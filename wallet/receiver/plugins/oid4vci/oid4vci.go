@@ -182,6 +182,22 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 	return &response, nil
 }
 
+func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
+	formData := url.Values{}
+	formData.Set("grant_type", "authorization_code")
+	formData.Set("code", request.Code)
+	formData.Set("redirect_uri", request.RedirectURI)
+	formData.Set("code_verifier", request.CodeVerifier)
+	formData.Set("client_id", request.ClientID)
+
+	requestHeaders := headersToMap(headers)
+	var response types.CredentialIssuanceAccessToken
+	if err := o.doFormRequestWithDpopRetry(endpoint, strings.NewReader(formData.Encode()), requestHeaders, proofFactory, &response); err != nil {
+		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
+	}
+	return &response, nil
+}
+
 func (o *Oid4vciReceiver) FetchClientAttestationChallenge(endpoint common.URIField) (*types.ClientAttestationChallengeResponse, error) {
 	var response types.ClientAttestationChallengeResponse
 	if err := o.doFinalRequest(http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
@@ -222,8 +238,20 @@ func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, ac
 	return &response, nil
 }
 
+func (o *Oid4vciReceiver) RequestDeferredCredentialWithDpopRetry(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, proofFactory DPoPProofFactory) (*types.CredentialResponse, error) {
+	var response types.CredentialResponse
+	if err := o.doBearerJSONRequestWithDpopRetry(endpoint, accessToken, deferredRequest, proofFactory, &response); err != nil {
+		return nil, fmt.Errorf("failed to request deferred credential with DPoP retry: %w", err)
+	}
+	return &response, nil
+}
+
 func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, accessToken string, notification types.NotificationRequest, dpopProof string) error {
 	return o.doBearerJSONRequest(endpoint, accessToken, notification, dpopProof, nil)
+}
+
+func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
+	return o.doBearerJSONRequestWithDpopRetry(endpoint, accessToken, notification, proofFactory, nil)
 }
 
 func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *types.CredentialIssuerMetadata) ([]byte, string, error) {
@@ -443,6 +471,71 @@ func (o *Oid4vciReceiver) doBearerJSONRequestWithDpopRetry(endpoint common.URIFi
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "DPoP "+accessToken)
 		req.Header.Set("DPoP", dpopProof)
+
+		resp, err := o.httpClient().Do(req)
+		if err != nil {
+			return err
+		}
+		respBody, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if target == nil || len(respBody) == 0 {
+				return nil
+			}
+			if err := json.Unmarshal(respBody, target); err != nil {
+				return fmt.Errorf("failed to parse JSON: %w", err)
+			}
+			return nil
+		}
+		nonce := resp.Header.Get("DPoP-Nonce")
+		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) && nonce != "" {
+			dpopNonce = nonce
+			continue
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	return fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+}
+
+func (o *Oid4vciReceiver) doFormRequestWithDpopRetry(endpoint common.URIField, body io.Reader, headers map[string]string, proofFactory DPoPProofFactory, target any) error {
+	if proofFactory == nil {
+		return fmt.Errorf("DPoP proof factory is required")
+	}
+
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	endpointURL := url.URL(endpoint)
+	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+	}
+
+	var dpopNonce string
+	for attempt := 0; attempt < 2; attempt++ {
+		dpopProof, err := proofFactory(dpopNonce)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequest(http.MethodPost, endpointURL.String(), bytes.NewReader(bodyBytes))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("DPoP", dpopProof)
+		for key, value := range headers {
+			if value != "" {
+				req.Header.Set(key, value)
+			}
+		}
 
 		resp, err := o.httpClient().Do(req)
 		if err != nil {

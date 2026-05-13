@@ -598,6 +598,206 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 	}
 }
 
+func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+			t.Errorf("Content-Type header = %q", got)
+		}
+		if got := r.Header.Get("OAuth-Client-Attestation"); got != "attestation-jwt" {
+			t.Errorf("OAuth-Client-Attestation header = %q", got)
+		}
+		if got := r.Header.Get("OAuth-Client-Attestation-PoP"); got != "attestation-pop-jwt" {
+			t.Errorf("OAuth-Client-Attestation-PoP header = %q", got)
+		}
+		if attempts == 1 {
+			if r.Header.Get("DPoP") != "proof:" {
+				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
+			}
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("DPoP") != "proof:nonce-1" {
+			t.Errorf("second DPoP proof = %q", r.Header.Get("DPoP"))
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+		if got := r.Form.Get("grant_type"); got != "authorization_code" {
+			t.Errorf("grant_type = %q", got)
+		}
+		if got := r.Form.Get("code"); got != "code-1" {
+			t.Errorf("code = %q", got)
+		}
+		if got := r.Form.Get("redirect_uri"); got != "openid-credential-offer://callback" {
+			t.Errorf("redirect_uri = %q", got)
+		}
+		if got := r.Form.Get("code_verifier"); got != "verifier-1" {
+			t.Errorf("code_verifier = %q", got)
+		}
+		if got := r.Form.Get("client_id"); got != "client-1" {
+			t.Errorf("client_id = %q", got)
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+			"access_token": "access-1",
+			"token_type":   "DPoP",
+		})
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	var proofNonces []string
+	response, err := receiver.ExchangeAuthorizationCodeWithDpopRetry(
+		common.URIField(*parsed),
+		types.AuthorizationCodeTokenRequest{
+			Code:         "code-1",
+			RedirectURI:  "openid-credential-offer://callback",
+			CodeVerifier: "verifier-1",
+			ClientID:     "client-1",
+		},
+		types.OAuthClientAttestationHeaders{
+			ClientAttestation:    "attestation-jwt",
+			ClientAttestationPop: "attestation-pop-jwt",
+		},
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExchangeAuthorizationCodeWithDpopRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+	if response.Token != "access-1" || response.TokenType != "DPoP" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			assertBearerJSONRequest(t, r, "access-1", "proof:")
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusUnauthorized)
+			return
+		}
+		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
+		var body types.DeferredCredentialRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode body: %v", err)
+		}
+		if body.TransactionID != "tx-1" {
+			t.Errorf("transaction_id = %q", body.TransactionID)
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"credential": "credential-jwt"})
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	var proofNonces []string
+	response, err := receiver.RequestDeferredCredentialWithDpopRetry(
+		common.URIField(*parsed),
+		"access-1",
+		types.DeferredCredentialRequest{TransactionID: "tx-1"},
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("RequestDeferredCredentialWithDpopRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+	if response.Credential != "credential-jwt" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			assertBearerJSONRequest(t, r, "access-1", "proof:")
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusUnauthorized)
+			return
+		}
+		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
+		var body types.NotificationRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode body: %v", err)
+		}
+		if body.NotificationID != "notification-1" || body.Event != "credential_accepted" {
+			t.Errorf("notification request = %#v", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	var proofNonces []string
+	err = receiver.SendCredentialNotificationWithDpopRetry(
+		common.URIField(*parsed),
+		"access-1",
+		types.NotificationRequest{NotificationID: "notification-1", Event: "credential_accepted"},
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("SendCredentialNotificationWithDpopRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+}
+
 func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
