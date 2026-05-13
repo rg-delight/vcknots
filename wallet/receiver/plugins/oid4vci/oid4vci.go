@@ -17,7 +17,16 @@ import (
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-type Oid4vciReceiver struct{}
+type Oid4vciReceiver struct {
+	HTTPClient *http.Client
+}
+
+func (o *Oid4vciReceiver) httpClient() *http.Client {
+	if o.HTTPClient != nil {
+		return o.HTTPClient
+	}
+	return http.DefaultClient
+}
 
 // doRequest performs an HTTP request and unmarshals the JSON response into target.
 // It handles common patterns: URL construction, status checking, body reading, and JSON parsing.
@@ -46,12 +55,12 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 
 	switch method {
 	case "GET":
-		resp, err = http.Get(endpointURL.String())
+		resp, err = o.httpClient().Get(endpointURL.String())
 	case "POST":
 		if body == nil {
 			return fmt.Errorf("POST request requires a body")
 		}
-		resp, err = http.Post(endpointURL.String(), "application/x-www-form-urlencoded", body)
+		resp, err = o.httpClient().Post(endpointURL.String(), "application/x-www-form-urlencoded", body)
 	default:
 		return fmt.Errorf("unsupported HTTP method: %s", method)
 	}
@@ -123,6 +132,149 @@ func (o *Oid4vciReceiver) FetchAccessToken(receivingTypes types.SupportedReceivi
 	}
 
 	return &accessToken, nil
+}
+
+func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, request types.PushedAuthorizationRequest, headers types.OAuthClientAttestationHeaders) (*types.PushedAuthorizationResponse, error) {
+	formData := url.Values{}
+	formData.Set("response_type", request.ResponseType)
+	formData.Set("client_id", request.ClientID)
+	formData.Set("redirect_uri", request.RedirectURI)
+	formData.Set("scope", request.Scope)
+	formData.Set("state", request.State)
+	formData.Set("code_challenge", request.CodeChallenge)
+	formData.Set("code_challenge_method", request.CodeChallengeMethod)
+	if request.IssuerState != "" {
+		formData.Set("issuer_state", request.IssuerState)
+	}
+
+	var response types.PushedAuthorizationResponse
+	if err := o.doFinalRequest(http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", headersToMap(headers), &response); err != nil {
+		return nil, fmt.Errorf("failed to push authorization request: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, dpopProof string) (*types.CredentialIssuanceAccessToken, error) {
+	formData := url.Values{}
+	formData.Set("grant_type", "authorization_code")
+	formData.Set("code", request.Code)
+	formData.Set("redirect_uri", request.RedirectURI)
+	formData.Set("code_verifier", request.CodeVerifier)
+	formData.Set("client_id", request.ClientID)
+
+	requestHeaders := headersToMap(headers)
+	if dpopProof != "" {
+		requestHeaders["DPoP"] = dpopProof
+	}
+
+	var response types.CredentialIssuanceAccessToken
+	if err := o.doFinalRequest(http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
+		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) FetchClientAttestationChallenge(endpoint common.URIField) (*types.ClientAttestationChallengeResponse, error) {
+	var response types.ClientAttestationChallengeResponse
+	if err := o.doFinalRequest(http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to fetch client attestation challenge: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) FetchNonce(endpoint common.URIField) (*types.NonceResponse, error) {
+	var response types.NonceResponse
+	if err := o.doFinalRequest(http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
+		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) RequestCredential(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
+	var response types.CredentialResponse
+	if err := o.doBearerJSONRequest(endpoint, accessToken, credentialRequest, dpopProof, &response); err != nil {
+		return nil, fmt.Errorf("failed to request credential: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
+	var response types.CredentialResponse
+	if err := o.doBearerJSONRequest(endpoint, accessToken, deferredRequest, dpopProof, &response); err != nil {
+		return nil, fmt.Errorf("failed to request deferred credential: %w", err)
+	}
+	return &response, nil
+}
+
+func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, accessToken string, notification types.NotificationRequest, dpopProof string) error {
+	return o.doBearerJSONRequest(endpoint, accessToken, notification, dpopProof, nil)
+}
+
+func (o *Oid4vciReceiver) doBearerJSONRequest(endpoint common.URIField, accessToken string, payload any, dpopProof string, target any) error {
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	headers := map[string]string{
+		"Authorization": "DPoP " + accessToken,
+		"DPoP":          dpopProof,
+	}
+
+	return o.doFinalRequest(http.MethodPost, endpoint, bytes.NewReader(bodyBytes), "application/json", headers, target)
+}
+
+func headersToMap(headers types.OAuthClientAttestationHeaders) map[string]string {
+	result := map[string]string{}
+	if headers.ClientAttestation != "" {
+		result["OAuth-Client-Attestation"] = headers.ClientAttestation
+	}
+	if headers.ClientAttestationPop != "" {
+		result["OAuth-Client-Attestation-PoP"] = headers.ClientAttestationPop
+	}
+	return result
+}
+
+func (o *Oid4vciReceiver) doFinalRequest(method string, endpoint common.URIField, body io.Reader, contentType string, headers map[string]string, target any) error {
+	endpointURL := url.URL(endpoint)
+	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+	}
+
+	req, err := http.NewRequest(method, endpointURL.String(), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for key, value := range headers {
+		if value != "" {
+			req.Header.Set(key, value)
+		}
+	}
+
+	resp, err := o.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+	if target == nil || len(bodyBytes) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(bodyBytes, target); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return nil
 }
 
 func (o *Oid4vciReceiver) ReceiveCredential(

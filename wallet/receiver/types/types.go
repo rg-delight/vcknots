@@ -65,17 +65,37 @@ const (
 type CredentialIssuerMetadata struct {
 	CredentialIssuer                 string                             `json:"credential_issuer"`
 	CredentialEndpoint               common.URIField                    `json:"credential_endpoint"`
+	NonceEndpoint                    *common.URIField                   `json:"nonce_endpoint,omitempty"`
+	DeferredCredentialEndpoint       *common.URIField                   `json:"deferred_credential_endpoint,omitempty"`
+	NotificationEndpoint             *common.URIField                   `json:"notification_endpoint,omitempty"`
+	CredentialRequestEncryption      *CredentialRequestEncryption       `json:"credential_request_encryption,omitempty"`
+	CredentialResponseEncryption     *CredentialResponseEncryption      `json:"credential_response_encryption,omitempty"`
 	AuthorizationServers             []common.URIField                  `json:"authorization_servers,omitempty"`
 	Display                          []CredentialIssuerMetadataDisplay  `json:"display,omitempty"`
 	CredentialConfigurationSupported map[string]CredentialConfiguration `json:"credential_configurations_supported,omitempty"`
 }
 
+type CredentialRequestEncryption struct {
+	Jwks               jose.JSONWebKeySet `json:"jwks"`
+	AlgValuesSupported []string           `json:"alg_values_supported,omitempty"`
+	EncValuesSupported []string           `json:"enc_values_supported,omitempty"`
+}
+
+type CredentialResponseEncryption struct {
+	AlgValuesSupported []string `json:"alg_values_supported,omitempty"`
+	EncValuesSupported []string `json:"enc_values_supported,omitempty"`
+	EncryptionRequired *bool    `json:"encryption_required,omitempty"`
+}
+
 type CredentialConfiguration struct {
-	Display                             *[]CredentialConfigurationDisplay `json:"display,omitempty"`
-	ProofTypesSupported                 *map[string]ProofType             `json:"proof_types_supported,omitempty"`
-	Format                              string                            `json:"format"`
-	CredentialDefinition                *CredentialDefinition             `json:"credential_definition,omitempty"`
-	CredentialSigningAlgValuesSupported []jose.SignatureAlgorithm         `json:"credential_signing_alg_values_supported,omitempty"`
+	Display                              *[]CredentialConfigurationDisplay `json:"display,omitempty"`
+	ProofTypesSupported                  *map[string]ProofType             `json:"proof_types_supported,omitempty"`
+	Format                               string                            `json:"format"`
+	Scope                                string                            `json:"scope,omitempty"`
+	CredentialIdentifier                 string                            `json:"credential_identifier,omitempty"`
+	CryptographicBindingMethodsSupported []string                          `json:"cryptographic_binding_methods_supported,omitempty"`
+	CredentialDefinition                 *CredentialDefinition             `json:"credential_definition,omitempty"`
+	CredentialSigningAlgValuesSupported  []jose.SignatureAlgorithm         `json:"credential_signing_alg_values_supported,omitempty"`
 }
 
 type CredentialIssuerMetadataDisplay struct {
@@ -130,6 +150,9 @@ type AuthorizationServerMetadata struct {
 	Issuer                                             common.URIField            `json:"issuer"`
 	AuthorizationEndpoint                              *common.URIField           `json:"authorization_endpoint,omitempty"`
 	TokenEndpoint                                      *common.URIField           `json:"token_endpoint,omitempty"`
+	PushedAuthorizationRequestEndpoint                 *common.URIField           `json:"pushed_authorization_request_endpoint,omitempty"`
+	ChallengeEndpoint                                  *common.URIField           `json:"challenge_endpoint,omitempty"`
+	DpopSigningAlgValuesSupported                      *[]jose.SignatureAlgorithm `json:"dpop_signing_alg_values_supported,omitempty"`
 	JwksUri                                            *common.URIField           `json:"jwks_uri,omitempty"`
 	RegistrationEndpoint                               *common.URIField           `json:"registration_endpoint,omitempty"`
 	ScopesSupported                                    *[]string                  `json:"scopes_supported,omitempty"`
@@ -203,6 +226,75 @@ type CredentialIssuanceAccessToken struct {
 	RefreshToken    *string `json:"refresh_token,omitempty"`
 	CNonce          *string `json:"c_nonce,omitempty"`
 	CNonceExpiresIn *int    `json:"c_nonce_expires_in,omitempty"`
+}
+
+type PushedAuthorizationRequest struct {
+	ResponseType        string
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	State               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	IssuerState         string
+}
+
+type PushedAuthorizationResponse struct {
+	RequestURI string `json:"request_uri"`
+	ExpiresIn  int    `json:"expires_in,omitempty"`
+}
+
+type AuthorizationCodeTokenRequest struct {
+	Code         string
+	RedirectURI  string
+	CodeVerifier string
+	ClientID     string
+}
+
+type ClientAttestationChallengeResponse struct {
+	AttestationChallenge string `json:"attestation_challenge,omitempty"`
+}
+
+type OAuthClientAttestationHeaders struct {
+	ClientAttestation    string
+	ClientAttestationPop string
+}
+
+type NonceResponse struct {
+	CNonce          string `json:"c_nonce"`
+	CNonceExpiresIn *int   `json:"c_nonce_expires_in,omitempty"`
+}
+
+type CredentialRequest struct {
+	CredentialConfigurationID    string                               `json:"credential_configuration_id,omitempty"`
+	Proofs                       *CredentialProofs                    `json:"proofs,omitempty"`
+	CredentialResponseEncryption *CredentialResponseEncryptionRequest `json:"credential_response_encryption,omitempty"`
+}
+
+type CredentialProofs struct {
+	JWT []string `json:"jwt,omitempty"`
+}
+
+type CredentialResponseEncryptionRequest struct {
+	Jwk jose.JSONWebKey `json:"jwk"`
+	Enc string          `json:"enc"`
+}
+
+type CredentialResponse struct {
+	Credential     any     `json:"credential,omitempty"`
+	Credentials    []any   `json:"credentials,omitempty"`
+	TransactionID  string  `json:"transaction_id,omitempty"`
+	NotificationID string  `json:"notification_id,omitempty"`
+	CNonce         *string `json:"c_nonce,omitempty"`
+}
+
+type DeferredCredentialRequest struct {
+	TransactionID string `json:"transaction_id"`
+}
+
+type NotificationRequest struct {
+	NotificationID string `json:"notification_id"`
+	Event          string `json:"event"`
 }
 
 // Receiver defines the interface for credential receiving components

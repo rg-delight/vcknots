@@ -1,6 +1,7 @@
 package oid4vci
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +38,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 		defer env.SetDebugMode(dbg_mode)
 		defer env.SetHTTPAllowed(http_allowed)
-		env.SetDebugMode(false); env.SetHTTPAllowed(false)
+		env.SetDebugMode(false)
+		env.SetHTTPAllowed(false)
 
 		_, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -202,7 +204,8 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 		defer env.SetDebugMode(dbg_mode)
 		defer env.SetHTTPAllowed(http_allowed)
-		env.SetDebugMode(false); env.SetHTTPAllowed(false)
+		env.SetDebugMode(false)
+		env.SetHTTPAllowed(false)
 
 		_, err := receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -283,7 +286,8 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 		defer env.SetDebugMode(dbg_mode)
 		defer env.SetHTTPAllowed(http_allowed)
-		env.SetDebugMode(false); env.SetHTTPAllowed(false)
+		env.SetDebugMode(false)
+		env.SetHTTPAllowed(false)
 
 		_, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "test-code")
 		if err == nil {
@@ -349,6 +353,195 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 }
 
+func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/challenge":
+			if r.Method != http.MethodPost {
+				t.Errorf("challenge method = %s", r.Method)
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"attestation_challenge": "challenge-1"})
+		case "/par":
+			if r.Method != http.MethodPost {
+				t.Errorf("PAR method = %s", r.Method)
+			}
+			if got := r.Header.Get("OAuth-Client-Attestation"); got != "attestation-jwt" {
+				t.Errorf("OAuth-Client-Attestation = %q", got)
+			}
+			if got := r.Header.Get("OAuth-Client-Attestation-PoP"); got != "pop-jwt" {
+				t.Errorf("OAuth-Client-Attestation-PoP = %q", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("failed to parse PAR form: %v", err)
+			}
+			if got := r.Form.Get("grant_type"); got != "" {
+				t.Errorf("PAR should not include grant_type, got %q", got)
+			}
+			if got := r.Form.Get("issuer_state"); got != "issuer-state-1" {
+				t.Errorf("issuer_state = %q", got)
+			}
+			mockserver.JSONResponse(w, http.StatusCreated, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
+		case "/token":
+			if got := r.Header.Get("DPoP"); got != "dpop-token" {
+				t.Errorf("DPoP header = %q", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("failed to parse token form: %v", err)
+			}
+			if got := r.Form.Get("grant_type"); got != "authorization_code" {
+				t.Errorf("grant_type = %q", got)
+			}
+			if got := r.Form.Get("code_verifier"); got != "verifier-1" {
+				t.Errorf("code_verifier = %q", got)
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"access_token": "access-1", "token_type": "DPoP"})
+		case "/nonce":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "nonce-1"})
+		case "/credential":
+			assertBearerJSONRequest(t, r, "access-1", "dpop-credential")
+			var body types.CredentialRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode credential request: %v", err)
+			}
+			if body.CredentialConfigurationID != "pid" {
+				t.Errorf("credential_configuration_id = %q", body.CredentialConfigurationID)
+			}
+			if body.Proofs == nil || len(body.Proofs.JWT) != 1 || body.Proofs.JWT[0] != "proof-jwt" {
+				t.Errorf("proofs.jwt = %#v", body.Proofs)
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"transaction_id": "tx-1"})
+		case "/deferred":
+			assertBearerJSONRequest(t, r, "access-1", "dpop-deferred")
+			var body types.DeferredCredentialRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode deferred request: %v", err)
+			}
+			if body.TransactionID != "tx-1" {
+				t.Errorf("transaction_id = %q", body.TransactionID)
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": "credential-jwt", "notification_id": "notification-1"})
+		case "/notification":
+			assertBearerJSONRequest(t, r, "access-1", "dpop-notification")
+			var body types.NotificationRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode notification request: %v", err)
+			}
+			if body.NotificationID != "notification-1" || body.Event != "credential_accepted" {
+				t.Errorf("notification body = %#v", body)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	endpoint := func(path string) common.URIField {
+		t.Helper()
+		parsed, err := url.Parse(server.URL + path)
+		if err != nil {
+			t.Fatalf("failed to parse endpoint: %v", err)
+		}
+		return common.URIField(*parsed)
+	}
+
+	challenge, err := receiver.FetchClientAttestationChallenge(endpoint("/challenge"))
+	if err != nil {
+		t.Fatalf("FetchClientAttestationChallenge() error = %v", err)
+	}
+	if challenge.AttestationChallenge != "challenge-1" {
+		t.Fatalf("challenge = %#v", challenge)
+	}
+
+	par, err := receiver.PushAuthorizationRequest(endpoint("/par"), types.PushedAuthorizationRequest{
+		ResponseType:        "code",
+		ClientID:            "client-1",
+		RedirectURI:         "https://wallet.example/callback",
+		Scope:               "pid_scope",
+		State:               "state-1",
+		CodeChallenge:       "challenge",
+		CodeChallengeMethod: "S256",
+		IssuerState:         "issuer-state-1",
+	}, types.OAuthClientAttestationHeaders{
+		ClientAttestation:    "attestation-jwt",
+		ClientAttestationPop: "pop-jwt",
+	})
+	if err != nil {
+		t.Fatalf("PushAuthorizationRequest() error = %v", err)
+	}
+	if par.RequestURI != "urn:request:1" || par.ExpiresIn != 60 {
+		t.Fatalf("PAR response = %#v", par)
+	}
+
+	token, err := receiver.ExchangeAuthorizationCode(endpoint("/token"), types.AuthorizationCodeTokenRequest{
+		Code:         "code-1",
+		RedirectURI:  "https://wallet.example/callback",
+		CodeVerifier: "verifier-1",
+		ClientID:     "client-1",
+	}, types.OAuthClientAttestationHeaders{}, "dpop-token")
+	if err != nil {
+		t.Fatalf("ExchangeAuthorizationCode() error = %v", err)
+	}
+	if token.Token != "access-1" || token.TokenType != "DPoP" {
+		t.Fatalf("token response = %#v", token)
+	}
+
+	nonce, err := receiver.FetchNonce(endpoint("/nonce"))
+	if err != nil {
+		t.Fatalf("FetchNonce() error = %v", err)
+	}
+	if nonce.CNonce != "nonce-1" {
+		t.Fatalf("nonce response = %#v", nonce)
+	}
+
+	credential, err := receiver.RequestCredential(endpoint("/credential"), "access-1", types.CredentialRequest{
+		CredentialConfigurationID: "pid",
+		Proofs:                    &types.CredentialProofs{JWT: []string{"proof-jwt"}},
+	}, "dpop-credential")
+	if err != nil {
+		t.Fatalf("RequestCredential() error = %v", err)
+	}
+	if credential.TransactionID != "tx-1" {
+		t.Fatalf("credential response = %#v", credential)
+	}
+
+	deferred, err := receiver.RequestDeferredCredential(endpoint("/deferred"), "access-1", types.DeferredCredentialRequest{TransactionID: credential.TransactionID}, "dpop-deferred")
+	if err != nil {
+		t.Fatalf("RequestDeferredCredential() error = %v", err)
+	}
+	if deferred.Credential != "credential-jwt" || deferred.NotificationID != "notification-1" {
+		t.Fatalf("deferred response = %#v", deferred)
+	}
+
+	if err := receiver.SendCredentialNotification(endpoint("/notification"), "access-1", types.NotificationRequest{
+		NotificationID: deferred.NotificationID,
+		Event:          "credential_accepted",
+	}, "dpop-notification"); err != nil {
+		t.Fatalf("SendCredentialNotification() error = %v", err)
+	}
+}
+
+func assertBearerJSONRequest(t *testing.T, r *http.Request, accessToken string, dpopProof string) {
+	t.Helper()
+	if r.Method != http.MethodPost {
+		t.Errorf("method = %s", r.Method)
+	}
+	if got := r.Header.Get("Authorization"); got != "DPoP "+accessToken {
+		t.Errorf("Authorization header = %q", got)
+	}
+	if got := r.Header.Get("DPoP"); got != dpopProof {
+		t.Errorf("DPoP header = %q", got)
+	}
+	if got := r.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type header = %q", got)
+	}
+}
+
 func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 	accessToken := types.CredentialIssuanceAccessToken{Token: "test_token", TokenType: "bearer"}
@@ -365,7 +558,8 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 		defer env.SetDebugMode(dbg_mode)
 		defer env.SetHTTPAllowed(http_allowed)
-		env.SetDebugMode(false); env.SetHTTPAllowed(false)
+		env.SetDebugMode(false)
+		env.SetHTTPAllowed(false)
 
 		_, err := receiver.ReceiveCredential(types.Oid4vci, endpoint, "jwt_vc_json", accessToken, nil, nil)
 		if err == nil {
@@ -514,7 +708,7 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(http_allowed)
 	env.SetHTTPAllowed(true)
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
