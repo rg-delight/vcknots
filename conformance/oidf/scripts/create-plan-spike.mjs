@@ -20,8 +20,14 @@ const suiteOrigin = trimTrailingSlash(
 const composeProject = process.env.OIDF_COMPOSE_PROJECT ?? "vcknots-oidf-conformance";
 const composeFile = path.join(oidfRoot, "docker-compose-prebuilt-named-volume.yml");
 const moduleTimeoutMs = Number(process.env.OIDF_MODULE_TIMEOUT_MS ?? 120_000);
+const walletInvocationTimeoutMs = Number(process.env.OIDF_WALLET_INVOCATION_TIMEOUT_MS ?? 30_000);
 const moduleLimit = optionalPositiveInteger(process.env.OIDF_MODULE_LIMIT);
 const moduleFilter = process.env.OIDF_MODULE_FILTER;
+const placeholderFulfillmentTimeoutMs = Number(
+  process.env.OIDF_PLACEHOLDER_FULFILLMENT_TIMEOUT_MS ?? 10_000,
+);
+const placeholderImage =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mN89+4dAAX8AqGd7mOmAAAAAElFTkSuQmCC";
 
 const defaultHarnessOrigin = trimTrailingSlash(
   process.env.VCKNOTS_OIDF_HARNESS_ORIGIN ??
@@ -373,6 +379,18 @@ async function runModule({ artifactDir, index, target, plan, planModule }) {
   });
   await writeJson(path.join(artifactDir, `${filePrefix}-module.json`), runnerModule);
 
+  const walletInvocation = await driveWalletInvocationIfNeeded({ target, moduleId: runnerModule.id });
+  await writeJson(path.join(artifactDir, `${filePrefix}-wallet-invocation.json`), walletInvocation);
+
+  const placeholderFulfillment = await fulfillReviewPlaceholdersIfNeeded({
+    target,
+    moduleId: runnerModule.id,
+  });
+  await writeJson(
+    path.join(artifactDir, `${filePrefix}-placeholder-fulfillment.json`),
+    placeholderFulfillment,
+  );
+
   const info = await waitForModule(runnerModule.id);
   const logs = await getModuleLogs(runnerModule.id);
   await writeJson(path.join(artifactDir, `${filePrefix}-info.json`), info);
@@ -386,6 +404,101 @@ async function runModule({ artifactDir, index, target, plan, planModule }) {
     timedOut: Boolean(info.runnerTimedOut),
     classification: classification.classification,
     reason: classification.reason,
+  };
+}
+
+async function fulfillReviewPlaceholdersIfNeeded({ target, moduleId }) {
+  if (target.role !== "wallet") {
+    return {
+      attempted: false,
+      reason: "Target is not a wallet target.",
+    };
+  }
+
+  const deadline = Date.now() + placeholderFulfillmentTimeoutMs;
+  const uploaded = [];
+  let lastPlaceholderCount = 0;
+  while (Date.now() < deadline) {
+    const logs = await getModuleLogs(moduleId);
+    const placeholders = extractReviewPlaceholders(logs);
+    lastPlaceholderCount = placeholders.length;
+    const remaining = placeholders.filter((placeholder) => !uploaded.includes(placeholder));
+    if (remaining.length > 0) {
+      for (const placeholder of remaining) {
+        await uploadPlaceholderImage(moduleId, placeholder);
+        uploaded.push(placeholder);
+      }
+      return {
+        attempted: true,
+        uploaded,
+      };
+    }
+
+    const info = await suiteFetch(`/api/info/${moduleId}`);
+    if (info.status === "FINISHED" || info.result === "FAILED" || info.test?.result === "FAILED") {
+      return {
+        attempted: false,
+        reason: "Module finished or failed before a REVIEW placeholder appeared.",
+        lastPlaceholderCount,
+      };
+    }
+    await delay(500);
+  }
+
+  return {
+    attempted: false,
+    reason: "No REVIEW placeholder appeared before timeout.",
+    timeoutMs: placeholderFulfillmentTimeoutMs,
+    lastPlaceholderCount,
+  };
+}
+
+async function driveWalletInvocationIfNeeded({ target, moduleId }) {
+  if (target.role !== "wallet") {
+    return {
+      invoked: false,
+      reason: "Target is not a wallet target.",
+    };
+  }
+
+  const deadline = Date.now() + walletInvocationTimeoutMs;
+  let lastHintCount = 0;
+  while (Date.now() < deadline) {
+    const logs = await getModuleLogs(moduleId);
+    const concreteUrls = extractConcreteWalletInvocationUrls(logs);
+    lastHintCount = concreteUrls.length;
+    const concreteUrl = concreteUrls.find((candidate) => !candidate.includes("*"));
+    const url =
+      concreteUrls.find(
+        (candidate) => !candidate.includes("*") && candidate.includes("request_uri_method=post"),
+      ) ?? concreteUrl;
+    if (url) {
+      try {
+        const response = await fetch(url, { redirect: "follow" });
+        const body = await response.text();
+        return {
+          invoked: true,
+          url,
+          status: response.status,
+          ok: response.ok,
+          body: body.slice(0, 2000),
+        };
+      } catch (error) {
+        return {
+          invoked: false,
+          url,
+          error: serializeError(error),
+        };
+      }
+    }
+    await delay(1_000);
+  }
+
+  return {
+    invoked: false,
+    reason: "No concrete wallet invocation URL appeared in suite logs before timeout.",
+    timeoutMs: walletInvocationTimeoutMs,
+    lastHintCount,
   };
 }
 
@@ -452,6 +565,14 @@ async function buildConfig(target) {
   config.alias = `vcknots-${target.planName}-${Date.now()}`.replaceAll(/[^A-Za-z0-9._-]/g, "-");
   config.description = `VCKnots OIDF runner for ${target.planName}`;
   target.overrideConfig?.(config);
+  if (target.suite === "haip") {
+    const credentialTrustAnchorPem = (
+      await readFile(path.join(certsDir, "vp-signing-ca.crt"), "utf8")
+    ).trim();
+    config.credential ??= {};
+    config.credential.trust_anchor_pem = credentialTrustAnchorPem;
+    config.credential.status_list_trust_anchor_pem = credentialTrustAnchorPem;
+  }
   return config;
 }
 
@@ -536,6 +657,13 @@ function classifyTarget({ plan, moduleResults, error, timedOut }) {
       counts,
     };
   }
+  if (counts.review_required) {
+    return {
+      classification: "review_required",
+      reason: "At least one OIDF module finished in REVIEW after screenshot evidence was uploaded.",
+      counts,
+    };
+  }
   if (counts.unsupported_capability) {
     return {
       classification: "unsupported_capability",
@@ -560,6 +688,21 @@ function classifyTarget({ plan, moduleResults, error, timedOut }) {
 function classifyModule({ target, planModule, runnerModule, info, logs }) {
   const result = info.result ?? info.test?.result;
   const logText = JSON.stringify(logs);
+  if (result === "PASSED") {
+    return { classification: "passed", reason: "OIDF module result is PASSED." };
+  }
+  if (result === "FAILED") {
+    return { classification: "failed", reason: "OIDF module result is FAILED." };
+  }
+  if (result === "WARNING") {
+    return { classification: "failed", reason: "OIDF module finished with WARNING result." };
+  }
+  if (result === "REVIEW") {
+    return {
+      classification: "review_required",
+      reason: "OIDF module finished in REVIEW after screenshot evidence was uploaded.",
+    };
+  }
   if (isMissingHarnessEvidence(logText)) {
     return {
       classification: "harness_gap",
@@ -567,12 +710,6 @@ function classifyModule({ target, planModule, runnerModule, info, logs }) {
       invocation: extractInvocationHints(logText),
       moduleUrl: runnerModule.url,
     };
-  }
-  if (result === "PASSED") {
-    return { classification: "passed", reason: "OIDF module result is PASSED." };
-  }
-  if (result === "FAILED") {
-    return { classification: "failed", reason: "OIDF module result is FAILED." };
   }
   if (info.runnerTimedOut || info.status === "WAITING" || info.status === "RUNNING") {
     return {
@@ -618,7 +755,86 @@ function extractInvocationHints(logText) {
   return [...new Set(hints)].slice(0, 10);
 }
 
+function extractConcreteWalletInvocationUrls(logs) {
+  const urls = [];
+  const visit = (value, key = "") => {
+    if (typeof value === "string") {
+      const isInvocationField =
+        key === "redirect_to_authorization_endpoint" ||
+        key === "credential_offer_redirect_url" ||
+        key === "redirect_to";
+      const hasRequiredWalletParams =
+        (/\/oidf\/vp\/authorize/i.test(value) && value.includes("request_uri=")) ||
+        (/\/oidf\/vci\/credential-offer/i.test(value) && value.includes("credential_offer"));
+      if (isInvocationField && /^https?:\/\/[^*\s"]+$/i.test(value) && hasRequiredWalletParams) {
+        urls.push(value);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item, key);
+      }
+      return;
+    }
+    if (value && typeof value === "object") {
+      for (const [childKey, item] of Object.entries(value)) {
+        visit(item, childKey);
+      }
+    }
+  };
+  visit(logs);
+  return [...new Set(urls)];
+}
+
+function extractReviewPlaceholders(logs) {
+  const placeholders = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    if (value.result === "REVIEW" && typeof value.upload === "string" && value.upload.length > 0) {
+      placeholders.push(value.upload);
+    }
+    for (const item of Object.values(value)) {
+      visit(item);
+    }
+  };
+  visit(logs);
+  return [...new Set(placeholders)];
+}
+
+async function uploadPlaceholderImage(moduleId, placeholder) {
+  await suiteFetchRaw(`/api/log/${moduleId}/images/${placeholder}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "text/plain",
+    },
+    body: placeholderImage,
+  });
+}
+
 async function suiteFetch(pathname, options = {}) {
+  const { text } = await suiteFetchRaw(pathname, {
+    method: options.method,
+    headers: {
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+    },
+    searchParams: options.searchParams,
+    body: options.body,
+  });
+  return text ? JSON.parse(text) : {};
+}
+
+async function suiteFetchRaw(pathname, options = {}) {
   const url = new URL(pathname, suiteOrigin);
   for (const [key, value] of Object.entries(options.searchParams ?? {})) {
     url.searchParams.set(key, value);
@@ -626,19 +842,15 @@ async function suiteFetch(pathname, options = {}) {
 
   const response = await fetch(url, {
     method: options.method ?? "GET",
-    headers: {
-      Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-    },
+    headers: options.headers ?? { Accept: "application/json" },
     body: options.body,
   });
+  const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    throw new Error(`${response.status} ${response.statusText}: ${text}`);
   }
-
-  const text = await response.text();
-  return text ? JSON.parse(text) : {};
+  return { response, text };
 }
 
 async function createArtifactDir(targetName) {
