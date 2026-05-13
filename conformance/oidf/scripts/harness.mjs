@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import http from "node:http";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
@@ -13,9 +15,11 @@ const scriptPath = fileURLToPath(import.meta.url);
 const scriptDir = path.dirname(scriptPath);
 const oidfRoot = path.resolve(scriptDir, "..");
 const vcknotsRoot = path.resolve(oidfRoot, "../..");
+const walletRoot = path.join(vcknotsRoot, "wallet");
 const defaultSuiteDir = path.resolve(vcknotsRoot, "../openid-conformance-suite");
 const suiteDir = path.resolve(process.env.OIDF_CONFORMANCE_SUITE_DIR ?? defaultSuiteDir);
 const requireFromIssuerVerifier = createRequire(path.join(vcknotsRoot, "issuer+verifier/package.json"));
+const execFileAsync = promisify(execFile);
 
 const { SDJwtInstance } = requireFromIssuerVerifier("@sd-jwt/core");
 const { ES256, digest, generateSalt } = requireFromIssuerVerifier("@sd-jwt/crypto-nodejs");
@@ -32,26 +36,6 @@ const haipCredentialSigningJwk = await readJson(
 const haipCredentialX5c = Array.isArray(haipCredentialSigningJwk.x5c)
   ? haipCredentialSigningJwk.x5c
   : [];
-const vciIssuerHarnessConfig = await readJson(
-  path.join(suiteDir, "scripts/test-configs-rp-against-op/vci-issuer-test-config-client_attestation-client-auth-dpop.json"),
-);
-const vciClientId = vciIssuerHarnessConfig.client.client_id;
-const vciRedirectUri = `${suiteOrigin()}/test/a/oidf-vci-issuer-test/callback`;
-const vciClientJwk = vciIssuerHarnessConfig.client.jwks.keys[0];
-const vciClientAttesterJwk = vciIssuerHarnessConfig.vci.client_attester_keys_jwks.keys[0];
-const vciCredentialResponseEncryptionKeyPair = await jose.generateKeyPair("ECDH-ES", {
-  crv: "P-256",
-  extractable: true,
-});
-const vciCredentialResponseEncryptionPrivateJwk = await jose.exportJWK(
-  vciCredentialResponseEncryptionKeyPair.privateKey,
-);
-const vciCredentialResponseEncryptionPublicJwk = {
-  ...(await jose.exportJWK(vciCredentialResponseEncryptionKeyPair.publicKey)),
-  alg: "ECDH-ES",
-  use: "enc",
-  kid: "vcknots-vci-credential-response-enc",
-};
 const holderPublicJwk = publicOnlyJwk(holderKeyPair.publicKey);
 const fixtureClaims = {
   given_name: "TARO",
@@ -162,141 +146,31 @@ async function handleVpAuthorize(requestUrl) {
 }
 
 async function handleVciCredentialOffer(requestUrl) {
-  const credentialOffer = JSON.parse(requiredParam(requestUrl, "credential_offer"));
-  const credentialIssuer = stringProperty(credentialOffer, "credential_issuer");
-  const credentialConfigurationId = Array.isArray(credentialOffer.credential_configuration_ids)
-    ? credentialOffer.credential_configuration_ids[0]
-    : undefined;
-  if (typeof credentialConfigurationId !== "string" || credentialConfigurationId.length === 0) {
-    rejectRequest("credential_offer does not contain a credential_configuration_id");
-  }
-
-  console.log(`[harness] VCI credential offer issuer=${credentialIssuer}`);
-  const issuerMetadata = await fetchJson(wellKnownUrl(credentialIssuer, "openid-credential-issuer"));
-  const authorizationServerIssuer = Array.isArray(issuerMetadata.authorization_servers)
-    ? issuerMetadata.authorization_servers[0]
-    : credentialIssuer;
-  const authorizationServerMetadata = await fetchJson(
-    wellKnownUrl(authorizationServerIssuer, "oauth-authorization-server"),
-  );
-
-  const attestationChallenge = await fetchClientAttestationChallengeIfAdvertised(
-    authorizationServerMetadata.challenge_endpoint,
-  );
-  const clientAttestation = await createClientAttestation();
-
-  const codeVerifier = randomBase64Url(32);
-  const state = randomBase64Url(16);
-  const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest());
-  const credentialConfiguration =
-    issuerMetadata.credential_configurations_supported?.[credentialConfigurationId];
-  const scope = typeof credentialConfiguration?.scope === "string"
-    ? credentialConfiguration.scope
-    : credentialConfigurationId;
-
-  const parEndpoint = stringProperty(authorizationServerMetadata, "pushed_authorization_request_endpoint");
-  const authorizationEndpoint = stringProperty(authorizationServerMetadata, "authorization_endpoint");
-  const tokenEndpoint = stringProperty(authorizationServerMetadata, "token_endpoint");
-  const credentialEndpoint = stringProperty(issuerMetadata, "credential_endpoint");
-  const nonceEndpoint = stringProperty(issuerMetadata, "nonce_endpoint");
-  const deferredCredentialEndpoint = stringProperty(issuerMetadata, "deferred_credential_endpoint");
-
-  const parParams = new URLSearchParams({
-    response_type: "code",
-    client_id: vciClientId,
-    redirect_uri: vciRedirectUri,
-    scope,
-    state,
-    code_challenge: codeChallenge,
-    code_challenge_method: "S256",
-  });
-  const issuerState = credentialOffer.grants?.authorization_code?.issuer_state;
-  if (typeof issuerState === "string") {
-    parParams.set("issuer_state", issuerState);
-  }
-
-  const parResponse = await fetchWithClientAttestation(parEndpoint, {
-    method: "POST",
-    body: parParams,
-    clientAttestation,
-    attestationChallenge,
-    authorizationServerIssuer,
-    contentType: "application/x-www-form-urlencoded",
-  });
-  const parBody = await readJsonResponse(parResponse, "PAR");
-  const requestUri = stringProperty(parBody, "request_uri");
-
-  const authorizationUrl = new URL(authorizationEndpoint);
-  authorizationUrl.searchParams.set("client_id", vciClientId);
-  authorizationUrl.searchParams.set("request_uri", requestUri);
-  const authorizationResponse = await fetch(authorizationUrl, { redirect: "manual" });
-  const authorizationLocation = authorizationResponse.headers.get("location");
-  if (!authorizationLocation) {
-    throw new Error(`authorization endpoint did not redirect: ${authorizationResponse.status} ${await authorizationResponse.text()}`);
-  }
-  const authorizationRedirect = new URL(authorizationLocation, authorizationEndpoint);
-  assertReturnedState(authorizationRedirect, state);
-  const code = requiredParam(authorizationRedirect, "code");
-
-  const tokenParams = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: vciRedirectUri,
-    code_verifier: codeVerifier,
-    client_id: vciClientId,
-  });
-  const tokenResponse = await fetchWithClientAttestationAndDpopRetry(tokenEndpoint, {
-    method: "POST",
-    body: tokenParams,
-    clientAttestation,
-    attestationChallenge,
-    authorizationServerIssuer,
-    contentType: "application/x-www-form-urlencoded",
-  });
-  const tokenBody = await readJsonResponse(tokenResponse, "token");
-  const accessToken = stringProperty(tokenBody, "access_token");
-
-  const nonceResponse = await fetch(nonceEndpoint, { method: "POST" });
-  const nonceBody = await readJsonResponse(nonceResponse, "nonce");
-  const credentialNonce = stringProperty(nonceBody, "c_nonce");
-  const proofJwt = await createCredentialRequestJwtProof({
-    audience: credentialIssuer,
-    nonce: credentialNonce,
-  });
-
-  let credentialBody = await postVciCredentialRequest({
-    endpoint: credentialEndpoint,
-    issuerMetadata,
-    accessToken,
-    label: "credential",
-    requestBody: {
-      credential_configuration_id: credentialConfigurationId,
-      proofs: {
-        jwt: [proofJwt],
-      },
-    },
-  });
-  if (typeof credentialBody.transaction_id === "string") {
-    credentialBody = await postVciCredentialRequest({
-      endpoint: deferredCredentialEndpoint,
-      issuerMetadata,
-      accessToken,
-      label: "deferred credential",
-      requestBody: {
-        transaction_id: credentialBody.transaction_id,
-      },
-    });
-  }
-  if (typeof credentialBody.notification_id === "string" && typeof issuerMetadata.notification_endpoint === "string") {
-    await sendCredentialAcceptedNotification({
-      notificationEndpoint: issuerMetadata.notification_endpoint,
-      accessToken,
-      notificationId: credentialBody.notification_id,
-    });
-  }
-
-  console.log(`[harness] completed VCI issuance for ${credentialConfigurationId}`);
+  const result = await runWalletAPI("vci-receive", [
+    "--offer-url",
+    requestUrl.toString(),
+    "--suite-dir",
+    suiteDir,
+    "--conformance-server",
+    suiteOrigin(),
+  ]);
+  console.log(`[harness] completed VCI issuance through wallet API: ${result.trim()}`);
   return { status: 200, body: "The response has been sent to the server for processing" };
+}
+
+async function runWalletAPI(command, args) {
+  const { stdout, stderr } = await execFileAsync("go", ["run", "./cmd/oidf-harness-api", command, ...args], {
+    cwd: walletRoot,
+    env: {
+      ...process.env,
+      MISE_TRUSTED_CONFIG_PATHS: walletRoot,
+    },
+    maxBuffer: 1024 * 1024,
+  });
+  if (stderr.trim().length > 0) {
+    console.error(`[harness] wallet API ${command} stderr: ${stderr.trim()}`);
+  }
+  return stdout;
 }
 
 async function fetchRequestObject(requestUri, requestUriMethod) {
@@ -429,312 +303,6 @@ async function encryptAuthorizationResponse(authzResponse, requestPayload) {
       cty: "json",
     })
     .encrypt(key);
-}
-
-async function fetchClientAttestationChallengeIfAdvertised(challengeEndpoint) {
-  if (typeof challengeEndpoint !== "string" || challengeEndpoint.length === 0) {
-    return undefined;
-  }
-  const response = await fetch(challengeEndpoint, { method: "POST" });
-  const body = await readJsonResponse(response, "client attestation challenge");
-  return typeof body.attestation_challenge === "string" ? body.attestation_challenge : undefined;
-}
-
-async function createClientAttestation() {
-  const clientInstancePublicJwk = {
-    ...publicOnlyJwk(vciClientJwk),
-    kid: vciClientJwk.kid,
-    alg: "ES256",
-    use: "sig",
-  };
-  const now = Math.floor(Date.now() / 1000);
-  return new jose.SignJWT({
-    iss: "https://client-attester.example.org/",
-    sub: vciClientId,
-    iat: now,
-    nbf: now,
-    exp: now + 300,
-    cnf: {
-      jwk: clientInstancePublicJwk,
-    },
-  })
-    .setProtectedHeader({
-      alg: "ES256",
-      typ: "oauth-client-attestation+jwt",
-      x5c: vciClientAttesterJwk.x5c,
-      kid: vciClientAttesterJwk.kid,
-    })
-    .sign(await jose.importJWK(vciClientAttesterJwk, "ES256"));
-}
-
-async function createClientAttestationPop({ authorizationServerIssuer, attestationChallenge }) {
-  const now = Math.floor(Date.now() / 1000);
-  const payload = {
-    iss: vciClientId,
-    iat: now,
-    nbf: now,
-    exp: now + 300,
-    aud: authorizationServerIssuer,
-    jti: randomUUID(),
-  };
-  if (typeof attestationChallenge === "string") {
-    payload.challenge = attestationChallenge;
-  }
-  return new jose.SignJWT(payload)
-    .setProtectedHeader({
-      alg: "ES256",
-      typ: "oauth-client-attestation-pop+jwt",
-      kid: vciClientJwk.kid,
-    })
-    .sign(await jose.importJWK(vciClientJwk, "ES256"));
-}
-
-async function createDpopProof({ method, url, nonce, accessToken }) {
-  const publicJwk = {
-    ...publicOnlyJwk(vciClientJwk),
-    kid: vciClientJwk.kid,
-    alg: "ES256",
-    use: "sig",
-  };
-  const payload = {
-    htm: method.toUpperCase(),
-    htu: dpopHtu(url),
-    iat: Math.floor(Date.now() / 1000),
-    jti: randomUUID(),
-  };
-  if (nonce) {
-    payload.nonce = nonce;
-  }
-  if (accessToken) {
-    payload.ath = base64url(createHash("sha256").update(accessToken).digest());
-  }
-  return new jose.SignJWT(payload)
-    .setProtectedHeader({
-      alg: "ES256",
-      typ: "dpop+jwt",
-      jwk: publicJwk,
-    })
-    .sign(await jose.importJWK(vciClientJwk, "ES256"));
-}
-
-async function createCredentialRequestJwtProof({ audience, nonce }) {
-  const now = Math.floor(Date.now() / 1000);
-  return new jose.SignJWT({
-    aud: audience,
-    iat: now,
-    nonce,
-  })
-    .setProtectedHeader({
-      alg: "ES256",
-      typ: "openid4vci-proof+jwt",
-      jwk: publicOnlyJwk(holderKeyPair.publicKey),
-    })
-    .sign(await jose.importJWK(holderKeyPair.privateKey, "ES256"));
-}
-
-async function fetchWithClientAttestation(url, {
-  method,
-  body,
-  clientAttestation,
-  attestationChallenge,
-  authorizationServerIssuer,
-  contentType,
-}) {
-  const pop = await createClientAttestationPop({ authorizationServerIssuer, attestationChallenge });
-  return fetch(url, {
-    method,
-    headers: {
-      accept: "application/json",
-      "content-type": contentType,
-      "oauth-client-attestation": clientAttestation,
-      "oauth-client-attestation-pop": pop,
-    },
-    body,
-  });
-}
-
-async function fetchWithClientAttestationAndDpopRetry(url, options) {
-  let dpopNonce;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const pop = await createClientAttestationPop({
-      authorizationServerIssuer: options.authorizationServerIssuer,
-      attestationChallenge: options.attestationChallenge,
-    });
-    const dpop = await createDpopProof({
-      method: options.method,
-      url,
-      nonce: dpopNonce,
-    });
-    const response = await fetch(url, {
-      method: options.method,
-      headers: {
-        accept: "application/json",
-        "content-type": options.contentType,
-        dpop,
-        "oauth-client-attestation": options.clientAttestation,
-        "oauth-client-attestation-pop": pop,
-      },
-      body: options.body,
-    });
-    if (response.ok || !isDpopNonceError(response)) {
-      return response;
-    }
-    dpopNonce = response.headers.get("dpop-nonce");
-    await response.text();
-  }
-  throw new Error(`DPoP nonce retry exhausted for ${url}`);
-}
-
-async function fetchWithDpopRetry(url, { method, body, contentType, accessToken }) {
-  let dpopNonce;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const dpop = await createDpopProof({
-      method,
-      url,
-      nonce: dpopNonce,
-      accessToken,
-    });
-    const response = await fetch(url, {
-      method,
-      headers: {
-        accept: "application/json",
-        authorization: `DPoP ${accessToken}`,
-        "content-type": contentType,
-        dpop,
-      },
-      body,
-    });
-    if (response.ok || !isDpopNonceError(response)) {
-      return response;
-    }
-    dpopNonce = response.headers.get("dpop-nonce");
-    await response.text();
-  }
-  throw new Error(`DPoP nonce retry exhausted for ${url}`);
-}
-
-async function postVciCredentialRequest({ endpoint, issuerMetadata, accessToken, requestBody, label }) {
-  const bodyWithEncryption = addCredentialResponseEncryptionIfSupported(requestBody, issuerMetadata);
-  const { body, contentType } = await encodeCredentialRequest(bodyWithEncryption, issuerMetadata);
-  const response = await fetchWithDpopRetry(endpoint, {
-    method: "POST",
-    accessToken,
-    body,
-    contentType,
-  });
-  return readCredentialResponse(response, label);
-}
-
-function addCredentialResponseEncryptionIfSupported(requestBody, issuerMetadata) {
-  if (!issuerMetadata.credential_response_encryption) {
-    return requestBody;
-  }
-  const encValues = issuerMetadata.credential_response_encryption.enc_values_supported;
-  return {
-    ...requestBody,
-    credential_response_encryption: {
-      jwk: vciCredentialResponseEncryptionPublicJwk,
-      enc: Array.isArray(encValues) && typeof encValues[0] === "string" ? encValues[0] : "A128GCM",
-    },
-  };
-}
-
-async function encodeCredentialRequest(requestBody, issuerMetadata) {
-  const requestEncryption = issuerMetadata.credential_request_encryption;
-  if (!requestEncryption) {
-    return {
-      body: JSON.stringify(requestBody),
-      contentType: "application/json",
-    };
-  }
-  const encryptionJwk = requestEncryption.jwks?.keys?.[0];
-  if (!encryptionJwk) {
-    throw new Error("credential_request_encryption metadata does not contain a jwk");
-  }
-  const alg = typeof encryptionJwk.alg === "string" ? encryptionJwk.alg : "ECDH-ES";
-  const encValues = Array.isArray(requestEncryption.enc_values_supported)
-    ? requestEncryption.enc_values_supported
-    : [];
-  const enc = typeof encValues[0] === "string" ? encValues[0] : "A128GCM";
-  const payload = new TextEncoder().encode(JSON.stringify(requestBody));
-  const key = await jose.importJWK(encryptionJwk, alg);
-  const jwe = await new jose.CompactEncrypt(payload)
-    .setProtectedHeader({
-      alg,
-      enc,
-      ...(typeof encryptionJwk.kid === "string" ? { kid: encryptionJwk.kid } : {}),
-      cty: "json",
-    })
-    .encrypt(key);
-  return {
-    body: jwe,
-    contentType: "application/jwt",
-  };
-}
-
-async function readCredentialResponse(response, label) {
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.toLowerCase().includes("application/jwt")) {
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`${label} endpoint returned ${response.status}: ${text}`);
-    }
-    const key = await jose.importJWK(vciCredentialResponseEncryptionPrivateJwk, "ECDH-ES");
-    const { plaintext } = await jose.compactDecrypt(text, key);
-    return JSON.parse(new TextDecoder().decode(plaintext));
-  }
-  return readJsonResponse(response, label);
-}
-
-async function sendCredentialAcceptedNotification({ notificationEndpoint, accessToken, notificationId }) {
-  const response = await fetchWithDpopRetry(notificationEndpoint, {
-    method: "POST",
-    accessToken,
-    contentType: "application/json",
-    body: JSON.stringify({
-      notification_id: notificationId,
-      event: "credential_accepted",
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`notification endpoint returned ${response.status}: ${await response.text()}`);
-  }
-  await response.text();
-}
-
-function isDpopNonceError(response) {
-  return (response.status === 400 || response.status === 401) && response.headers.has("dpop-nonce");
-}
-
-async function readJsonResponse(response, label) {
-  const text = await response.text();
-  let parsed;
-  try {
-    parsed = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(`${label} endpoint returned non-JSON ${response.status}: ${text}`);
-  }
-  if (!response.ok) {
-    throw new Error(`${label} endpoint returned ${response.status}: ${text}`);
-  }
-  return parsed;
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, { headers: { accept: "application/json" } });
-  return readJsonResponse(response, url);
-}
-
-function wellKnownUrl(issuer, wellKnownTypePath) {
-  const issuerUrl = new URL(issuer);
-  return `${issuerUrl.origin}/.well-known/${wellKnownTypePath}${issuerUrl.pathname}`;
-}
-
-function dpopHtu(url) {
-  const parsed = new URL(url);
-  parsed.search = "";
-  parsed.hash = "";
-  return parsed.toString();
 }
 
 function resolveSatisfiableDcqlCredentialIds(dcql) {
@@ -918,10 +486,6 @@ function publicOnlyJwk(jwk) {
 
 function base64url(bytes) {
   return Buffer.from(bytes).toString("base64url");
-}
-
-function randomBase64Url(byteLength) {
-  return base64url(randomBytes(byteLength));
 }
 
 function suiteOrigin() {
