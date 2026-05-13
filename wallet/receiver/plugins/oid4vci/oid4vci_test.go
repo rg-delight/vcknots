@@ -536,6 +536,68 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 	}
 }
 
+func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Header.Get("Authorization") != "DPoP access-1" {
+			t.Errorf("Authorization header = %q", r.Header.Get("Authorization"))
+		}
+		if attempts == 1 {
+			if r.Header.Get("DPoP") != "proof:" {
+				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
+			}
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("DPoP") != "proof:nonce-1" {
+			t.Errorf("second DPoP proof = %q", r.Header.Get("DPoP"))
+		}
+		var body types.CredentialRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode body: %v", err)
+		}
+		if body.CredentialConfigurationID != "pid" {
+			t.Errorf("credential_configuration_id = %q", body.CredentialConfigurationID)
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"credential": "credential-jwt"})
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	var proofNonces []string
+	response, err := receiver.RequestCredentialWithDpopRetry(
+		common.URIField(*parsed),
+		"access-1",
+		types.CredentialRequest{CredentialConfigurationID: "pid"},
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("RequestCredentialWithDpopRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+	if response.Credential != "credential-jwt" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
