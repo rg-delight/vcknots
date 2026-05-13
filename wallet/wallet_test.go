@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -586,6 +588,184 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 
 	kbJwt := parts[len(parts)-1]
 	assert.Equal(t, 2, strings.Count(kbJwt, "."))
+}
+
+func TestParseCredentialOfferURL(t *testing.T) {
+	issuerURL, err := url.Parse("https://issuer.example")
+	require.NoError(t, err)
+	offer := CredentialOffer{
+		CredentialIssuer:           issuerURL,
+		CredentialConfigurationIDs: []string{"pid"},
+		Grants: map[string]*CredentialOfferGrant{
+			"authorization_code": {IssuerState: "issuer-state-1"},
+		},
+	}
+	offerJSON, err := json.Marshal(offer)
+	require.NoError(t, err)
+
+	parsed, err := ParseCredentialOfferURL("openid-credential-offer://?credential_offer=" + url.QueryEscape(string(offerJSON)))
+	require.NoError(t, err)
+	require.Equal(t, "https://issuer.example", parsed.CredentialIssuer.String())
+	require.Equal(t, []string{"pid"}, parsed.CredentialConfigurationIDs)
+	require.Equal(t, "issuer-state-1", parsed.Grants["authorization_code"].IssuerState)
+}
+
+func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+
+	var server *httptest.Server
+	pushedState := ""
+	tokenAttempts := 0
+	credentialAttempts := 0
+	notificationAttempts := 0
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-credential-issuer":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credential_issuer":            server.URL,
+				"credential_endpoint":          server.URL + "/credential",
+				"nonce_endpoint":               server.URL + "/nonce",
+				"deferred_credential_endpoint": server.URL + "/deferred",
+				"notification_endpoint":        server.URL + "/notification",
+				"authorization_servers":        []string{server.URL},
+				"credential_configurations_supported": map[string]any{
+					"pid": map[string]any{
+						"format": "dc+sd-jwt",
+						"scope":  "pid-scope",
+					},
+				},
+			})
+		case "/.well-known/oauth-authorization-server":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"issuer":                                server.URL,
+				"authorization_endpoint":                server.URL + "/authorize",
+				"pushed_authorization_request_endpoint": server.URL + "/par",
+				"token_endpoint":                        server.URL + "/token",
+				"challenge_endpoint":                    server.URL + "/challenge",
+				"pre-authorized_grant_anonymous_access_supported": true,
+				"response_types_supported":                        []string{"code"},
+			})
+		case "/challenge":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"attestation_challenge": "challenge-1"})
+		case "/par":
+			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation"))
+			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation-PoP"))
+			require.NoError(t, r.ParseForm())
+			require.Equal(t, "code", r.Form.Get("response_type"))
+			require.Equal(t, "client-1", r.Form.Get("client_id"))
+			require.Equal(t, "openid-credential-offer://callback", r.Form.Get("redirect_uri"))
+			require.Equal(t, "pid-scope", r.Form.Get("scope"))
+			require.Equal(t, "S256", r.Form.Get("code_challenge_method"))
+			require.Equal(t, "issuer-state-1", r.Form.Get("issuer_state"))
+			pushedState = r.Form.Get("state")
+			require.NotEmpty(t, pushedState)
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
+		case "/authorize":
+			require.Equal(t, "client-1", r.URL.Query().Get("client_id"))
+			require.Equal(t, "urn:request:1", r.URL.Query().Get("request_uri"))
+			w.Header().Set("Location", "openid-credential-offer://callback?code=code-1&state="+url.QueryEscape(pushedState))
+			w.WriteHeader(http.StatusFound)
+		case "/token":
+			tokenAttempts++
+			require.NotEmpty(t, r.Header.Get("DPoP"))
+			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation"))
+			require.NoError(t, r.ParseForm())
+			require.Equal(t, "authorization_code", r.Form.Get("grant_type"))
+			require.Equal(t, "code-1", r.Form.Get("code"))
+			require.Equal(t, "client-1", r.Form.Get("client_id"))
+			if tokenAttempts == 1 {
+				w.Header().Set("DPoP-Nonce", "token-nonce-1")
+				http.Error(w, "use nonce", http.StatusUnauthorized)
+				return
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
+		case "/nonce":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "credential-nonce-1"})
+		case "/credential":
+			credentialAttempts++
+			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
+			require.NotEmpty(t, r.Header.Get("DPoP"))
+			if credentialAttempts == 1 {
+				w.Header().Set("DPoP-Nonce", "credential-nonce-1")
+				http.Error(w, "use nonce", http.StatusUnauthorized)
+				return
+			}
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, "pid", body["credential_configuration_id"])
+			proofs, ok := body["proofs"].(map[string]any)
+			require.True(t, ok)
+			require.NotEmpty(t, proofs["jwt"])
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"transaction_id": "tx-1"})
+		case "/deferred":
+			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, "tx-1", body["transaction_id"])
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+				"credential":      "issued-sd-jwt",
+				"notification_id": "notification-1",
+			})
+		case "/notification":
+			notificationAttempts++
+			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
+			var body receiverTypes.NotificationRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, "notification-1", body.NotificationID)
+			require.Equal(t, "credential_accepted", body.Event)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	issuerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	result, err := controller.ReceiveOID4VCIFinalCredential(OID4VCIFinalReceiveRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"pid"},
+			Grants: map[string]*CredentialOfferGrant{
+				"authorization_code": {IssuerState: "issuer-state-1"},
+			},
+		},
+		Type:           receiverTypes.Oid4vci,
+		ClientID:       "client-1",
+		RedirectURI:    "openid-credential-offer://callback",
+		HolderKey:      holderKey,
+		ClientKey:      clientKey,
+		AttesterKey:    attesterKey,
+		AttesterIssuer: "https://client-attester.example.org/",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.CredentialResponse)
+	require.Equal(t, "issued-sd-jwt", result.CredentialResponse.Credential)
+	require.Len(t, result.SavedCredentials, 1)
+	require.Equal(t, []byte("issued-sd-jwt"), result.SavedCredentials[0].Entry.Raw)
+	require.Equal(t, string(credential.SDJwtVC), result.SavedCredentials[0].Entry.MimeType)
+	require.Equal(t, 2, tokenAttempts)
+	require.Equal(t, 2, credentialAttempts)
+	require.Equal(t, 1, notificationAttempts)
+}
+
+func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return jose.JSONWebKey{
+		Key:       privateKey,
+		KeyID:     keyID,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
 }
 
 func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[string]string) string {

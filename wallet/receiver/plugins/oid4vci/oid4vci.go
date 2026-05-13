@@ -29,6 +29,11 @@ type Oid4vciReceiver struct {
 
 type DPoPProofFactory func(nonce string) (string, error)
 
+type CredentialEndpointHTTPResponse struct {
+	Body        []byte
+	ContentType string
+}
+
 func (o *Oid4vciReceiver) httpClient() *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
@@ -228,6 +233,17 @@ func (o *Oid4vciReceiver) RequestCredentialWithDpopRetry(endpoint common.URIFiel
 		return nil, fmt.Errorf("failed to request credential with DPoP retry: %w", err)
 	}
 	return &response, nil
+}
+
+func (o *Oid4vciReceiver) PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
+	responseBody, responseContentType, err := o.doBearerRequestWithDpopRetry(endpoint, accessToken, body, contentType, proofFactory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to post credential endpoint request with DPoP retry: %w", err)
+	}
+	return &CredentialEndpointHTTPResponse{
+		Body:        responseBody,
+		ContentType: responseContentType,
+	}, nil
 }
 
 func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
@@ -444,64 +460,75 @@ func (o *Oid4vciReceiver) doBearerJSONRequest(endpoint common.URIField, accessTo
 }
 
 func (o *Oid4vciReceiver) doBearerJSONRequestWithDpopRetry(endpoint common.URIField, accessToken string, payload any, proofFactory DPoPProofFactory, target any) error {
-	if proofFactory == nil {
-		return fmt.Errorf("DPoP proof factory is required")
-	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
+	respBody, _, err := o.doBearerRequestWithDpopRetry(endpoint, accessToken, bodyBytes, "application/json", proofFactory)
+	if err != nil {
+		return err
+	}
+	if target == nil || len(respBody) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(respBody, target); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return nil
+}
+
+func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField, accessToken string, bodyBytes []byte, contentType string, proofFactory DPoPProofFactory) ([]byte, string, error) {
+	if proofFactory == nil {
+		return nil, "", fmt.Errorf("DPoP proof factory is required")
+	}
+
 	endpointURL := url.URL(endpoint)
 	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+		return nil, "", fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
 	var dpopNonce string
 	for attempt := 0; attempt < 2; attempt++ {
 		dpopProof, err := proofFactory(dpopNonce)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		req, err := http.NewRequest(http.MethodPost, endpointURL.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Content-Type", "application/json")
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
 		req.Header.Set("Authorization", "DPoP "+accessToken)
 		req.Header.Set("DPoP", dpopProof)
 
 		resp, err := o.httpClient().Do(req)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		respBody, readErr := io.ReadAll(resp.Body)
 		closeErr := resp.Body.Close()
 		if readErr != nil {
-			return readErr
+			return nil, "", readErr
 		}
 		if closeErr != nil {
-			return closeErr
+			return nil, "", closeErr
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			if target == nil || len(respBody) == 0 {
-				return nil
-			}
-			if err := json.Unmarshal(respBody, target); err != nil {
-				return fmt.Errorf("failed to parse JSON: %w", err)
-			}
-			return nil
+			return respBody, resp.Header.Get("Content-Type"), nil
 		}
 		nonce := resp.Header.Get("DPoP-Nonce")
 		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) && nonce != "" {
 			dpopNonce = nonce
 			continue
 		}
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBody))
+		return nil, "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
-	return fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+	return nil, "", fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
 }
 
 func (o *Oid4vciReceiver) doFormRequestWithDpopRetry(endpoint common.URIField, body io.Reader, headers map[string]string, proofFactory DPoPProofFactory, target any) error {

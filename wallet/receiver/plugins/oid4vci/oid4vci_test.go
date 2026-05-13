@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -594,6 +595,73 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 		t.Fatalf("proof nonces = %#v", proofNonces)
 	}
 	if response.Credential != "credential-jwt" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if got := r.Header.Get("Authorization"); got != "DPoP access-1" {
+			t.Errorf("Authorization header = %q", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/jwt" {
+			t.Errorf("Content-Type header = %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read body: %v", err)
+		}
+		if string(body) != "encrypted-request" {
+			t.Errorf("body = %q", string(body))
+		}
+		if attempts == 1 {
+			if r.Header.Get("DPoP") != "proof:" {
+				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
+			}
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("DPoP") != "proof:nonce-1" {
+			t.Errorf("second DPoP proof = %q", r.Header.Get("DPoP"))
+		}
+		w.Header().Set("Content-Type", "application/jwt")
+		_, _ = w.Write([]byte("encrypted-response"))
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	var proofNonces []string
+	response, err := receiver.PostCredentialEndpointWithDpopRetry(
+		common.URIField(*parsed),
+		"access-1",
+		[]byte("encrypted-request"),
+		"application/jwt",
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("PostCredentialEndpointWithDpopRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+	if string(response.Body) != "encrypted-response" || response.ContentType != "application/jwt" {
 		t.Fatalf("response = %#v", response)
 	}
 }
