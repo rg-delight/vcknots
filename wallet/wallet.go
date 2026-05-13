@@ -591,7 +591,8 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, fmt.Errorf("nonce endpoint is missing on credential issuer")
 	}
 
-	attestationHeaders, attestationChallenge, err := createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata)
+	authorizationServerIssuer := authorizationServerEndpoint.String()
+	attestationHeaders, attestationChallenge, err := createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
 	if err != nil {
 		return nil, err
 	}
@@ -628,15 +629,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, err
 	}
 
-	tokenAttestationHeaders := attestationHeaders
-	if req.AttesterKey.Key != nil {
-		tokenPop, err := finalReceiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerMetadata.Issuer.String(), attestationChallenge, 5*time.Minute)
-		if err != nil {
-			return nil, err
-		}
-		tokenAttestationHeaders.ClientAttestationPop = tokenPop
-	}
-	token, err := finalReceiver.ExchangeAuthorizationCodeWithDpopRetry(
+	token, err := finalReceiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
 		*authorizationServerMetadata.TokenEndpoint,
 		receiverTypes.AuthorizationCodeTokenRequest{
 			Code:         code,
@@ -644,7 +637,17 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 			CodeVerifier: codeVerifier,
 			ClientID:     req.ClientID,
 		},
-		tokenAttestationHeaders,
+		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
+			tokenAttestationHeaders := attestationHeaders
+			if req.AttesterKey.Key != nil {
+				tokenPop, err := finalReceiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
+				if err != nil {
+					return receiverTypes.OAuthClientAttestationHeaders{}, err
+				}
+				tokenAttestationHeaders.ClientAttestationPop = tokenPop
+			}
+			return tokenAttestationHeaders, nil
+		},
 		func(nonce string) (string, error) {
 			return finalReceiver.CreateDpopProof(req.ClientKey, http.MethodPost, authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
 		},
@@ -841,7 +844,7 @@ func (w *Wallet) storeAndParseCredential(credentialJWT *string) (*SavedCredentia
 	}, nil
 }
 
-func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
 	if req.AttesterKey.Key == nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", nil
 	}
@@ -863,11 +866,10 @@ func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver
 		attestationChallenge = challenge.AttestationChallenge
 	}
 
-	authIssuer := authMetadata.Issuer.String()
-	if authIssuer == "" {
+	if authorizationServerIssuer == "" {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("authorization server issuer is required for client attestation PoP")
 	}
-	clientAttestationPop, err := receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authIssuer, attestationChallenge, 5*time.Minute)
+	clientAttestationPop, err := receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
 	}

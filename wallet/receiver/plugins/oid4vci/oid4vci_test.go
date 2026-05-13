@@ -759,6 +759,81 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 	}
 }
 
+func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	attempts := 0
+	var attestationPops []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		attestationPops = append(attestationPops, r.Header.Get("OAuth-Client-Attestation-PoP"))
+		if got := r.Header.Get("OAuth-Client-Attestation"); got != "attestation-jwt" {
+			t.Errorf("OAuth-Client-Attestation header = %q", got)
+		}
+		if attempts == 1 {
+			if r.Header.Get("DPoP") != "proof:" {
+				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
+			}
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("DPoP") != "proof:nonce-1" {
+			t.Errorf("second DPoP proof = %q", r.Header.Get("DPoP"))
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+			"access_token": "access-1",
+			"token_type":   "DPoP",
+		})
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server URL: %v", err)
+	}
+
+	headerFactoryCalls := 0
+	var proofNonces []string
+	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+		common.URIField(*parsed),
+		types.AuthorizationCodeTokenRequest{
+			Code:         "code-1",
+			RedirectURI:  "openid-credential-offer://callback",
+			CodeVerifier: "verifier-1",
+			ClientID:     "client-1",
+		},
+		func() (types.OAuthClientAttestationHeaders, error) {
+			headerFactoryCalls++
+			return types.OAuthClientAttestationHeaders{
+				ClientAttestation:    "attestation-jwt",
+				ClientAttestationPop: fmt.Sprintf("attestation-pop-jwt-%d", headerFactoryCalls),
+			}, nil
+		},
+		func(nonce string) (string, error) {
+			proofNonces = append(proofNonces, nonce)
+			return "proof:" + nonce, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExchangeAuthorizationCodeWithDpopAndAttestationRetry() error = %v", err)
+	}
+	if response.Token != "access-1" || response.TokenType != "DPoP" {
+		t.Fatalf("response = %#v", response)
+	}
+	if attempts != 2 || headerFactoryCalls != 2 {
+		t.Fatalf("attempts = %d, headerFactoryCalls = %d", attempts, headerFactoryCalls)
+	}
+	if len(attestationPops) != 2 || attestationPops[0] == attestationPops[1] {
+		t.Fatalf("attestation PoP headers = %#v", attestationPops)
+	}
+	if len(proofNonces) != 2 || proofNonces[0] != "" || proofNonces[1] != "nonce-1" {
+		t.Fatalf("proof nonces = %#v", proofNonces)
+	}
+}
+
 func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
@@ -980,6 +1055,9 @@ func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
 	if typ := parsedDpop.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "dpop+jwt" {
 		t.Fatalf("DPoP typ = %#v", typ)
 	}
+	if parsedDpop.Headers[0].KeyID != "" {
+		t.Fatalf("DPoP protected header should not contain top-level kid, got %q", parsedDpop.Headers[0].KeyID)
+	}
 	if parsedDpop.Headers[0].JSONWebKey == nil || parsedDpop.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
 		t.Fatalf("DPoP jwk header = %#v", parsedDpop.Headers[0].JSONWebKey)
 	}
@@ -1011,6 +1089,9 @@ func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
 	}
 	if typ := parsedProof.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "openid4vci-proof+jwt" {
 		t.Fatalf("proof typ = %#v", typ)
+	}
+	if parsedProof.Headers[0].KeyID != "" {
+		t.Fatalf("proof protected header should not contain top-level kid, got %q", parsedProof.Headers[0].KeyID)
 	}
 	if parsedProof.Headers[0].JSONWebKey == nil || parsedProof.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
 		t.Fatalf("proof jwk header = %#v", parsedProof.Headers[0].JSONWebKey)
@@ -1250,7 +1331,7 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		{
 			name:         "Auth Server (With Trailing Slash)",
 			identifier:   "/tenant1/",
-			expectedPath: "/.well-known/oauth-authorization-server/tenant1",
+			expectedPath: "/.well-known/oauth-authorization-server/tenant1/",
 			discovery: func(u common.URIField) error {
 				_, err := receiver.FetchAuthorizationServerMetadata(u, types.Oid4vci)
 				return err

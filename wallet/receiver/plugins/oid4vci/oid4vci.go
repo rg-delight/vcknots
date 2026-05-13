@@ -29,6 +29,8 @@ type Oid4vciReceiver struct {
 
 type DPoPProofFactory = types.DPoPProofFactory
 
+type OAuthClientAttestationHeadersFactory = types.OAuthClientAttestationHeadersFactory
+
 type CredentialEndpointHTTPResponse = types.CredentialEndpointHTTPResponse
 
 func (o *Oid4vciReceiver) httpClient() *http.Client {
@@ -49,7 +51,10 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 	if path == "/.well-known/oauth-authorization-server" {
 		// Special handling for metadata discovery as per RFC 8414 §3
 		// The well-known string MUST be inserted between the host component and the path component.
-		originalPath := strings.TrimSuffix(endpointURL.Path, "/")
+		originalPath := endpointURL.Path
+		if originalPath == "/" {
+			originalPath = ""
+		}
 		if !strings.HasPrefix(originalPath, path) {
 			endpointURL.Path = path + originalPath
 		}
@@ -210,6 +215,12 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 }
 
 func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
+	return o.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint, request, func() (types.OAuthClientAttestationHeaders, error) {
+		return headers, nil
+	}, proofFactory)
+}
+
+func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
 	formData := url.Values{}
 	formData.Set("grant_type", "authorization_code")
 	formData.Set("code", request.Code)
@@ -217,9 +228,8 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopRetry(endpoint common
 	formData.Set("code_verifier", request.CodeVerifier)
 	formData.Set("client_id", request.ClientID)
 
-	requestHeaders := headersToMap(headers)
 	var response types.CredentialIssuanceAccessToken
-	if err := o.doFormRequestWithDpopRetry(endpoint, strings.NewReader(formData.Encode()), requestHeaders, proofFactory, &response); err != nil {
+	if err := o.doFormRequestWithDpopAndAttestationRetry(endpoint, strings.NewReader(formData.Encode()), headersFactory, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
 	}
 	return &response, nil
@@ -554,8 +564,30 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField,
 }
 
 func (o *Oid4vciReceiver) doFormRequestWithDpopRetry(endpoint common.URIField, body io.Reader, headers map[string]string, proofFactory DPoPProofFactory, target any) error {
+	return o.doFormRequestWithDpopAndHeadersRetry(endpoint, body, func() (map[string]string, error) {
+		return headers, nil
+	}, proofFactory, target)
+}
+
+func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint common.URIField, body io.Reader, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {
+	if headersFactory == nil {
+		return fmt.Errorf("OAuth client attestation headers factory is required")
+	}
+	return o.doFormRequestWithDpopAndHeadersRetry(endpoint, body, func() (map[string]string, error) {
+		headers, err := headersFactory()
+		if err != nil {
+			return nil, err
+		}
+		return headersToMap(headers), nil
+	}, proofFactory, target)
+}
+
+func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.URIField, body io.Reader, headersFactory func() (map[string]string, error), proofFactory DPoPProofFactory, target any) error {
 	if proofFactory == nil {
 		return fmt.Errorf("DPoP proof factory is required")
+	}
+	if headersFactory == nil {
+		return fmt.Errorf("headers factory is required")
 	}
 
 	bodyBytes, err := io.ReadAll(body)
@@ -570,6 +602,10 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopRetry(endpoint common.URIField, b
 	var dpopNonce string
 	for attempt := 0; attempt < 2; attempt++ {
 		dpopProof, err := proofFactory(dpopNonce)
+		if err != nil {
+			return err
+		}
+		headers, err := headersFactory()
 		if err != nil {
 			return err
 		}
@@ -751,7 +787,18 @@ func signJWTWithPublicJWKHeader(key jose.JSONWebKey, typ string, payload map[str
 	if publicJWK.KeyID == "" {
 		publicJWK.KeyID = key.KeyID
 	}
-	return signJWT(key, typ, payload, map[string]any{"jwk": publicJWK})
+	alg := jose.SignatureAlgorithm(key.Algorithm)
+	if alg == "" {
+		alg = jose.ES256
+	}
+	options := (&jose.SignerOptions{}).
+		WithType(jose.ContentType(typ)).
+		WithHeader("jwk", publicJWK)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key.Key}, options)
+	if err != nil {
+		return "", err
+	}
+	return jwt.Signed(signer).Claims(payload).Serialize()
 }
 
 func signJWT(key jose.JSONWebKey, typ string, payload map[string]any, extraHeaders map[string]any) (string, error) {

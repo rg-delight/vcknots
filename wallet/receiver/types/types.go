@@ -322,6 +322,8 @@ type Receiver interface {
 
 type DPoPProofFactory func(nonce string) (string, error)
 
+type OAuthClientAttestationHeadersFactory func() (OAuthClientAttestationHeaders, error)
+
 type CredentialEndpointHTTPResponse struct {
 	Body        []byte
 	ContentType string
@@ -335,6 +337,7 @@ type OID4VCIFinalReceiver interface {
 
 	PushAuthorizationRequest(endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
 	ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headers OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
 	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
 	FetchNonce(endpoint common.URIField) (*NonceResponse, error)
 	PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
