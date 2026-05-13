@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
@@ -210,6 +211,86 @@ func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, a
 	return o.doBearerJSONRequest(endpoint, accessToken, notification, dpopProof, nil)
 }
 
+func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *types.CredentialIssuerMetadata) ([]byte, string, error) {
+	if issuerMetadata == nil || issuerMetadata.CredentialRequestEncryption == nil {
+		body, err := json.Marshal(request)
+		if err != nil {
+			return nil, "", err
+		}
+		return body, "application/json", nil
+	}
+
+	encryptionKey, err := selectEncryptionKey(&issuerMetadata.CredentialRequestEncryption.Jwks)
+	if err != nil {
+		return nil, "", err
+	}
+	alg := encryptionKey.Algorithm
+	if alg == "" {
+		alg = firstOrDefault(issuerMetadata.CredentialRequestEncryption.AlgValuesSupported, "ECDH-ES")
+	}
+	enc := firstOrDefault(issuerMetadata.CredentialRequestEncryption.EncValuesSupported, "A128GCM")
+
+	keyAlg, err := parseJWEKeyAlgorithm(alg)
+	if err != nil {
+		return nil, "", err
+	}
+	contentEnc, err := parseJWEContentEncryption(enc)
+	if err != nil {
+		return nil, "", err
+	}
+
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, "", err
+	}
+
+	encrypter, err := jose.NewEncrypter(
+		contentEnc,
+		jose.Recipient{
+			Algorithm: keyAlg,
+			Key:       encryptionKey.Key,
+			KeyID:     encryptionKey.KeyID,
+		},
+		(&jose.EncrypterOptions{}).WithContentType("json"),
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create credential request encrypter: %w", err)
+	}
+
+	jwe, err := encrypter.Encrypt(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to encrypt credential request: %w", err)
+	}
+	serialized, err := jwe.CompactSerialize()
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to serialize credential request JWE: %w", err)
+	}
+	return []byte(serialized), "application/jwt", nil
+}
+
+func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*types.CredentialResponse, error) {
+	payload := body
+	if strings.Contains(strings.ToLower(contentType), "application/jwt") {
+		if decryptionKey == nil {
+			return nil, fmt.Errorf("decryption key is required for encrypted credential response")
+		}
+		jwe, err := jose.ParseEncrypted(string(body), supportedJWEKeyAlgorithms(), supportedJWEContentEncryptions())
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse credential response JWE: %w", err)
+		}
+		payload, err = jwe.Decrypt(decryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt credential response JWE: %w", err)
+		}
+	}
+
+	var response types.CredentialResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse credential response JSON: %w", err)
+	}
+	return &response, nil
+}
+
 func (o *Oid4vciReceiver) doBearerJSONRequest(endpoint common.URIField, accessToken string, payload any, dpopProof string, target any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -275,6 +356,67 @@ func (o *Oid4vciReceiver) doFinalRequest(method string, endpoint common.URIField
 		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
 	return nil
+}
+
+func selectEncryptionKey(jwks *jose.JSONWebKeySet) (*jose.JSONWebKey, error) {
+	if jwks == nil || len(jwks.Keys) == 0 {
+		return nil, fmt.Errorf("encryption JWKS does not contain a key")
+	}
+	for i := range jwks.Keys {
+		if jwks.Keys[i].Use == "enc" {
+			return &jwks.Keys[i], nil
+		}
+	}
+	return &jwks.Keys[0], nil
+}
+
+func firstOrDefault(values []string, fallback string) string {
+	if len(values) > 0 && values[0] != "" {
+		return values[0]
+	}
+	return fallback
+}
+
+func parseJWEKeyAlgorithm(alg string) (jose.KeyAlgorithm, error) {
+	switch alg {
+	case "ECDH-ES":
+		return jose.ECDH_ES, nil
+	case "ECDH-ES+A128KW":
+		return jose.ECDH_ES_A128KW, nil
+	case "ECDH-ES+A192KW":
+		return jose.ECDH_ES_A192KW, nil
+	case "ECDH-ES+A256KW":
+		return jose.ECDH_ES_A256KW, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption algorithm: %s", alg)
+	}
+}
+
+func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
+	switch enc {
+	case "A128GCM":
+		return jose.A128GCM, nil
+	case "A192GCM":
+		return jose.A192GCM, nil
+	case "A256GCM":
+		return jose.A256GCM, nil
+	case "A128CBC-HS256":
+		return jose.A128CBC_HS256, nil
+	case "A192CBC-HS384":
+		return jose.A192CBC_HS384, nil
+	case "A256CBC-HS512":
+		return jose.A256CBC_HS512, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption encoding: %s", enc)
+	}
+}
+
+func supportedJWEKeyAlgorithms() []jose.KeyAlgorithm {
+	return []jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW}
+}
+
+func supportedJWEContentEncryptions() []jose.ContentEncryption {
+	return []jose.ContentEncryption{jose.A128GCM, jose.A192GCM, jose.A256GCM, jose.A128CBC_HS256, jose.A192CBC_HS384, jose.A256CBC_HS512}
 }
 
 func (o *Oid4vciReceiver) ReceiveCredential(

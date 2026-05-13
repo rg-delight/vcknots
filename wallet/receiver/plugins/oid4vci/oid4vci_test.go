@@ -1,6 +1,9 @@
 package oid4vci
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -523,6 +527,96 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		Event:          "credential_accepted",
 	}, "dpop-notification"); err != nil {
 		t.Fatalf("SendCredentialNotification() error = %v", err)
+	}
+}
+
+func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate recipient key: %v", err)
+	}
+	metadata := &types.CredentialIssuerMetadata{
+		CredentialRequestEncryption: &types.CredentialRequestEncryption{
+			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+				{
+					Key:       &recipient.PublicKey,
+					KeyID:     "issuer-enc-key",
+					Use:       "enc",
+					Algorithm: string(jose.ECDH_ES),
+				},
+			}},
+			EncValuesSupported: []string{"A256GCM"},
+		},
+	}
+
+	body, contentType, err := receiver.EncodeCredentialRequest(types.CredentialRequest{
+		CredentialConfigurationID: "pid",
+		Proofs:                    &types.CredentialProofs{JWT: []string{"proof-jwt"}},
+	}, metadata)
+	if err != nil {
+		t.Fatalf("EncodeCredentialRequest() error = %v", err)
+	}
+	if contentType != "application/jwt" {
+		t.Fatalf("contentType = %q", contentType)
+	}
+	jwe, err := jose.ParseEncrypted(string(body), []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A256GCM})
+	if err != nil {
+		t.Fatalf("failed to parse request JWE: %v", err)
+	}
+	if jwe.Header.KeyID != "issuer-enc-key" {
+		t.Fatalf("kid = %q", jwe.Header.KeyID)
+	}
+	if got := jwe.Header.ExtraHeaders[jose.HeaderContentType]; got != "json" {
+		t.Fatalf("cty = %#v", got)
+	}
+	plaintext, err := jwe.Decrypt(recipient)
+	if err != nil {
+		t.Fatalf("failed to decrypt request JWE: %v", err)
+	}
+	var decodedRequest types.CredentialRequest
+	if err := json.Unmarshal(plaintext, &decodedRequest); err != nil {
+		t.Fatalf("failed to decode request: %v", err)
+	}
+	if decodedRequest.CredentialConfigurationID != "pid" || decodedRequest.Proofs.JWT[0] != "proof-jwt" {
+		t.Fatalf("decoded request = %#v", decodedRequest)
+	}
+
+	responsePayload, err := json.Marshal(types.CredentialResponse{Credential: "credential-jwt", NotificationID: "notification-1"})
+	if err != nil {
+		t.Fatalf("failed to marshal response: %v", err)
+	}
+	encrypter, err := jose.NewEncrypter(
+		jose.A256GCM,
+		jose.Recipient{Algorithm: jose.ECDH_ES, Key: &recipient.PublicKey, KeyID: "wallet-enc-key"},
+		(&jose.EncrypterOptions{}).WithContentType("json"),
+	)
+	if err != nil {
+		t.Fatalf("failed to create encrypter: %v", err)
+	}
+	encryptedResponse, err := encrypter.Encrypt(responsePayload)
+	if err != nil {
+		t.Fatalf("failed to encrypt response: %v", err)
+	}
+	serializedResponse, err := encryptedResponse.CompactSerialize()
+	if err != nil {
+		t.Fatalf("failed to serialize response: %v", err)
+	}
+
+	decodedResponse, err := receiver.DecodeCredentialResponse([]byte(serializedResponse), "application/jwt", recipient)
+	if err != nil {
+		t.Fatalf("DecodeCredentialResponse() error = %v", err)
+	}
+	if decodedResponse.Credential != "credential-jwt" || decodedResponse.NotificationID != "notification-1" {
+		t.Fatalf("decoded response = %#v", decodedResponse)
+	}
+
+	plainResponse, err := receiver.DecodeCredentialResponse([]byte(`{"transaction_id":"tx-1"}`), "application/json", nil)
+	if err != nil {
+		t.Fatalf("DecodeCredentialResponse() plain error = %v", err)
+	}
+	if plainResponse.TransactionID != "tx-1" {
+		t.Fatalf("plain response = %#v", plainResponse)
 	}
 }
 
