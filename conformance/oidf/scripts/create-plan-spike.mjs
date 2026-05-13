@@ -24,13 +24,43 @@ const moduleLimit = optionalPositiveInteger(process.env.OIDF_MODULE_LIMIT);
 const moduleFilter = process.env.OIDF_MODULE_FILTER;
 
 const defaultHarnessOrigin = trimTrailingSlash(
-  process.env.VCKNOTS_HAIP_HARNESS_ORIGIN ?? "http://127.0.0.1:9080",
+  process.env.VCKNOTS_OIDF_HARNESS_ORIGIN ??
+    process.env.VCKNOTS_HAIP_HARNESS_ORIGIN ??
+    "http://127.0.0.1:9080",
 );
 
 const targets = {
+  "vci-wallet-final": {
+    role: "wallet",
+    protocol: "oid4vci",
+    suite: "final",
+    planName: "oid4vci-1_0-wallet-test-plan",
+    config: "vci-wallet-test-config.json",
+    variant: {
+      credential_format: "sd_jwt_vc",
+      fapi_profile: "vci",
+      vci_grant_type: "authorization_code",
+      vci_authorization_code_flow_variant: "issuer_initiated",
+      vci_credential_offer_variant: "by_value",
+      authorization_request_type: "simple",
+      client_auth_type: "client_attestation",
+      sender_constrain: "dpop",
+      fapi_request_method: "unsigned",
+      vci_credential_issuance_mode: "immediate",
+      vci_credential_encryption: "plain",
+    },
+    overrideConfig(config) {
+      config.vci ??= {};
+      config.vci.credential_offer_endpoint =
+        process.env.VCKNOTS_OIDF_WALLET_CREDENTIAL_OFFER_ENDPOINT ??
+        process.env.VCKNOTS_HAIP_WALLET_CREDENTIAL_OFFER_ENDPOINT ??
+        `${defaultHarnessOrigin}/oidf/vci/credential-offer`;
+    },
+  },
   "vci-wallet-haip": {
     role: "wallet",
     protocol: "oid4vci",
+    suite: "haip",
     planName: "oid4vci-1_0-wallet-haip-test-plan",
     config: "vci-wallet-test-config.json",
     variant: {
@@ -48,6 +78,7 @@ const targets = {
   "vci-issuer-haip": {
     role: "issuer",
     protocol: "oid4vci",
+    suite: "haip",
     planName: "oid4vci-1_0-issuer-haip-test-plan",
     config: "vci-issuer-test-config-client_attestation-client-auth-dpop.json",
     variant: {
@@ -63,6 +94,7 @@ const targets = {
   "vp-wallet-haip": {
     role: "wallet",
     protocol: "oid4vp",
+    suite: "haip",
     planName: "oid4vp-1final-wallet-haip-test-plan",
     config: "vp-wallet-test-config-dcql-sdjwt.json",
     variant: {
@@ -76,9 +108,31 @@ const targets = {
         `${defaultHarnessOrigin}/oidf/vp/authorize`;
     },
   },
+  "vp-wallet-final": {
+    role: "wallet",
+    protocol: "oid4vp",
+    suite: "final",
+    planName: "oid4vp-1final-wallet-test-plan",
+    config: "vp-wallet-test-config-dcql-sdjwt.json",
+    variant: {
+      vp_profile: "plain_vp",
+      credential_format: "sd_jwt_vc",
+      response_mode: "direct_post.jwt",
+      request_method: "request_uri_signed",
+      client_id_prefix: "x509_hash",
+    },
+    overrideConfig(config) {
+      config.server ??= {};
+      config.server.authorization_endpoint =
+        process.env.VCKNOTS_OIDF_WALLET_AUTHORIZATION_ENDPOINT ??
+        process.env.VCKNOTS_HAIP_WALLET_AUTHORIZATION_ENDPOINT ??
+        `${defaultHarnessOrigin}/oidf/vp/authorize`;
+    },
+  },
   "vp-verifier-haip": {
     role: "verifier",
     protocol: "oid4vp",
+    suite: "haip",
     planName: "oid4vp-1final-verifier-haip-test-plan",
     config: "vp-verifier-test-config.json",
     variant: {
@@ -94,7 +148,12 @@ const targets = {
   },
 };
 
-const haipTargetNames = Object.keys(targets);
+const targetNames = Object.keys(targets);
+const targetGroups = {
+  haip: targetNames.filter((name) => targets[name].suite === "haip"),
+  walletFinal: ["vci-wallet-final", "vci-wallet-haip", "vp-wallet-final", "vp-wallet-haip"],
+  all: targetNames,
+};
 const command = process.argv[2] ?? "help";
 const targetName = process.argv[3];
 
@@ -102,7 +161,7 @@ try {
   if (command === "help" || command === "--help" || command === "-h") {
     printHelp();
   } else if (command === "list-targets") {
-    console.log(JSON.stringify(haipTargetNames, null, 2));
+    console.log(JSON.stringify({ targets: targetNames, groups: targetGroups }, null, 2));
   } else if (command === "start-suite") {
     startSuite();
     await waitForSuite();
@@ -123,15 +182,19 @@ try {
   } else if (command === "run-all-haip") {
     startSuite();
     await waitForSuite();
-    const results = [];
-    for (const name of haipTargetNames) {
-      results.push(await runTarget(name));
-    }
-    const summary = {
-      ok: results.every((result) => result.exitCode === 0),
-      suiteOrigin,
-      targets: results.map((result) => result.summary),
-    };
+    const summary = await runTargetGroup(targetGroups.haip);
+    console.log(JSON.stringify(summary, null, 2));
+    process.exitCode = summary.ok ? 0 : 1;
+  } else if (command === "run-all-wallet-final") {
+    startSuite();
+    await waitForSuite();
+    const summary = await runTargetGroup(targetGroups.walletFinal);
+    console.log(JSON.stringify(summary, null, 2));
+    process.exitCode = summary.ok ? 0 : 1;
+  } else if (command === "run-all") {
+    startSuite();
+    await waitForSuite();
+    const summary = await runTargetGroup(targetGroups.all);
     console.log(JSON.stringify(summary, null, 2));
     process.exitCode = summary.ok ? 0 : 1;
   } else {
@@ -139,6 +202,18 @@ try {
   }
 } catch (error) {
   fail(error instanceof Error ? error.stack ?? error.message : String(error));
+}
+
+async function runTargetGroup(names) {
+  const results = [];
+  for (const name of names) {
+    results.push(await runTarget(name));
+  }
+  return {
+    ok: results.every((result) => result.exitCode === 0),
+    suiteOrigin,
+    targets: results.map((result) => result.summary),
+  };
 }
 
 async function createPlanArtifact(name) {
@@ -151,6 +226,7 @@ async function createPlanArtifact(name) {
     targetName: name,
     role: target.role,
     protocol: target.protocol,
+    suite: target.suite,
     planName: target.planName,
     variant: target.variant,
     config,
@@ -212,6 +288,7 @@ async function runTarget(name) {
     targetName: name,
     role: target.role,
     protocol: target.protocol,
+    suite: target.suite,
     planName: target.planName,
     variant: target.variant,
     moduleTimeoutMs,
@@ -373,7 +450,7 @@ async function buildConfig(target) {
 
   const config = JSON.parse(text);
   config.alias = `vcknots-${target.planName}-${Date.now()}`.replaceAll(/[^A-Za-z0-9._-]/g, "-");
-  config.description = `VCKnots OIDF HAIP runner for ${target.planName}`;
+  config.description = `VCKnots OIDF runner for ${target.planName}`;
   target.overrideConfig?.(config);
   return config;
 }
@@ -441,7 +518,7 @@ function classifyTarget({ plan, moduleResults, error, timedOut }) {
   if (moduleResults.length === 0) {
     return {
       classification: "plan_created",
-      reason: "OIDF HAIP plan was created; no modules were started in this command.",
+      reason: "OIDF plan was created; no modules were started in this command.",
     };
   }
   const counts = countBy(moduleResults.map((result) => result.classification));
@@ -455,14 +532,14 @@ function classifyTarget({ plan, moduleResults, error, timedOut }) {
   if (counts.harness_gap || timedOut) {
     return {
       classification: "harness_gap",
-      reason: "At least one OIDF module is waiting for a VCKnots HAIP harness or timed out before completion.",
+      reason: "At least one OIDF module is waiting for a VCKnots harness or timed out before completion.",
       counts,
     };
   }
   if (counts.unsupported_capability) {
     return {
       classification: "unsupported_capability",
-      reason: "At least one OIDF module reached a known unsupported HAIP capability.",
+      reason: "At least one OIDF module reached a known unsupported capability.",
       counts,
     };
   }
@@ -486,7 +563,7 @@ function classifyModule({ target, planModule, runnerModule, info, logs }) {
   if (isMissingHarnessEvidence(logText)) {
     return {
       classification: "harness_gap",
-      reason: `Module ${planModule.testModule} reached the suite but needs a VCKnots HAIP ${target.role} harness that is intentionally not implemented in this milestone.`,
+      reason: `Module ${planModule.testModule} reached the suite but needs a VCKnots ${target.role} harness that is intentionally not implemented in this milestone.`,
       invocation: extractInvocationHints(logText),
       moduleUrl: runnerModule.url,
     };
@@ -614,7 +691,7 @@ function serializeError(error) {
 
 function requireTargetName(name) {
   if (!name || !targets[name]) {
-    fail(`Expected target name. Known targets: ${haipTargetNames.join(", ")}`);
+    fail(`Expected target name. Known targets: ${targetNames.join(", ")}`);
   }
   return name;
 }
@@ -626,14 +703,17 @@ function printHelp() {
   node conformance/oidf/scripts/create-plan-spike.mjs create-plan <target>
   node conformance/oidf/scripts/create-plan-spike.mjs run-target <target>
   node conformance/oidf/scripts/create-plan-spike.mjs run-all-haip
+  node conformance/oidf/scripts/create-plan-spike.mjs run-all-wallet-final
+  node conformance/oidf/scripts/create-plan-spike.mjs run-all
 
 Targets:
-  ${haipTargetNames.join("\n  ")}
+  ${targetNames.join("\n  ")}
 
 Useful environment:
   OIDF_MODULE_TIMEOUT_MS=15000
   OIDF_MODULE_LIMIT=1
   OIDF_MODULE_FILTER=happy-flow
+  VCKNOTS_OIDF_HARNESS_ORIGIN=http://127.0.0.1:9080
   VCKNOTS_HAIP_HARNESS_ORIGIN=http://127.0.0.1:9080
 `);
 }

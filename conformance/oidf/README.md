@@ -2,7 +2,7 @@
 
 This directory is a first harness home for running VCKnots-focused OpenID Foundation conformance experiments before integrating Final 1.0 or HAIP behavior into a wallet application.
 
-The harness starts the OIDF conformance suite with Docker named volumes, creates HAIP test plans through the suite API, can start suite modules, and saves artifacts under `conformance/oidf/artifacts`. It intentionally does not depend on the NICE wallet app, BetterAuth, a database, or UI routes.
+The harness starts the OIDF conformance suite with Docker named volumes, creates Wallet Final 1.0 and HAIP test plans through the suite API, can start suite modules, and saves artifacts under `conformance/oidf/artifacts`. It intentionally does not depend on the NICE wallet app, BetterAuth, a database, or UI routes.
 
 ## Why this lives in VCKnots
 
@@ -10,16 +10,32 @@ VCKnots should prove its protocol, cryptographic, and wire-format behavior befor
 
 ## Current scope
 
-The current script is a suite/API smoke test and red-test runner, not a conformance pass claim. It verifies that the local OIDF suite can start, that the HAIP plans can be created from the pinned suite configuration files, and that modules can be invoked with bounded timeouts for TDD.
+The current script is a suite/API smoke test and red-test runner, not a conformance pass claim. It verifies that the local OIDF suite can start, that selected Wallet Final 1.0 and HAIP plans can be created from the pinned suite configuration files, and that modules can be invoked with bounded timeouts for TDD.
 
-The HAIP targets are:
+The Wallet Final 1.0 development targets are:
 
+- `vci-wallet-final`: `oid4vci-1_0-wallet-test-plan`
 - `vci-wallet-haip`: `oid4vci-1_0-wallet-haip-test-plan`
-- `vci-issuer-haip`: `oid4vci-1_0-issuer-haip-test-plan`
+- `vp-wallet-final`: `oid4vp-1final-wallet-test-plan`
 - `vp-wallet-haip`: `oid4vp-1final-wallet-haip-test-plan`
+
+Additional HAIP server-side targets are available because Issue 41 tracks the broader VCKnots fork investigation:
+
+- `vci-issuer-haip`: `oid4vci-1_0-issuer-haip-test-plan`
 - `vp-verifier-haip`: `oid4vp-1final-verifier-haip-test-plan`
 
 The HAIP targets expose the expected VCKnots gaps. OpenID4VCI HAIP requires authorization code flow, DPoP, client or wallet attestation, key attestation, and Final-era nonce and encryption behavior. OpenID4VP HAIP requires encrypted responses such as `direct_post.jwt`, Final client identifier handling such as `x509_hash`, and DCQL-oriented requests.
+
+The runner deliberately chooses a small set of executable variants instead of the full OIDF Cartesian product. Current verified module counts for the selected variants are:
+
+- VCI wallet Final: 4 modules.
+- VCI wallet HAIP: 9 modules.
+- VP wallet Final: 14 modules for `sd_jwt_vc`, `vp_profile=plain_vp`, `response_mode=direct_post.jwt`, `request_method=request_uri_signed`, `client_id_prefix=x509_hash`.
+- VP wallet HAIP: 12 modules.
+- VCI issuer HAIP: 62 modules.
+- VP verifier HAIP: 10 modules.
+
+This is useful for VCKnots Wallet Final 1.0 TDD because the suite plumbing, plan creation, module invocation, and artifact capture are real. It is not yet sufficient to prove Wallet Final 1.0 behavior because the thin VCKnots HTTP harness and the protocol implementation are intentionally still missing.
 
 ## Prerequisites
 
@@ -39,14 +55,27 @@ Start the local suite only:
 
     node conformance/oidf/scripts/create-plan-spike.mjs start-suite
 
+Create a VP Final wallet plan and save artifacts:
+
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-final
+
 Create a VP HAIP wallet plan and save artifacts:
 
     node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-haip
 
-Create every HAIP plan one at a time:
+Create every Wallet Final development plan one at a time:
 
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vci-wallet-final
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vci-wallet-haip
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-final
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-haip
+
+Create every available plan one at a time:
+
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vci-wallet-final
     node conformance/oidf/scripts/create-plan-spike.mjs create-plan vci-wallet-haip
     node conformance/oidf/scripts/create-plan-spike.mjs create-plan vci-issuer-haip
+    node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-final
     node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-wallet-haip
     node conformance/oidf/scripts/create-plan-spike.mjs create-plan vp-verifier-haip
 
@@ -58,9 +87,21 @@ Run all four HAIP targets:
 
     node conformance/oidf/scripts/create-plan-spike.mjs run-all-haip
 
+Run Wallet Final development targets:
+
+    node conformance/oidf/scripts/create-plan-spike.mjs run-all-wallet-final
+
+Run every available target:
+
+    node conformance/oidf/scripts/create-plan-spike.mjs run-all
+
 For a quick red smoke run while no VCKnots HAIP harness exists yet, limit each target to one module and use a short timeout:
 
     OIDF_MODULE_LIMIT=1 OIDF_MODULE_TIMEOUT_MS=15000 node conformance/oidf/scripts/create-plan-spike.mjs run-all-haip
+
+For the same Wallet Final 1.0 smoke:
+
+    OIDF_MODULE_LIMIT=1 OIDF_MODULE_TIMEOUT_MS=15000 node conformance/oidf/scripts/create-plan-spike.mjs run-all-wallet-final
 
 Useful environment variables:
 
@@ -72,7 +113,10 @@ Useful environment variables:
 - `OIDF_MODULE_TIMEOUT_MS`: per-module timeout, default `120000`.
 - `OIDF_MODULE_LIMIT`: optional number of modules to run from each created plan.
 - `OIDF_MODULE_FILTER`: optional substring filter for module names.
+- `VCKNOTS_OIDF_HARNESS_ORIGIN`: default future harness origin for Final and HAIP targets, default `http://127.0.0.1:9080`.
 - `VCKNOTS_HAIP_HARNESS_ORIGIN`: default future harness origin, default `http://127.0.0.1:9080`.
+- `VCKNOTS_OIDF_WALLET_CREDENTIAL_OFFER_ENDPOINT`: VCI wallet entrypoint override.
+- `VCKNOTS_OIDF_WALLET_AUTHORIZATION_ENDPOINT`: VP wallet entrypoint override.
 - `VCKNOTS_HAIP_WALLET_CREDENTIAL_OFFER_ENDPOINT`: VCI wallet entrypoint override.
 - `VCKNOTS_HAIP_WALLET_AUTHORIZATION_ENDPOINT`: VP wallet entrypoint override.
 - `VCKNOTS_HAIP_ISSUER_BASE_URL`: VCI issuer under test override.
