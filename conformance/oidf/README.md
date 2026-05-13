@@ -37,6 +37,8 @@ The runner deliberately chooses a small set of executable variants instead of th
 
 This is useful for VCKnots Wallet Final 1.0 TDD because the suite plumbing, plan creation, module invocation, and artifact capture are real. It is not yet sufficient to prove Wallet Final 1.0 behavior because the thin VCKnots HTTP harness and the protocol implementation are intentionally still missing.
 
+See `VARIANTS.md` for the selected runner variants and the observed wallet-plan variant universe. See `BRANCHING.md` for the parent worktree and VCKnots submodule branch lifecycle.
+
 ## Prerequisites
 
 - Docker with Compose support.
