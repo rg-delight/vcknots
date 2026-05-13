@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -53,6 +54,7 @@ func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*Credentia
 	builder := NewRequestBuilder()
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
 	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
+	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
 
 	// Request Object by Reference
 	if requestURI := queryParams.Get("request_uri"); requestURI != "" {
@@ -147,6 +149,79 @@ func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, 
 	return nil
 }
 
+// CreateEncryptedAuthorizationResponse creates an OID4VP Final direct_post.jwt
+// authorization response JWE. The authzResponse map is the JSON object that the
+// verifier receives after decrypting the form field named "response".
+func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map[string]any, metadata *VerifierMetadata) (string, error) {
+	if metadata == nil {
+		return "", fmt.Errorf("verifier metadata is required for encrypted authorization response")
+	}
+
+	payloadBytes, err := json.Marshal(authzResponse)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal authorization response: %w", err)
+	}
+
+	encryptionKey, err := selectVerifierEncryptionKey(&metadata.Jwks)
+	if err != nil {
+		return "", err
+	}
+
+	alg := encryptionKey.Algorithm
+	if alg == "" {
+		alg = metadata.AuthorizationEncryptedResponseAlg
+	}
+	if alg == "" {
+		alg = "ECDH-ES"
+	}
+
+	enc := ""
+	if len(metadata.EncryptedResponseEncValuesSupported) > 0 {
+		enc = metadata.EncryptedResponseEncValuesSupported[0]
+	}
+	if enc == "" {
+		enc = metadata.AuthorizationEncryptedResponseEnc
+	}
+	if enc == "" {
+		enc = "A128GCM"
+	}
+
+	keyAlg, err := parseJWEKeyAlgorithm(alg)
+	if err != nil {
+		return "", err
+	}
+	contentEnc, err := parseJWEContentEncryption(enc)
+	if err != nil {
+		return "", err
+	}
+
+	options := (&jose.EncrypterOptions{}).WithContentType("json")
+	encrypter, err := jose.NewEncrypter(
+		contentEnc,
+		jose.Recipient{
+			Algorithm: keyAlg,
+			Key:       encryptionKey.Key,
+			KeyID:     encryptionKey.KeyID,
+		},
+		options,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create encrypter: %w", err)
+	}
+
+	jwe, err := encrypter.Encrypt(payloadBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt authorization response: %w", err)
+	}
+
+	serialized, err := jwe.CompactSerialize()
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize authorization response JWE: %w", err)
+	}
+
+	return serialized, nil
+}
+
 // createJARMResponse creates a JWT-Secured Authorization Response (JARM)
 func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission string, request *types.PresentationRequest, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
 	// Create the response payload
@@ -166,56 +241,18 @@ func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission str
 		return "", fmt.Errorf("failed to marshal JARM payload: %w", err)
 	}
 
-	// Find encryption key from verifier JWKS
-	if verifierJWKS == nil || len(verifierJWKS.Keys) == 0 {
-		return "", fmt.Errorf("verifier JWKS not available for encryption")
+	encryptionKey, err := selectVerifierEncryptionKey(verifierJWKS)
+	if err != nil {
+		return "", err
 	}
 
-	// Select appropriate key for encryption (prefer "enc" use, or first available key)
-	var encryptionKey *jose.JSONWebKey
-	for i := range verifierJWKS.Keys {
-		key := &verifierJWKS.Keys[i]
-		if key.Use == "enc" {
-			encryptionKey = key
-			break
-		}
+	keyAlg, err := parseJWEKeyAlgorithm(encAlg)
+	if err != nil {
+		return "", err
 	}
-	if encryptionKey == nil {
-		// Use first key if no "enc" key found
-		encryptionKey = &verifierJWKS.Keys[0]
-	}
-
-	// Parse algorithm
-	var keyAlg jose.KeyAlgorithm
-	switch encAlg {
-	case "ECDH-ES":
-		keyAlg = jose.ECDH_ES
-	case "ECDH-ES+A128KW":
-		keyAlg = jose.ECDH_ES_A128KW
-	case "ECDH-ES+A192KW":
-		keyAlg = jose.ECDH_ES_A192KW
-	case "ECDH-ES+A256KW":
-		keyAlg = jose.ECDH_ES_A256KW
-	default:
-		return "", fmt.Errorf("unsupported encryption algorithm: %s", encAlg)
-	}
-
-	var contentEnc jose.ContentEncryption
-	switch encEnc {
-	case "A128GCM":
-		contentEnc = jose.A128GCM
-	case "A192GCM":
-		contentEnc = jose.A192GCM
-	case "A256GCM":
-		contentEnc = jose.A256GCM
-	case "A128CBC-HS256":
-		contentEnc = jose.A128CBC_HS256
-	case "A192CBC-HS384":
-		contentEnc = jose.A192CBC_HS384
-	case "A256CBC-HS512":
-		contentEnc = jose.A256CBC_HS512
-	default:
-		return "", fmt.Errorf("unsupported encryption encoding: %s", encEnc)
+	contentEnc, err := parseJWEContentEncryption(encEnc)
+	if err != nil {
+		return "", err
 	}
 
 	// Create encrypter
@@ -247,10 +284,60 @@ func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission str
 	return serialized, nil
 }
 
+func selectVerifierEncryptionKey(verifierJWKS *jose.JSONWebKeySet) (*jose.JSONWebKey, error) {
+	if verifierJWKS == nil || len(verifierJWKS.Keys) == 0 {
+		return nil, fmt.Errorf("verifier JWKS not available for encryption")
+	}
+
+	for i := range verifierJWKS.Keys {
+		key := &verifierJWKS.Keys[i]
+		if key.Use == "enc" {
+			return key, nil
+		}
+	}
+
+	return &verifierJWKS.Keys[0], nil
+}
+
+func parseJWEKeyAlgorithm(alg string) (jose.KeyAlgorithm, error) {
+	switch alg {
+	case "ECDH-ES":
+		return jose.ECDH_ES, nil
+	case "ECDH-ES+A128KW":
+		return jose.ECDH_ES_A128KW, nil
+	case "ECDH-ES+A192KW":
+		return jose.ECDH_ES_A192KW, nil
+	case "ECDH-ES+A256KW":
+		return jose.ECDH_ES_A256KW, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption algorithm: %s", alg)
+	}
+}
+
+func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
+	switch enc {
+	case "A128GCM":
+		return jose.A128GCM, nil
+	case "A192GCM":
+		return jose.A192GCM, nil
+	case "A256GCM":
+		return jose.A256GCM, nil
+	case "A128CBC-HS256":
+		return jose.A128CBC_HS256, nil
+	case "A192CBC-HS384":
+		return jose.A192CBC_HS384, nil
+	case "A256CBC-HS512":
+		return jose.A256CBC_HS512, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption encoding: %s", enc)
+	}
+}
+
 type requestBuilder struct {
 	req                    *CredentialPresentationRequest
 	x509TrustChainRoots    *x509.CertPool
 	insecureSkipX509Verify bool
+	expectedClientID       string
 	errValidation          error
 }
 
@@ -271,8 +358,8 @@ func (b *requestBuilder) validate() error {
 		return b.errValidation
 	}
 
-	if b.req.PresentationDefinition == nil || b.req.PresentationDefinition.ID == "" {
-		return fmt.Errorf("presentation_definition is required")
+	if (b.req.PresentationDefinition == nil || b.req.PresentationDefinition.ID == "") && b.req.DCQLQuery == nil {
+		return fmt.Errorf("presentation_definition or dcql_query is required")
 	}
 
 	if b.req.ResponseType == "" {
@@ -283,7 +370,7 @@ func (b *requestBuilder) validate() error {
 		return fmt.Errorf("client_id is required")
 	}
 
-	if b.req.RedirectURI == "" {
+	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost && b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT && b.req.RedirectURI == "" {
 		return fmt.Errorf("redirect_uri is required")
 	}
 
@@ -291,7 +378,10 @@ func (b *requestBuilder) validate() error {
 		return fmt.Errorf("nonce is required")
 	}
 
-	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost {
+	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
+		if b.req.ResponseURI == "" {
+			return fmt.Errorf("response_uri is required")
+		}
 		responseURI, err := url.Parse(b.req.ResponseURI)
 		if err != nil {
 			return fmt.Errorf("response_uri must be URI: %w", err)
@@ -356,6 +446,10 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	b.req.ResponseType = getParam("response_type", true)
 	b.req.ClientID = strings.TrimSpace(getParam("client_id", true))
+	if b.expectedClientID != "" && b.req.ClientID != b.expectedClientID {
+		b.errValidation = fmt.Errorf("outer client_id does not match request object client_id: %s != %s", b.expectedClientID, b.req.ClientID)
+		return
+	}
 
 	redirectURIFromParam := getParam("redirect_uri", false) // redirect_uri may be emitted
 	redirectURIFromClientID := ""
@@ -364,6 +458,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			switch parsedCID.prefix {
 			case OID4VPClientIDPrefixRedirectURI, OID4VPClientIDPrefixX509SanDNS:
 				redirectURIFromClientID = parsedCID.original
+			case OID4VPClientIDPrefixX509Hash:
+				// x509_hash binds the request object to an x5c certificate hash,
+				// so it does not derive a redirect URI from client_id.
 			default: // unimplemented: other client_id prefixes
 				b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
 			}
@@ -385,7 +482,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	b.req.ResponseMode = OAuthAuthzReqResponseMode(getParam("response_mode", true))
 
-	responseURIFromParam := getParam("response_uri", b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost)
+	responseURIFromParam := getParam("response_uri", b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT)
 
 	if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
 		b.errValidation = err
@@ -394,7 +491,29 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	b.req.ResponseURI = responseURIFromParam
 
-	if pd := getParam("presentation_definition", true); pd != "" {
+	if dcql, exists := params["dcql_query"]; exists && dcql != nil {
+		var query DCQLQuery
+		switch value := dcql.(type) {
+		case string:
+			if err := json.Unmarshal([]byte(value), &query); err != nil {
+				b.errValidation = fmt.Errorf("invalid dcql_query: %w", err)
+				return
+			}
+		default:
+			jsonBytes, err := json.Marshal(value)
+			if err != nil {
+				b.errValidation = fmt.Errorf("failed to marshal dcql_query: %w", err)
+				return
+			}
+			if err := json.Unmarshal(jsonBytes, &query); err != nil {
+				b.errValidation = fmt.Errorf("invalid dcql_query: %w", err)
+				return
+			}
+		}
+		b.req.DCQLQuery = &query
+	}
+
+	if pd := getParam("presentation_definition", b.req.DCQLQuery == nil); pd != "" {
 		// Handle presentation_definition as either string (JSON) or map
 		var presDef PresentationDefinition
 		if pdMap, ok := params["presentation_definition"].(map[string]any); ok {
@@ -532,6 +651,31 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 
 	// x509_san_dns
 	clientID, err := parseOID4VPClientID(b.req.ClientID)
+	if err == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash {
+		certificates, err := parseX5CCertificatesFromJWT(obj)
+		if err != nil {
+			b.errValidation = err
+			return b
+		}
+		if len(certificates) == 0 {
+			b.errValidation = fmt.Errorf("x5c header is empty")
+			return b
+		}
+		thumbprint := sha256.Sum256(certificates[0].Raw)
+		actualHash := base64.RawURLEncoding.EncodeToString(thumbprint[:])
+		if actualHash != clientID.original {
+			b.errValidation = fmt.Errorf("x509_hash client_id mismatch: expected %s, got %s", clientID.original, actualHash)
+			return b
+		}
+
+		claims := jwt.Claims{}
+		if err := parsedJWT.Claims(certificates[0].PublicKey, &claims); err != nil {
+			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %v", err)
+			return b
+		}
+		return b
+	}
+
 	if err == nil && clientID.prefix == OID4VPClientIDPrefixX509SanDNS {
 		var certificates *[]*x509.Certificate = nil
 
@@ -716,7 +860,8 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	case RequestURIMethodGET:
 		req, err = http.NewRequest(http.MethodGet, uri, nil)
 	case RequestURIMethodPOST:
-		req, err = http.NewRequest(http.MethodPost, uri, nil)
+		body := strings.NewReader(url.Values{"wallet_metadata": []string{"{}"}}.Encode())
+		req, err = http.NewRequest(http.MethodPost, uri, body)
 	default:
 		b.errValidation = fmt.Errorf("unsupported request_uri_method: %s", method)
 		return b
@@ -731,6 +876,10 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		Timeout: 30 * time.Second,
 	}
 	req.Header.Set("User-Agent", "")
+	req.Header.Set("Accept", "application/oauth-authz-req+jwt, application/jwt, text/plain, */*")
+	if method == RequestURIMethodPOST {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		b.errValidation = fmt.Errorf("failed to send %s request to %s: %w", method, uri, err)
@@ -750,6 +899,43 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	}
 
 	return b.WithRequestObject(string(body))
+}
+
+func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {
+	parts := strings.Split(obj, ".")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid JWT format")
+	}
+
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode JWT header: %w", err)
+	}
+
+	var header struct {
+		X5C []string `json:"x5c"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return nil, fmt.Errorf("failed to parse JWT header: %w", err)
+	}
+	if len(header.X5C) == 0 {
+		return nil, fmt.Errorf("x5c header is empty")
+	}
+
+	certificates := make([]*x509.Certificate, 0, len(header.X5C))
+	for i, certB64 := range header.X5C {
+		certDER, err := base64.StdEncoding.DecodeString(certB64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode x5c certificate at index %d: %w", i, err)
+		}
+		cert, err := x509.ParseCertificate(certDER)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse x5c certificate at index %d: %w", i, err)
+		}
+		certificates = append(certificates, cert)
+	}
+
+	return certificates, nil
 }
 
 func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {

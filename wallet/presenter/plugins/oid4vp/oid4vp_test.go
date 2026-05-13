@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +122,66 @@ func TestOid4vpPresenter_Present(t *testing.T) {
 			t.Error("Expected error for hijacked connection, got nil")
 		}
 	})
+}
+
+func TestOid4vpPresenter_CreateEncryptedAuthorizationResponse(t *testing.T) {
+	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate recipient key: %v", err)
+	}
+
+	p := &Oid4vpPresenter{}
+	token, err := p.CreateEncryptedAuthorizationResponse(
+		map[string]any{
+			"vp_token": map[string]any{
+				"pid": []string{"presented-sd-jwt"},
+			},
+			"state": "state-1",
+		},
+		&VerifierMetadata{
+			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+				{
+					Key:       &recipient.PublicKey,
+					KeyID:     "enc-key-1",
+					Use:       "enc",
+					Algorithm: string(jose.ECDH_ES),
+				},
+			}},
+			EncryptedResponseEncValuesSupported: []string{"A256GCM"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateEncryptedAuthorizationResponse() error = %v", err)
+	}
+
+	jwe, err := jose.ParseEncrypted(token, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A256GCM})
+	if err != nil {
+		t.Fatalf("failed to parse encrypted response: %v", err)
+	}
+	if jwe.Header.KeyID != "enc-key-1" {
+		t.Fatalf("expected kid enc-key-1, got %q", jwe.Header.KeyID)
+	}
+	if got := jwe.Header.ExtraHeaders[jose.HeaderContentType]; got != "json" {
+		t.Fatalf("expected cty json, got %#v", got)
+	}
+	plaintext, err := jwe.Decrypt(recipient)
+	if err != nil {
+		t.Fatalf("failed to decrypt response: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+	if payload["state"] != "state-1" {
+		t.Fatalf("expected state to round-trip, got %#v", payload["state"])
+	}
+	vpToken, ok := payload["vp_token"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected vp_token object, got %#v", payload["vp_token"])
+	}
+	if _, ok := vpToken["pid"].([]any); !ok {
+		t.Fatalf("expected pid credential array in vp_token, got %#v", vpToken["pid"])
+	}
 }
 
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
@@ -628,6 +690,30 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 	}
 }
 
+func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testing.T) {
+	p := &Oid4vpPresenter{}
+	uri := "openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=n&dcql_query=%7B%22credentials%22%3A%5B%7B%22id%22%3A%22pid%22%2C%22format%22%3A%22dc%2Bsd-jwt%22%2C%22meta%22%3A%7B%22vct_values%22%3A%5B%22urn%3Aeudi%3Apid%3A1%22%5D%7D%2C%22claims%22%3A%5B%7B%22path%22%3A%5B%22given_name%22%5D%7D%5D%7D%5D%7D&response_mode=direct_post.jwt&response_uri=https://example.com/response"
+	req, err := p.ParsePresentationRequest(uri)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT {
+		t.Fatalf("expected direct_post.jwt response mode, got %q", req.ResponseMode)
+	}
+	if req.RedirectURI != "" {
+		t.Fatalf("expected no redirect_uri for x509_hash direct_post.jwt, got %q", req.RedirectURI)
+	}
+	if req.PresentationDefinition == nil || req.PresentationDefinition.ID != "" {
+		t.Fatalf("expected presentation_definition to be omitted, got %#v", req.PresentationDefinition)
+	}
+	if req.DCQLQuery == nil || len(req.DCQLQuery.Credentials) != 1 {
+		t.Fatalf("expected one DCQL credential query, got %#v", req.DCQLQuery)
+	}
+	if got := req.DCQLQuery.Credentials[0].Claims[0].Path[0]; got != "given_name" {
+		t.Fatalf("expected requested claim path given_name, got %q", got)
+	}
+}
+
 func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	p := &Oid4vpPresenter{}
 	httpAllowed := env.IsHTTPAllowed()
@@ -885,6 +971,88 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *
 	}
 }
 
+func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+	hash := sha256.Sum256(der)
+	clientID := "x509_hash:" + base64.RawURLEncoding.EncodeToString(hash[:])
+
+	claims := map[string]any{
+		"aud":           "https://self-issued.me/v2",
+		"nonce":         "n",
+		"client_id":     clientID,
+		"response_type": "vp_token",
+		"response_mode": "direct_post.jwt",
+		"response_uri":  "https://example.org/response",
+		"dcql_query": map[string]any{
+			"credentials": []map[string]any{
+				{
+					"id":     "pid",
+					"format": "dc+sd-jwt",
+					"meta": map[string]any{
+						"vct_values": []string{"urn:eudi:pid:1"},
+					},
+					"claims": []map[string]any{
+						{"path": []string{"given_name"}},
+					},
+				},
+			},
+		},
+	}
+	signerOpts := (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt").WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(der)})
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: priv}, signerOpts)
+	if err != nil {
+		t.Fatalf("failed to create signer: %v", err)
+	}
+	jwtStr, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatalf("failed to sign jwt: %v", err)
+	}
+
+	builder := NewRequestBuilder()
+	builder.expectedClientID = clientID
+	builder = builder.WithRequestObject(jwtStr)
+	req, err := builder.Build()
+	if err != nil {
+		t.Fatalf("expected x509_hash request object to verify, got %v", err)
+	}
+	if req.DCQLQuery == nil || req.DCQLQuery.Credentials[0].ID != "pid" {
+		t.Fatalf("expected DCQL query to be parsed, got %#v", req.DCQLQuery)
+	}
+
+	builder = NewRequestBuilder()
+	builder.expectedClientID = "x509_hash:wrong"
+	builder = builder.WithRequestObject(jwtStr)
+	if _, err := builder.Build(); err == nil || !strings.Contains(err.Error(), "outer client_id does not match") {
+		t.Fatalf("expected outer client_id mismatch, got %v", err)
+	}
+
+	claims["client_id"] = "x509_hash:wrong"
+	badJWT, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		t.Fatalf("failed to sign bad jwt: %v", err)
+	}
+	builder = NewRequestBuilder()
+	builder = builder.WithRequestObject(badJWT)
+	if _, err := builder.Build(); err == nil || !strings.Contains(err.Error(), "x509_hash client_id mismatch") {
+		t.Fatalf("expected x509_hash mismatch, got %v", err)
+	}
+}
+
 func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 	t.Run("Delete default User-Agent header (GET)", func(t *testing.T) {
 		m := mockserver.NewMockServer()
@@ -919,6 +1087,18 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			called = true
 			if ua := r.Header.Get("User-Agent"); ua != "" {
 				t.Errorf("User-Agent is not empty string, got %q", ua)
+			}
+			if got := r.Header.Get("Accept"); got != "application/oauth-authz-req+jwt, application/jwt, text/plain, */*" {
+				t.Errorf("unexpected Accept header: %q", got)
+			}
+			if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+				t.Errorf("unexpected Content-Type header: %q", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("failed to parse form: %v", err)
+			}
+			if got := r.Form.Get("wallet_metadata"); got != "{}" {
+				t.Errorf("unexpected wallet_metadata body value: %q", got)
 			}
 			w.WriteHeader(http.StatusOK)
 		})

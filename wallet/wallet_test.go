@@ -484,6 +484,23 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 	assert.Equal(t, "http", endpoint.Scheme)
 }
 
+func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithoutRedirectURI(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","claims":[{"path":["given_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
+		dcqlQuery,
+	)
+
+	req, endpoint, err := controller.parseAuthorizationRequest(uri)
+	require.NoError(t, err)
+	require.NotNil(t, endpoint)
+	require.NotNil(t, req.DCQLQuery)
+	assert.Empty(t, req.RedirectURI)
+	assert.Equal(t, "https://example.com/response", endpoint.String())
+	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
+}
+
 func TestController_PresentCredential_MissingRequiredFields_Integration(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 

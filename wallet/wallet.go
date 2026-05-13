@@ -640,14 +640,14 @@ func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.Credential
 		return nil, nil, fmt.Errorf("failed to parse request URI: %w", err)
 	}
 
-	if req.RedirectURI == "" {
+	if req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPost && req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPostJWT && req.RedirectURI == "" {
 		return nil, nil, fmt.Errorf("redirect_uri is not specified")
 	}
 
 	var endpoint *url.URL
-	if req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPost {
+	if req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPost || req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPostJWT {
 		if req.ResponseURI == "" {
-			return nil, nil, fmt.Errorf("response_uri is not specified for response_mode=direct_post")
+			return nil, nil, fmt.Errorf("response_uri is not specified for response_mode=%s", req.ResponseMode)
 		}
 		endpoint, err = url.Parse(req.ResponseURI)
 		if err != nil {
