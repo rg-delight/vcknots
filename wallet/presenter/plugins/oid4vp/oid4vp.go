@@ -222,6 +222,34 @@ func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map
 	return serialized, nil
 }
 
+// SubmitEncryptedAuthorizationResponse encrypts an OID4VP Final authorization
+// response and submits it to the verifier response_uri using the direct_post.jwt
+// form field named "response". It returns the verifier response body so callers
+// can perform browser-driver follow-up such as opening a returned redirect URI.
+func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *VerifierMetadata) (string, error) {
+	encryptedResponse, err := p.CreateEncryptedAuthorizationResponse(authzResponse, metadata)
+	if err != nil {
+		return "", err
+	}
+
+	formData := url.Values{"response": []string{encryptedResponse}}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("failed to submit encrypted authorization response: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read authorization response submission body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("verifier returned non-2xx status: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
 // createJARMResponse creates a JWT-Secured Authorization Response (JARM)
 func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission string, request *types.PresentationRequest, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
 	// Create the response payload

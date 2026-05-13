@@ -184,6 +184,73 @@ func TestOid4vpPresenter_CreateEncryptedAuthorizationResponse(t *testing.T) {
 	}
 }
 
+func TestOid4vpPresenter_SubmitEncryptedAuthorizationResponse(t *testing.T) {
+	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate recipient key: %v", err)
+	}
+
+	p := &Oid4vpPresenter{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+			t.Errorf("Content-Type = %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("failed to parse form: %v", err)
+		}
+		token := r.Form.Get("response")
+		if token == "" {
+			t.Fatal("missing response form field")
+		}
+		jwe, err := jose.ParseEncrypted(token, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A256GCM})
+		if err != nil {
+			t.Fatalf("failed to parse encrypted response: %v", err)
+		}
+		plaintext, err := jwe.Decrypt(recipient)
+		if err != nil {
+			t.Fatalf("failed to decrypt encrypted response: %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(plaintext, &payload); err != nil {
+			t.Fatalf("failed to unmarshal response payload: %v", err)
+		}
+		if payload["state"] != "state-1" {
+			t.Fatalf("state = %#v", payload["state"])
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"redirect_uri":"https://example.com/callback"}`))
+	}))
+	defer server.Close()
+
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse endpoint: %v", err)
+	}
+	body, err := p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
+		"vp_token": map[string]any{"pid": []string{"presented-sd-jwt"}},
+		"state":    "state-1",
+	}, &VerifierMetadata{
+		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{
+				Key:       &recipient.PublicKey,
+				KeyID:     "enc-key-1",
+				Use:       "enc",
+				Algorithm: string(jose.ECDH_ES),
+			},
+		}},
+		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
+	})
+	if err != nil {
+		t.Fatalf("SubmitEncryptedAuthorizationResponse() error = %v", err)
+	}
+	if body != `{"redirect_uri":"https://example.com/callback"}` {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(rawURL)
