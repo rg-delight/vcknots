@@ -216,7 +216,7 @@ async function runTargetGroup(names) {
     results.push(await runTarget(name));
   }
   return {
-    ok: results.every((result) => result.exitCode === 0),
+    ok: results.every((result) => result.summary.ok),
     suiteOrigin,
     targets: results.map((result) => result.summary),
   };
@@ -329,11 +329,12 @@ async function runTarget(name) {
       timedOut: moduleResults.some((result) => result.timedOut),
     });
     await writeJson(path.join(artifactDir, "classification.json"), classification);
+    const ok = isTargetOk(classification.classification);
 
     return {
       artifactDir,
       summary: {
-        ok: classification.classification === "passed",
+        ok,
         targetName: name,
         artifactDir,
         selectedModuleCount: planModules.length,
@@ -341,7 +342,7 @@ async function runTarget(name) {
         classification: classification.classification,
         reason: classification.reason,
       },
-      exitCode: classification.classification === "suite_or_environment_issue" ? 1 : 0,
+      exitCode: ok ? 0 : 1,
     };
   } catch (error) {
     const classification = classifyTarget({
@@ -683,6 +684,10 @@ function classifyTarget({ plan, moduleResults, error, timedOut }) {
     reason: "Module results did not fit a known classification.",
     counts,
   };
+}
+
+function isTargetOk(classification) {
+  return classification === "passed" || classification === "review_required";
 }
 
 function classifyModule({ target, planModule, runnerModule, info, logs }) {
