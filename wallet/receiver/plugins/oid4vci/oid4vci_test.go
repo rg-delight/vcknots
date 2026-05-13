@@ -5,14 +5,17 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -688,6 +691,88 @@ func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
 	}
 	if proofClaims["aud"] != "https://issuer.example" || proofClaims["nonce"] != "credential-nonce" {
 		t.Fatalf("proof claims = %#v", proofClaims)
+	}
+}
+
+func TestOid4vciReceiver_CreateClientAttestationJWTs(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	clientPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate client key: %v", err)
+	}
+	attesterPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate attester key: %v", err)
+	}
+	certTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(3),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, &attesterPrivateKey.PublicKey, attesterPrivateKey)
+	if err != nil {
+		t.Fatalf("failed to create attester certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatalf("failed to parse attester certificate: %v", err)
+	}
+	clientKey := jose.JSONWebKey{Key: clientPrivateKey, KeyID: "client-key-1", Algorithm: string(jose.ES256), Use: "sig"}
+	attesterKey := jose.JSONWebKey{Key: attesterPrivateKey, KeyID: "attester-key-1", Algorithm: string(jose.ES256), Use: "sig", Certificates: []*x509.Certificate{cert}}
+
+	attestation, err := receiver.CreateClientAttestation(clientKey, attesterKey, "https://client-attester.example.org/", "client-1", time.Minute)
+	if err != nil {
+		t.Fatalf("CreateClientAttestation() error = %v", err)
+	}
+	parsedAttestation, err := jwt.ParseSigned(attestation, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("failed to parse attestation JWT: %v", err)
+	}
+	if typ := parsedAttestation.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "oauth-client-attestation+jwt" {
+		t.Fatalf("attestation typ = %#v", typ)
+	}
+	if parsedAttestation.Headers[0].KeyID != "attester-key-1" {
+		t.Fatalf("attestation kid = %q", parsedAttestation.Headers[0].KeyID)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	if chains, err := parsedAttestation.Headers[0].Certificates(x509.VerifyOptions{Roots: pool}); err != nil || len(chains) == 0 {
+		t.Fatalf("expected x5c certificate chain, chains=%#v err=%v", chains, err)
+	}
+	var attestationClaims map[string]any
+	if err := parsedAttestation.Claims(&attesterPrivateKey.PublicKey, &attestationClaims); err != nil {
+		t.Fatalf("failed to verify attestation JWT: %v", err)
+	}
+	if attestationClaims["iss"] != "https://client-attester.example.org/" || attestationClaims["sub"] != "client-1" {
+		t.Fatalf("attestation claims = %#v", attestationClaims)
+	}
+	cnf, ok := attestationClaims["cnf"].(map[string]any)
+	if !ok || cnf["jwk"] == nil {
+		t.Fatalf("attestation cnf = %#v", attestationClaims["cnf"])
+	}
+
+	pop, err := receiver.CreateClientAttestationPop(clientKey, "client-1", "https://issuer.example", "challenge-1", time.Minute)
+	if err != nil {
+		t.Fatalf("CreateClientAttestationPop() error = %v", err)
+	}
+	parsedPop, err := jwt.ParseSigned(pop, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("failed to parse PoP JWT: %v", err)
+	}
+	if typ := parsedPop.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "oauth-client-attestation-pop+jwt" {
+		t.Fatalf("PoP typ = %#v", typ)
+	}
+	var popClaims map[string]any
+	if err := parsedPop.Claims(&clientPrivateKey.PublicKey, &popClaims); err != nil {
+		t.Fatalf("failed to verify PoP JWT: %v", err)
+	}
+	if popClaims["iss"] != "client-1" || popClaims["aud"] != "https://issuer.example" || popClaims["challenge"] != "challenge-1" {
+		t.Fatalf("PoP claims = %#v", popClaims)
+	}
+	if popClaims["jti"] == "" {
+		t.Fatalf("PoP jti missing: %#v", popClaims)
 	}
 }
 

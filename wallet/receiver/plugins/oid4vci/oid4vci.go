@@ -339,6 +339,58 @@ func (o *Oid4vciReceiver) CreateCredentialRequestJWTProof(key jose.JSONWebKey, a
 	return token, nil
 }
 
+func (o *Oid4vciReceiver) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error) {
+	if lifetime == 0 {
+		lifetime = 5 * time.Minute
+	}
+	now := time.Now()
+	clientPublicJWK := clientKey.Public()
+	clientPublicJWK.Algorithm = firstOrDefault([]string{clientPublicJWK.Algorithm}, "ES256")
+	clientPublicJWK.Use = firstOrDefault([]string{clientPublicJWK.Use}, "sig")
+	clientPublicJWK.KeyID = firstOrDefault([]string{clientPublicJWK.KeyID}, clientKey.KeyID)
+
+	payload := map[string]any{
+		"iss": attesterIssuer,
+		"sub": clientID,
+		"iat": now.Unix(),
+		"nbf": now.Unix(),
+		"exp": now.Add(lifetime).Unix(),
+		"cnf": map[string]any{
+			"jwk": clientPublicJWK,
+		},
+	}
+
+	token, err := signJWT(attesterKey, "oauth-client-attestation+jwt", payload, x5cHeaders(attesterKey))
+	if err != nil {
+		return "", fmt.Errorf("failed to create client attestation JWT: %w", err)
+	}
+	return token, nil
+}
+
+func (o *Oid4vciReceiver) CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error) {
+	if lifetime == 0 {
+		lifetime = 5 * time.Minute
+	}
+	now := time.Now()
+	payload := map[string]any{
+		"iss": clientID,
+		"iat": now.Unix(),
+		"nbf": now.Unix(),
+		"exp": now.Add(lifetime).Unix(),
+		"aud": authorizationServerIssuer,
+		"jti": uuid.NewString(),
+	}
+	if attestationChallenge != "" {
+		payload["challenge"] = attestationChallenge
+	}
+
+	token, err := signJWT(clientKey, "oauth-client-attestation-pop+jwt", payload, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create client attestation PoP JWT: %w", err)
+	}
+	return token, nil
+}
+
 func (o *Oid4vciReceiver) doBearerJSONRequest(endpoint common.URIField, accessToken string, payload any, dpopProof string, target any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -478,25 +530,46 @@ func dpopHTU(rawURL string) (string, error) {
 }
 
 func signJWTWithPublicJWKHeader(key jose.JSONWebKey, typ string, payload map[string]any) (string, error) {
-	alg := jose.SignatureAlgorithm(key.Algorithm)
-	if alg == "" {
-		alg = jose.ES256
-	}
 	publicJWK := key.Public()
-	publicJWK.Algorithm = string(alg)
+	publicJWK.Algorithm = firstOrDefault([]string{publicJWK.Algorithm}, "ES256")
 	if publicJWK.Use == "" {
 		publicJWK.Use = "sig"
 	}
 	if publicJWK.KeyID == "" {
 		publicJWK.KeyID = key.KeyID
 	}
+	return signJWT(key, typ, payload, map[string]any{"jwk": publicJWK})
+}
 
-	options := (&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader("jwk", publicJWK)
+func signJWT(key jose.JSONWebKey, typ string, payload map[string]any, extraHeaders map[string]any) (string, error) {
+	alg := jose.SignatureAlgorithm(key.Algorithm)
+	if alg == "" {
+		alg = jose.ES256
+	}
+
+	options := (&jose.SignerOptions{}).WithType(jose.ContentType(typ))
+	if key.KeyID != "" {
+		options = options.WithHeader("kid", key.KeyID)
+	}
+	for name, value := range extraHeaders {
+		options = options.WithHeader(jose.HeaderKey(name), value)
+	}
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, options)
 	if err != nil {
 		return "", err
 	}
 	return jwt.Signed(signer).Claims(payload).Serialize()
+}
+
+func x5cHeaders(key jose.JSONWebKey) map[string]any {
+	if len(key.Certificates) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(key.Certificates))
+	for _, cert := range key.Certificates {
+		values = append(values, base64.StdEncoding.EncodeToString(cert.Raw))
+	}
+	return map[string]any{"x5c": values}
 }
 
 func (o *Oid4vciReceiver) ReceiveCredential(
