@@ -2,14 +2,19 @@ package oid4vci
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
@@ -291,6 +296,49 @@ func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType stri
 	return &response, nil
 }
 
+func (o *Oid4vciReceiver) CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error) {
+	htu, err := dpopHTU(rawURL)
+	if err != nil {
+		return "", err
+	}
+
+	payload := map[string]any{
+		"htm": strings.ToUpper(method),
+		"htu": htu,
+		"iat": time.Now().Unix(),
+		"jti": uuid.NewString(),
+	}
+	if nonce != "" {
+		payload["nonce"] = nonce
+	}
+	if accessToken != "" {
+		ath := sha256.Sum256([]byte(accessToken))
+		payload["ath"] = base64.RawURLEncoding.EncodeToString(ath[:])
+	}
+
+	token, err := signJWTWithPublicJWKHeader(key, "dpop+jwt", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to create DPoP proof: %w", err)
+	}
+	return token, nil
+}
+
+func (o *Oid4vciReceiver) CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error) {
+	payload := map[string]any{
+		"aud": audience,
+		"iat": time.Now().Unix(),
+	}
+	if nonce != "" {
+		payload["nonce"] = nonce
+	}
+
+	token, err := signJWTWithPublicJWKHeader(key, "openid4vci-proof+jwt", payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to create credential request JWT proof: %w", err)
+	}
+	return token, nil
+}
+
 func (o *Oid4vciReceiver) doBearerJSONRequest(endpoint common.URIField, accessToken string, payload any, dpopProof string, target any) error {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -417,6 +465,38 @@ func supportedJWEKeyAlgorithms() []jose.KeyAlgorithm {
 
 func supportedJWEContentEncryptions() []jose.ContentEncryption {
 	return []jose.ContentEncryption{jose.A128GCM, jose.A192GCM, jose.A256GCM, jose.A128CBC_HS256, jose.A192CBC_HS384, jose.A256CBC_HS512}
+}
+
+func dpopHTU(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse DPoP htu URL: %w", err)
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func signJWTWithPublicJWKHeader(key jose.JSONWebKey, typ string, payload map[string]any) (string, error) {
+	alg := jose.SignatureAlgorithm(key.Algorithm)
+	if alg == "" {
+		alg = jose.ES256
+	}
+	publicJWK := key.Public()
+	publicJWK.Algorithm = string(alg)
+	if publicJWK.Use == "" {
+		publicJWK.Use = "sig"
+	}
+	if publicJWK.KeyID == "" {
+		publicJWK.KeyID = key.KeyID
+	}
+
+	options := (&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader("jwk", publicJWK)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, options)
+	if err != nil {
+		return "", err
+	}
+	return jwt.Signed(signer).Claims(payload).Serialize()
 }
 
 func (o *Oid4vciReceiver) ReceiveCredential(

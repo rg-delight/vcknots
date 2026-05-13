@@ -4,6 +4,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -617,6 +620,74 @@ func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
 	}
 	if plainResponse.TransactionID != "tx-1" {
 		t.Fatalf("plain response = %#v", plainResponse)
+	}
+}
+
+func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	key := jose.JSONWebKey{
+		Key:       privateKey,
+		KeyID:     "wallet-key-1",
+		Algorithm: string(jose.ES256),
+		Use:       "sig",
+	}
+
+	dpop, err := receiver.CreateDpopProof(key, http.MethodPost, "https://issuer.example/credential?ignored=true#fragment", "nonce-1", "access-token")
+	if err != nil {
+		t.Fatalf("CreateDpopProof() error = %v", err)
+	}
+	parsedDpop, err := jwt.ParseSigned(dpop, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("failed to parse DPoP JWT: %v", err)
+	}
+	if typ := parsedDpop.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "dpop+jwt" {
+		t.Fatalf("DPoP typ = %#v", typ)
+	}
+	if parsedDpop.Headers[0].JSONWebKey == nil || parsedDpop.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
+		t.Fatalf("DPoP jwk header = %#v", parsedDpop.Headers[0].JSONWebKey)
+	}
+	var dpopClaims map[string]any
+	if err := parsedDpop.Claims(&privateKey.PublicKey, &dpopClaims); err != nil {
+		t.Fatalf("failed to verify DPoP JWT: %v", err)
+	}
+	if dpopClaims["htm"] != http.MethodPost {
+		t.Fatalf("htm = %#v", dpopClaims["htm"])
+	}
+	if dpopClaims["htu"] != "https://issuer.example/credential" {
+		t.Fatalf("htu = %#v", dpopClaims["htu"])
+	}
+	if dpopClaims["nonce"] != "nonce-1" {
+		t.Fatalf("nonce = %#v", dpopClaims["nonce"])
+	}
+	ath := sha256.Sum256([]byte("access-token"))
+	if dpopClaims["ath"] != base64.RawURLEncoding.EncodeToString(ath[:]) {
+		t.Fatalf("ath = %#v", dpopClaims["ath"])
+	}
+
+	proof, err := receiver.CreateCredentialRequestJWTProof(key, "https://issuer.example", "credential-nonce")
+	if err != nil {
+		t.Fatalf("CreateCredentialRequestJWTProof() error = %v", err)
+	}
+	parsedProof, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("failed to parse proof JWT: %v", err)
+	}
+	if typ := parsedProof.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "openid4vci-proof+jwt" {
+		t.Fatalf("proof typ = %#v", typ)
+	}
+	if parsedProof.Headers[0].JSONWebKey == nil || parsedProof.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
+		t.Fatalf("proof jwk header = %#v", parsedProof.Headers[0].JSONWebKey)
+	}
+	var proofClaims map[string]any
+	if err := parsedProof.Claims(&privateKey.PublicKey, &proofClaims); err != nil {
+		t.Fatalf("failed to verify proof JWT: %v", err)
+	}
+	if proofClaims["aud"] != "https://issuer.example" || proofClaims["nonce"] != "credential-nonce" {
+		t.Fatalf("proof claims = %#v", proofClaims)
 	}
 }
 
