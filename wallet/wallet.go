@@ -279,6 +279,10 @@ type SavedCredential struct {
 	Entry      *types.CredentialEntry
 }
 
+// OID4VPFinalAuthorizationResponse represents the JSON payload that is
+// encrypted into a direct_post.jwt response for OID4VP Final DCQL requests.
+type OID4VPFinalAuthorizationResponse map[string]any
+
 // IKeyEntry represents a key entry interface for signing operations.
 type IKeyEntry interface {
 	ID() string
@@ -633,6 +637,66 @@ func (w *Wallet) PresentCredential(uriString string, key IKeyEntry, options seri
 	return w.submitPresentation(presentation, flavor, endpoint, descriptorMap, req, key, options)
 }
 
+// BuildOID4VPFinalAuthorizationResponse builds an OID4VP Final DCQL
+// authorization response from credentials already stored in the wallet. The
+// returned value is ready to encrypt with Oid4vpPresenter.CreateEncryptedAuthorizationResponse
+// and submit as the direct_post.jwt "response" form field.
+func (w *Wallet) BuildOID4VPFinalAuthorizationResponse(uriString string, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
+	req, _, err := w.parseAuthorizationRequest(uriString)
+	if err != nil {
+		return nil, err
+	}
+	if req.DCQLQuery == nil {
+		return nil, fmt.Errorf("dcql_query is required for OID4VP Final authorization response")
+	}
+
+	credentials, selections, err := w.selectCredentialsForDCQL(req.DCQLQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	vpToken := map[string][]string{}
+	for _, selection := range selections {
+		savedCredential := credentials[selection.CandidateID]
+		flavor, err := savedCredential.Entry.SerializationFlavor()
+		if err != nil {
+			return nil, fmt.Errorf("failed to detect selected credential format: %w", err)
+		}
+		options, err := w.serializer.GetDefaultOption(flavor)
+		if err != nil {
+			return nil, err
+		}
+		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
+			sdOpts.SelectedClaims = selection.RequestedClaims
+			sdOpts.RequireKeyBinding = true
+			sdOpts.Audience = req.ClientID
+			sdOpts.Nonce = req.Nonce
+			sdOpts.TransactionData = req.TransactionData
+			if req.TransactionDataHashesAlg != "" {
+				sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
+			}
+		}
+
+		presentation, err := w.buildPresentation([]*SavedCredential{savedCredential}, &flavor, nil, key, req)
+		if err != nil {
+			return nil, err
+		}
+		serialized, _, err := w.serializer.SerializePresentation(flavor, presentation, key, options)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", selection.CandidateID, err)
+		}
+		vpToken[selection.QueryID] = append(vpToken[selection.QueryID], string(serialized))
+	}
+
+	response := OID4VPFinalAuthorizationResponse{
+		"vp_token": vpToken,
+	}
+	if req.State != "" {
+		response["state"] = req.State
+	}
+	return response, nil
+}
+
 // parseAuthorizationRequest parses the authorization request URI and determines the endpoint.
 func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.CredentialPresentationRequest, *url.URL, error) {
 	req, err := w.presenter.ParseRequestURI(uriString)
@@ -690,6 +754,58 @@ func (w *Wallet) selectCredentialsForPresentation(req *oid4vp.CredentialPresenta
 	}
 
 	return selectedCredentials, serializationFlavor, nil
+}
+
+func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DCQLQuery) (map[string]*SavedCredential, []oid4vp.DCQLCredentialSelection, error) {
+	entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{
+		Offset: 0,
+		Limit:  nil,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get credential entries: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("no credentials available for presentation")
+	}
+
+	credentialsByID := map[string]*SavedCredential{}
+	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(entries))
+	for _, entry := range entries {
+		flavor, err := entry.Entry.SerializationFlavor()
+		if err != nil {
+			continue
+		}
+		_, vpFormat, err := flavor.OID4VPFormatIdentifier()
+		if err != nil {
+			continue
+		}
+		claimNames := []string{}
+		if entry.Credential.Claims != nil {
+			for name := range *entry.Credential.Claims {
+				claimNames = append(claimNames, name)
+			}
+		}
+		vct := ""
+		if len(entry.Credential.Types) > 0 {
+			vct = entry.Credential.Types[0]
+		}
+		credentialsByID[entry.Entry.Id] = entry
+		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
+			ID:     entry.Entry.Id,
+			Format: vpFormat,
+			VCT:    vct,
+			Claims: claimNames,
+		})
+	}
+
+	selections, err := oid4vp.ResolveSatisfiableDCQLCredentials(query, candidates)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(selections) == 0 {
+		return nil, nil, fmt.Errorf("dcql_query cannot be satisfied by stored credentials")
+	}
+	return credentialsByID, selections, nil
 }
 
 // validateSerializationFlavor ensures all credentials have the same serialization flavor.

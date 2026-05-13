@@ -4,18 +4,21 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -35,6 +38,29 @@ type mockKeyEntry struct {
 
 func (m *mockKeyEntry) ID() string {
 	return m.id
+}
+
+type realSigningKeyEntry struct {
+	id  string
+	key *ecdsa.PrivateKey
+}
+
+func (r *realSigningKeyEntry) ID() string {
+	return r.id
+}
+
+func (r *realSigningKeyEntry) PublicKey() jose.JSONWebKey {
+	return jose.JSONWebKey{
+		Key:       &r.key.PublicKey,
+		KeyID:     r.id,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
+}
+
+func (r *realSigningKeyEntry) Sign(data []byte) ([]byte, error) {
+	digest := sha256.Sum256(data)
+	return ecdsa.SignASN1(rand.Reader, r.key, digest[:])
 }
 
 func (m *mockKeyEntry) PublicKey() jose.JSONWebKey {
@@ -499,6 +525,94 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithou
 	assert.Empty(t, req.RedirectURI)
 	assert.Equal(t, "https://example.com/response", endpoint.String())
 	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
+}
+
+func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	key := &realSigningKeyEntry{id: "holder-key-1", key: privateKey}
+
+	rawCredential := buildTestSDJWTVC(t, key.PublicKey(), map[string]string{
+		"given_name":  "TARO",
+		"family_name": "TEST",
+		"birthdate":   "2000-01-01",
+	})
+	err = controller.credStore.SaveCredentialEntry(credstoreTypes.CredentialEntry{
+		Id:         "credential-1",
+		ReceivedAt: time.Now(),
+		Raw:        []byte(rawCredential),
+		MimeType:   string(credential.SDJwtVC),
+	}, 0)
+	require.NoError(t, err)
+
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1",
+		dcqlQuery,
+	)
+
+	response, err := controller.BuildOID4VPFinalAuthorizationResponse(uri, key)
+	require.NoError(t, err)
+	assert.Equal(t, "state-1", response["state"])
+	vpToken, ok := response["vp_token"].(map[string][]string)
+	require.True(t, ok)
+	require.Len(t, vpToken["pid"], 1)
+
+	presentation := vpToken["pid"][0]
+	assert.Contains(t, presentation, ".")
+	assert.Contains(t, presentation, "~")
+	assert.Contains(t, presentation, "ey")
+
+	parts := strings.Split(presentation, "~")
+	disclosureNames := map[string]bool{}
+	for _, part := range parts[1:] {
+		if part == "" || strings.Count(part, ".") == 2 {
+			continue
+		}
+		var disclosure []any
+		decoded, err := base64.RawURLEncoding.DecodeString(part)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(decoded, &disclosure))
+		if len(disclosure) == 3 {
+			if name, ok := disclosure[1].(string); ok {
+				disclosureNames[name] = true
+			}
+		}
+	}
+	assert.True(t, disclosureNames["given_name"])
+	assert.True(t, disclosureNames["family_name"])
+	assert.False(t, disclosureNames["birthdate"])
+
+	kbJwt := parts[len(parts)-1]
+	assert.Equal(t, 2, strings.Count(kbJwt, "."))
+}
+
+func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
+	t.Helper()
+	disclosures := make([]string, 0, len(claims))
+	for name, value := range claims {
+		disclosureBytes, err := json.Marshal([]any{"salt-" + name, name, value})
+		require.NoError(t, err)
+		disclosures = append(disclosures, base64.RawURLEncoding.EncodeToString(disclosureBytes))
+	}
+
+	holderPublicJWK := holderPublicKey.Public()
+	payload := map[string]any{
+		"iss":     "https://issuer.example.test",
+		"vct":     "urn:eudi:pid:1",
+		"cnf":     map[string]any{"jwk": holderPublicJWK},
+		"iat":     float64(time.Now().Unix()),
+		"_sd":     []string{},
+		"_sd_alg": "sha-256",
+	}
+	headerBytes, err := json.Marshal(map[string]any{"alg": "ES256", "typ": "dc+sd-jwt"})
+	require.NoError(t, err)
+	payloadBytes, err := json.Marshal(payload)
+	require.NoError(t, err)
+	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+	sdJWT := base64.RawURLEncoding.EncodeToString(headerBytes) + "." + base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + signature
+	return sdJWT + "~" + strings.Join(disclosures, "~") + "~"
 }
 
 func TestController_PresentCredential_MissingRequiredFields_Integration(t *testing.T) {
