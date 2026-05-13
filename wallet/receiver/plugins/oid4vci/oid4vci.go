@@ -27,12 +27,9 @@ type Oid4vciReceiver struct {
 	HTTPClient *http.Client
 }
 
-type DPoPProofFactory func(nonce string) (string, error)
+type DPoPProofFactory = types.DPoPProofFactory
 
-type CredentialEndpointHTTPResponse struct {
-	Body        []byte
-	ContentType string
-}
+type CredentialEndpointHTTPResponse = types.CredentialEndpointHTTPResponse
 
 func (o *Oid4vciReceiver) httpClient() *http.Client {
 	if o.HTTPClient != nil {
@@ -63,33 +60,34 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 		}
 	}
 
-	var resp *http.Response
-	var err error
+	return o.doRequestURL(method, endpointURL, body, target)
+}
 
-	switch method {
-	case "GET":
-		resp, err = o.httpClient().Get(endpointURL.String())
-	case "POST":
-		if body == nil {
-			return fmt.Errorf("POST request requires a body")
-		}
-		resp, err = o.httpClient().Post(endpointURL.String(), "application/x-www-form-urlencoded", body)
-	default:
-		return fmt.Errorf("unsupported HTTP method: %s", method)
+func (o *Oid4vciReceiver) doRequestURL(method string, endpointURL url.URL, body io.Reader, target interface{}) error {
+	if method == "POST" && body == nil {
+		return fmt.Errorf("POST request requires a body")
 	}
-
+	req, err := http.NewRequest(method, endpointURL.String(), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	resp, err := o.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	if len(bodyBytes) == 0 {
@@ -109,11 +107,35 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	}
 
 	var metadata types.CredentialIssuerMetadata
+	if err := o.fetchFinalIssuerMetadata(endpoint, &metadata); err == nil {
+		return &metadata, nil
+	} else {
+		endpointURL := url.URL(endpoint)
+		if strings.EqualFold(endpointURL.Scheme, "https") && strings.Trim(endpointURL.Path, "/") != "" {
+			return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+		}
+	}
 	if err := o.doRequest("GET", endpoint, "/.well-known/openid-credential-issuer", nil, &metadata); err != nil {
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
 
 	return &metadata, nil
+}
+
+func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(endpoint common.URIField, target interface{}) error {
+	endpointURL := url.URL(endpoint)
+	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+	}
+	originalPath := endpointURL.Path
+	if originalPath == "/" {
+		originalPath = ""
+	}
+	if strings.HasPrefix(originalPath, "/.well-known/openid-credential-issuer") {
+		return o.doRequestURL("GET", endpointURL, nil, target)
+	}
+	endpointURL.Path = "/.well-known/openid-credential-issuer" + originalPath
+	return o.doRequestURL("GET", endpointURL, nil, target)
 }
 
 func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIField, receivingTypes types.SupportedReceivingTypes) (*types.AuthorizationServerMetadata, error) {

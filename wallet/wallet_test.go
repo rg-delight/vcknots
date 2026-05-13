@@ -591,12 +591,10 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 }
 
 func TestParseCredentialOfferURL(t *testing.T) {
-	issuerURL, err := url.Parse("https://issuer.example")
-	require.NoError(t, err)
-	offer := CredentialOffer{
-		CredentialIssuer:           issuerURL,
-		CredentialConfigurationIDs: []string{"pid"},
-		Grants: map[string]*CredentialOfferGrant{
+	offer := map[string]any{
+		"credential_issuer":            "https://issuer.example",
+		"credential_configuration_ids": []string{"pid"},
+		"grants": map[string]*CredentialOfferGrant{
 			"authorization_code": {IssuerState: "issuer-state-1"},
 		},
 	}

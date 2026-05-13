@@ -4,6 +4,7 @@ package types
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
@@ -95,7 +96,7 @@ type CredentialConfiguration struct {
 	CredentialIdentifier                 string                            `json:"credential_identifier,omitempty"`
 	CryptographicBindingMethodsSupported []string                          `json:"cryptographic_binding_methods_supported,omitempty"`
 	CredentialDefinition                 *CredentialDefinition             `json:"credential_definition,omitempty"`
-	CredentialSigningAlgValuesSupported  []jose.SignatureAlgorithm         `json:"credential_signing_alg_values_supported,omitempty"`
+	CredentialSigningAlgValuesSupported  []any                             `json:"credential_signing_alg_values_supported,omitempty"`
 }
 
 type CredentialIssuerMetadataDisplay struct {
@@ -317,4 +318,31 @@ type Receiver interface {
 		credentialDefinition *CredentialDefinition,
 		jwtProof *string,
 	) (*string, error)
+}
+
+type DPoPProofFactory func(nonce string) (string, error)
+
+type CredentialEndpointHTTPResponse struct {
+	Body        []byte
+	ContentType string
+}
+
+// OID4VCIFinalReceiver is an optional plugin capability for OpenID4VCI
+// Final 1.0 / HAIP flows. It intentionally extends, rather than replaces,
+// the legacy Receiver interface used by the existing Draft 13 flow.
+type OID4VCIFinalReceiver interface {
+	Receiver
+
+	PushAuthorizationRequest(endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
+	ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headers OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
+	FetchNonce(endpoint common.URIField) (*NonceResponse, error)
+	PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
+	SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification NotificationRequest, proofFactory DPoPProofFactory) error
+	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
+	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
+	CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error)
+	CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error)
+	CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error)
+	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
 }

@@ -16,6 +16,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	wallet "github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -81,7 +83,14 @@ func runVCIReceive(args []string) error {
 	if err != nil {
 		return err
 	}
-	api, err := wallet.NewWallet()
+	httpClient := insecureHTTPClient()
+	receiverDispatcher, err := receiver.NewReceivingDispatcher(
+		receiver.WithPlugin(types.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: httpClient}),
+	)
+	if err != nil {
+		return err
+	}
+	api, err := wallet.NewWalletWithConfig(wallet.Config{Receiver: receiverDispatcher})
 	if err != nil {
 		return err
 	}
@@ -95,7 +104,7 @@ func runVCIReceive(args []string) error {
 		AttesterKey:                     config.VCI.ClientAttesterKeysJWKS.Keys[0],
 		AttesterIssuer:                  config.VCI.ClientAttesterIssuer,
 		CredentialResponseEncryptionKey: &responseEncryptionKey,
-		HTTPClient:                      insecureHTTPClient(),
+		HTTPClient:                      httpClient,
 	})
 	if err != nil {
 		return err
