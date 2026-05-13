@@ -644,6 +644,35 @@ func TestSerializePresentation_SelectiveDisclosure_InvalidSelectedClaims(t *test
 	}
 }
 
+func TestSerializePresentation_SelectiveDisclosure_EmptySelection(t *testing.T) {
+	serializer, err := NewSdJwtVcSerializer()
+	if err != nil {
+		t.Fatalf("failed to initialize sd-jwt serializer")
+	}
+	testSDJWT := createTestSDJWT()
+
+	presentation := &credential.CredentialPresentation{
+		Types:       []string{"VerifiablePresentation"},
+		Credentials: [][]byte{[]byte(testSDJWT)},
+	}
+
+	opts := &SdJwtVcPresentationOptions{
+		SelectedClaims:                  []string{},
+		LimitDisclosureToSelectedClaims: true,
+		RequireKeyBinding:               false,
+	}
+
+	serialized, _, err := serializer.SerializePresentation(credential.SDJwtVC, presentation, nil, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cf := ParseCombinedFormatForPresentation(string(serialized))
+	if len(cf.Disclosures) != 0 {
+		t.Errorf("expected no disclosures, got %d", len(cf.Disclosures))
+	}
+}
+
 func TestDeserializeCredential(t *testing.T) {
 	serializer, err := NewSdJwtVcSerializer()
 	if err != nil {
@@ -1311,7 +1340,7 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 
 func TestSdJwtVcPresentationOptions_SetAudience(t *testing.T) {
 	tests := []struct {
-		name string
+		name     string
 		audience string
 	}{
 		{name: "audience-sample1", audience: "x509_san_dns:localhost"},
@@ -1329,7 +1358,7 @@ func TestSdJwtVcPresentationOptions_SetAudience(t *testing.T) {
 
 func TestSdJwtVcPresentationOptions_SetNonce(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		nonce string
 	}{
 		{name: "nonce-sample1", nonce: "asldkfjad4e4"},

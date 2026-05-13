@@ -32,6 +32,10 @@ func NewSdJwtVcSerializer() (*SdJwtVcSerializer, error) {
 type SdJwtVcPresentationOptions struct {
 	// SelectedClaims specifies which claims to disclose in the presentation
 	SelectedClaims []string
+	// LimitDisclosureToSelectedClaims makes SelectedClaims authoritative even
+	// when it is empty. When false, an empty SelectedClaims preserves the
+	// historical behavior of disclosing all available disclosures.
+	LimitDisclosureToSelectedClaims bool
 	// RequireKeyBinding indicates whether a Key Binding JWT is required
 	RequireKeyBinding bool
 	// Audience is the intended audience for the Key Binding JWT (required if RequireKeyBinding is true)
@@ -60,7 +64,6 @@ func (o *SdJwtVcPresentationOptions) SetNonce(nonce string) {
 		o.Nonce = nonce
 	}
 }
-
 
 // CombinedFormatForPresentation represents an SD-JWT in combined format for presentation
 // Format: <Issuer-signed JWT>~<Disclosure 1>~<Disclosure 2>~...~<Disclosure N>~<optional KB-JWT>
@@ -552,7 +555,7 @@ func (s *SdJwtVcSerializer) SerializePresentation(
 	// Filter disclosures based on selected claims
 	var selectedDisclosures []string
 	if sdOpts != nil {
-		if len(sdOpts.SelectedClaims) > 0 {
+		if sdOpts.LimitDisclosureToSelectedClaims || len(sdOpts.SelectedClaims) > 0 {
 			// Parse all disclosures
 			for _, discStr := range cf.Disclosures {
 				disc, err := parseDisclosure(discStr, sdAlg)

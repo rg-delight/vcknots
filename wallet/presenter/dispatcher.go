@@ -74,6 +74,26 @@ func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol,
 	return nil
 }
 
+func (d *PresentationDispatcher) SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *oid4vp.VerifierMetadata) (string, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
+	}
+
+	finalPresenter, ok := plugin.(interface {
+		SubmitEncryptedAuthorizationResponse(url.URL, map[string]any, *oid4vp.VerifierMetadata) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", types.ErrUnsupportedProtocol)
+	}
+
+	body, err := finalPresenter.SubmitEncryptedAuthorizationResponse(endpoint, authzResponse, metadata)
+	if err != nil {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
+	}
+	return body, nil
+}
+
 func (d *PresentationDispatcher) ParseRequestURI(uriString string) (*oid4vp.CredentialPresentationRequest, error) {
 	// Determine protocol from URI (currently only OID4VP is supported)
 	protocol := types.Oid4vp

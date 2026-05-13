@@ -1092,6 +1092,43 @@ func (w *Wallet) BuildOID4VPFinalAuthorizationResponse(uriString string, key IKe
 	if err != nil {
 		return nil, err
 	}
+	return w.buildOID4VPFinalAuthorizationResponse(req, key)
+}
+
+// SubmitOID4VPFinalAuthorizationResponse builds, encrypts, and submits an
+// OID4VP Final direct_post.jwt authorization response for credentials already
+// stored in the wallet. The returned body is the verifier response after posting
+// the encrypted "response" form field to response_uri.
+func (w *Wallet) SubmitOID4VPFinalAuthorizationResponse(uriString string, key IKeyEntry) (string, error) {
+	req, endpoint, err := w.parseAuthorizationRequest(uriString)
+	if err != nil {
+		return "", err
+	}
+	return w.SubmitOID4VPFinalAuthorizationRequest(req, *endpoint, key)
+}
+
+// SubmitOID4VPFinalAuthorizationRequest builds, encrypts, and submits an
+// already-parsed OID4VP Final direct_post.jwt authorization request. This keeps
+// adapters from re-fetching one-time request_uri values when they need to inspect
+// the request before handing control to the wallet API.
+func (w *Wallet) SubmitOID4VPFinalAuthorizationRequest(req *oid4vp.CredentialPresentationRequest, endpoint url.URL, key IKeyEntry) (string, error) {
+	if req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPostJWT {
+		return "", fmt.Errorf("response_mode must be direct_post.jwt for OID4VP Final encrypted submission")
+	}
+	if req.ClientMetadata == nil {
+		return "", fmt.Errorf("client_metadata is required for OID4VP Final encrypted submission")
+	}
+	if len(req.TransactionData) > 0 {
+		return "", fmt.Errorf("transaction_data is not supported")
+	}
+	response, err := w.buildOID4VPFinalAuthorizationResponse(req, key)
+	if err != nil {
+		return "", err
+	}
+	return w.presenter.SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint, map[string]any(response), req.ClientMetadata)
+}
+
+func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPresentationRequest, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
 	if req.DCQLQuery == nil {
 		return nil, fmt.Errorf("dcql_query is required for OID4VP Final authorization response")
 	}
@@ -1114,6 +1151,7 @@ func (w *Wallet) BuildOID4VPFinalAuthorizationResponse(uriString string, key IKe
 		}
 		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
 			sdOpts.SelectedClaims = selection.RequestedClaims
+			sdOpts.LimitDisclosureToSelectedClaims = true
 			sdOpts.RequireKeyBinding = true
 			sdOpts.Audience = req.ClientID
 			sdOpts.Nonce = req.Nonce
@@ -1170,8 +1208,8 @@ func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.Credential
 		}
 	}
 
-	if req.PresentationDefinition == nil {
-		return nil, nil, fmt.Errorf("presentation definition is not specified")
+	if (req.PresentationDefinition == nil || req.PresentationDefinition.ID == "") && req.DCQLQuery == nil {
+		return nil, nil, fmt.Errorf("presentation_definition or dcql_query is not specified")
 	}
 
 	return req, endpoint, nil

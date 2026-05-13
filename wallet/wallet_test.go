@@ -590,6 +590,78 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 	assert.Equal(t, 2, strings.Count(kbJwt, "."))
 }
 
+func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	holderKey := &realSigningKeyEntry{id: "holder-key-1", key: holderPrivateKey}
+
+	rawCredential := buildTestSDJWTVC(t, holderKey.PublicKey(), map[string]string{
+		"given_name":  "TARO",
+		"family_name": "TEST",
+		"birthdate":   "2000-01-01",
+	})
+	err = controller.credStore.SaveCredentialEntry(credstoreTypes.CredentialEntry{
+		Id:         "credential-1",
+		ReceivedAt: time.Now(),
+		Raw:        []byte(rawCredential),
+		MimeType:   string(credential.SDJwtVC),
+	}, 0)
+	require.NoError(t, err)
+
+	encryptionPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	var decryptedPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.NoError(t, r.ParseForm())
+		encryptedResponse := r.Form.Get("response")
+		require.NotEmpty(t, encryptedResponse)
+
+		jwe, err := jose.ParseEncrypted(encryptedResponse, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A128GCM})
+		require.NoError(t, err)
+		plaintext, err := jwe.Decrypt(encryptionPrivateKey)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(plaintext, &decryptedPayload))
+		_, _ = w.Write([]byte(`{"redirect_uri":"https://example.com/done"}`))
+	}))
+	defer server.Close()
+
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	clientMetadataBytes, err := json.Marshal(map[string]any{
+		"jwks": map[string]any{
+			"keys": []jose.JSONWebKey{{
+				Key:       &encryptionPrivateKey.PublicKey,
+				KeyID:     "enc-key-1",
+				Algorithm: "ECDH-ES",
+				Use:       "enc",
+			}},
+		},
+		"encrypted_response_enc_values_supported": []string{"A128GCM"},
+	})
+	require.NoError(t, err)
+
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=%s&state=state-1&client_metadata=%s",
+		dcqlQuery,
+		url.QueryEscape(server.URL),
+		url.QueryEscape(string(clientMetadataBytes)),
+	)
+
+	body, err := controller.SubmitOID4VPFinalAuthorizationResponse(uri, holderKey)
+	require.NoError(t, err)
+	assert.Contains(t, body, "redirect_uri")
+	assert.Equal(t, "state-1", decryptedPayload["state"])
+	vpToken, ok := decryptedPayload["vp_token"].(map[string]any)
+	require.True(t, ok)
+	require.NotEmpty(t, vpToken["pid"])
+}
+
 func TestParseCredentialOfferURL(t *testing.T) {
 	offer := map[string]any{
 		"credential_issuer":            "https://issuer.example",

@@ -20,11 +20,19 @@ import (
 )
 
 type Oid4vpPresenter struct {
+	HTTPClient          *http.Client
 	X509TrustChainRoots *x509.CertPool
 	// InsecureSkipX509Verify skips certificate verification for testing purposes.
 	// WARNING: This should NEVER be set to true in production environments.
 	// This is only for conformance testing with self-signed or non-standard certificates.
 	InsecureSkipX509Verify bool
+}
+
+func (p *Oid4vpPresenter) httpClient() *http.Client {
+	if p.HTTPClient != nil {
+		return p.HTTPClient
+	}
+	return http.DefaultClient
 }
 
 // ParsePresentationRequest parses the presentation request URI and returns a CredentialPresentationRequest,
@@ -43,15 +51,8 @@ func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*Credentia
 	}
 	queryParams := parsedURL.Query()
 
-	// Early validation of client_id format (before fetching request_uri)
-	// This prevents unnecessary network requests for obviously invalid client_ids
-	if clientID := strings.TrimSpace(queryParams.Get("client_id")); clientID != "" {
-		if _, err := parseOID4VPClientID(clientID); err != nil {
-			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
-		}
-	}
-
 	builder := NewRequestBuilder()
+	builder.httpClient = p.httpClient()
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
 	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
 	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
@@ -132,10 +133,7 @@ func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, 
 		}
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	resp, err := client.Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	resp, err := p.httpClient().Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to send presentation to verifier: %w", err)
 	}
@@ -233,8 +231,7 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	}
 
 	formData := url.Values{"response": []string{encryptedResponse}}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	resp, err := p.httpClient().Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("failed to submit encrypted authorization response: %w", err)
 	}
@@ -363,6 +360,7 @@ func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
 
 type requestBuilder struct {
 	req                    *CredentialPresentationRequest
+	httpClient             *http.Client
 	x509TrustChainRoots    *x509.CertPool
 	insecureSkipX509Verify bool
 	expectedClientID       string
@@ -900,13 +898,14 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
 	req.Header.Set("User-Agent", "")
 	req.Header.Set("Accept", "application/oauth-authz-req+jwt, application/jwt, text/plain, */*")
 	if method == RequestURIMethodPOST {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	client := b.httpClient
+	if client == nil {
+		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
