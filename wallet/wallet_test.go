@@ -689,6 +689,9 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
 	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	responseEncryptionKey := newPrivateJWKForFinalVCITest(t, "credential-response-enc-key-1")
+	responseEncryptionKey.Algorithm = "ECDH-ES"
+	responseEncryptionKey.Use = "enc"
 
 	var server *httptest.Server
 	pushedState := ""
@@ -705,6 +708,11 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				"deferred_credential_endpoint": server.URL + "/deferred",
 				"notification_endpoint":        server.URL + "/notification",
 				"authorization_servers":        []string{server.URL},
+				"credential_response_encryption": map[string]any{
+					"alg_values_supported": []string{"ECDH-ES"},
+					"enc_values_supported": []string{"A128GCM"},
+					"encryption_required":  true,
+				},
 				"credential_configurations_supported": map[string]any{
 					"pid": map[string]any{
 						"format": "dc+sd-jwt",
@@ -773,6 +781,10 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			proofs, ok := body["proofs"].(map[string]any)
 			require.True(t, ok)
 			require.NotEmpty(t, proofs["jwt"])
+			responseEncryption, ok := body["credential_response_encryption"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, "ECDH-ES", responseEncryption["alg"])
+			require.Equal(t, "A128GCM", responseEncryption["enc"])
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"transaction_id": "tx-1"})
 		case "/deferred":
 			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
@@ -807,13 +819,14 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				"authorization_code": {IssuerState: "issuer-state-1"},
 			},
 		},
-		Type:           receiverTypes.Oid4vci,
-		ClientID:       "client-1",
-		RedirectURI:    "openid-credential-offer://callback",
-		HolderKey:      holderKey,
-		ClientKey:      clientKey,
-		AttesterKey:    attesterKey,
-		AttesterIssuer: "https://client-attester.example.org/",
+		Type:                            receiverTypes.Oid4vci,
+		ClientID:                        "client-1",
+		RedirectURI:                     "openid-credential-offer://callback",
+		HolderKey:                       holderKey,
+		ClientKey:                       clientKey,
+		AttesterKey:                     attesterKey,
+		AttesterIssuer:                  "https://client-attester.example.org/",
+		CredentialResponseEncryptionKey: &responseEncryptionKey,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result.CredentialResponse)

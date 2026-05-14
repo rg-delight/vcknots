@@ -967,8 +967,12 @@ func addCredentialResponseEncryption(payload map[string]any, issuerMetadata *rec
 	if len(issuerMetadata.CredentialResponseEncryption.EncValuesSupported) > 0 && issuerMetadata.CredentialResponseEncryption.EncValuesSupported[0] != "" {
 		enc = issuerMetadata.CredentialResponseEncryption.EncValuesSupported[0]
 	}
+	// TODO(openid4vc-ts-compat): OID4VCI Final 1.0 defines jwk+enc here, but
+	// @openid4vc/openid4vci currently requires alg. Remove this when upstream
+	// accepts Final 1.0 credential_response_encryption without top-level alg.
 	payload["credential_response_encryption"] = map[string]any{
 		"jwk": publicKey,
+		"alg": publicKey.Algorithm,
 		"enc": enc,
 	}
 }
