@@ -680,6 +680,36 @@ func TestParseCredentialOfferURL(t *testing.T) {
 	require.Equal(t, "issuer-state-1", parsed.Grants["authorization_code"].IssuerState)
 }
 
+func TestParseCredentialOfferURL_TransactionCodeRoundTrip(t *testing.T) {
+	wantGrant := &CredentialOfferGrant{
+		PreAuthorizedCode: "pre-authorized-code",
+		TxCode: &TransactionCode{
+			InputMode:   "numeric",
+			Length:      6,
+			Description: "Enter the code shown by the issuer",
+		},
+	}
+	offerJSON, err := json.Marshal(map[string]any{
+		"credential_issuer":            "https://issuer.example",
+		"credential_configuration_ids": []string{"pid"},
+		"grants": map[string]*CredentialOfferGrant{
+			"urn:ietf:params:oauth:grant-type:pre-authorized_code": wantGrant,
+		},
+	})
+	require.NoError(t, err)
+
+	parsed, err := ParseCredentialOfferURL("openid-credential-offer://?credential_offer=" + url.QueryEscape(string(offerJSON)))
+	require.NoError(t, err)
+	parsedGrant := parsed.Grants["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+	require.Equal(t, wantGrant, parsedGrant)
+
+	roundTripJSON, err := json.Marshal(parsedGrant)
+	require.NoError(t, err)
+	var roundTripped CredentialOfferGrant
+	require.NoError(t, json.Unmarshal(roundTripJSON, &roundTripped))
+	require.Equal(t, *wantGrant, roundTripped)
+}
+
 func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")

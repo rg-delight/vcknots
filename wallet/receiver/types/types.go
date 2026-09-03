@@ -229,6 +229,12 @@ type CredentialIssuanceAccessToken struct {
 	CNonceExpiresIn *int    `json:"c_nonce_expires_in,omitempty"`
 }
 
+// PreAuthorizedCodeTokenRequest holds pre-authorized token request parameters.
+type PreAuthorizedCodeTokenRequest struct {
+	PreAuthorizedCode string `json:"pre-authorized_code"`
+	TxCode            string `json:"tx_code,omitempty"`
+}
+
 type PushedAuthorizationRequest struct {
 	ResponseType        string
 	ClientID            string
@@ -307,7 +313,7 @@ type Receiver interface {
 	FetchAuthorizationServerMetadata(endpoint common.URIField, receivingType SupportedReceivingTypes) (*AuthorizationServerMetadata, error)
 
 	// FetchAccessToken fetches access token through OID4VCI
-	FetchAccessToken(receivingType SupportedReceivingTypes, endpoint common.URIField, authzCode string) (*CredentialIssuanceAccessToken, error)
+	FetchAccessToken(receivingType SupportedReceivingTypes, endpoint common.URIField, request PreAuthorizedCodeTokenRequest) (*CredentialIssuanceAccessToken, error)
 
 	// ReceiveCredential receives credential through OID4VCI
 	ReceiveCredential(

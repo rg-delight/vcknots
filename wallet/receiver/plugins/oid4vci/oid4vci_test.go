@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -300,7 +301,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		env.SetDebugMode(false)
 		env.SetHTTPAllowed(false)
 
-		_, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "test-code")
+		_, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err == nil {
 			t.Fatal("FetchAccessToken should be error when issuer's schema is http")
 		}
@@ -311,7 +312,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		defer env.SetHTTPAllowed(http_allowed)
 		env.SetHTTPAllowed(true)
 
-		token, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "test-code")
+		token, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err != nil {
 			t.Fatalf("Expected no error, got %v", err)
 		}
@@ -340,7 +341,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		errorServer.SetErrorResponse("/token", http.StatusInternalServerError)
 
 		errorURL, _ := url.Parse(errorServer.URL())
-		_, err := receiver.FetchAccessToken(types.Oid4vci, common.URIField(*errorURL), "test-code")
+		_, err := receiver.FetchAccessToken(types.Oid4vci, common.URIField(*errorURL), types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err == nil {
 			t.Fatal("Expected error for server error")
 		}
@@ -357,11 +358,61 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		invalidJSONServer.SetTextResponse("/token", http.StatusOK, "{invalid-json")
 
 		invalidJSONURL, _ := url.Parse(invalidJSONServer.URL())
-		_, err := receiver.FetchAccessToken(types.Oid4vci, common.URIField(*invalidJSONURL), "test-code")
+		_, err := receiver.FetchAccessToken(types.Oid4vci, common.URIField(*invalidJSONURL), types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err == nil {
 			t.Fatal("Expected error for invalid JSON response")
 		}
 	})
+}
+
+func TestOid4vciReceiver_FetchAccessToken_WithTransactionCode(t *testing.T) {
+	form := fetchAccessTokenRequestForm(t, types.PreAuthorizedCodeTokenRequest{
+		PreAuthorizedCode: "pre-authorized-code",
+		TxCode:            "123456",
+	})
+
+	require.Equal(t, "urn:ietf:params:oauth:grant-type:pre-authorized_code", form.Get("grant_type"))
+	require.Equal(t, "pre-authorized-code", form.Get("pre-authorized_code"))
+	require.Equal(t, "123456", form.Get("tx_code"))
+}
+
+func TestOid4vciReceiver_FetchAccessToken_WithoutTransactionCode(t *testing.T) {
+	form := fetchAccessTokenRequestForm(t, types.PreAuthorizedCodeTokenRequest{
+		PreAuthorizedCode: "pre-authorized-code",
+	})
+
+	require.Equal(t, "urn:ietf:params:oauth:grant-type:pre-authorized_code", form.Get("grant_type"))
+	require.Equal(t, "pre-authorized-code", form.Get("pre-authorized_code"))
+	_, present := form["tx_code"]
+	require.False(t, present)
+}
+
+func fetchAccessTokenRequestForm(t *testing.T, request types.PreAuthorizedCodeTokenRequest) url.Values {
+	t.Helper()
+
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	t.Cleanup(func() { env.SetHTTPAllowed(httpAllowed) })
+	env.SetHTTPAllowed(true)
+
+	forms := make(chan url.Values, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		forms <- r.PostForm
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access-token","token_type":"Bearer"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client()}
+	_, err = receiver.FetchAccessToken(types.Oid4vci, common.URIField(*serverURL), request)
+	require.NoError(t, err)
+
+	return <-forms
 }
 
 func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
