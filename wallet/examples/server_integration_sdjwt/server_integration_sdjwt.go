@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/env"
 	"io"
 	"log/slog"
 	"net/http"
@@ -267,6 +268,7 @@ func main() {
 
 	certPool := buildCertPool(isConformanceMode)
 	p := &oid4vp.Oid4vpPresenter{
+		AllowHTTP:              env.IsHTTPAllowed(),
 		X509TrustChainRoots:    certPool,
 		InsecureSkipX509Verify: isConformanceMode,
 	}

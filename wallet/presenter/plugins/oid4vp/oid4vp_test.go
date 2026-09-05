@@ -18,7 +18,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
@@ -699,9 +698,8 @@ func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T
 // Additional validations for query params and builder flows
 func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testing.T) {
 	p := &Oid4vpPresenter{}
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(false)
+
+	p.AllowHTTP = false
 
 	tests := []struct {
 		name    string
@@ -783,9 +781,8 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 
 func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	p := &Oid4vpPresenter{}
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	p.AllowHTTP = true
 
 	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition=%7B%22id%22%3A%22def%22%7D&response_mode=direct_post&response_uri=http://example.com/response"
 	req, err := p.ParsePresentationRequest(uri)

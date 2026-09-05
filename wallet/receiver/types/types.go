@@ -80,6 +80,7 @@ type CredentialRequestEncryption struct {
 	Jwks               jose.JSONWebKeySet `json:"jwks"`
 	AlgValuesSupported []string           `json:"alg_values_supported,omitempty"`
 	EncValuesSupported []string           `json:"enc_values_supported,omitempty"`
+	EncryptionRequired *bool              `json:"encryption_required,omitempty"`
 }
 
 type CredentialResponseEncryption struct {

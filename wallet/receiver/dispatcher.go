@@ -3,6 +3,7 @@ package receiver
 
 import (
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/env"
 	"path/filepath"
 
 	"github.com/trustknots/vcknots/wallet/common"
@@ -35,7 +36,7 @@ func NewReceivingDispatcher(options ...func(*ReceivingDispatcher) error) (*Recei
 func WithDefaultConfig() func(d *ReceivingDispatcher) error {
 	return func(d *ReceivingDispatcher) error {
 		// Register built-in receiving components
-		oid4vciReceiver := &oid4vci.Oid4vciReceiver{}
+		oid4vciReceiver := &oid4vci.Oid4vciReceiver{AllowHTTP: env.IsHTTPAllowed()}
 		d.registerPlugin(types.Oid4vci, oid4vciReceiver)
 
 		examplesDir, _ := filepath.Abs("./examples")
