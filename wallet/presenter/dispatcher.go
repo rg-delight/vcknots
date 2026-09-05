@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/env"
 	"net/url"
 
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
@@ -30,7 +31,7 @@ func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (
 
 func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
-		oid4vpReceiver := &oid4vp.Oid4vpPresenter{}
+		oid4vpReceiver := &oid4vp.Oid4vpPresenter{AllowHTTP: env.IsHTTPAllowed()}
 		return d.registerPlugin(types.Oid4vp, oid4vpReceiver)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,12 +20,13 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 type Oid4vciReceiver struct {
 	HTTPClient *http.Client
+	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
+	AllowHTTP bool
 }
 
 type DPoPProofFactory = types.DPoPProofFactory
@@ -44,7 +46,7 @@ func (o *Oid4vciReceiver) httpClient() *http.Client {
 // It handles common patterns: URL construction, status checking, body reading, and JSON parsing.
 func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, path string, body io.Reader, target interface{}) error {
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
@@ -92,7 +94,7 @@ func (o *Oid4vciReceiver) doRequestURL(method string, endpointURL url.URL, body 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		return &metadataHTTPStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
 	}
 
 	if len(bodyBytes) == 0 {
@@ -111,15 +113,23 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 		return nil, fmt.Errorf("unsupported serialization flavor")
 	}
 
-	var metadata types.CredentialIssuerMetadata
-	if err := o.fetchFinalIssuerMetadata(endpoint, &metadata); err == nil {
-		return &metadata, nil
-	} else {
-		endpointURL := url.URL(endpoint)
-		if strings.EqualFold(endpointURL.Scheme, "https") && strings.Trim(endpointURL.Path, "/") != "" {
-			return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
-		}
+	var finalMetadata types.CredentialIssuerMetadata
+	err := o.fetchFinalIssuerMetadata(endpoint, &finalMetadata)
+	if err == nil {
+		return &finalMetadata, nil
 	}
+	// Keep the legacy discovery path only for local test issuers that explicitly
+	// report the Final endpoint missing. Never retry malformed or forbidden metadata,
+	// and never repeat the same URL. Each attempt decodes into a fresh value.
+	endpointURL := url.URL(endpoint)
+	var statusError *metadataHTTPStatusError
+	if !o.AllowHTTP || !strings.EqualFold(endpointURL.Scheme, "http") ||
+		strings.Trim(endpointURL.Path, "/") == "" ||
+		strings.Contains(endpointURL.Path, "/.well-known/openid-credential-issuer") ||
+		!errors.As(err, &statusError) || statusError.statusCode != http.StatusNotFound {
+		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+	}
+	var metadata types.CredentialIssuerMetadata
 	if err := o.doRequest("GET", endpoint, "/.well-known/openid-credential-issuer", nil, &metadata); err != nil {
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
@@ -127,9 +137,18 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	return &metadata, nil
 }
 
+type metadataHTTPStatusError struct {
+	statusCode int
+	body       string
+}
+
+func (e *metadataHTTPStatusError) Error() string {
+	return fmt.Sprintf("unexpected status code: %d, body: %s", e.statusCode, e.body)
+}
+
 func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(endpoint common.URIField, target interface{}) error {
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 	originalPath := endpointURL.Path
@@ -519,7 +538,7 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField,
 	}
 
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return nil, "", fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
@@ -598,7 +617,7 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.U
 		return err
 	}
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
@@ -670,7 +689,7 @@ func headersToMap(headers types.OAuthClientAttestationHeaders) map[string]string
 
 func (o *Oid4vciReceiver) doFinalRequest(method string, endpoint common.URIField, body io.Reader, contentType string, headers map[string]string, target any) error {
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
@@ -848,7 +867,7 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	endpointURL := url.URL(endpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
@@ -888,7 +907,7 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	req.ContentLength = int64(len(reqBodyBytes))
 
 	// Execute request
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := o.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

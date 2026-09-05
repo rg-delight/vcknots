@@ -47,11 +47,11 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 
 	t.Run("https is required", func(t *testing.T) {
 		dbg_mode := env.IsDebugMode()
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+
 		defer env.SetDebugMode(dbg_mode)
-		defer env.SetHTTPAllowed(http_allowed)
+
 		env.SetDebugMode(false)
-		env.SetHTTPAllowed(false)
+		receiver.AllowHTTP = false
 
 		_, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -60,9 +60,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		metadata, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
 		if err != nil {
@@ -86,9 +85,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -104,9 +102,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Empty response body", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		emptyServer := mockserver.NewMockServer()
 		defer emptyServer.Close()
@@ -121,9 +118,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -138,9 +134,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Trailing slash in endpoint", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		metadata := types.CredentialIssuerMetadata{
 			CredentialIssuer: "http://example.com",
@@ -170,9 +165,8 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Trailing slash in endpoint with path component", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		metadata := types.CredentialIssuerMetadata{
 			CredentialIssuer: "http://example.com/issuer",
@@ -213,11 +207,11 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 
 	t.Run("https is required", func(t *testing.T) {
 		dbg_mode := env.IsDebugMode()
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+
 		defer env.SetDebugMode(dbg_mode)
-		defer env.SetHTTPAllowed(http_allowed)
+
 		env.SetDebugMode(false)
-		env.SetHTTPAllowed(false)
+		receiver.AllowHTTP = false
 
 		_, err := receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -226,9 +220,8 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		metadata, err := receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 		if err != nil {
@@ -248,9 +241,8 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -266,9 +258,8 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -295,11 +286,11 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 
 	t.Run("https is required", func(t *testing.T) {
 		dbg_mode := env.IsDebugMode()
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+
 		defer env.SetDebugMode(dbg_mode)
-		defer env.SetHTTPAllowed(http_allowed)
+
 		env.SetDebugMode(false)
-		env.SetHTTPAllowed(false)
+		receiver.AllowHTTP = false
 
 		_, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err == nil {
@@ -308,9 +299,8 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		token, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "test-code"})
 		if err != nil {
@@ -330,9 +320,8 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -348,9 +337,8 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -390,10 +378,6 @@ func TestOid4vciReceiver_FetchAccessToken_WithoutTransactionCode(t *testing.T) {
 func fetchAccessTokenRequestForm(t *testing.T, request types.PreAuthorizedCodeTokenRequest) url.Values {
 	t.Helper()
 
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	t.Cleanup(func() { env.SetHTTPAllowed(httpAllowed) })
-	env.SetHTTPAllowed(true)
-
 	forms := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
@@ -408,7 +392,7 @@ func fetchAccessTokenRequestForm(t *testing.T, request types.PreAuthorizedCodeTo
 
 	serverURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client()}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	_, err = receiver.FetchAccessToken(types.Oid4vci, common.URIField(*serverURL), request)
 	require.NoError(t, err)
 
@@ -417,9 +401,8 @@ func fetchAccessTokenRequestForm(t *testing.T, request types.PreAuthorizedCodeTo
 
 func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -590,9 +573,8 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 
 func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -652,9 +634,8 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 
 func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -719,9 +700,8 @@ func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 
 func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -812,9 +792,8 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 
 func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	var attestationPops []string
@@ -887,9 +866,8 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 
 func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -942,9 +920,8 @@ func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 
 func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+
+	receiver.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1267,11 +1244,11 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 
 	t.Run("https is required", func(t *testing.T) {
 		dbg_mode := env.IsDebugMode()
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+
 		defer env.SetDebugMode(dbg_mode)
-		defer env.SetHTTPAllowed(http_allowed)
+
 		env.SetDebugMode(false)
-		env.SetHTTPAllowed(false)
+		receiver.AllowHTTP = false
 
 		_, err := receiver.ReceiveCredential(types.Oid4vci, endpoint, "jwt_vc_json", accessToken, nil, nil)
 		if err == nil {
@@ -1280,9 +1257,8 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		credential, err := receiver.ReceiveCredential(types.Oid4vci, endpoint, "jwt_vc_json", accessToken, nil, nil)
 		if err != nil {
@@ -1299,9 +1275,8 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -1317,9 +1292,8 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -1334,9 +1308,8 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("No credential in response", func(t *testing.T) {
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
+
+		receiver.AllowHTTP = true
 
 		noCredServer := mockserver.NewMockServer()
 		defer noCredServer.Close()
@@ -1417,9 +1390,7 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		},
 	}
 
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
+	receiver.AllowHTTP = true
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

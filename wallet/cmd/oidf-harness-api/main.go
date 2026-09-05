@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/env"
 	"net/http"
 	"net/url"
 	"os"
@@ -97,6 +98,7 @@ func runVPAuthorize(args []string) error {
 
 	httpClient := insecureHTTPClient()
 	vpPresenter := &oid4vp.Oid4vpPresenter{
+		AllowHTTP:              env.IsHTTPAllowed(),
 		HTTPClient:             httpClient,
 		InsecureSkipX509Verify: true,
 	}
@@ -188,7 +190,7 @@ func runVCIReceive(args []string) error {
 	}
 	httpClient := insecureHTTPClient()
 	receiverDispatcher, err := receiver.NewReceivingDispatcher(
-		receiver.WithPlugin(types.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: httpClient}),
+		receiver.WithPlugin(types.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: httpClient, AllowHTTP: env.IsHTTPAllowed()}),
 	)
 	if err != nil {
 		return err

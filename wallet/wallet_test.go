@@ -478,10 +478,10 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 }
 
 func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
 
 	presentationDefinition := url.QueryEscape(`{"id":"test-def"}`)
 	uri := fmt.Sprintf(
@@ -495,10 +495,10 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 }
 
 func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	presentationDefinition := url.QueryEscape(`{"id":"test-def"}`)
 	uri := fmt.Sprintf(
@@ -591,6 +591,9 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 }
 
 func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
 	controller := createTestControllerWithDefaults(t)
 	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -627,10 +630,6 @@ func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
 		_, _ = w.Write([]byte(`{"redirect_uri":"https://example.com/done"}`))
 	}))
 	defer server.Close()
-
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
 
 	clientMetadataBytes, err := json.Marshal(map[string]any{
 		"jwks": map[string]any{
@@ -711,10 +710,10 @@ func TestParseCredentialOfferURL_TransactionCodeRoundTrip(t *testing.T) {
 }
 
 func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
@@ -1207,6 +1206,9 @@ func createMockOID4VCIServer() *mockserver.OID4VCIIssuerServer {
 }
 
 func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	// Create mock HTTP server
 	server := createMockOID4VCIServer()
 	defer server.Close()
@@ -1235,9 +1237,6 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 	}
 
 	// First test metadata fetch to debug
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Fatalf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -1259,11 +1258,15 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 }
 
 // createMockOID4VPServer creates a mock HTTP server for OID4VP testing
+
 func createMockOID4VPServer() *mockserver.OID4VPPresenterServer {
 	return mockserver.NewOID4VPPresenterServer(nil)
 }
 
 func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
@@ -1271,9 +1274,6 @@ func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 
 	serverURL, _ := url.Parse(server.URL())
 
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Errorf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -1288,6 +1288,9 @@ func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 }
 
 func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	// First, create a mock OID4VCI server to get a credential
 	vciServer := createMockOID4VCIServer()
 	defer vciServer.Close()
@@ -1316,9 +1319,6 @@ func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
 		Key:  newMockKeyEntry(),
 	}
 
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	savedCredential, err := controller.ReceiveCredential(receiveReq)
 	if err != nil {
 		t.Logf("Failed to receive credential for presentation test: %v", err)
@@ -1343,6 +1343,9 @@ func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
 }
 
 func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	controller := createTestControllerWithDefaults(t)
 
 	tests := []struct {
@@ -1381,9 +1384,6 @@ func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *test
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-			defer env.SetHTTPAllowed(http_allowed)
-			env.SetHTTPAllowed(true)
 			serverURL := tt.setupURL()
 			_, err := controller.FetchCredentialIssuerMetadata(serverURL, tt.receiverType)
 

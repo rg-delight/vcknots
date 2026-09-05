@@ -15,12 +15,13 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 type Oid4vpPresenter struct {
-	HTTPClient          *http.Client
+	HTTPClient *http.Client
+	// AllowHTTP permits HTTP response endpoints for a local test verifier.
+	AllowHTTP           bool
 	X509TrustChainRoots *x509.CertPool
 	// InsecureSkipX509Verify skips certificate verification for testing purposes.
 	// WARNING: This should NEVER be set to true in production environments.
@@ -53,6 +54,7 @@ func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*Credentia
 
 	builder := NewRequestBuilder()
 	builder.httpClient = p.httpClient()
+	builder.allowHTTP = p.AllowHTTP
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
 	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
 	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
@@ -361,6 +363,7 @@ func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
 type requestBuilder struct {
 	req                    *CredentialPresentationRequest
 	httpClient             *http.Client
+	allowHTTP              bool
 	x509TrustChainRoots    *x509.CertPool
 	insecureSkipX509Verify bool
 	expectedClientID       string
@@ -377,6 +380,12 @@ func NewRequestBuilder() *requestBuilder {
 		x509TrustChainRoots:    nil,
 		insecureSkipX509Verify: false,
 	}
+}
+
+// WithHTTPAllowed enables HTTP response endpoints for local tests only.
+func (b *requestBuilder) WithHTTPAllowed(allow bool) *requestBuilder {
+	b.allowHTTP = allow
+	return b
 }
 
 func (b *requestBuilder) validate() error {
@@ -412,7 +421,7 @@ func (b *requestBuilder) validate() error {
 		if err != nil {
 			return fmt.Errorf("response_uri must be URI: %w", err)
 		}
-		if !env.IsHTTPAllowed() && !strings.EqualFold(responseURI.Scheme, "https") {
+		if !b.allowHTTP && !strings.EqualFold(responseURI.Scheme, "https") {
 			return fmt.Errorf("response_uri must use https scheme")
 		}
 	}
