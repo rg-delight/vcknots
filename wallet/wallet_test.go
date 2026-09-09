@@ -2895,57 +2895,6 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithout
 	assert.Contains(t, err.Error(), "nonce endpoint response exceeds")
 }
 
-func TestController_fetchDPoPNonce_ReturnsHeaderValue(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		w.Header().Set("DPoP-Nonce", "dpop-nonce")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
-	}))
-	defer server.Close()
-
-	nonceEndpoint, err := common.ParseURIField(server.URL)
-	require.NoError(t, err)
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
-	require.NoError(t, err)
-	require.NotNil(t, nonce)
-	assert.Equal(t, "dpop-nonce", *nonce)
-}
-
-func TestController_fetchDPoPNonce_ReturnsErrorWhenEndpointMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{})
-	require.Error(t, err)
-	require.Nil(t, nonce)
-	assert.Contains(t, err.Error(), "nonce endpoint")
-}
-
-func TestController_fetchDPoPNonce_ReturnsErrorWhenHeaderMissing(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
-	}))
-	defer server.Close()
-
-	nonceEndpoint, err := common.ParseURIField(server.URL)
-	require.NoError(t, err)
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
-	require.Error(t, err)
-	require.Nil(t, nonce)
-	assert.Contains(t, err.Error(), "DPoP-Nonce")
-}
-
 func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
@@ -3014,6 +2963,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 					http.Error(w, "first DPoP proof should not include nonce", http.StatusBadRequest)
 					return
 				}
+				w.Header().Set("DPoP-Nonce", dpopNonce)
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{
 					"error": "use_dpop_nonce",
 				})
@@ -3139,7 +3089,7 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 	require.NotNil(t, credential)
 }
 
-func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *testing.T) {
+func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredentialNonce(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
@@ -3158,9 +3108,12 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 	)
 
 	var credentialRequests int
+	var nonceRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nonce":
+			nonceRequests++
+			require.Zero(t, credentialRequests, "c_nonce must be fetched before requesting the credential")
 			if r.Method != http.MethodPost {
 				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 				return
@@ -3203,7 +3156,7 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 			return
 		}
 
-		if payload["nonce"] != nonceEndpointDPoPNonce {
+		if payload["nonce"] != credentialHeaderNonce {
 			http.Error(w, "retry DPoP proof missing nonce", http.StatusBadRequest)
 			return
 		}
@@ -3244,9 +3197,10 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, credential)
 	assert.Equal(t, 2, credentialRequests)
+	assert.Equal(t, 1, nonceRequests)
 }
 
-func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.T) {
+func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
@@ -3307,9 +3261,8 @@ func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.Error(t, err)
 	require.Nil(t, credential)
-	assert.Contains(t, err.Error(), "failed to fetch DPoP nonce")
-	assert.Contains(t, err.Error(), "nonce endpoint")
-	assert.Equal(t, 1, credentialRequests)
+	assert.ErrorIs(t, err, receiverTypes.ErrUseDPoPNonce)
+	assert.Equal(t, 2, credentialRequests)
 }
 
 func TestAccessTokenCredentialIdentifier(t *testing.T) {

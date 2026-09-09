@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -157,12 +156,6 @@ func curveForSignatureAlgorithm(alg jose.SignatureAlgorithm) (elliptic.Curve, er
 		return nil, fmt.Errorf("unsupported client authentication signing algorithm: %q", alg)
 	}
 }
-
-var dpopNonceHTTPClient = &http.Client{
-	Timeout: 10 * time.Second,
-}
-
-const maxDPoPNonceResponseBodyBytes int64 = 4 << 10
 
 // NewWallet creates a Wallet with default dispatcher configurations.
 //
@@ -1557,49 +1550,6 @@ func (w *Wallet) fetchCredentialNonce(
 	return nil, fmt.Errorf("nonce response does not contain c_nonce or nonce")
 }
 
-func (w *Wallet) fetchDPoPNonce(issuerMetadata *receiverTypes.CredentialIssuerMetadata) (*string, error) {
-	if issuerMetadata == nil || issuerMetadata.NonceEndpoint == nil {
-		return nil, fmt.Errorf("issuer metadata does not contain nonce endpoint")
-	}
-
-	nonceEndpointURL := url.URL(*issuerMetadata.NonceEndpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(nonceEndpointURL.Scheme, "https") {
-		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", nonceEndpointURL.Scheme)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, nonceEndpointURL.String(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create DPoP nonce request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := dpopNonceHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch DPoP nonce: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxDPoPNonceResponseBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read DPoP nonce response: %w", err)
-	}
-	if int64(len(bodyBytes)) > maxDPoPNonceResponseBodyBytes {
-		return nil, fmt.Errorf("DPoP nonce endpoint response exceeds %d bytes", maxDPoPNonceResponseBodyBytes)
-	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("DPoP nonce endpoint returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	nonce := strings.TrimSpace(resp.Header.Get("DPoP-Nonce"))
-	if nonce == "" {
-		return nil, fmt.Errorf("DPoP nonce endpoint response does not contain DPoP-Nonce header")
-	}
-
-	return &nonce, nil
-}
-
 // requestCredential requests the credential from the issuer with JWT proof.
 func (w *Wallet) requestCredential(
 	req ReceiveCredentialRequest,
@@ -1691,12 +1641,12 @@ func (w *Wallet) requestCredential(
 	}
 
 	credentialJWT, err := receiveCredential(nil)
-	if err != nil && strings.EqualFold(accessToken.TokenType, "DPoP") && errors.Is(err, receiverTypes.ErrUseDPoPNonce) {
-		dpopNonce, nonceErr := w.fetchDPoPNonce(issuerMetadata)
-		if nonceErr != nil {
-			return nil, fmt.Errorf("failed to fetch DPoP nonce: %w", nonceErr)
+	if err != nil && strings.EqualFold(accessToken.TokenType, "DPoP") {
+		// RFC9449 section 9 binds the retry to the resource server's challenge.
+		// The VCI c_nonce endpoint is a different protocol and cannot replace it.
+		if dpopNonce, ok := receiverTypes.DPoPNonceFromError(err); ok && dpopNonce != "" {
+			credentialJWT, err = receiveCredential(&dpopNonce)
 		}
-		credentialJWT, err = receiveCredential(dpopNonce)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive credential: %w", err)
