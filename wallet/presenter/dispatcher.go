@@ -58,21 +58,21 @@ func (d *PresentationDispatcher) getPlugin(protocol types.SupportedPresentationP
 	return plugin, nil
 }
 
-func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, presentationSubmission PresentationSubmission, request *PresentationRequest) error {
+func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *PresentationRequest) (string, error) {
 	if len(serializedPresentation) == 0 {
-		return types.NewPresenterError(protocol, endpoint.String(), "present", types.ErrInvalidPresentation)
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present", types.ErrInvalidPresentation)
 	}
 
 	plugin, err := d.getPlugin(protocol)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if err := plugin.Present(protocol, endpoint, serializedPresentation, presentationSubmission, request); err != nil {
-		return types.NewPresenterError(protocol, endpoint.String(), "present", err)
+	redirectURI, err := plugin.Present(protocol, endpoint, serializedPresentation, request)
+	if err != nil {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present", err)
 	}
-
-	return nil
+	return redirectURI, nil
 }
 
 func (d *PresentationDispatcher) SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *oid4vp.VerifierMetadata) (string, error) {
@@ -113,4 +113,37 @@ func (d *PresentationDispatcher) ParseRequestURI(uriString string) (*oid4vp.Cred
 		return req, nil
 	}
 	return nil, types.NewPresenterError(protocol, "", "parse_uri", types.ErrUnsupportedProtocol)
+}
+
+// ParseDraft24RequestURI parses a Presentation Exchange request using the registered Draft24 capability.
+func (d *PresentationDispatcher) ParseDraft24RequestURI(uri string) (*oid4vp.CredentialPresentationRequest, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return nil, err
+	}
+	draft, ok := plugin.(interface {
+		ParseDraft24PresentationRequest(string) (*oid4vp.CredentialPresentationRequest, error)
+	})
+	if !ok {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_draft24", types.ErrUnsupportedProtocol)
+	}
+	return draft.ParseDraft24PresentationRequest(uri)
+}
+
+// PresentDraft24 submits a legacy Presentation Exchange response through the registered capability.
+func (d *PresentationDispatcher) PresentDraft24(protocol SupportedPresentationProtocol, endpoint url.URL, serialized []byte, submission types.PresentationSubmission, request *PresentationRequest) (string, error) {
+	if len(serialized) == 0 {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrInvalidPresentation)
+	}
+	plugin, err := d.getPlugin(protocol)
+	if err != nil {
+		return "", err
+	}
+	draft, ok := plugin.(interface {
+		PresentDraft24(types.SupportedPresentationProtocol, url.URL, []byte, types.PresentationSubmission, *types.PresentationRequest) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrUnsupportedProtocol)
+	}
+	return draft.PresentDraft24(protocol, endpoint, serialized, submission, request)
 }

@@ -3,7 +3,7 @@ name: CI server core
 # server depends on issuer+verifier
 on:
   pull_request:
-    branches: ["main", "feat/oid4vci-1.0"]
+    branches: ["main", "feat/oid4vci-1.0", "feat/oid4vp-1.0"]
     paths:
       - server/core/**
 
@@ -12,13 +12,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6.0.10
         with:
           run_install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version-file: .nvmrc
           cache: "pnpm"

@@ -700,6 +700,38 @@ func TestDeserializeCredential(t *testing.T) {
 		}
 	})
 
+	t.Run("Invalid _sd field type", func(t *testing.T) {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"vc+sd-jwt"}`))
+		payload := map[string]interface{}{
+			"_sd": "invalid-type",
+			"iss": "https://example.com/issuer",
+			"vct": "https://credentials.example.com/identity_credential",
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+		invalid := header + "." + base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + signature + "~"
+
+		_, err := serializer.DeserializeCredential(credential.SDJwtVC, []byte(invalid))
+		require.Error(t, err)
+		require.ErrorIs(t, err, types.ErrInvalidCredential)
+	})
+
+	t.Run("Invalid disclosure format", func(t *testing.T) {
+		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"vc+sd-jwt"}`))
+		payload := map[string]interface{}{
+			"_sd": []string{"dummy"},
+			"iss": "https://example.com/issuer",
+			"vct": "https://credentials.example.com/identity_credential",
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+		invalid := header + "." + base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + signature + "~not-valid-base64~"
+
+		_, err := serializer.DeserializeCredential(credential.SDJwtVC, []byte(invalid))
+		require.Error(t, err)
+		require.ErrorIs(t, err, types.ErrDecodingFailed)
+	})
+
 	t.Run("Valid SD-JWT VC", func(t *testing.T) {
 		testSDJWT := createTestSDJWT()
 		cred, err := serializer.DeserializeCredential(credential.SDJwtVC, []byte(testSDJWT))
@@ -715,6 +747,9 @@ func TestDeserializeCredential(t *testing.T) {
 			t.Errorf("expected issuer 'https://example.com/issuer', got '%s'", cred.Issuer)
 		}
 
+		require.Len(t, cred.Types, 1)
+		require.Equal(t, "https://credentials.example.com/identity_credential", cred.Types[0])
+
 		if cred.Proof == nil {
 			t.Fatal("expected proof to be non-nil")
 		}
@@ -727,6 +762,16 @@ func TestDeserializeCredential(t *testing.T) {
 		if cred.Claims == nil {
 			t.Fatal("expected claims to be non-nil")
 		}
+
+		require.Equal(t, "John", (*cred.Claims)["given_name"])
+		require.Equal(t, "johndoe@example.com", (*cred.Claims)["email"])
+		require.Equal(t, "Doe", (*cred.Claims)["family_name"])
+
+		require.NotNil(t, cred.SDJwt)
+		require.Equal(t, "sha-256", cred.SDJwt.SDAlg)
+		require.Len(t, cred.SDJwt.SD, 3)
+		require.Len(t, cred.SDJwt.Disclosures, 3)
+		require.Equal(t, "given_name", cred.SDJwt.Disclosures[0].Name)
 	})
 }
 

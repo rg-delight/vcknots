@@ -3,7 +3,7 @@ name: pr-title-lint
 on:
     pull_request:
         types: [opened, edited, synchronize, reopened]
-        branches: ["main", "feat/oid4vci-1.0"]
+        branches: ["main", "feat/oid4vci-1.0", "feat/oid4vp-1.0"]
 
 permissions:
     contents: read
@@ -13,6 +13,6 @@ jobs:
     semantic:
         runs-on: ubuntu-latest
         steps:
-            - uses: amannn/action-semantic-pull-request@v5
+            - uses: amannn/action-semantic-pull-request@v6.1.1
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,14 +18,17 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
+	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
@@ -34,8 +39,9 @@ import (
 )
 
 type mockKeyEntry struct {
-	id  string
-	key jose.JSONWebKey
+	id         string
+	key        jose.JSONWebKey
+	privateKey *ecdsa.PrivateKey
 }
 
 func (m *mockKeyEntry) ID() string {
@@ -70,7 +76,31 @@ func (m *mockKeyEntry) PublicKey() jose.JSONWebKey {
 }
 
 func (m *mockKeyEntry) Sign(data []byte) ([]byte, error) {
-	return []byte("mock-signature"), nil
+	if m.privateKey == nil {
+		return nil, fmt.Errorf("mock key is missing private key")
+	}
+
+	hash := sha256.Sum256(data)
+	r, s, err := ecdsa.Sign(rand.Reader, m.privateKey, hash[:])
+	if err != nil {
+		return nil, err
+	}
+
+	signature := make([]byte, 64)
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+	copy(signature[32-len(rBytes):32], rBytes)
+	copy(signature[64-len(sBytes):64], sBytes)
+
+	return signature, nil
+}
+
+type invalidSignatureKeyEntry struct {
+	*mockKeyEntry
+}
+
+func (k *invalidSignatureKeyEntry) Sign(data []byte) ([]byte, error) {
+	return []byte("invalid-es256-signature"), nil
 }
 
 func newMockKeyEntry() *mockKeyEntry {
@@ -84,25 +114,178 @@ func newMockKeyEntry() *mockKeyEntry {
 		Algorithm: "ES256",
 		KeyID:     "test-key-id",
 		Use:       "sig",
-		Key:       privateKey,
+		Key:       &privateKey.PublicKey,
 	}
-
-	// Set the public key part
-	jwk.Key = &privateKey.PublicKey
 
 	return &mockKeyEntry{
-		id:  "test-key-id",
-		key: jwk,
+		id:         "test-key-id",
+		key:        jwk,
+		privateKey: privateKey,
 	}
+}
+
+type captureDpopReceiver struct {
+	capturedProof *string
+}
+
+func (c *captureDpopReceiver) FetchIssuerMetadata(endpoint common.URIField, rt receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+
+	return nil, fmt.Errorf("unexpected call to FetchIssuerMetadata")
+
+}
+
+func (c *captureDpopReceiver) FetchAuthorizationServerMetadata(endpoint common.URIField, rt receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error) {
+
+	return nil, fmt.Errorf("unexpected call to FetchAuthorizationServerMetadata")
+
+}
+
+func (c *captureDpopReceiver) FetchAccessToken(rt receiverTypes.SupportedReceivingTypes, endpoint common.URIField, authzCode string, txCode string, opts ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error) {
+
+	requestConfig := receiverTypes.NewTokenRequestConfig(opts...)
+	if requestConfig.DPoPProof != "" {
+		proof := requestConfig.DPoPProof
+		c.capturedProof = &proof
+	}
+	return &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     "tok",
+		TokenType: "Bearer",
+	}, nil
+
+}
+
+func (c *captureDpopReceiver) FetchNonce(rt receiverTypes.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
+	return nil, fmt.Errorf("unexpected call to FetchNonce")
+}
+
+func (c *captureDpopReceiver) ReceiveCredential(
+
+	rt receiverTypes.SupportedReceivingTypes,
+	endpoint common.URIField,
+	credentialConfigurationID string,
+	credentialIdentifier *string,
+	accessToken receiverTypes.CredentialIssuanceAccessToken,
+	credentialDefinition *receiverTypes.CredentialDefinition,
+	jwtProof *string,
+	options ...*receiverTypes.CredentialRequestOptions,
+) (*string, error) {
+
+	return nil, fmt.Errorf("unexpected call to ReceiveCredential")
+
 }
 
 // createTestControllerWithDefaults uses default configurations for integration testing
 func createTestControllerWithDefaults(t *testing.T) *Wallet {
+	tempConfigDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
+	t.Setenv("HOME", tempConfigDir)
+
 	controller, err := NewWallet()
 	if err != nil {
 		t.Fatalf("Failed to create controller with defaults: %v", err)
 	}
 	return controller
+}
+
+func mustParseURL(t *testing.T, rawURL string) *url.URL {
+	t.Helper()
+
+	parsed, err := url.Parse(rawURL)
+	require.NoError(t, err)
+	return parsed
+}
+
+func newReceiveCredentialTestServer(t *testing.T) (*url.URL, <-chan url.Values, func()) {
+	t.Helper()
+
+	tokenFormCh := make(chan url.Values, 1)
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+
+	issuerKeyPair := mockserver.MustGenerateKeyPair("issuer-key-id")
+	jwtBuilder := mockserver.MustNewJWTBuilder(issuerKeyPair)
+	defaultCredentialJWT, err := jwtBuilder.CreateSignedJWT(server.URL, map[string]interface{}{
+		"sub": "did:key:z6Mkio4WDmdtgEo4f9Hq6i6tnW8WFwknQQ4KHUY99BGY4EVr",
+		"vc": map[string]interface{}{
+			"@context": []string{
+				"https://www.w3.org/2018/credentials/v1",
+			},
+			"id":           "http://example.com/credential/1",
+			"type":         []string{"VerifiableCredential"},
+			"issuer":       server.URL,
+			"issuanceDate": "2023-01-01T00:00:00Z",
+			"credentialSubject": map[string]interface{}{
+				"id":   "http://example.com/subject",
+				"name": "John Doe",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	mux.HandleFunc("/.well-known/openid-credential-issuer", func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"credential_issuer":     server.URL,
+			"credential_endpoint":   server.URL + "/credential",
+			"nonce_endpoint":        server.URL + "/nonce",
+			"authorization_servers": []string{server.URL},
+			"credential_configurations_supported": map[string]interface{}{
+				"test-config": map[string]interface{}{
+					"format": "jwt_vc_json",
+					"credential_definition": map[string]interface{}{
+						"type": []string{"VerifiableCredential"},
+					},
+				},
+			},
+		})
+	})
+
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"issuer":         server.URL,
+			"token_endpoint": server.URL + "/token",
+			"pre-authorized_grant_anonymous_access_supported": true,
+			"response_types_supported":                        []string{"code"},
+		})
+	})
+
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		form := url.Values{}
+		for key, values := range r.Form {
+			form[key] = append([]string(nil), values...)
+		}
+		tokenFormCh <- form
+
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"access_token": "test-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"c_nonce":      "test-nonce",
+		})
+	})
+
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"c_nonce": "test-nonce",
+		})
+	})
+
+	mux.HandleFunc("/credential", func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"credentials": []map[string]string{{
+				"credential": defaultCredentialJWT,
+			}},
+		})
+	})
+
+	credentialIssuer, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	return credentialIssuer, tokenFormCh, server.Close
 }
 
 func TestNewWallet(t *testing.T) {
@@ -152,6 +335,22 @@ func TestNewWalletWithConfig_WithValidConfig(t *testing.T) {
 	}
 }
 
+// This test focuses on DPoP key auto-generation.
+// If default initialization becomes flaky in CI, inject explicit test dependencies.
+func TestNewWalletWithConfig_DPoP_AutoGeneratesKey(t *testing.T) {
+	credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
+	if err != nil {
+		t.Skipf("credential store not available in this environment: %v", err)
+	}
+	w, err := NewWalletWithConfig(Config{
+		CredStore: credStore,
+		DPoP:      DPoPConfig{Enabled: true},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, w.dpop.Key)
+}
+
 func TestNewWalletWithConfig_MissingComponents(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -197,6 +396,16 @@ func TestNewWalletWithConfig_MissingComponents(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewInMemoryECKeyEntry(t *testing.T) {
+	key, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	require.NotEmpty(t, key.ID())
+
+	pub, ok := key.PublicKey().Key.(*ecdsa.PublicKey)
+	require.True(t, ok)
+	require.Equal(t, elliptic.P256(), pub.Curve)
 }
 
 func TestController_GenerateDID_Integration(t *testing.T) {
@@ -286,6 +495,79 @@ func TestController_ReceiveCredential_EmptyConfigurationIDs_Integration(t *testi
 	}
 	if err.Error() != "credential configuration IDs are empty" {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
+	defer closeServer()
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           credentialIssuer,
+			CredentialConfigurationIDs: []string{"test-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+					PreAuthorizedCode: "test-code",
+					TxCode:            &TxCode{},
+				},
+			},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  newMockKeyEntry(),
+	}
+
+	_, err := controller.ReceiveCredential(req)
+	require.NoError(t, err)
+
+	select {
+	case form := <-tokenFormCh:
+		require.Equal(t, "urn:ietf:params:oauth:grant-type:pre-authorized_code", form.Get("grant_type"))
+		require.Equal(t, "test-code", form.Get("pre-authorized_code"))
+		require.NotContains(t, form, "tx_code")
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "token endpoint was not called")
+	}
+}
+
+func TestController_ReceiveCredential_TxCodeProvided_Integration(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
+	defer closeServer()
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           credentialIssuer,
+			CredentialConfigurationIDs: []string{"test-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+					PreAuthorizedCode: "test-code",
+					TxCode:            &TxCode{},
+				},
+			},
+		},
+		Type:   receiverTypes.Oid4vci,
+		Key:    newMockKeyEntry(),
+		TxCode: "123456",
+	}
+
+	_, err := controller.ReceiveCredential(req)
+	require.NoError(t, err)
+
+	select {
+	case form := <-tokenFormCh:
+		require.Equal(t, "123456", form.Get("tx_code"))
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "tx_code was not received at token endpoint")
 	}
 }
 
@@ -401,7 +683,7 @@ func TestController_PresentCredential_InvalidID_Integration(t *testing.T) {
 	mockKey := newMockKeyEntry()
 
 	// This should fail when trying to parse the invalid URI
-	err := controller.PresentCredential(mockURI, mockKey, nil)
+	_, err := controller.PresentCredential(mockURI, mockKey, nil)
 	if err == nil {
 		t.Error("Expected PresentCredential to fail with invalid URI")
 		return
@@ -451,7 +733,7 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockKey := newMockKeyEntry()
-			err := controller.PresentCredential(tt.uri, mockKey, nil)
+			_, err := controller.PresentCredential(tt.uri, mockKey, nil)
 			if tt.wantErr && err == nil {
 				t.Errorf("PresentCredential() expected error but got none")
 			}
@@ -483,10 +765,10 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 	env.SetHTTPAllowed(false)
 	controller := createTestControllerWithDefaults(t)
 
-	presentationDefinition := url.QueryEscape(`{"id":"test-def"}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&presentation_definition=%s&response_mode=direct_post&response_uri=http://example.com/response",
-		presentationDefinition,
+		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		dcqlQuery,
 	)
 
 	_, _, err := controller.parseAuthorizationRequest(uri)
@@ -500,10 +782,10 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 	env.SetHTTPAllowed(true)
 	controller := createTestControllerWithDefaults(t)
 
-	presentationDefinition := url.QueryEscape(`{"id":"test-def"}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&presentation_definition=%s&response_mode=direct_post&response_uri=http://example.com/response",
-		presentationDefinition,
+		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		dcqlQuery,
 	)
 
 	_, endpoint, err := controller.parseAuthorizationRequest(uri)
@@ -514,7 +796,7 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 
 func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithoutRedirectURI(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
-	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","claims":[{"path":["given_name"]}]}]}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}]}`)
 	uri := fmt.Sprintf(
 		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
 		dcqlQuery,
@@ -523,7 +805,7 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithou
 	req, endpoint, err := controller.parseAuthorizationRequest(uri)
 	require.NoError(t, err)
 	require.NotNil(t, endpoint)
-	require.NotNil(t, req.DCQLQuery)
+	require.NotNil(t, req.DcqlQuery)
 	assert.Empty(t, req.RedirectURI)
 	assert.Equal(t, "https://example.com/response", endpoint.String())
 	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
@@ -936,7 +1218,7 @@ func TestController_PresentCredential_MissingRequiredFields_Integration(t *testi
 			setupMockURI: func() string {
 				return "openid4vp://present?credential_id=test-cred&client_id=test-client"
 			},
-			expectedErrors: []string{"presentation definition is not specified", "failed to parse request URI"},
+			expectedErrors: []string{"dcql_query is not specified", "failed to parse request URI"},
 		},
 	}
 
@@ -944,7 +1226,7 @@ func TestController_PresentCredential_MissingRequiredFields_Integration(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			mockURI := tt.setupMockURI()
 			mockKey := newMockKeyEntry()
-			err := controller.PresentCredential(mockURI, mockKey, nil)
+			_, err := controller.PresentCredential(mockURI, mockKey, nil)
 
 			if err == nil {
 				t.Errorf("PresentCredential() expected error but got none")
@@ -1052,6 +1334,246 @@ func TestController_FetchAuthorizationServerMetadata_Integration(t *testing.T) {
 		t.Error("Expected ReceiveCredential to fail in test environment without proper server setup")
 	}
 }
+func TestWallet_generateDPoPProof_HeaderAndPayload(t *testing.T) {
+	key, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+
+	w := &Wallet{}
+	proof, err := w.generateDPoPProof(key, http.MethodPost, "https://server.example.com/token", "", nil)
+	require.NoError(t, err)
+
+	parts := strings.Split(proof, ".")
+	require.Len(t, parts, 3)
+
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+
+	var header map[string]any
+	var payload map[string]any
+
+	require.NoError(t, json.Unmarshal(headerBytes, &header))
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload))
+
+	assert.Equal(t, "dpop+jwt", header["typ"])
+	assert.Equal(t, "ES256", header["alg"])
+
+	jwk, ok := header["jwk"].(map[string]any)
+	require.True(t, ok)
+	assert.NotNil(t, jwk["kty"])
+	assert.Nil(t, jwk["d"])
+
+	assert.NotEmpty(t, payload["jti"])
+	assert.Equal(t, "POST", payload["htm"])
+	assert.Equal(t, "https://server.example.com/token", payload["htu"])
+	assert.NotNil(t, payload["iat"])
+}
+
+func TestWallet_generateDPoPProof_JtiIsUnique(t *testing.T) {
+	key, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	w := &Wallet{}
+	proof1, err := w.generateDPoPProof(
+		key,
+		http.MethodPost,
+		"https://server.example.com/token",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+	proof2, err := w.generateDPoPProof(
+		key,
+		http.MethodPost,
+		"https://server.example.com/token",
+		"",
+		nil,
+	)
+	require.NoError(t, err)
+	jti1 := extractPayloadField(t, proof1, "jti")
+	jti2 := extractPayloadField(t, proof2, "jti")
+	assert.NotEqual(t, jti1, jti2)
+}
+
+func TestWallet_generateDPoPProof_NilKey(t *testing.T) {
+	w := &Wallet{}
+	_, err := w.generateDPoPProof(
+		nil,
+		http.MethodPost,
+		"https://server.example.com/token",
+		"",
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dpop key is required")
+}
+
+func TestWallet_obtainAccessToken_DPoPEnabledControlsProof(t *testing.T) {
+
+	tokenEndpoint, err := common.ParseURIField("https://server.example.com/token")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpoint: tokenEndpoint,
+		PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+	}
+	t.Run("disabled does not attach proof", func(t *testing.T) {
+		cap := &captureDpopReceiver{}
+		d, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Mock, cap))
+		require.NoError(t, err)
+		w := &Wallet{
+			receiver: d,
+			dpop:     DPoPConfig{Enabled: false},
+		}
+		_, err = w.obtainAccessToken(receiverTypes.Mock, authMetadata, "pre-auth-code", "")
+		require.NoError(t, err)
+		assert.Nil(t, cap.capturedProof)
+	})
+	t.Run("enabled attaches proof", func(t *testing.T) {
+		key, err := newInMemoryECKeyEntry()
+		require.NoError(t, err)
+		cap := &captureDpopReceiver{}
+		d, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Mock, cap))
+		require.NoError(t, err)
+		w := &Wallet{
+			receiver: d,
+			dpop: DPoPConfig{
+				Enabled: true,
+				Key:     key,
+			},
+		}
+		_, err = w.obtainAccessToken(receiverTypes.Mock, authMetadata, "pre-auth-code", "")
+		require.NoError(t, err)
+		require.NotNil(t, cap.capturedProof)
+		assert.NotEmpty(t, *cap.capturedProof)
+	})
+
+}
+
+func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	const (
+		dpopNonce        = "token-dpop-nonce"
+		accessTokenValue = "dpop-access-token"
+	)
+
+	var tokenRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			http.NotFound(w, r)
+			return
+		}
+		tokenRequests++
+		dpopProof := r.Header.Get("DPoP")
+		if dpopProof == "" {
+			http.Error(w, "missing DPoP header", http.StatusBadRequest)
+			return
+		}
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(strings.Split(dpopProof, ".")[1])
+		if err != nil {
+			http.Error(w, "invalid DPoP payload", http.StatusBadRequest)
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			http.Error(w, "invalid DPoP payload json", http.StatusBadRequest)
+			return
+		}
+
+		if tokenRequests == 1 {
+			if _, exists := payload["nonce"]; exists {
+				http.Error(w, "first DPoP proof should not include nonce", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("DPoP-Nonce", dpopNonce)
+			w.Header().Set("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if payload["nonce"] != dpopNonce {
+			http.Error(w, "retry DPoP proof missing nonce", http.StatusBadRequest)
+			return
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"access_token": accessTokenValue,
+			"token_type":   "DPoP",
+			"expires_in":   3600,
+		})
+	}))
+	defer server.Close()
+
+	tokenEndpoint, err := common.ParseURIField(server.URL + "/token")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpoint: tokenEndpoint,
+		PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+	}
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+		dpop: DPoPConfig{
+			Enabled: true,
+			Key:     dpopKey,
+		},
+	}
+
+	token, err := w.obtainAccessToken(receiverTypes.Oid4vci, authMetadata, "pre-auth-code", "")
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, accessTokenValue, token.Token)
+	assert.Equal(t, 2, tokenRequests)
+}
+
+func extractPayloadField(t *testing.T, compactJWT string, field string) any {
+	t.Helper()
+	parts := strings.Split(compactJWT, ".")
+	require.Len(t, parts, 3)
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(b, &payload))
+	value, ok := payload[field]
+	require.True(t, ok, "field %q not found in payload", field)
+	return value
+}
+
+func extractHeaderField(t *testing.T, compactJWT string, field string) any {
+	t.Helper()
+	parts := strings.Split(compactJWT, ".")
+	require.Len(t, parts, 3)
+	b, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var header map[string]any
+	require.NoError(t, json.Unmarshal(b, &header))
+	value, ok := header[field]
+	require.True(t, ok, "field %q not found in header", field)
+	return value
+}
+
+func TestWallet_generateDPoPProof_SignatureVerifies(t *testing.T) {
+	key, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+
+	w := &Wallet{}
+	proof, err := w.generateDPoPProof(key, http.MethodPost, "https://server.example.com/token", "", nil)
+	require.NoError(t, err)
+
+	parsed, err := jose.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+
+	embeddedJWK := parsed.Signatures[0].Header.JSONWebKey
+	require.NotNil(t, embeddedJWK)
+
+	_, err = parsed.Verify(embeddedJWK.Key)
+	require.NoError(t, err)
+}
 
 func TestController_generateJWTProof_AnonymousPreAuthorizedFlow_OmitsIss(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
@@ -1063,7 +1585,14 @@ func TestController_generateJWTProof_AnonymousPreAuthorizedFlow_OmitsIss(t *test
 	}
 	nonce := "test-nonce"
 
-	proof, err := controller.generateJWTProof(key, did, &nonce, "test-aud", nil)
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
 	if err != nil {
 		t.Errorf("generateJWTProof returned error: %v", err)
 	}
@@ -1084,15 +1613,93 @@ func TestController_generateJWTProof_AnonymousPreAuthorizedFlow_OmitsIss(t *test
 	}
 
 	proofParts := strings.Split(proof, ".")
-	require.Len(t, proofParts, 3, "expected JWT to have 3 parts")
+	if len(proofParts) != 3 {
+		t.Fatalf("expected JWT to have 3 parts, got %d", len(proofParts))
+	}
 
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(proofParts[1])
-	require.NoError(t, err, "failed to decode payload")
+	if err != nil {
+		t.Fatalf("failed to decode payload: %v", err)
+	}
 
 	var payload map[string]interface{}
-	require.NoError(t, json.Unmarshal(payloadBytes, &payload), "failed to unmarshal payload")
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
 
-	assert.NotContains(t, payload, "iss", "expected iss claim to be omitted in anonymous pre-authorized flow")
+	if _, exists := payload["iss"]; exists {
+		t.Fatalf("expected iss claim to be omitted in anonymous pre-authorized flow, got %v", payload["iss"])
+	}
+}
+
+func TestController_generateJWTProof_RejectsInvalidES256SignatureEncoding(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	key := &invalidSignatureKeyEntry{mockKeyEntry: newMockKeyEntry()}
+	did := &idprofTypes.IdentityProfile{
+		ID:     "did:key:test123",
+		TypeID: "did:key",
+	}
+
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		nil,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
+	require.Error(t, err)
+	assert.Empty(t, proof)
+	assert.Contains(t, err.Error(), "failed to serialize JWT proof")
+}
+
+func TestController_generateDPoPProof_IncludesAccessTokenHashAndNonce(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	key := newMockKeyEntry()
+	accessToken := "dpop-access-token"
+	nonce := "dpop-nonce"
+	htu := "https://issuer.example.com/credential"
+
+	proof, err := controller.generateDPoPProof(key, http.MethodPost, htu, accessToken, &nonce)
+	require.NoError(t, err)
+
+	parts := strings.Split(proof, ".")
+	require.Len(t, parts, 3)
+
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var header map[string]interface{}
+	require.NoError(t, json.Unmarshal(headerBytes, &header))
+	assert.Equal(t, "dpop+jwt", header["typ"])
+	assert.Equal(t, "ES256", header["alg"])
+	assert.Contains(t, header, "jwk")
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload))
+
+	accessTokenHash := sha256.Sum256([]byte(accessToken))
+	expectedAth := base64.RawURLEncoding.EncodeToString(accessTokenHash[:])
+	assert.Equal(t, http.MethodPost, payload["htm"])
+	assert.Equal(t, htu, payload["htu"])
+	assert.Equal(t, expectedAth, payload["ath"])
+	assert.Equal(t, nonce, payload["nonce"])
+	assert.NotEmpty(t, payload["jti"])
+	assert.NotZero(t, payload["iat"])
+}
+
+func TestController_generateDPoPProof_RejectsInvalidES256SignatureEncoding(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	key := &invalidSignatureKeyEntry{mockKeyEntry: newMockKeyEntry()}
+
+	proof, err := controller.generateDPoPProof(key, http.MethodPost, "https://issuer.example.com/credential", "access-token", nil)
+	require.Error(t, err)
+	assert.Empty(t, proof)
+	assert.Contains(t, err.Error(), "failed to serialize dpop proof")
 }
 
 func TestController_generateJWTProof_NonAnonymousFlow_IncludesIssAsClientID(t *testing.T) {
@@ -1106,7 +1713,14 @@ func TestController_generateJWTProof_NonAnonymousFlow_IncludesIssAsClientID(t *t
 	nonce := "test-nonce"
 	clientID := "test-client-id"
 
-	proof, err := controller.generateJWTProof(key, did, &nonce, "test-aud", &clientID)
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		&clientID,
+		credentialRequestProofBindingMethodKID,
+	)
 	if err != nil {
 		t.Fatalf("generateJWTProof returned error: %v", err)
 	}
@@ -1135,6 +1749,861 @@ func TestController_generateJWTProof_NonAnonymousFlow_IncludesIssAsClientID(t *t
 	}
 }
 
+// --- private_key_jwt client authentication tests ---
+
+func newClientAuthKeyEntry(t *testing.T, keyID string) (*mockKeyEntry, jose.JSONWebKey) {
+	t.Helper()
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	privateJWK := jose.JSONWebKey{
+		Key:       privKey,
+		KeyID:     keyID,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
+	publicJWK := privateJWK.Public()
+	return &mockKeyEntry{
+		id:         keyID,
+		key:        publicJWK,
+		privateKey: privKey,
+	}, publicJWK
+}
+
+func TestWallet_generateClientAssertion_HeaderAndPayload(t *testing.T) {
+	w := &Wallet{}
+
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+	const clientID = "test-client-id"
+	const tokenEndpoint = "https://as.example.com/token"
+
+	assertion, err := w.generateClientAssertion(key, clientID, tokenEndpoint, jose.ES256)
+	require.NoError(t, err)
+
+	parts := strings.Split(assertion, ".")
+	require.Len(t, parts, 3)
+
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var header map[string]interface{}
+	require.NoError(t, json.Unmarshal(headerBytes, &header))
+	assert.Equal(t, "JWT", header["typ"])
+	assert.Equal(t, "ES256", header["alg"])
+	assert.Equal(t, "client-key-1", header["kid"])
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload))
+
+	assert.Equal(t, clientID, payload["iss"])
+	assert.Equal(t, clientID, payload["sub"])
+	assert.Equal(t, tokenEndpoint, payload["aud"])
+	assert.NotEmpty(t, payload["jti"])
+	assert.NotZero(t, payload["iat"])
+	assert.NotZero(t, payload["exp"])
+	assert.NotZero(t, payload["nbf"])
+
+	expClaim, ok := payload["exp"].(float64)
+	require.True(t, ok)
+	iatClaim, ok := payload["iat"].(float64)
+	require.True(t, ok)
+	assert.InDelta(t, float64(clientAssertionLifetime.Seconds()), expClaim-iatClaim, 2)
+}
+
+func TestWallet_generateClientAssertion_ErrorsOnMissingInputs(t *testing.T) {
+	w := &Wallet{}
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+
+	_, err := w.generateClientAssertion(nil, "client-id", "https://as.example.com/token", jose.ES256)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client auth key is required")
+
+	_, err = w.generateClientAssertion(key, "  ", "https://as.example.com/token", jose.ES256)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "clientID is required")
+
+	_, err = w.generateClientAssertion(key, "client-id", "  ", jose.ES256)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audience is required")
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func authMethodsPtr(methods ...receiverTypes.TokenEndpointAuthMethod) *[]receiverTypes.TokenEndpointAuthMethod {
+	m := methods
+	return &m
+}
+
+func TestResolveClientAuthMethod(t *testing.T) {
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+
+	t.Run("defaults to none when anonymous supported and nothing configured", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+		}
+		method, ok := resolveClientAuthMethod(ClientAuthConfig{}, authMetadata)
+		require.True(t, ok)
+		assert.Equal(t, receiverTypes.None, method)
+	})
+
+	t.Run("selects private_key_jwt when configured and advertised", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+			TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{jose.ES256},
+		}
+		method, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		require.True(t, ok)
+		assert.Equal(t, receiverTypes.PrivateKeyJwt, method)
+	})
+
+	t.Run("defaults to none even when private_key_jwt credentials are configured", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+			TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+		}
+		method, ok := resolveClientAuthMethod(ClientAuthConfig{
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		require.True(t, ok)
+		assert.Equal(t, receiverTypes.None, method)
+	})
+
+	t.Run("honors explicit private_key_jwt method", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+			TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+			TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{jose.ES256},
+		}
+		method, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		require.True(t, ok)
+		assert.Equal(t, receiverTypes.PrivateKeyJwt, method)
+	})
+
+	t.Run("does not fall back to none when private_key_jwt is not advertised", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		assert.False(t, ok)
+	})
+
+	t.Run("returns false when no method is usable", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(false),
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{}, authMetadata)
+		assert.False(t, ok)
+	})
+
+	t.Run("private_key_jwt rejected when alg not supported", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+			TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{jose.RS256},
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		assert.False(t, ok)
+	})
+
+	t.Run("private_key_jwt rejected when signing alg metadata is omitted", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			TokenEndpointAuthMethodsSupported: authMethodsPtr(receiverTypes.PrivateKeyJwt),
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		assert.False(t, ok)
+	})
+
+	t.Run("private_key_jwt rejected when signing alg metadata is empty", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+			TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{},
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "client-id",
+			Key:      key,
+		}, authMetadata)
+		assert.False(t, ok)
+	})
+
+	t.Run("private_key_jwt rejected when client id/key missing", func(t *testing.T) {
+		authMetadata := &receiverTypes.AuthorizationServerMetadata{
+			TokenEndpointAuthMethodsSupported: authMethodsPtr(receiverTypes.PrivateKeyJwt),
+		}
+		_, ok := resolveClientAuthMethod(ClientAuthConfig{
+			Method: receiverTypes.PrivateKeyJwt,
+		}, authMetadata)
+		assert.False(t, ok)
+	})
+}
+
+func TestValidateClientAuthConfig(t *testing.T) {
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+
+	assert.NoError(t, validateClientAuthConfig(ClientAuthConfig{}))
+	assert.NoError(t, validateClientAuthConfig(ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "wallet-id",
+		Key:      key,
+	}))
+
+	err := validateClientAuthConfig(ClientAuthConfig{
+		Method: receiverTypes.PrivateKeyJwt,
+		Key:    key,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "client ID is required")
+
+	err = validateClientAuthConfig(ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "wallet-id",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "key is required")
+
+	err = validateClientAuthConfig(ClientAuthConfig{
+		Method: receiverTypes.ClientSecretPost,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported client authentication method")
+
+	incompatiblePrivateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	incompatibleKey := &mockKeyEntry{
+		id: "client-key-1",
+		key: jose.JSONWebKey{
+			Algorithm: "ES384",
+			KeyID:     "client-key-1",
+			Use:       "sig",
+			Key:       &incompatiblePrivateKey.PublicKey,
+		},
+		privateKey: incompatiblePrivateKey,
+	}
+	err = validateClientAuthConfig(ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "wallet-id",
+		Key:      incompatibleKey,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not compatible with ES256")
+
+	// The same P-384 key becomes valid once the configuration declares ES384,
+	// which is what token_endpoint_auth_signing_alg carries.
+	require.NoError(t, validateClientAuthConfig(ClientAuthConfig{
+		Method:     receiverTypes.PrivateKeyJwt,
+		ClientID:   "wallet-id",
+		Key:        incompatibleKey,
+		SigningAlg: jose.ES384,
+	}))
+
+	err = validateClientAuthConfig(ClientAuthConfig{
+		Method:     receiverTypes.PrivateKeyJwt,
+		ClientID:   "wallet-id",
+		Key:        key,
+		SigningAlg: jose.ES384,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not compatible with ES384")
+
+	err = validateClientAuthConfig(ClientAuthConfig{
+		Method:     receiverTypes.PrivateKeyJwt,
+		ClientID:   "wallet-id",
+		Key:        key,
+		SigningAlg: jose.RS256,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported client authentication signing algorithm")
+}
+
+func TestClientAuthConfig_SignatureAlgorithmDefaultsToES256(t *testing.T) {
+	assert.Equal(t, jose.ES256, ClientAuthConfig{}.signatureAlgorithm())
+	assert.Equal(t, jose.ES384, ClientAuthConfig{SigningAlg: jose.ES384}.signatureAlgorithm())
+}
+
+func TestClientAuthMethodAvailable_HonoursConfiguredSigningAlg(t *testing.T) {
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpointAuthMethodsSupported:          authMethodsPtr(receiverTypes.PrivateKeyJwt),
+		TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{jose.ES384},
+	}
+
+	// The authorization server advertises ES384 only, so the ES256 default
+	// finds no usable method.
+	assert.False(t, clientAuthMethodAvailable(
+		receiverTypes.PrivateKeyJwt,
+		ClientAuthConfig{ClientID: "wallet-id", Key: key},
+		authMetadata,
+	))
+
+	assert.True(t, clientAuthMethodAvailable(
+		receiverTypes.PrivateKeyJwt,
+		ClientAuthConfig{ClientID: "wallet-id", Key: key, SigningAlg: jose.ES384},
+		authMetadata,
+	))
+}
+
+func TestWallet_generateClientAssertion_SupportsEveryConfigurableAlgorithm(t *testing.T) {
+	tests := []struct {
+		alg   jose.SignatureAlgorithm
+		curve elliptic.Curve
+	}{
+		{jose.ES256, elliptic.P256()},
+		{jose.ES384, elliptic.P384()},
+		{jose.ES512, elliptic.P521()},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.alg), func(t *testing.T) {
+			privKey, err := ecdsa.GenerateKey(tt.curve, rand.Reader)
+			require.NoError(t, err)
+			// mockKeyEntry only signs with P-256, so use the key entry the
+			// configuration loader actually produces.
+			key, err := keystore.NewKeyEntryFromJWK(jose.JSONWebKey{
+				Key:       privKey,
+				KeyID:     "client-key-1",
+				Algorithm: string(tt.alg),
+				Use:       "sig",
+			})
+			require.NoError(t, err)
+
+			clientAuth := ClientAuthConfig{
+				Method:     receiverTypes.PrivateKeyJwt,
+				ClientID:   "wallet-id",
+				Key:        key,
+				SigningAlg: tt.alg,
+			}
+			require.NoError(t, validateClientAuthConfig(clientAuth))
+
+			w := &Wallet{clientAuth: clientAuth}
+			assertion, err := w.generateClientAssertion(key, "wallet-id", "https://as.example.com", tt.alg)
+			require.NoError(t, err)
+
+			parts := strings.Split(assertion, ".")
+			require.Len(t, parts, 3)
+
+			headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+			require.NoError(t, err)
+			var header map[string]interface{}
+			require.NoError(t, json.Unmarshal(headerBytes, &header))
+			assert.Equal(t, string(tt.alg), header["alg"])
+
+			// Parsing with the public key proves the signature encoding is the
+			// IEEE P1363 form a JWS verifier expects, not raw DER.
+			parsed, err := jwt.ParseSigned(assertion, []jose.SignatureAlgorithm{tt.alg})
+			require.NoError(t, err)
+			claims := map[string]interface{}{}
+			require.NoError(t, parsed.Claims(&privKey.PublicKey, &claims))
+			assert.Equal(t, "wallet-id", claims["iss"])
+		})
+	}
+}
+
+func TestWallet_generateClientAssertion_RejectsNonECDSAAlgorithm(t *testing.T) {
+	w := &Wallet{}
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+
+	_, err := w.generateClientAssertion(key, "client-id", "https://as.example.com", jose.RS256)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported client authentication signing algorithm")
+}
+
+func TestResolveClientAssertionAudience(t *testing.T) {
+	tokenEndpoint := "https://as.example.com/token"
+	issuer, err := common.ParseURIField("https://as.example.com")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{Issuer: *issuer}
+
+	assert.Equal(t, "https://registered-audience.example.com", resolveClientAssertionAudience(
+		ClientAuthConfig{AssertionAudience: "https://registered-audience.example.com"},
+		authMetadata,
+		tokenEndpoint,
+	))
+	assert.Equal(t, "https://as.example.com", resolveClientAssertionAudience(
+		ClientAuthConfig{},
+		authMetadata,
+		tokenEndpoint,
+	))
+	assert.Equal(t, tokenEndpoint, resolveClientAssertionAudience(
+		ClientAuthConfig{},
+		&receiverTypes.AuthorizationServerMetadata{},
+		tokenEndpoint,
+	))
+}
+
+type captureClientAuthReceiver struct {
+	capturedClientID        *string
+	capturedClientAssertion *string
+	capturedDPoP            *string
+}
+
+func (c *captureClientAuthReceiver) FetchIssuerMetadata(endpoint common.URIField, rt receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+	return nil, fmt.Errorf("unexpected call to FetchIssuerMetadata")
+}
+
+func (c *captureClientAuthReceiver) FetchAuthorizationServerMetadata(endpoint common.URIField, rt receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error) {
+	return nil, fmt.Errorf("unexpected call to FetchAuthorizationServerMetadata")
+}
+
+func (c *captureClientAuthReceiver) FetchAccessToken(rt receiverTypes.SupportedReceivingTypes, endpoint common.URIField, authzCode string, txCode string, opts ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error) {
+	cfg := receiverTypes.NewTokenRequestConfig(opts...)
+	if cfg.ClientAssertion != "" {
+		id, assertion := cfg.ClientID, cfg.ClientAssertion
+		c.capturedClientID = &id
+		c.capturedClientAssertion = &assertion
+	}
+	if cfg.DPoPProof != "" {
+		proof := cfg.DPoPProof
+		c.capturedDPoP = &proof
+	}
+	return &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     "tok",
+		TokenType: "Bearer",
+	}, nil
+}
+
+func (c *captureClientAuthReceiver) FetchNonce(rt receiverTypes.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
+	return nil, fmt.Errorf("unexpected call to FetchNonce")
+}
+
+func (c *captureClientAuthReceiver) ReceiveCredential(
+	rt receiverTypes.SupportedReceivingTypes,
+	endpoint common.URIField,
+	credentialConfigurationID string,
+	credentialIdentifier *string,
+	accessToken receiverTypes.CredentialIssuanceAccessToken,
+	credentialDefinition *receiverTypes.CredentialDefinition,
+	jwtProof *string,
+	options ...*receiverTypes.CredentialRequestOptions,
+) (*string, error) {
+	return nil, fmt.Errorf("unexpected call to ReceiveCredential")
+}
+
+func TestWallet_obtainAccessToken_PrivateKeyJwtAttachesAssertion(t *testing.T) {
+	tokenEndpoint, err := common.ParseURIField("https://as.example.com/token")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpoint: tokenEndpoint,
+		TokenEndpointAuthMethodsSupported: authMethodsPtr(
+			receiverTypes.PrivateKeyJwt,
+		),
+		TokenEndpointAuthSigningAlgValuesSupported: &[]jose.SignatureAlgorithm{jose.ES256},
+	}
+
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+	cap := &captureClientAuthReceiver{}
+	d, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Mock, cap))
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+		clientAuth: ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "wallet-id",
+			Key:      key,
+		},
+	}
+
+	token, err := w.obtainAccessToken(receiverTypes.Mock, authMetadata, "pre-auth-code", "")
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	require.NotNil(t, cap.capturedClientAssertion)
+	require.NotNil(t, cap.capturedClientID)
+	assert.Equal(t, "wallet-id", *cap.capturedClientID)
+	assert.Nil(t, cap.capturedDPoP, "DPoP should not be attached when disabled")
+}
+
+func TestWallet_obtainAccessToken_AnonymousByDefaultDoesNotAttachAssertion(t *testing.T) {
+	tokenEndpoint, err := common.ParseURIField("https://as.example.com/token")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpoint: tokenEndpoint,
+		PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+	}
+
+	cap := &captureClientAuthReceiver{}
+	d, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Mock, cap))
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+	}
+
+	token, err := w.obtainAccessToken(receiverTypes.Mock, authMetadata, "pre-auth-code", "")
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Nil(t, cap.capturedClientAssertion, "client assertion must not be attached for anonymous flow")
+}
+
+func TestWallet_obtainAccessToken_NoUsableMethodReturnsError(t *testing.T) {
+	tokenEndpoint, err := common.ParseURIField("https://as.example.com/token")
+	require.NoError(t, err)
+	authMetadata := &receiverTypes.AuthorizationServerMetadata{
+		TokenEndpoint: tokenEndpoint,
+		PreAuthorizedGrantAnonymousAccessSupported: boolPtr(false),
+	}
+
+	cap := &captureClientAuthReceiver{}
+	d, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Mock, cap))
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+	}
+
+	_, err = w.obtainAccessToken(receiverTypes.Mock, authMetadata, "pre-auth-code", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no usable client authentication method")
+}
+
+func TestWallet_obtainAccessToken_PrivateKeyJwtEndToEndWithMockServer(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	key, publicJWK := newClientAuthKeyEntry(t, "client-key-1")
+	pubKey := publicJWK
+
+	issuerConfig := &mockserver.OID4VCIIssuerConfig{
+		KeyPair:                           mockserver.MustGenerateKeyPair("issuer-key-id"),
+		IssuerID:                          "test-issuer",
+		PreAuthorizedGrantAnonymous:       mockserver.BoolPtr(false),
+		TokenEndpointAuthMethodsSupported: []string{"private_key_jwt"},
+		TokenEndpointAuthSigningAlgs:      []string{"ES256"},
+		RequireClientAssertion:            true,
+		ClientAuthPublicKey:               &pubKey,
+		ExpectedClientID:                  "wallet-id",
+		CredentialConfigurations: map[string]interface{}{
+			"test-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"credential_definition": map[string]interface{}{
+					"type": []string{"VerifiableCredential"},
+				},
+			},
+		},
+		TokenResponse: map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"c_nonce":      "mock-nonce",
+		},
+		CustomCredentials: make(map[string]string),
+	}
+	issuer := mockserver.NewOID4VCIIssuerServer(issuerConfig)
+	defer issuer.Close()
+
+	// Fix the expected aud on the server side. Letting the mock derive it from
+	// the incoming request would make the check tautological, since the wallet
+	// resolves the same value from this server's metadata.
+	issuerConfig.ClientAssertionAudience = issuer.URL()
+
+	issuerURL, err := url.Parse(issuer.URL())
+	require.NoError(t, err)
+	asEndpoint := common.URIField(*issuerURL)
+	tokenEndpoint, err := common.ParseURIField(issuer.URL() + "/token")
+	require.NoError(t, err)
+
+	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+		clientAuth: ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "wallet-id",
+			Key:      key,
+		},
+	}
+
+	authMetadata, err := d.FetchAuthorizationServerMetadata(asEndpoint, receiverTypes.Oid4vci)
+	require.NoError(t, err)
+	require.NotNil(t, authMetadata.TokenEndpoint)
+
+	authMetadata.TokenEndpoint = tokenEndpoint
+
+	token, err := w.obtainAccessToken(receiverTypes.Oid4vci, authMetadata, "pre-auth-code", "")
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "mock-access-token", token.Token)
+}
+
+func TestWallet_fetchCredentialMetadata_UsesCredentialIssuerAsAuthorizationServerWhenOmitted(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	key, _ := newClientAuthKeyEntry(t, "client-key-1")
+	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
+		KeyPair:                           mockserver.MustGenerateKeyPair("issuer-key-id"),
+		IssuerID:                          "test-issuer",
+		PreAuthorizedGrantAnonymous:       mockserver.BoolPtr(false),
+		OmitAuthorizationServers:          true,
+		TokenEndpointAuthMethodsSupported: []string{"private_key_jwt"},
+		TokenEndpointAuthSigningAlgs:      []string{"ES256"},
+		CredentialConfigurations: map[string]interface{}{
+			"test-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"credential_definition": map[string]interface{}{
+					"type": []string{"VerifiableCredential"},
+				},
+			},
+		},
+		CustomCredentials: make(map[string]string),
+	})
+	defer issuer.Close()
+
+	issuerURL, err := url.Parse(issuer.URL())
+	require.NoError(t, err)
+
+	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+		clientAuth: ClientAuthConfig{
+			Method:   receiverTypes.PrivateKeyJwt,
+			ClientID: "wallet-id",
+			Key:      key,
+		},
+	}
+
+	offer := &CredentialOffer{
+		CredentialIssuer:           issuerURL,
+		CredentialConfigurationIDs: []string{"test-config"},
+		Grants:                     map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {}},
+	}
+	req := ReceiveCredentialRequest{
+		CredentialOffer: offer,
+		Type:            receiverTypes.Oid4vci,
+	}
+
+	_, authMetadata, err := w.fetchCredentialMetadata(req)
+	require.NoError(t, err)
+	require.NotNil(t, authMetadata)
+}
+
+func TestWallet_fetchCredentialMetadata_RejectsEmptyAuthorizationServers(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
+		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
+		PreAuthorizedGrantAnonymous: mockserver.BoolPtr(true),
+		EmptyAuthorizationServers:   true,
+		CredentialConfigurations: map[string]interface{}{
+			"test-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"credential_definition": map[string]interface{}{
+					"type": []string{"VerifiableCredential"},
+				},
+			},
+		},
+		CustomCredentials: make(map[string]string),
+	})
+	defer issuer.Close()
+
+	issuerURL, err := url.Parse(issuer.URL())
+	require.NoError(t, err)
+	dispatcher, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{receiver: dispatcher}
+
+	_, _, err = w.fetchCredentialMetadata(ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"test-config"},
+			Grants:                     map[string]*CredentialOfferGrant{},
+		},
+		Type: receiverTypes.Oid4vci,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "authorization_servers must not be an empty array")
+}
+
+func TestWallet_fetchCredentialMetadata_RejectsWhenNoUsableMethod(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
+		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
+		IssuerID:                    "test-issuer",
+		PreAuthorizedGrantAnonymous: mockserver.BoolPtr(false),
+		CredentialConfigurations: map[string]interface{}{
+			"test-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"credential_definition": map[string]interface{}{
+					"type": []string{"VerifiableCredential"},
+				},
+			},
+		},
+		CustomCredentials: make(map[string]string),
+	})
+	defer issuer.Close()
+
+	issuerURL, err := url.Parse(issuer.URL())
+	require.NoError(t, err)
+
+	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{receiver: d}
+
+	offer := &CredentialOffer{
+		CredentialIssuer:           issuerURL,
+		CredentialConfigurationIDs: []string{"test-config"},
+		Grants:                     map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {}},
+	}
+	req := ReceiveCredentialRequest{
+		CredentialOffer: offer,
+		Type:            receiverTypes.Oid4vci,
+	}
+
+	_, _, err = w.fetchCredentialMetadata(req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no usable client authentication method")
+}
+
+// TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess pins the three
+// states of the OPTIONAL pre-authorized_grant_anonymous_access_supported metadata
+// parameter. Omitting it means "unknown", not "unsupported" — issuers commonly leave it
+// out, the OpenID conformance suite among them — so only an explicit false may stop the
+// pre-authorized code flow.
+func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	tests := []struct {
+		name            string
+		anonymousAccess *bool
+		wantErr         bool
+	}{
+		{name: "omitted", anonymousAccess: nil, wantErr: false},
+		{name: "explicit true", anonymousAccess: mockserver.BoolPtr(true), wantErr: false},
+		{name: "explicit false", anonymousAccess: mockserver.BoolPtr(false), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
+				KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
+				IssuerID:                    "test-issuer",
+				PreAuthorizedGrantAnonymous: tt.anonymousAccess,
+				CredentialConfigurations: map[string]interface{}{
+					"test-config": map[string]interface{}{
+						"format": "jwt_vc_json",
+						"credential_definition": map[string]interface{}{
+							"type": []string{"VerifiableCredential"},
+						},
+					},
+				},
+				CustomCredentials: make(map[string]string),
+			})
+			defer issuer.Close()
+
+			issuerURL, err := url.Parse(issuer.URL())
+			require.NoError(t, err)
+
+			d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+			require.NoError(t, err)
+			w := &Wallet{receiver: d}
+
+			_, authMetadata, err := w.fetchCredentialMetadata(ReceiveCredentialRequest{
+				CredentialOffer: &CredentialOffer{
+					CredentialIssuer:           issuerURL,
+					CredentialConfigurationIDs: []string{"test-config"},
+					Grants:                     map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {}},
+				},
+				Type: receiverTypes.Oid4vci,
+			})
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "no usable client authentication method")
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, authMetadata)
+		})
+	}
+}
+
+// TestWallet_obtainAccessToken_OmittedAnonymousAccessSendsClientID checks that an issuer
+// which never advertises pre-authorized_grant_anonymous_access_supported still receives a
+// token request, and that the request names the configured client. The assertion is on
+// what reached the server rather than on the returned token, because the failure this
+// guards against stopped the wallet before any request went out.
+func TestWallet_obtainAccessToken_OmittedAnonymousAccessSendsClientID(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+
+	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
+		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
+		IssuerID:                    "test-issuer",
+		PreAuthorizedGrantAnonymous: nil,
+		CredentialConfigurations: map[string]interface{}{
+			"test-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"credential_definition": map[string]interface{}{
+					"type": []string{"VerifiableCredential"},
+				},
+			},
+		},
+		TokenResponse: map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		},
+		CustomCredentials: make(map[string]string),
+	})
+	defer issuer.Close()
+
+	issuerURL, err := url.Parse(issuer.URL())
+	require.NoError(t, err)
+
+	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	require.NoError(t, err)
+	w := &Wallet{
+		receiver: d,
+		clientAuth: ClientAuthConfig{
+			Method:   receiverTypes.None,
+			ClientID: "wallet-id",
+		},
+	}
+
+	authMetadata, err := d.FetchAuthorizationServerMetadata(common.URIField(*issuerURL), receiverTypes.Oid4vci)
+	require.NoError(t, err)
+	require.Nil(t, authMetadata.PreAuthorizedGrantAnonymousAccessSupported,
+		"the mock must omit the parameter for this test to mean anything")
+
+	token, err := w.obtainAccessToken(receiverTypes.Oid4vci, authMetadata, "pre-auth-code", "")
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "mock-access-token", token.Token)
+
+	tokenRequests := issuer.TokenRequests()
+	require.Len(t, tokenRequests, 1, "the wallet must reach the token endpoint")
+	assert.Equal(t, "urn:ietf:params:oauth:grant-type:pre-authorized_code", tokenRequests[0].Get("grant_type"))
+	assert.Equal(t, "wallet-id", tokenRequests[0].Get("client_id"))
+	assert.Empty(t, tokenRequests[0].Get("client_assertion"), "no client authentication is configured")
+}
+
 func TestController_generateJWTProof_NonAnonymousFlow_EmptyClientIDReturnsError(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 
@@ -1146,7 +2615,14 @@ func TestController_generateJWTProof_NonAnonymousFlow_EmptyClientIDReturnsError(
 	nonce := "test-nonce"
 	emptyClientID := ""
 
-	proof, err := controller.generateJWTProof(key, did, &nonce, "test-aud", &emptyClientID)
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		&emptyClientID,
+		credentialRequestProofBindingMethodKID,
+	)
 	if err == nil {
 		t.Fatalf("expected error when clientID is empty, got nil")
 	}
@@ -1169,7 +2645,14 @@ func TestController_generateJWTProof_NonAnonymousFlow_BlankClientIDReturnsError(
 	nonce := "test-nonce"
 	blankClientID := "   "
 
-	proof, err := controller.generateJWTProof(key, did, &nonce, "test-aud", &blankClientID)
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		&blankClientID,
+		credentialRequestProofBindingMethodKID,
+	)
 	if err == nil {
 		t.Fatalf("expected error when clientID is blank, got nil")
 	}
@@ -1190,7 +2673,14 @@ func TestController_generateJWTProof_WithoutNonce_Integration(t *testing.T) {
 		TypeID: "did:key",
 	}
 
-	proof, err := controller.generateJWTProof(key, did, nil, "test-aud", nil)
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		nil,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
 	if err != nil {
 		t.Errorf("generateJWTProof returned error: %v", err)
 	}
@@ -1200,9 +2690,1180 @@ func TestController_generateJWTProof_WithoutNonce_Integration(t *testing.T) {
 	}
 }
 
+func TestController_generateJWTProof_WithoutIssuer_Integration(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	key := newMockKeyEntry()
+	did := &idprofTypes.IdentityProfile{
+		ID:     "did:key:test123",
+		TypeID: "did:key",
+	}
+	nonce := "test-nonce"
+
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
+	if err != nil {
+		t.Fatalf("generateJWTProof returned error: %v", err)
+	}
+
+	parts := strings.Split(proof, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected JWT to have 3 parts, got %d", len(parts))
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("failed to decode JWT payload: %v", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("failed to parse JWT payload: %v", err)
+	}
+
+	if _, exists := payload["iss"]; exists {
+		t.Fatal("iss claim must be omitted")
+	}
+}
+
+const testMaxNonceResponseBodyBytes int64 = 4 << 10
+
+func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointMissing(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	cnonce := "token-c-nonce"
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{CNonce: &cnonce}
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.NoError(t, err)
+	require.NotNil(t, nonce)
+	assert.Equal(t, cnonce, *nonce)
+}
+
+func TestController_fetchCredentialNonce_ReturnsNilWhenNoNonceSource(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, &receiverTypes.CredentialIssuerMetadata{}, &receiverTypes.CredentialIssuanceAccessToken{})
+	require.NoError(t, err)
+	require.Nil(t, nonce)
+}
+
+func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	nonceEndpoint, err := common.ParseURIField("http://127.0.0.1:1/nonce")
+	require.NoError(t, err)
+
+	cnonce := "token-c-nonce"
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{CNonce: &cnonce}
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.NoError(t, err)
+	require.NotNil(t, nonce)
+	assert.Equal(t, cnonce, *nonce)
+}
+
+func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
+
+	nonceEndpoint, err := common.ParseURIField("http://example.com/nonce")
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.Error(t, err)
+	require.Nil(t, nonce)
+	assert.Contains(t, err.Error(), "unsupported URL scheme")
+}
+
+func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	nonceValue := "nonce-from-endpoint"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nonce":"` + nonceValue + `"}`))
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.NoError(t, err)
+	require.NotNil(t, nonce)
+	assert.Equal(t, nonceValue, *nonce)
+}
+
+func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFallback(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporary failure", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.Error(t, err)
+	require.Nil(t, nonce)
+	assert.Contains(t, err.Error(), "nonce endpoint returned status")
+}
+
+func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLarge(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nonce":"` + largeNonce + `"}`))
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+
+	fallback := "token-c-nonce"
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{CNonce: &fallback}
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.NoError(t, err)
+	require.NotNil(t, nonce)
+	assert.Equal(t, fallback, *nonce)
+}
+
+func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithoutFallback(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"nonce":"` + largeNonce + `"}`))
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{}
+
+	nonce, err := controller.fetchCredentialNonce(receiverTypes.Oid4vci, issuerMetadata, accessToken)
+	require.Error(t, err)
+	require.Nil(t, nonce)
+	assert.Contains(t, err.Error(), "nonce endpoint response exceeds")
+}
+
+func TestController_fetchDPoPNonce_ReturnsHeaderValue(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		w.Header().Set("DPoP-Nonce", "dpop-nonce")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
+	require.NoError(t, err)
+	require.NotNil(t, nonce)
+	assert.Equal(t, "dpop-nonce", *nonce)
+}
+
+func TestController_fetchDPoPNonce_ReturnsErrorWhenEndpointMissing(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+
+	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{})
+	require.Error(t, err)
+	require.Nil(t, nonce)
+	assert.Contains(t, err.Error(), "nonce endpoint")
+}
+
+func TestController_fetchDPoPNonce_ReturnsErrorWhenHeaderMissing(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
+	}))
+	defer server.Close()
+
+	nonceEndpoint, err := common.ParseURIField(server.URL)
+	require.NoError(t, err)
+	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
+	require.Error(t, err)
+	require.Nil(t, nonce)
+	assert.Contains(t, err.Error(), "DPoP-Nonce")
+}
+
+func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	controller.dpop = DPoPConfig{
+		Enabled: true,
+		Key:     dpopKey,
+	}
+
+	const (
+		accessTokenValue = "dpop-access-token"
+		dpopNonce        = "issuer-dpop-nonce"
+	)
+
+	var credentialRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nonce":
+			if r.Method != http.MethodPost {
+				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("DPoP-Nonce", dpopNonce)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
+		case "/credential":
+			credentialRequests++
+			if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
+				http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
+				return
+			}
+			dpopProof := r.Header.Get("DPoP")
+			if dpopProof == "" {
+				http.Error(w, "missing DPoP header", http.StatusBadRequest)
+				return
+			}
+
+			parts := strings.Split(dpopProof, ".")
+			if len(parts) != 3 {
+				http.Error(w, "invalid DPoP proof", http.StatusBadRequest)
+				return
+			}
+			payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				http.Error(w, "invalid DPoP payload", http.StatusBadRequest)
+				return
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+				http.Error(w, "invalid DPoP payload json", http.StatusBadRequest)
+				return
+			}
+
+			accessTokenHash := sha256.Sum256([]byte(accessTokenValue))
+			expectedAth := base64.RawURLEncoding.EncodeToString(accessTokenHash[:])
+			if payload["ath"] != expectedAth {
+				http.Error(w, "invalid ath", http.StatusBadRequest)
+				return
+			}
+
+			if credentialRequests == 1 {
+				if _, exists := payload["nonce"]; exists {
+					http.Error(w, "first DPoP proof should not include nonce", http.StatusBadRequest)
+					return
+				}
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{
+					"error": "use_dpop_nonce",
+				})
+				return
+			}
+
+			if payload["nonce"] != dpopNonce {
+				http.Error(w, "retry DPoP proof missing nonce", http.StatusBadRequest)
+				return
+			}
+
+			mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+				"credentials": []map[string]string{{
+					"credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature",
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	credentialEndpoint, err := common.ParseURIField(server.URL + "/credential")
+	require.NoError(t, err)
+	nonceEndpoint, err := common.ParseURIField(server.URL + "/nonce")
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialIssuer:   server.URL,
+		CredentialEndpoint: *credentialEndpoint,
+		NonceEndpoint:      nonceEndpoint,
+	}
+	offerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           offerURL,
+			CredentialConfigurationIDs: []string{"test-config"},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  newMockKeyEntry(),
+	}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     accessTokenValue,
+		TokenType: "DPoP",
+	}
+
+	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
+	require.NoError(t, err)
+	require.NotNil(t, credential)
+	assert.Equal(t, 2, credentialRequests)
+}
+
+func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	holderKey := newMockKeyEntry()
+	controller.dpop = DPoPConfig{
+		Enabled: true,
+		Key:     dpopKey,
+	}
+
+	const accessTokenValue = "dpop-access-token"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/credential" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
+			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
+			return
+		}
+		dpopProof := r.Header.Get("DPoP")
+		if dpopProof == "" {
+			http.Error(w, "missing DPoP header", http.StatusBadRequest)
+			return
+		}
+		jwk, ok := extractHeaderField(t, dpopProof, "jwk").(map[string]any)
+		require.True(t, ok)
+		if got := jwk["kid"]; got != dpopKey.ID() {
+			http.Error(w, fmt.Sprintf("DPoP proof kid = %v", got), http.StatusBadRequest)
+			return
+		}
+
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"credentials": []map[string]string{{
+				"credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	credentialEndpoint, err := common.ParseURIField(server.URL + "/credential")
+	require.NoError(t, err)
+	offerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           offerURL,
+			CredentialConfigurationIDs: []string{"test-config"},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  holderKey,
+	}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     accessTokenValue,
+		TokenType: "DPoP",
+	}
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialIssuer:   server.URL,
+		CredentialEndpoint: *credentialEndpoint,
+	}
+
+	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
+	require.NoError(t, err)
+	require.NotNil(t, credential)
+}
+
+func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	controller.dpop = DPoPConfig{
+		Enabled: true,
+		Key:     dpopKey,
+	}
+
+	const (
+		accessTokenValue       = "dpop-access-token"
+		credentialHeaderNonce  = "credential-dpop-nonce"
+		nonceEndpointDPoPNonce = "nonce-endpoint-dpop-nonce"
+	)
+
+	var credentialRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nonce":
+			if r.Method != http.MethodPost {
+				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("DPoP-Nonce", nonceEndpointDPoPNonce)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
+			return
+		case "/credential":
+		default:
+			http.NotFound(w, r)
+			return
+		}
+
+		credentialRequests++
+		dpopProof := r.Header.Get("DPoP")
+		if dpopProof == "" {
+			http.Error(w, "missing DPoP header", http.StatusBadRequest)
+			return
+		}
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(strings.Split(dpopProof, ".")[1])
+		if err != nil {
+			http.Error(w, "invalid DPoP payload", http.StatusBadRequest)
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			http.Error(w, "invalid DPoP payload json", http.StatusBadRequest)
+			return
+		}
+
+		if credentialRequests == 1 {
+			if _, exists := payload["nonce"]; exists {
+				http.Error(w, "first DPoP proof should not include nonce", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("DPoP-Nonce", credentialHeaderNonce)
+			w.Header().Set("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if payload["nonce"] != nonceEndpointDPoPNonce {
+			http.Error(w, "retry DPoP proof missing nonce", http.StatusBadRequest)
+			return
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+			"credentials": []map[string]string{{
+				"credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	credentialEndpoint, err := common.ParseURIField(server.URL + "/credential")
+	require.NoError(t, err)
+	offerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           offerURL,
+			CredentialConfigurationIDs: []string{"test-config"},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  newMockKeyEntry(),
+	}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     accessTokenValue,
+		TokenType: "DPoP",
+	}
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialIssuer:   server.URL,
+		CredentialEndpoint: *credentialEndpoint,
+	}
+	nonceEndpoint, err := common.ParseURIField(server.URL + "/nonce")
+	require.NoError(t, err)
+	issuerMetadata.NonceEndpoint = nonceEndpoint
+
+	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
+	require.NoError(t, err)
+	require.NotNil(t, credential)
+	assert.Equal(t, 2, credentialRequests)
+}
+
+func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	controller.dpop = DPoPConfig{
+		Enabled: true,
+		Key:     dpopKey,
+	}
+
+	const accessTokenValue = "dpop-access-token"
+
+	var credentialRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/credential" {
+			http.NotFound(w, r)
+			return
+		}
+		credentialRequests++
+		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
+			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
+			return
+		}
+		if got := r.Header.Get("DPoP"); got == "" {
+			http.Error(w, "missing DPoP header", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("DPoP-Nonce", "credential-endpoint-nonce")
+		mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{
+			"error": "use_dpop_nonce",
+		})
+	}))
+	defer server.Close()
+
+	credentialEndpoint, err := common.ParseURIField(server.URL + "/credential")
+	require.NoError(t, err)
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialIssuer:   server.URL,
+		CredentialEndpoint: *credentialEndpoint,
+	}
+	offerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           offerURL,
+			CredentialConfigurationIDs: []string{"test-config"},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  newMockKeyEntry(),
+	}
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+		Token:     accessTokenValue,
+		TokenType: "DPoP",
+	}
+
+	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
+	require.Error(t, err)
+	require.Nil(t, credential)
+	assert.Contains(t, err.Error(), "failed to fetch DPoP nonce")
+	assert.Contains(t, err.Error(), "nonce endpoint")
+	assert.Equal(t, 1, credentialRequests)
+}
+
+func TestAccessTokenCredentialIdentifier(t *testing.T) {
+	tests := []struct {
+		name        string
+		accessToken *receiverTypes.CredentialIssuanceAccessToken
+		want        *string
+	}{
+		{
+			name:        "nil access token",
+			accessToken: nil,
+			want:        nil,
+		},
+		{
+			name: "no authorization details",
+			accessToken: &receiverTypes.CredentialIssuanceAccessToken{
+				Token: "test-token",
+			},
+			want: nil,
+		},
+		{
+			name: "authorization details without identifiers",
+			accessToken: &receiverTypes.CredentialIssuanceAccessToken{
+				AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+					{Type: receiverTypes.AuthorizationDetailTypeOpenIDCredential},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "ignores non-openid_credential authorization details",
+			accessToken: &receiverTypes.CredentialIssuanceAccessToken{
+				AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+					{Type: "resource_access", CredentialIdentifiers: []string{"unrelated-id"}},
+					{Type: receiverTypes.AuthorizationDetailTypeOpenIDCredential, CredentialIdentifiers: []string{"cred-id-2"}},
+				},
+			},
+			want: &[]string{"cred-id-2"}[0],
+		},
+		{
+			name: "returns nil when only non-openid_credential details exist",
+			accessToken: &receiverTypes.CredentialIssuanceAccessToken{
+				AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+					{Type: "resource_access", CredentialIdentifiers: []string{"unrelated-id"}},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "first non-empty credential identifier is selected",
+			accessToken: &receiverTypes.CredentialIssuanceAccessToken{
+				AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+					{Type: receiverTypes.AuthorizationDetailTypeOpenIDCredential, CredentialIdentifiers: []string{"", "cred-id-1"}},
+					{Type: receiverTypes.AuthorizationDetailTypeOpenIDCredential, CredentialIdentifiers: []string{"cred-id-2"}},
+				},
+			},
+			want: &[]string{"cred-id-1"}[0],
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := accessTokenCredentialIdentifier(tt.accessToken)
+			if tt.want == nil {
+				require.Nil(t, got)
+				return
+			}
+
+			require.NotNil(t, got)
+			assert.Equal(t, *tt.want, *got)
+		})
+	}
+}
+
 // createMockOID4VCIServer creates a mock HTTP server for OID4VCI testing
 func createMockOID4VCIServer() *mockserver.OID4VCIIssuerServer {
 	return mockserver.NewOID4VCIIssuerServer(nil)
+}
+
+// This fixture intentionally uses a mocked ES256 signature (64 zero bytes).
+// These tests only validate SD-JWT parsing/metadata round-trip, not signature verification.
+// If SD-JWT deserialization later requires signature verification, replace this with a
+// valid ES256 signature (preferred) or change alg to "none" accordingly.
+func createWalletTestSDJWT() string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"vc+sd-jwt"}`))
+	disclosures := []string{
+		"WyIyR0xDNDJzS1F2ZUNmR2ZyeU5STjl3IiwgImdpdmVuX25hbWUiLCAiSm9obiJd",
+		"WyI2SWo3dE0tYTVpVlBHYm9TNXRtdlZBIiwgImVtYWlsIiwgImpvaG5kb2VAZXhhbXBsZS5jb20iXQ",
+	}
+
+	sdDigests := make([]string, 0, len(disclosures))
+	for _, disclosure := range disclosures {
+		h := sha256.Sum256([]byte(disclosure))
+		sdDigests = append(sdDigests, base64.RawURLEncoding.EncodeToString(h[:]))
+	}
+
+	payload := map[string]interface{}{
+		"_sd":     sdDigests,
+		"iss":     "https://example.com/issuer",
+		"sub":     "did:key:z6Mkwallet-test-subject",
+		"iat":     1683000000,
+		"exp":     1883000000,
+		"vct":     "https://credentials.example.com/identity_credential",
+		"_sd_alg": "sha-256",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+
+	jwt := header + "." + payloadEncoded + "." + signature
+
+	result := jwt
+	for _, disclosure := range disclosures {
+		result += "~" + disclosure
+	}
+	result += "~"
+
+	return result
+}
+
+func TestController_generateJWTProof_KIDBinding_NilDIDReturnsError(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	key := newMockKeyEntry()
+	nonce := "test-nonce"
+
+	proof, err := controller.generateJWTProof(
+		key,
+		nil,
+		&nonce,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "did is required for kid proof binding")
+	assert.Empty(t, proof)
+}
+
+func TestController_generateJWTProof_KIDBinding_BlankDIDReturnsError(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	key := newMockKeyEntry()
+	nonce := "test-nonce"
+	did := &idprofTypes.IdentityProfile{ID: "  ", TypeID: "did:key"}
+
+	proof, err := controller.generateJWTProof(
+		key,
+		did,
+		&nonce,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodKID,
+	)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "did.ID is required for kid proof binding")
+	assert.Empty(t, proof)
+}
+
+func TestController_generateJWTProof_JWKBinding_AllowsNilDID(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	key := newMockKeyEntry()
+	nonce := "test-nonce"
+
+	proof, err := controller.generateJWTProof(
+		key,
+		nil,
+		&nonce,
+		"test-aud",
+		nil,
+		credentialRequestProofBindingMethodJWK,
+	)
+
+	require.NoError(t, err)
+	require.NotEmpty(t, proof)
+
+	proofParts := strings.Split(proof, ".")
+	require.Len(t, proofParts, 3)
+
+	headerBytes, decodeErr := base64.RawURLEncoding.DecodeString(proofParts[0])
+	require.NoError(t, decodeErr)
+
+	var header map[string]interface{}
+	require.NoError(t, json.Unmarshal(headerBytes, &header))
+	_, hasJWK := header["jwk"]
+	_, hasKID := header["kid"]
+	assert.True(t, hasJWK)
+	assert.False(t, hasKID)
+}
+
+func TestController_shouldAttachCredentialRequestProof_EmptyBindingMethodsOmitProof(t *testing.T) {
+	req := ReceiveCredentialRequest{RequestedFormat: credential.JwtVc}
+	empty := []string{}
+	configuration := &receiverTypes.CredentialConfiguration{
+		CryptographicBindingMethodsSupported: &empty,
+	}
+
+	attachProof := shouldAttachCredentialRequestProof(req, configuration)
+	assert.False(t, attachProof)
+}
+
+func TestController_shouldAttachCredentialRequestProof_EmptyBindingMethodsWithNoRequestedFormatKeepsBackwardCompatibility(t *testing.T) {
+	req := ReceiveCredentialRequest{}
+	empty := []string{}
+	configuration := &receiverTypes.CredentialConfiguration{
+		CryptographicBindingMethodsSupported: &empty,
+	}
+
+	attachProof := shouldAttachCredentialRequestProof(req, configuration)
+	assert.True(t, attachProof)
+}
+
+func TestController_selectCredentialConfiguration_UnsupportedDefaultFormatReturnsError(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	issuerURL, err := url.Parse("https://issuer.example.com")
+	require.NoError(t, err)
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"mdoc-config"},
+		},
+	}
+
+	issuerMetadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+			"mdoc-config": {
+				Format: "mso_mdoc",
+			},
+		},
+	}
+
+	configID, config, flavor, err := controller.selectCredentialConfiguration(req, issuerMetadata)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported credential format for configuration \"mdoc-config\"")
+	assert.Equal(t, "", configID)
+	assert.Nil(t, config)
+	assert.Equal(t, credential.SupportedSerializationFlavor(""), flavor)
+}
+
+func createWalletTestJwtVCCredential() string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT"}`))
+	now := time.Now().Unix()
+	payload := map[string]interface{}{
+		"iat": now,
+		"exp": now + 3600,
+		"vc": map[string]interface{}{
+			"id":     "https://issuer.example.com/credentials/test-1",
+			"type":   []string{"VerifiableCredential"},
+			"issuer": "https://issuer.example.com",
+			"credentialSubject": map[string]interface{}{
+				"id": "did:key:test-subject",
+			},
+		},
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+
+	return header + "." + payloadEncoded + "." + signature
+}
+
+type credentialIssuanceMockServerOptions struct {
+	credentialConfigurationsSupported map[string]interface{}
+	tokenResponse                     map[string]interface{}
+	nonceResponse                     map[string]interface{}
+	includeNonceEndpoint              bool
+	credential                        string
+}
+
+func newCredentialIssuanceMockServer(t *testing.T, opts credentialIssuanceMockServerOptions) (*url.URL, *map[string]interface{}, chan error) {
+	t.Helper()
+
+	if opts.credentialConfigurationsSupported == nil {
+		t.Fatal("credentialConfigurationsSupported is required")
+	}
+
+	if opts.tokenResponse == nil {
+		opts.tokenResponse = map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+		}
+	}
+
+	if opts.includeNonceEndpoint && opts.nonceResponse == nil {
+		opts.nonceResponse = map[string]interface{}{
+			"c_nonce": "nonce-from-endpoint",
+		}
+	}
+
+	if opts.credential == "" {
+		opts.credential = createWalletTestJwtVCCredential()
+	}
+
+	var capturedBody map[string]interface{}
+	handlerErrCh := make(chan error, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		baseURL := "http://" + r.Host
+
+		switch r.URL.Path {
+		case "/.well-known/openid-credential-issuer":
+			issuerResponse := map[string]interface{}{
+				"credential_issuer":                   baseURL,
+				"credential_endpoint":                 baseURL + "/credential",
+				"authorization_servers":               []string{baseURL},
+				"credential_configurations_supported": opts.credentialConfigurationsSupported,
+			}
+			if opts.includeNonceEndpoint {
+				issuerResponse["nonce_endpoint"] = baseURL + "/nonce"
+			}
+			mockserver.JSONResponse(w, http.StatusOK, issuerResponse)
+		case "/.well-known/oauth-authorization-server":
+			mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+				"issuer":         baseURL,
+				"token_endpoint": baseURL + "/token",
+				"pre-authorized_grant_anonymous_access_supported": true,
+				"response_types_supported":                        []string{"code"},
+			})
+		case "/token":
+			mockserver.JSONResponse(w, http.StatusOK, opts.tokenResponse)
+		case "/nonce":
+			if !opts.includeNonceEndpoint {
+				http.NotFound(w, r)
+				return
+			}
+			mockserver.JSONResponse(w, http.StatusOK, opts.nonceResponse)
+		case "/credential":
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				handlerErrCh <- fmt.Errorf("failed to read credential request body: %w", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			if err := json.Unmarshal(bodyBytes, &capturedBody); err != nil {
+				handlerErrCh <- fmt.Errorf("failed to decode credential request body: %w", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			handlerErrCh <- nil
+
+			mockserver.JSONResponse(w, http.StatusOK, map[string]interface{}{
+				"credential": opts.credential,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	issuerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	return issuerURL, &capturedBody, handlerErrCh
+}
+
+func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	sdJwtCredential := createWalletTestSDJWT()
+	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
+		credentialConfigurationsSupported: map[string]interface{}{
+			"jwt-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+			},
+			"sdjwt-config": map[string]interface{}{
+				"format": "dc+sd-jwt",
+				"cryptographic_binding_methods_supported": []string{"jwk"},
+			},
+		},
+		includeNonceEndpoint: true,
+		tokenResponse: map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"c_nonce":      "mock-c-nonce",
+		},
+		nonceResponse: map[string]interface{}{
+			"c_nonce": "nonce-from-endpoint",
+		},
+		credential: sdJwtCredential,
+	})
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"jwt-config", "sdjwt-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+					PreAuthorizedCode: "test-code",
+				},
+			},
+		},
+		Type:            receiverTypes.Oid4vci,
+		Key:             newMockKeyEntry(),
+		RequestedFormat: credential.SDJwtVC,
+	}
+
+	savedCredential, err := controller.ReceiveCredential(req)
+	require.NoError(t, err)
+	require.NotNil(t, savedCredential)
+
+	select {
+	case handlerErr := <-handlerErrCh:
+		require.NoError(t, handlerErr)
+	case <-time.After(time.Second):
+		t.Fatal("credential endpoint was not called")
+	}
+
+	requestedConfigID, ok := (*capturedBody)["credential_configuration_id"].(string)
+	require.True(t, ok, "credential_configuration_id should be a string")
+	assert.Equal(t, "sdjwt-config", requestedConfigID)
+
+	proofs, ok := (*capturedBody)["proofs"].(map[string]interface{})
+	require.True(t, ok, "proofs should be present for cryptographic binding")
+	jwtProofs, ok := proofs["jwt"].([]interface{})
+	require.True(t, ok, "proofs.jwt should be present")
+	require.Len(t, jwtProofs, 1, "proofs.jwt should contain one proof")
+	proofJWT, ok := jwtProofs[0].(string)
+	require.True(t, ok, "proofs.jwt[0] should be a JWT string")
+
+	proofParts := strings.Split(proofJWT, ".")
+	require.Len(t, proofParts, 3, "proof JWT should have 3 parts")
+	proofHeaderBytes, err := base64.RawURLEncoding.DecodeString(proofParts[0])
+	require.NoError(t, err)
+
+	var proofHeader map[string]interface{}
+	require.NoError(t, json.Unmarshal(proofHeaderBytes, &proofHeader))
+	_, hasJWK := proofHeader["jwk"]
+	assert.True(t, hasJWK, "proof JWT header should include jwk when binding method supports jwk")
+	_, hasKID := proofHeader["kid"]
+	assert.False(t, hasKID, "proof JWT header should not include kid when jwk is used")
+
+	assert.Equal(t, string(credential.SDJwtVC), savedCredential.Entry.MimeType)
+	require.NotNil(t, savedCredential.Credential)
+	require.NotNil(t, savedCredential.Credential.SDJwt)
+	assert.Len(t, savedCredential.Credential.SDJwt.SD, 2)
+
+	retrievedCredential, err := controller.GetCredentialEntry(savedCredential.Entry.Id)
+	require.NoError(t, err)
+	require.NotNil(t, retrievedCredential)
+	assert.Equal(t, savedCredential.Entry.Id, retrievedCredential.Entry.Id)
+	assert.Equal(t, string(credential.SDJwtVC), retrievedCredential.Entry.MimeType)
+}
+
+func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMethodsSupported(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
+		credentialConfigurationsSupported: map[string]interface{}{
+			"jwt-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+				"cryptographic_binding_methods_supported": []string{"jwk"},
+			},
+		},
+		includeNonceEndpoint: true,
+		tokenResponse: map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+			"c_nonce":      "mock-c-nonce",
+		},
+		nonceResponse: map[string]interface{}{
+			"c_nonce": "nonce-from-endpoint",
+		},
+	})
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"jwt-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+					PreAuthorizedCode: "test-code",
+				},
+			},
+		},
+		Type:            receiverTypes.Oid4vci,
+		Key:             newMockKeyEntry(),
+		RequestedFormat: credential.JwtVc,
+	}
+
+	_, err := controller.ReceiveCredential(req)
+	require.NoError(t, err)
+
+	select {
+	case handlerErr := <-handlerErrCh:
+		require.NoError(t, handlerErr)
+	case <-time.After(time.Second):
+		t.Fatal("credential endpoint was not called")
+	}
+
+	proofs, ok := (*capturedBody)["proofs"].(map[string]interface{})
+	require.True(t, ok, "proofs should be present when cryptographic_binding_methods_supported exists")
+	jwtProofs, ok := proofs["jwt"].([]interface{})
+	require.True(t, ok, "proofs.jwt should be present")
+	require.Len(t, jwtProofs, 1, "proofs.jwt should contain one proof")
+}
+
+func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNilKey(t *testing.T) {
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+
+	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
+		credentialConfigurationsSupported: map[string]interface{}{
+			"jwt-config": map[string]interface{}{
+				"format": "jwt_vc_json",
+			},
+		},
+		tokenResponse: map[string]interface{}{
+			"access_token": "mock-access-token",
+			"token_type":   "Bearer",
+		},
+	})
+
+	req := ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"jwt-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+					PreAuthorizedCode: "test-code",
+				},
+			},
+		},
+		Type:            receiverTypes.Oid4vci,
+		RequestedFormat: credential.JwtVc,
+	}
+	require.Nil(t, req.Key, "nil key should be allowed when cryptographic binding is not required")
+
+	savedCredential, err := controller.ReceiveCredential(req)
+	require.NoError(t, err)
+	require.NotNil(t, savedCredential)
+	require.Nil(t, req.Key, "request key should remain nil")
+
+	select {
+	case handlerErr := <-handlerErrCh:
+		require.NoError(t, handlerErr)
+	case <-time.After(time.Second):
+		t.Fatal("credential endpoint was not called")
+	}
+
+	_, hasProof := (*capturedBody)["proof"]
+	assert.False(t, hasProof, "proof should not be present when binding is not required")
+	_, hasProofs := (*capturedBody)["proofs"]
+	assert.False(t, hasProofs, "proofs should not be present when binding is not required")
+	assert.Equal(t, string(credential.JwtVc), savedCredential.Entry.MimeType)
 }
 
 func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
@@ -1259,10 +3920,6 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 
 // createMockOID4VPServer creates a mock HTTP server for OID4VP testing
 
-func createMockOID4VPServer() *mockserver.OID4VPPresenterServer {
-	return mockserver.NewOID4VPPresenterServer(nil)
-}
-
 func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(http_allowed)
@@ -1287,28 +3944,22 @@ func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 	t.Logf("Successfully fetched metadata: %+v", metadata)
 }
 
-func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
+func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationID(t *testing.T) {
+	server := createMockOID4VCIServer()
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL())
+	require.NoError(t, err)
+
+	httpAllowed := env.IsHTTPAllowed()
+	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
-	// First, create a mock OID4VCI server to get a credential
-	vciServer := createMockOID4VCIServer()
-	defer vciServer.Close()
-
-	// Create a mock OID4VP server for presentation
-	vpServer := createMockOID4VPServer()
-	defer vpServer.Close()
-
 	controller := createTestControllerWithDefaults(t)
 
-	vciServerURL, _ := url.Parse(vciServer.URL())
-	vpEndpointURL, _ := url.Parse(vpServer.URL() + "/present")
-
-	// Step 1: First receive a credential via OID4VCI
-	receiveReq := ReceiveCredentialRequest{
+	req := ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           vciServerURL,
-			CredentialConfigurationIDs: []string{"test-config"},
+			CredentialIssuer:           serverURL,
+			CredentialConfigurationIDs: []string{"unsupported-config"},
 			Grants: map[string]*CredentialOfferGrant{
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
 					PreAuthorizedCode: "test-code",
@@ -1319,27 +3970,47 @@ func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
 		Key:  newMockKeyEntry(),
 	}
 
-	savedCredential, err := controller.ReceiveCredential(receiveReq)
-	if err != nil {
-		t.Logf("Failed to receive credential for presentation test: %v", err)
-		return
+	credential, err := controller.ReceiveCredential(req)
+	require.Error(t, err)
+	require.Nil(t, credential)
+	require.Contains(t, err.Error(), `credential configuration "unsupported-config" is not supported by issuer metadata`)
+}
+
+func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
+	controller, mockKey := receiveCredentialForPresentationTest(t)
+	redirectTarget := "https://example.com/redirect"
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"redirect_uri":"%s"}`, redirectTarget)
+	}))
+	defer responseServer.Close()
+
+	// Step 2: Present the credential and verify redirect handler execution
+	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`
+	clientID := "redirect_uri:https://example.com/cb"
+	presentationURI := fmt.Sprintf(
+		"openid4vp://present?dcql_query=%s&client_id=%s&response_type=vp_token&response_mode=direct_post&response_uri=%s&nonce=test-nonce-123&state=test-state-456",
+		url.QueryEscape(dcqlQuery),
+		url.QueryEscape(clientID),
+		url.QueryEscape(responseServer.URL),
+	)
+
+	called := false
+	var captured string
+	options := &PresentCredentialOptions{
+		OnRedirect: func(uri string) error {
+			called = true
+			captured = uri
+			return nil
+		},
 	}
 
-	t.Logf("Successfully received credential for presentation: %s", savedCredential.Entry.Id)
-
-	// Step 2: Now present the credential via OID4VP
-	// Create OID4VP URI with all required parameters per OID4VP specification
-	presentationDefinition := `{"id":"test-presentation-definition","input_descriptors":[{"id":"test-descriptor","format":{"jwt_vp":{"alg":["ES256"]}}}]}`
-	presentationURI := fmt.Sprintf("openid4vp://present?presentation_definition=%s&client_id=test-verifier&redirect_uri=%s&response_type=vp_token&response_mode=direct_post&nonce=test-nonce-123&scope=openid&state=test-state-456",
-		url.QueryEscape(presentationDefinition), vpEndpointURL.String())
-
-	mockKey := newMockKeyEntry()
-	err = controller.PresentCredential(presentationURI, mockKey, nil)
-	if err != nil {
-		t.Fatalf("PresentCredential failed: %v", err)
-	}
-
-	t.Log("PresentCredential succeeded with full OID4VCI->OID4VP flow")
+	redirectURI, err := controller.PresentCredentialWithOptions(presentationURI, mockKey, options)
+	require.NoError(t, err)
+	require.Equal(t, redirectTarget, redirectURI)
+	require.True(t, called, "expected redirect handler to be called")
+	require.Equal(t, redirectTarget, captured)
 }
 
 func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *testing.T) {
@@ -1696,14 +4367,12 @@ func TestController_PresentCredential_DetailedErrorPaths_Integration(t *testing.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockKey := newMockKeyEntry()
-			err := controller.PresentCredential(tt.mockURIString, mockKey, nil)
+			_, err := controller.PresentCredential(tt.mockURIString, mockKey, nil)
 
 			if !tt.expectParseError && !tt.expectCredError && err != nil {
 				t.Errorf("PresentCredential() unexpected error: %v", err)
 			} else if (tt.expectParseError || tt.expectCredError) && err == nil {
 				t.Errorf("PresentCredential() expected error but got none for %s", tt.description)
-			} else if err != nil {
-				// Expected error occurred - test passes
 			}
 		})
 	}
@@ -1722,7 +4391,7 @@ func TestController_PresentCredential_DetailedErrorPaths_Integration(t *testing.
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				mockKey := newMockKeyEntry()
-				err := controller.PresentCredential(tc.uri, mockKey, nil)
+				_, err := controller.PresentCredential(tc.uri, mockKey, nil)
 				if err == nil {
 					t.Errorf("Expected error for %s but got none", tc.name)
 				}
@@ -1774,44 +4443,387 @@ func TestApplyOID4VPRequestOptions(t *testing.T) {
 	})
 }
 
-func TestBuildDescriptorMap_UsesVPTokenRootPathForJwtVP(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-	flavor := credential.JwtVc
+func TestNewestCredentials_SelectsMostRecentEntries(t *testing.T) {
+	now := time.Now()
+	entries := []*SavedCredential{
+		{Entry: &credstoreTypes.CredentialEntry{Id: "oldest", ReceivedAt: now.Add(-2 * time.Hour)}},
+		{Entry: &credstoreTypes.CredentialEntry{Id: "newest", ReceivedAt: now}},
+		{Entry: &credstoreTypes.CredentialEntry{Id: "middle", ReceivedAt: now.Add(-time.Hour)}},
+	}
 
-	descriptorMap, err := controller.buildDescriptorMap([]*SavedCredential{{}}, &flavor)
-	require.NoError(t, err)
-	require.Len(t, descriptorMap, 1)
-	require.Equal(t, "$", descriptorMap[0].Path)
-	require.NotNil(t, descriptorMap[0].PathNested)
-	require.Equal(t, "$.verifiableCredential[0]", descriptorMap[0].PathNested.Path)
+	selected := newestCredentials(entries, 1)
+	require.Len(t, selected, 1)
+	require.NotNil(t, selected[0])
+	require.NotNil(t, selected[0].Entry)
+	assert.Equal(t, "newest", selected[0].Entry.Id)
 }
 
-func TestBuildDescriptorMap_UsesVPTokenRootPathForAllJwtDescriptors(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-	flavor := credential.JwtVc
+func TestNewestCredentials_ReturnsEntriesInDescendingReceivedAtOrder(t *testing.T) {
+	now := time.Now()
+	entries := []*SavedCredential{
+		{Entry: &credstoreTypes.CredentialEntry{Id: "first", ReceivedAt: now.Add(-time.Minute)}},
+		{Entry: &credstoreTypes.CredentialEntry{Id: "third", ReceivedAt: now.Add(-3 * time.Minute)}},
+		{Entry: &credstoreTypes.CredentialEntry{Id: "second", ReceivedAt: now.Add(-2 * time.Minute)}},
+	}
 
-	descriptorMap, err := controller.buildDescriptorMap([]*SavedCredential{{}, {}}, &flavor)
+	selected := newestCredentials(entries, 2)
+	require.Len(t, selected, 2)
+	assert.Equal(t, "first", selected[0].Entry.Id)
+	assert.Equal(t, "second", selected[1].Entry.Id)
+}
+
+func TestMockKeyEntrySign_ProducesVerifiableES256Signature(t *testing.T) {
+	key := newMockKeyEntry()
+	payload := []byte("test-payload")
+	signature, err := key.Sign(payload)
 	require.NoError(t, err)
-	require.Len(t, descriptorMap, 2)
+	require.Len(t, signature, 64)
 
-	for i, item := range descriptorMap {
-		require.Equalf(t, fmt.Sprintf("$[%d]", i), item.Path, "descriptorMap[%d].Path", i)
-		require.NotNilf(t, item.PathNested, "descriptorMap[%d].PathNested", i)
-		require.Equalf(t, fmt.Sprintf("$.verifiableCredential[%d]", i), item.PathNested.Path, "descriptorMap[%d].PathNested.Path", i)
+	publicKey, ok := key.PublicKey().Key.(*ecdsa.PublicKey)
+	require.True(t, ok)
+
+	hash := sha256.Sum256(payload)
+	r := new(big.Int).SetBytes(signature[:32])
+	s := new(big.Int).SetBytes(signature[32:])
+	assert.True(t, ecdsa.Verify(publicKey, hash[:], r, s))
+}
+
+func TestWallet_validateCredentialOffer(t *testing.T) {
+	issuerURL, err := url.Parse("https://issuer.example.com")
+	require.NoError(t, err)
+	httpIssuerURL, err := url.Parse("http://issuer.example.com")
+	require.NoError(t, err)
+
+	const preAuthGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+
+	tests := []struct {
+		name string // description of this test case
+		// Named input parameters for target function.
+		offer           *CredentialOffer
+		httpAllowed     bool
+		want            string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:    "nil offer",
+			offer:   nil,
+			wantErr: true,
+		},
+		{
+			name: "missing pre-authorization grant",
+			offer: &CredentialOffer{
+				CredentialIssuer:           issuerURL,
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants:                     map[string]*CredentialOfferGrant{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing credential issuer",
+			offer: &CredentialOffer{
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "credential issuer must include host",
+			offer: &CredentialOffer{
+				CredentialIssuer:           mustParseURL(t, "https:///issuer"),
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "credential issuer must include a host",
+		},
+		{
+			name: "credential issuer must use https by default",
+			offer: &CredentialOffer{
+				CredentialIssuer:           httpIssuerURL,
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "credential issuer must use https scheme",
+		},
+		{
+			name: "credential issuer allows http when configured",
+			offer: &CredentialOffer{
+				CredentialIssuer:           httpIssuerURL,
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			httpAllowed: true,
+			want:        "pre-auth-code",
+		},
+		{
+			name: "credential issuer must not include query",
+			offer: &CredentialOffer{
+				CredentialIssuer:           mustParseURL(t, "https://issuer.example.com?foo=bar"),
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "credential issuer must not include query or fragment",
+		},
+		{
+			name: "credential issuer must not include fragment",
+			offer: &CredentialOffer{
+				CredentialIssuer:           mustParseURL(t, "https://issuer.example.com#fragment"),
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "credential issuer must not include query or fragment",
+		},
+		{
+			name: "empty credential configuration IDs",
+			offer: &CredentialOffer{
+				CredentialIssuer: issuerURL,
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "duplicated credential configuration IDs",
+			offer: &CredentialOffer{
+				CredentialIssuer:           issuerURL,
+				CredentialConfigurationIDs: []string{"Degree", "VerifiableCredential", "Degree"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "credential configuration IDs must be unique",
+		},
+		{
+			name: "empty pre-authorization code",
+			offer: &CredentialOffer{
+				CredentialIssuer:           issuerURL,
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: ""},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid offer",
+			offer: &CredentialOffer{
+				CredentialIssuer:           issuerURL,
+				CredentialConfigurationIDs: []string{"test-credential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			want: "pre-auth-code",
+		},
+		{
+			name: "valid offer with multiple unique credential configuration IDs",
+			offer: &CredentialOffer{
+				CredentialIssuer:           issuerURL,
+				CredentialConfigurationIDs: []string{"Degree", "VerifiableCredential"},
+				Grants: map[string]*CredentialOfferGrant{
+					preAuthGrantType: {PreAuthorizedCode: "pre-auth-code"},
+				},
+			},
+			want: "pre-auth-code",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpAllowed := env.IsHTTPAllowed()
+			debugMode := env.IsDebugMode()
+			defer env.SetHTTPAllowed(httpAllowed)
+			defer env.SetDebugMode(debugMode)
+			env.SetDebugMode(false)
+			env.SetHTTPAllowed(tt.httpAllowed)
+
+			w, err := NewWallet()
+			require.NoError(t, err)
+
+			got, gotErr := w.validateCredentialOffer(tt.offer)
+			if tt.wantErr {
+				require.Error(t, gotErr)
+				if tt.wantErrContains != "" {
+					require.Contains(t, gotErr.Error(), tt.wantErrContains)
+				}
+				return
+			}
+
+			require.NoError(t, gotErr)
+			require.Equal(t, tt.want, got)
+		})
 	}
 }
 
-func TestBuildDescriptorMap_UsesVPTokenRootPathForALLSdJwtDescriptors(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-	flavor := credential.SDJwtVC
+func TestWallet_validateCredentialConfigurationIDs(t *testing.T) {
+	tests := []struct {
+		name            string
+		offer           *CredentialOffer
+		issuerMetadata  *receiverTypes.CredentialIssuerMetadata
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:    "all offered configuration IDs are supported",
+			offer:   &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json", "StudentID_jwt_vc_json"}},
+			wantErr: false,
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+					"EmployeeID_jwt_vc_json": {Format: "jwt_vc_json"},
+					"StudentID_jwt_vc_json":  {Format: "jwt_vc_json"},
+				},
+			},
+		},
+		{
+			name:  "unsupported offered configuration ID is rejected",
+			offer: &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json", "UnknownID_jwt_vc_json"}},
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+					"EmployeeID_jwt_vc_json": {Format: "jwt_vc_json"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: `credential configuration "UnknownID_jwt_vc_json" is not supported by issuer metadata`,
+		},
+		{
+			name:            "missing issuer metadata is rejected",
+			offer:           &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json"}},
+			issuerMetadata:  nil,
+			wantErr:         true,
+			wantErrContains: "issuer metadata is required",
+		},
+		{
+			name:  "missing supported configurations in metadata is rejected",
+			offer: &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json"}},
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{},
+			},
+			wantErr:         true,
+			wantErrContains: "credential configurations supported are missing in issuer metadata",
+		},
+	}
 
-	descriptorMap, err := controller.buildDescriptorMap([]*SavedCredential{{}, {}}, &flavor)
+	w, err := NewWallet()
 	require.NoError(t, err)
-	require.Len(t, descriptorMap, 2)
 
-	for i, item := range descriptorMap {
-		require.Equalf(t, fmt.Sprintf("$[%d]", i), item.Path, "descriptorMap[%d].Path", i)
-		require.Equalf(t, "dc+sd-jwt", item.Format, "descriptorMap[%d].Format", i)
-		require.Nilf(t, item.PathNested, "descriptorMap[%d].PathNested", i)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := w.validateCredentialConfigurationIDs(tt.offer, tt.issuerMetadata)
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErrContains)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry) {
+	t.Helper()
+	t.Setenv(env.DEBUG.String(), "")
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
+	controller := createTestControllerWithDefaults(t)
+	issuer, _, closeServer := newReceiveCredentialTestServer(t)
+	t.Cleanup(closeServer)
+	key := newMockKeyEntry()
+	saved, err := controller.ReceiveCredential(ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"test-config"},
+			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "test-code"}},
+		}, Type: receiverTypes.Oid4vci, Key: key,
+	})
+	require.NoError(t, err, "presentation test must receive and store a real signed credential")
+	require.NotNil(t, saved)
+	require.NotEmpty(t, saved.Entry.Raw)
+	return controller, key
+}
+
+func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
+	for _, draft := range []bool{false, true} {
+		name := "final"
+		if draft {
+			name = "draft24"
+		}
+		t.Run(name, func(t *testing.T) {
+			controller, key := receiveCredentialForPresentationTest(t)
+			captured := make(chan url.Values, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				captured <- r.PostForm
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"redirect_uri":"https://verifier.example/done"}`))
+			}))
+			defer server.Close()
+			params := url.Values{
+				"client_id": {"redirect_uri:" + server.URL}, "response_uri": {server.URL},
+				"response_type": {"vp_token"}, "response_mode": {"direct_post"},
+				"nonce": {"test-nonce"}, "state": {"test-state"},
+			}
+			if draft {
+				params.Set("scope", "openid")
+				params.Set("presentation_definition", `{"id":"definition","input_descriptors":[{"id":"identity","format":{"jwt_vp_json":{"alg":["ES256"]}}}]}`)
+			} else {
+				params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"jwt_vc_json","meta":{}}]}`)
+			}
+			uri := "openid4vp://present?" + params.Encode()
+			if draft {
+				require.NoError(t, controller.PresentDraft24Credential(uri, key, nil))
+			} else {
+				redirect, err := controller.PresentCredential(uri, key, nil)
+				require.NoError(t, err)
+				require.Equal(t, "https://verifier.example/done", redirect)
+			}
+			var form url.Values
+			select {
+			case form = <-captured:
+			default:
+				t.Fatal("verifier received no presentation")
+			}
+			require.Equal(t, "test-state", form.Get("state"))
+			var serialized string
+			if draft {
+				serialized = form.Get("vp_token")
+				var submission struct {
+					DefinitionID string `json:"definition_id"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(form.Get("presentation_submission")), &submission))
+				require.Equal(t, "definition", submission.DefinitionID)
+			} else {
+				require.NotContains(t, form, "presentation_submission")
+				var response map[string][]string
+				require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &response))
+				require.Len(t, response["identity"], 1)
+				serialized = response["identity"][0]
+			}
+			signed, err := jwt.ParseSigned(serialized, []jose.SignatureAlgorithm{jose.ES256})
+			require.NoError(t, err)
+			var claims map[string]any
+			require.NoError(t, signed.Claims(key.PublicKey().Key, &claims))
+			require.Equal(t, "test-nonce", claims["nonce"])
+			vp, ok := claims["vp"].(map[string]any)
+			require.True(t, ok)
+			require.Len(t, vp["verifiableCredential"], 1)
+		})
 	}
 }

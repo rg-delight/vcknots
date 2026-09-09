@@ -20,6 +20,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -28,6 +29,8 @@ type Oid4vciReceiver struct {
 	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
 	AllowHTTP bool
 }
+
+var _ types.OID4VCIFinalReceiver = (*Oid4vciReceiver)(nil)
 
 type DPoPProofFactory = types.DPoPProofFactory
 
@@ -39,7 +42,42 @@ func (o *Oid4vciReceiver) httpClient() *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
 	}
-	return http.DefaultClient
+	return oid4vciHTTPClient
+}
+
+const (
+	wellKnownCredentialIssuer    = "/.well-known/openid-credential-issuer"
+	wellKnownAuthorizationServer = "/.well-known/oauth-authorization-server"
+)
+
+type credentialNonceResponse struct {
+	CNonce *string `json:"c_nonce"`
+	Nonce  *string `json:"nonce"`
+}
+
+const maxNonceResponseBodyBytes int64 = 4 << 10
+
+var oid4vciHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// rejectTokenRedirect refuses to follow redirects. The token request carries the
+// client_assertion in its body, and a 307 or 308 response would make the HTTP
+// client replay that body against whatever origin the redirect names. Token
+// endpoints do not redirect, so failing is the safe reading.
+func rejectTokenRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("token endpoint redirected to %s: redirects are not followed for token requests", req.URL.Redacted())
+}
+
+// OID4VCICredentialFormatToSerializationFlavor maps OID4VCI credential format identifiers
+// to wallet serialization flavors.
+func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.SupportedSerializationFlavor, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "jwt_vc_json", "jwt_vc", string(credential.JwtVc):
+		return credential.JwtVc, nil
+	case "dc+sd-jwt", string(credential.SDJwtVC):
+		return credential.SDJwtVC, nil
+	default:
+		return "", fmt.Errorf("unsupported credential format: %q", format)
+	}
 }
 
 // doRequest performs an HTTP request and unmarshals the JSON response into target.
@@ -53,10 +91,8 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 	if path == "/.well-known/oauth-authorization-server" {
 		// Special handling for metadata discovery as per RFC 8414 §3
 		// The well-known string MUST be inserted between the host component and the path component.
-		originalPath := endpointURL.Path
-		if originalPath == "/" {
-			originalPath = ""
-		}
+		// RFC 8414 §3.1 excludes the trailing slash from the AS path component.
+		originalPath := strings.TrimSuffix(endpointURL.Path, "/")
 		if !strings.HasPrefix(originalPath, path) {
 			endpointURL.Path = path + originalPath
 		}
@@ -71,6 +107,9 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 }
 
 func (o *Oid4vciReceiver) doRequestURL(method string, endpointURL url.URL, body io.Reader, target interface{}) error {
+	if method != http.MethodGet && method != http.MethodPost {
+		return fmt.Errorf("unsupported HTTP method: %s", method)
+	}
 	if method == "POST" && body == nil {
 		return fmt.Errorf("POST request requires a body")
 	}
@@ -100,7 +139,6 @@ func (o *Oid4vciReceiver) doRequestURL(method string, endpointURL url.URL, body 
 	if len(bodyBytes) == 0 {
 		return fmt.Errorf("empty response body")
 	}
-
 	if err := json.Unmarshal(bodyBytes, target); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
@@ -130,7 +168,7 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
 	var metadata types.CredentialIssuerMetadata
-	if err := o.doRequest("GET", endpoint, "/.well-known/openid-credential-issuer", nil, &metadata); err != nil {
+	if err := o.doRequest("GET", endpoint, wellKnownCredentialIssuer, nil, &metadata); err != nil {
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
 
@@ -168,32 +206,182 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	}
 
 	var metadata types.AuthorizationServerMetadata
-	if err := o.doRequest("GET", endpoint, "/.well-known/oauth-authorization-server", nil, &metadata); err != nil {
+	if err := o.doRequest("GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
 		return nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
 	return &metadata, nil
 }
 
-func (o *Oid4vciReceiver) FetchAccessToken(receivingTypes types.SupportedReceivingTypes, endpoint common.URIField, request types.PreAuthorizedCodeTokenRequest) (*types.CredentialIssuanceAccessToken, error) {
+func (o *Oid4vciReceiver) FetchAccessToken(
+	receivingTypes types.SupportedReceivingTypes,
+	endpoint common.URIField,
+	authzCode string,
+	txCode string,
+	opts ...types.TokenRequestOption,
+) (*types.CredentialIssuanceAccessToken, error) {
+	if receivingTypes != types.Oid4vci {
+		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
+	}
+	formData := url.Values{}
+	formData.Set("grant_type", "urn:ietf:params:oauth:grant-type:pre-authorized_code")
+	formData.Set("pre-authorized_code", authzCode)
+	if txCode != "" {
+		formData.Set("tx_code", txCode)
+	}
+	requestConfig := types.NewTokenRequestConfig(opts...)
+	if requestConfig.ClientAssertion != "" {
+		// private_key_jwt identifies the client by client_id, and an empty one
+		// would only be rejected at the authorization server, where the cause
+		// is far harder to see.
+		if strings.TrimSpace(requestConfig.ClientID) == "" {
+			return nil, fmt.Errorf("client_id is required when a client assertion is sent")
+		}
+		formData.Set("client_assertion", requestConfig.ClientAssertion)
+		formData.Set("client_assertion_type", types.ClientAssertionTypeJWTBearer)
+	}
+	// Sent for both authenticated and unauthenticated requests: client_id is
+	// OPTIONAL for the pre-authorized code grant, so it is included whenever the
+	// caller configured one.
+	if strings.TrimSpace(requestConfig.ClientID) != "" {
+		formData.Set("client_id", requestConfig.ClientID)
+	}
+	endpointURLString := types.ResolveTokenEndpointURL(endpoint)
+	endpointURL, err := url.Parse(endpointURLString)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token endpoint URL: %w", err)
+	}
+
+	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
+		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+	}
+
+	// A client assertion proves possession of the registered client key, and
+	// RFC 6749 section 10.8 requires client credentials never to travel in the
+	// clear. VCKNOTS_WALLET_HTTP_ALLOWED exists so that the local samples can
+	// talk to a development server on this machine, which is why loopback
+	// stays permitted; it is not a licence to send the assertion across a
+	// network unprotected.
+	if requestConfig.ClientAssertion != "" &&
+		!strings.EqualFold(endpointURL.Scheme, "https") &&
+		!common.IsLoopbackHost(endpointURL.Hostname()) {
+		return nil, fmt.Errorf(
+			"refusing to send a client assertion to %q over %q: https is required for any host other than loopback",
+			endpointURL.Host, endpointURL.Scheme)
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		endpointURL.String(),
+		strings.NewReader(formData.Encode()),
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	if requestConfig.DPoPProof != "" {
+		req.Header.Set("DPoP", requestConfig.DPoPProof)
+	}
+	tokenClient := *o.httpClient()
+	tokenClient.CheckRedirect = rejectTokenRedirect
+	resp, err := tokenClient.Do(req)
+
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if isUseDPoPNonceResponse(resp, bodyBytes) {
+			return nil, types.NewDPoPNonceError(resp.Header.Get("DPoP-Nonce"), types.ErrTokenRequestFailed)
+		}
+		if resp.StatusCode == http.StatusBadRequest {
+			if errorCode := tokenErrorCode(bodyBytes); errorCode != "" {
+				return nil, fmt.Errorf(
+					"token request failed: %s; status: %d; response: %s: %w",
+					errorCode,
+					resp.StatusCode,
+					string(bodyBytes),
+					types.ErrTokenRequestFailed,
+				)
+			}
+		}
+		return nil, fmt.Errorf(
+			"unexpected status code: %d response: %s",
+			resp.StatusCode,
+			string(bodyBytes),
+		)
+	}
+
+	var accessToken types.CredentialIssuanceAccessToken
+	if err := json.Unmarshal(bodyBytes, &accessToken); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return &accessToken, nil
+
+}
+
+func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
 
-	// Prepare form data for token request
-	formData := url.Values{}
-	formData.Set("grant_type", "urn:ietf:params:oauth:grant-type:pre-authorized_code")
-	formData.Set("pre-authorized_code", request.PreAuthorizedCode)
-	if request.TxCode != "" {
-		formData.Set("tx_code", request.TxCode)
+	nonceEndpointURL := url.URL(endpoint)
+	if !o.AllowHTTP && !strings.EqualFold(nonceEndpointURL.Scheme, "https") {
+		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", nonceEndpointURL.Scheme)
 	}
 
-	var accessToken types.CredentialIssuanceAccessToken
-	if err := o.doRequest("POST", endpoint, "/token", strings.NewReader(formData.Encode()), &accessToken); err != nil {
-		return nil, fmt.Errorf("failed to fetch access token: %w", err)
+	req, err := http.NewRequest(http.MethodPost, nonceEndpointURL.String(), http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create nonce request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := o.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxNonceResponseBodyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read nonce response: %w", err)
 	}
 
-	return &accessToken, nil
+	if int64(len(bodyBytes)) > maxNonceResponseBodyBytes {
+		return nil, fmt.Errorf("nonce endpoint response exceeds %d bytes", maxNonceResponseBodyBytes)
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("nonce endpoint returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	if len(bodyBytes) == 0 {
+		return nil, fmt.Errorf("nonce endpoint returned empty response")
+	}
+
+	var nonceResponse credentialNonceResponse
+	if err := json.Unmarshal(bodyBytes, &nonceResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse nonce response: %w", err)
+	}
+
+	if nonceResponse.CNonce != nil && *nonceResponse.CNonce != "" {
+		return nonceResponse.CNonce, nil
+	}
+	if nonceResponse.Nonce != nil && *nonceResponse.Nonce != "" {
+		return nonceResponse.Nonce, nil
+	}
+
+	return nil, fmt.Errorf("nonce response does not contain c_nonce or nonce")
 }
 
 func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, request types.PushedAuthorizationRequest, headers types.OAuthClientAttestationHeaders) (*types.PushedAuthorizationResponse, error) {
@@ -265,7 +453,7 @@ func (o *Oid4vciReceiver) FetchClientAttestationChallenge(endpoint common.URIFie
 	return &response, nil
 }
 
-func (o *Oid4vciReceiver) FetchNonce(endpoint common.URIField) (*types.NonceResponse, error) {
+func (o *Oid4vciReceiver) FetchNonceResponse(endpoint common.URIField) (*types.NonceResponse, error) {
 	var response types.NonceResponse
 	if err := o.doFinalRequest(http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
@@ -585,12 +773,6 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField,
 	return nil, "", fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
 }
 
-func (o *Oid4vciReceiver) doFormRequestWithDpopRetry(endpoint common.URIField, body io.Reader, headers map[string]string, proofFactory DPoPProofFactory, target any) error {
-	return o.doFormRequestWithDpopAndHeadersRetry(endpoint, body, func() (map[string]string, error) {
-		return headers, nil
-	}, proofFactory, target)
-}
-
 func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint common.URIField, body io.Reader, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {
 	if headersFactory == nil {
 		return fmt.Errorf("OAuth client attestation headers factory is required")
@@ -857,10 +1039,12 @@ func x5cHeaders(key jose.JSONWebKey) map[string]any {
 func (o *Oid4vciReceiver) ReceiveCredential(
 	receivingTypes types.SupportedReceivingTypes,
 	endpoint common.URIField,
-	format string,
+	credentialConfigurationID string,
+	credentialIdentifier *string,
 	accessToken types.CredentialIssuanceAccessToken,
 	credentialDefinition *types.CredentialDefinition,
 	jwtProof *string,
+	options ...*types.CredentialRequestOptions,
 ) (*string, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
@@ -872,18 +1056,16 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	// Prepare credential request body
-	reqBody := map[string]interface{}{
-		"format": format,
-	}
-
-	if credentialDefinition != nil {
-		reqBody["credential_definition"] = credentialDefinition
+	reqBody := map[string]interface{}{}
+	if credentialIdentifier != nil && *credentialIdentifier != "" {
+		reqBody["credential_identifier"] = *credentialIdentifier
+	} else {
+		reqBody["credential_configuration_id"] = credentialConfigurationID
 	}
 
 	if jwtProof != nil {
-		reqBody["proof"] = map[string]interface{}{
-			"proof_type": "jwt",
-			"jwt":        *jwtProof,
+		reqBody["proofs"] = map[string]interface{}{
+			"jwt": []string{*jwtProof},
 		}
 	}
 
@@ -898,11 +1080,18 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 		return nil, err
 	}
 
+	requestOptions := firstCredentialRequestOptions(options)
+
 	// Set headers
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	// Capitalize the token type (e.g., "bearer" -> "Bearer") for spec compliance
-	tokenType := cases.Title(language.English).String(strings.ToLower(accessToken.TokenType))
+	tokenType := authorizationScheme(accessToken.TokenType)
 	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken.Token))
+	if strings.EqualFold(accessToken.TokenType, "DPoP") {
+		if requestOptions == nil || requestOptions.DPoPProofJWT == nil || *requestOptions.DPoPProofJWT == "" {
+			return nil, fmt.Errorf("DPoP proof JWT is required for DPoP access token")
+		}
+		req.Header.Set("DPoP", *requestOptions.DPoPProofJWT)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.ContentLength = int64(len(reqBodyBytes))
 
@@ -919,6 +1108,15 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	if resp.StatusCode != 200 {
+		if isUseDPoPNonceResponse(resp, bodyBytes) {
+			return nil, fmt.Errorf(
+				"%w; status: %d; endpoint: %s; response: %s",
+				types.NewDPoPNonceError(resp.Header.Get("DPoP-Nonce"), types.ErrUseDPoPNonce),
+				resp.StatusCode,
+				endpointURL.String(),
+				string(bodyBytes),
+			)
+		}
 		return nil, fmt.Errorf("failed to receive credential; status: %d; endpoint: %s; response: %s", resp.StatusCode, endpointURL.String(), string(bodyBytes))
 	}
 
@@ -932,9 +1130,32 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 		return nil, err
 	}
 
-	credential, ok := credentialResponse["credential"]
-	if !ok {
-		return nil, fmt.Errorf("no credential found in response")
+	var credential interface{}
+
+	credentialsRaw, hasCredentials := credentialResponse["credentials"]
+	if hasCredentials {
+		credentials, ok := credentialsRaw.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("credentials response has invalid type")
+		}
+		if len(credentials) != 1 {
+			return nil, fmt.Errorf("credentials response must contain exactly one credential, got %d", len(credentials))
+		}
+		credentialWrapper, ok := credentials[0].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("first credential entry has invalid format")
+		}
+		var found bool
+		credential, found = credentialWrapper["credential"]
+		if !found {
+			return nil, fmt.Errorf("credential field missing in first credentials entry")
+		}
+	} else {
+		var ok bool
+		credential, ok = credentialResponse["credential"]
+		if !ok {
+			return nil, fmt.Errorf("no credential found in response")
+		}
 	}
 
 	credentialStr, ok := credential.(string)
@@ -948,4 +1169,45 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	return &credentialStr, nil
+}
+
+func firstCredentialRequestOptions(options []*types.CredentialRequestOptions) *types.CredentialRequestOptions {
+	for _, option := range options {
+		if option != nil {
+			return option
+		}
+	}
+	return nil
+}
+
+func authorizationScheme(tokenType string) string {
+	switch {
+	case strings.EqualFold(tokenType, "bearer"):
+		return "Bearer"
+	case strings.EqualFold(tokenType, "dpop"):
+		return "DPoP"
+	default:
+		return cases.Title(language.English).String(strings.ToLower(tokenType))
+	}
+}
+
+func tokenErrorCode(bodyBytes []byte) string {
+	var errorResponse struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(bodyBytes, &errorResponse); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(errorResponse.Error)
+}
+
+func isUseDPoPNonceError(bodyBytes []byte) bool {
+	return tokenErrorCode(bodyBytes) == "use_dpop_nonce"
+}
+
+func isUseDPoPNonceResponse(resp *http.Response, bodyBytes []byte) bool {
+	if isUseDPoPNonceError(bodyBytes) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(resp.Header.Get("WWW-Authenticate")), "use_dpop_nonce")
 }

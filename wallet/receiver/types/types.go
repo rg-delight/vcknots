@@ -2,8 +2,11 @@
 package types
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -20,6 +23,7 @@ var (
 	ErrTokenRequestFailed        = errors.New("token request failed")
 	ErrInvalidTokenResponse      = errors.New("invalid token response")
 	ErrProofGenerationFailed     = errors.New("proof generation failed")
+	ErrUseDPoPNonce              = errors.New("use DPoP nonce")
 	ErrInvalidProofType          = errors.New("invalid or unsupported proof type")
 	ErrNetworkFailed             = errors.New("network request failed")
 	ErrTimeoutExpired            = errors.New("request timeout expired")
@@ -56,7 +60,47 @@ func NewReceiverError(protocol SupportedReceivingTypes, endpoint, op string, err
 	}
 }
 
+type DPoPNonceError struct {
+	Nonce string
+	Err   error
+}
+
+func NewDPoPNonceError(nonce string, err error) *DPoPNonceError {
+	if err == nil {
+		err = ErrUseDPoPNonce
+	}
+	return &DPoPNonceError{
+		Nonce: strings.TrimSpace(nonce),
+		Err:   err,
+	}
+}
+
+func (e *DPoPNonceError) Error() string {
+	message := fmt.Sprintf("%s (use_dpop_nonce)", e.Err)
+	if e.Nonce == "" {
+		return message
+	}
+	return fmt.Sprintf("%s, DPoP-Nonce: %q", message, e.Nonce)
+}
+
+func (e *DPoPNonceError) Unwrap() error {
+	return e.Err
+}
+
+func (e *DPoPNonceError) Is(target error) bool {
+	return target == ErrUseDPoPNonce
+}
+
+func DPoPNonceFromError(err error) (string, bool) {
+	var nonceErr *DPoPNonceError
+	if errors.As(err, &nonceErr) {
+		return nonceErr.Nonce, true
+	}
+	return "", false
+}
+
 type SupportedReceivingTypes int
+type SignatureAlgorithm jose.SignatureAlgorithm
 
 const (
 	Oid4vci SupportedReceivingTypes = iota
@@ -92,12 +136,50 @@ type CredentialResponseEncryption struct {
 type CredentialConfiguration struct {
 	Display                              *[]CredentialConfigurationDisplay `json:"display,omitempty"`
 	ProofTypesSupported                  *map[string]ProofType             `json:"proof_types_supported,omitempty"`
-	Format                               string                            `json:"format"`
 	Scope                                string                            `json:"scope,omitempty"`
 	CredentialIdentifier                 string                            `json:"credential_identifier,omitempty"`
-	CryptographicBindingMethodsSupported []string                          `json:"cryptographic_binding_methods_supported,omitempty"`
+	CryptographicBindingMethodsSupported *[]string                         `json:"cryptographic_binding_methods_supported,omitempty"`
+	Format                               string                            `json:"format"`
 	CredentialDefinition                 *CredentialDefinition             `json:"credential_definition,omitempty"`
-	CredentialSigningAlgValuesSupported  []any                             `json:"credential_signing_alg_values_supported,omitempty"`
+	CredentialSigningAlgValuesSupported  []SignatureAlgorithm              `json:"credential_signing_alg_values_supported,omitempty"`
+}
+
+var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
+	-8:   jose.EdDSA,
+	5:    jose.HS256,
+	6:    jose.HS384,
+	7:    jose.HS512,
+	-257: jose.RS256,
+	-258: jose.RS384,
+	-259: jose.RS512,
+	-7:   jose.ES256,
+	-9:   jose.ES256, // ESP256 (fully-specified ECDSA using P-256 and SHA-256)
+	-35:  jose.ES384,
+	-36:  jose.ES512,
+	-37:  jose.PS256,
+	-38:  jose.PS384,
+	-39:  jose.PS512,
+}
+
+func (c *SignatureAlgorithm) UnmarshalJSON(raw []byte) error {
+	var coseID int64
+	if err := json.Unmarshal(raw, &coseID); err == nil {
+		// COSE algorithm identifier
+		alg, ok := coseAlgToJWA[coseID]
+		if !ok {
+			return fmt.Errorf("unsupported COSE algorithm identifier %d", coseID)
+		}
+		*c = SignatureAlgorithm(alg)
+		return nil
+	}
+
+	// JWA name
+	var alg string
+	if err := json.Unmarshal(raw, &alg); err != nil {
+		return fmt.Errorf("invalid credential_signing_alg_values_supported entry: %w", err)
+	}
+	*c = SignatureAlgorithm(alg)
+	return nil
 }
 
 type CredentialIssuerMetadataDisplay struct {
@@ -220,17 +302,87 @@ const (
 	SelfSignedTlsClientAuth TokenEndpointAuthMethod = "self_signed_tls_client_auth"
 )
 
-// RFC 6749
-type CredentialIssuanceAccessToken struct {
-	Token           string  `json:"access_token"`
-	TokenType       string  `json:"token_type"`
-	ExpiresIn       int     `json:"expires_in,omitempty"`
-	RefreshToken    *string `json:"refresh_token,omitempty"`
-	CNonce          *string `json:"c_nonce,omitempty"`
-	CNonceExpiresIn *int    `json:"c_nonce_expires_in,omitempty"`
+// RFC 9396 (Rich Authorization Requests)
+type CredentialIssuanceAuthorizationDetail struct {
+	Type                  string   `json:"type,omitempty"`
+	CredentialIdentifiers []string `json:"credential_identifiers,omitempty"`
 }
 
-// PreAuthorizedCodeTokenRequest holds pre-authorized token request parameters.
+const AuthorizationDetailTypeOpenIDCredential = "openid_credential"
+
+// ClientAssertionTypeJWTBearer is the client_assertion_type value used for
+// private_key_jwt (and client_secret_jwt) client authentication per RFC 7523.
+const ClientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+type CredentialIssuanceAccessToken struct {
+	Token                string                                  `json:"access_token"`
+	TokenType            string                                  `json:"token_type"`
+	ExpiresIn            int                                     `json:"expires_in,omitempty"`
+	RefreshToken         *string                                 `json:"refresh_token,omitempty"`
+	CNonce               *string                                 `json:"c_nonce,omitempty"`
+	CNonceExpiresIn      *int                                    `json:"c_nonce_expires_in,omitempty"`
+	AuthorizationDetails []CredentialIssuanceAuthorizationDetail `json:"authorization_details,omitempty"`
+}
+
+type CredentialRequestOptions struct {
+	DPoPProofJWT *string
+}
+
+type TokenRequestConfig struct {
+	DPoPProof       string
+	ClientID        string
+	ClientAssertion string
+}
+
+type TokenRequestOption func(*TokenRequestConfig)
+
+func NewTokenRequestConfig(opts ...TokenRequestOption) *TokenRequestConfig {
+	cfg := &TokenRequestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+	return cfg
+}
+
+func WithDPoPProof(proof string) TokenRequestOption {
+	return func(cfg *TokenRequestConfig) {
+		cfg.DPoPProof = proof
+	}
+}
+
+// WithClientAssertion sets the private_key_jwt client authentication parameters.
+// When set, the token request includes client_id, client_assertion and
+// client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer.
+func WithClientAssertion(clientID, assertion string) TokenRequestOption {
+	return func(cfg *TokenRequestConfig) {
+		cfg.ClientID = clientID
+		cfg.ClientAssertion = assertion
+	}
+}
+
+// WithClientID sets the client_id sent with the token request without any
+// client authentication. client_id is OPTIONAL for the pre-authorized code
+// grant, so this identifies the client to an authorization server that expects
+// to know who is asking without requiring the client to authenticate.
+func WithClientID(clientID string) TokenRequestOption {
+	return func(cfg *TokenRequestConfig) {
+		cfg.ClientID = clientID
+	}
+}
+
+// ResolveTokenEndpointURL returns the canonical token endpoint URL string.
+// Metadata token_endpoint values are complete endpoint URLs, so this only
+// normalizes trailing slashes and does not append "/token".
+func ResolveTokenEndpointURL(endpoint common.URIField) string {
+	endpointURL := url.URL(endpoint)
+	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/")
+	return endpointURL.String()
+}
+
+// PreAuthorizedCodeTokenRequest holds the legacy pre-authorized token request parameters.
+// Deprecated: FetchAccessToken now accepts authzCode, txCode and TokenRequestOption arguments.
 type PreAuthorizedCodeTokenRequest struct {
 	PreAuthorizedCode string `json:"pre-authorized_code"`
 	TxCode            string `json:"tx_code,omitempty"`
@@ -314,16 +466,21 @@ type Receiver interface {
 	FetchAuthorizationServerMetadata(endpoint common.URIField, receivingType SupportedReceivingTypes) (*AuthorizationServerMetadata, error)
 
 	// FetchAccessToken fetches access token through OID4VCI
-	FetchAccessToken(receivingType SupportedReceivingTypes, endpoint common.URIField, request PreAuthorizedCodeTokenRequest) (*CredentialIssuanceAccessToken, error)
+	FetchAccessToken(receivingType SupportedReceivingTypes, endpoint common.URIField, authzCode string, txCode string, opts ...TokenRequestOption) (*CredentialIssuanceAccessToken, error)
+
+	// FetchNonce fetches nonce from the issuer nonce endpoint
+	FetchNonce(receivingType SupportedReceivingTypes, endpoint common.URIField) (*string, error)
 
 	// ReceiveCredential receives credential through OID4VCI
 	ReceiveCredential(
 		receivingType SupportedReceivingTypes,
 		endpoint common.URIField,
-		format string,
+		credentialConfigurationID string,
+		credentialIdentifier *string,
 		accessToken CredentialIssuanceAccessToken,
 		credentialDefinition *CredentialDefinition,
 		jwtProof *string,
+		options ...*CredentialRequestOptions,
 	) (*string, error)
 }
 
@@ -346,7 +503,7 @@ type OID4VCIFinalReceiver interface {
 	ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headers OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
 	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
 	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
-	FetchNonce(endpoint common.URIField) (*NonceResponse, error)
+	FetchNonceResponse(endpoint common.URIField) (*NonceResponse, error)
 	PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
 	SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification NotificationRequest, proofFactory DPoPProofFactory) error
 	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)

@@ -6,9 +6,9 @@ on:
       - main
   workflow_dispatch:
 
-
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -16,44 +16,45 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6.0.10
         with:
-          version: 10.11.0
+          version: 11.10.0
           run_install: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
-          node-version: 22
+          node-version: 24.18.1
           cache: "pnpm"
 
       - name: Install dependencies
-        run: pnpm install
+        run: |
+          # care npm Trusted Publish Auth
+          npm install -g npm@latest
+          pnpm install
 
       - name: Build
         run: |
           pnpm build
-    
-      - name: Check npm auth
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
-          npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Print publish config
+        run: |
+          npm --version
+          npm pkg get name
+          npm pkg get version
+          npm config get registry
+          echo "OIDC_REQUEST_TOKEN=${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+SET}"
 
       - name: Publish
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           pnpm changeset publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Push release tags
         run: |
@@ -61,3 +62,13 @@ jobs:
           git tag
           git show-ref --tags
           git push origin --tags
+
+      - name: Notify Slack on Workflow Failure
+        if: ${{ failure() }}
+        uses: slackapi/slack-github-action@v4.0.0
+        with:
+          errors: true
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "🚨 *GitHub Actions エラー発生*\n*リポジトリ:* ${{ github.repository }}\n*ワークフロー:* ${{ github.workflow }}\n*実行ログ:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|ログを確認する>"

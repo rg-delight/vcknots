@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,7 +34,7 @@ func (p *Oid4vpPresenter) httpClient() *http.Client {
 	if p.HTTPClient != nil {
 		return p.HTTPClient
 	}
-	return http.DefaultClient
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // ParsePresentationRequest parses the presentation request URI and returns a CredentialPresentationRequest,
@@ -46,13 +47,30 @@ func (p *Oid4vpPresenter) httpClient() *http.Client {
 //
 // This function detect which option is used and passes that to the proper handlers to obtain the CredentialPresentationRequest.
 func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
+	return p.parsePresentationRequest(uriString, false)
+}
+
+// ParseDraft24PresentationRequest accepts the existing Draft24 Presentation Exchange and DCQL request forms.
+// New Final integrations must use ParsePresentationRequest.
+func (p *Oid4vpPresenter) ParseDraft24PresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
+	return p.parsePresentationRequest(uriString, true)
+}
+
+func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 bool) (*CredentialPresentationRequest, error) {
 	parsedURL, err := url.Parse(uriString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URI: %w", err)
 	}
 	queryParams := parsedURL.Query()
+	// Reject malformed outer identifiers before dereferencing request_uri.
+	if clientID := strings.TrimSpace(queryParams.Get("client_id")); clientID != "" {
+		if _, err := parseOID4VPClientID(clientID); err != nil {
+			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
+		}
+	}
 
 	builder := NewRequestBuilder()
+	builder.draft24 = draft24
 	builder.httpClient = p.httpClient()
 	builder.allowHTTP = p.AllowHTTP
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
@@ -81,21 +99,111 @@ func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*Credentia
 
 	req, err := builder.Build()
 	if err != nil {
+		// OID4VP: when the Authorization Request is rejected with an OAuth
+		// error code and response_mode=direct_post, deliver the error
+		// authorization response to the Verifier's response_uri. Requests
+		// received as Request Objects are excluded: their validation fails
+		// before the signature is verified, so the response_uri is not yet
+		// trustworthy (see requestBuilder.errorResponseAllowed).
+		var authzErr *AuthorizationRequestError
+		if errors.As(err, &authzErr) && builder.errorResponseAllowed {
+			if sendErr := p.sendAuthorizationErrorResponse(builder.req, authzErr); sendErr != nil {
+				return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w (also failed to send error authorization response: %v)", err, sendErr)
+			}
+		}
 		return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w", err)
 	}
 
 	return req, nil
 }
 
-// Present sends the presentation to the verifier
-func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, presentationSubmission types.PresentationSubmission, request *types.PresentationRequest) error {
-	if protocol != types.Oid4vp {
-		return fmt.Errorf("plugin type mismatch")
+// sendAuthorizationErrorResponse posts the OAuth 2.0 error authorization
+// response (error, error_description and state) to the Verifier's
+// response_uri when response_mode=direct_post. It is a no-op when the
+// partially parsed request has no usable direct_post response_uri.
+func (p *Oid4vpPresenter) sendAuthorizationErrorResponse(req *CredentialPresentationRequest, authzErr *AuthorizationRequestError) error {
+	if req == nil || req.ResponseMode != OAuthAuthzReqResponseModeDirectPost || req.ResponseURI == "" {
+		return nil
 	}
 
-	presentationSubmissionJSON, err := json.Marshal(presentationSubmission)
+	responseURI, err := parseResponseURI(req.ResponseURI, p.AllowHTTP)
 	if err != nil {
-		return fmt.Errorf("failed to marshal presentation_submission: %w", err)
+		return err
+	}
+
+	formData := url.Values{}
+	formData.Set("error", string(authzErr.Code))
+	if authzErr.Err != nil {
+		formData.Set("error_description", authzErr.Err.Error())
+	}
+	if req.State != "" {
+		formData.Set("state", req.State)
+	}
+
+	if _, err := p.postAuthorizationResponse(responseURI.String(), formData); err != nil {
+		return fmt.Errorf("failed to send error authorization response: %w", err)
+	}
+
+	return nil
+}
+
+// parseResponseURI parses a response_uri and enforces the https scheme unless
+// http is explicitly allowed for testing.
+func parseResponseURI(responseURI string, allowHTTP bool) (*url.URL, error) {
+	if responseURI == "" {
+		return nil, fmt.Errorf("response_uri is required")
+	}
+	parsed, err := url.Parse(responseURI)
+	if err != nil {
+		return nil, fmt.Errorf("response_uri must be URI: %w", err)
+	}
+	if !allowHTTP && !strings.EqualFold(parsed.Scheme, "https") {
+		return nil, fmt.Errorf("response_uri must use https scheme")
+	}
+	return parsed, nil
+}
+
+// maxVerifierResponseBodySize bounds how much of a verifier response body the
+// wallet reads; the endpoint is derived from request input.
+const maxVerifierResponseBodySize = 1 << 20 // 1 MiB
+
+// postAuthorizationResponse form-POSTs an authorization response (or error
+// response) to the verifier and returns the response body on HTTP 200.
+func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData url.Values) ([]byte, error) {
+	client := p.httpClient()
+	resp, err := client.Post(endpoint, "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("verifier returned non-200 status: %d, body: %s", resp.StatusCode, string(body))
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read verifier response: %w", readErr)
+	}
+	return body, nil
+}
+
+// Present sends the presentation to the verifier.
+// The vp_token is a JSON object keyed by the DCQL Credential Query id, as
+// defined in OID4VP 1.0 Section 8.1:
+// {"<credential query id>": ["<presentation>"]}
+func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *types.PresentationRequest) (string, error) {
+	if protocol != types.Oid4vp {
+		return "", fmt.Errorf("plugin type mismatch")
+	}
+
+	if request == nil || request.CredentialQueryID == "" {
+		return "", fmt.Errorf("credential query id is required to build vp_token")
+	}
+	vpTokenJSON, err := json.Marshal(map[string][]string{
+		request.CredentialQueryID: {string(serializedPresentation)},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal vp_token: %w", err)
 	}
 
 	// Check if JARM (JWT-Secured Authorization Response Mode) is required
@@ -103,7 +211,7 @@ func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, 
 	var encryptionAlg, encryptionEnc string
 	var verifierJWKS *jose.JSONWebKeySet
 
-	if request != nil && request.ClientMetadata != nil {
+	if request.ClientMetadata != nil {
 		if metadata, ok := request.ClientMetadata.(*VerifierMetadata); ok {
 			if metadata.AuthorizationEncryptedResponseAlg != "" {
 				useJARM = true
@@ -119,34 +227,36 @@ func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, 
 
 	if useJARM {
 		// JARM: Create JWT with response parameters, encrypt it, and send as "response" parameter
-		jarmToken, err := p.createJARMResponse(string(serializedPresentation), string(presentationSubmissionJSON), request, encryptionAlg, encryptionEnc, verifierJWKS)
+		jarmToken, err := p.createJARMResponse(vpTokenJSON, request, encryptionAlg, encryptionEnc, verifierJWKS)
 		if err != nil {
-			return fmt.Errorf("failed to create JARM response: %w", err)
+			return "", fmt.Errorf("failed to create JARM response: %w", err)
 		}
 		formData.Set("response", jarmToken)
 	} else {
-		// Standard response: Send vp_token and presentation_submission directly
-		formData.Set("vp_token", string(serializedPresentation))
-		formData.Set("presentation_submission", string(presentationSubmissionJSON))
+		// Standard response: Send the vp_token JSON object directly
+		formData.Set("vp_token", string(vpTokenJSON))
 
 		// Add state if present in the original request
-		if request != nil && request.State != "" {
+		if request.State != "" {
 			formData.Set("state", request.State)
 		}
 	}
 
-	resp, err := p.httpClient().Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	respBody, err := p.postAuthorizationResponse(endpoint.String(), formData)
 	if err != nil {
-		return fmt.Errorf("failed to send presentation to verifier: %w", err)
+		return "", fmt.Errorf("failed to send presentation to verifier: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("verifier returned non-200 status: %d, body: %s", resp.StatusCode, string(respBody))
+	if len(respBody) == 0 {
+		return "", nil
+	}
+	var verifierResponse struct {
+		RedirectURI string `json:"redirect_uri"`
+	}
+	if err := json.Unmarshal(respBody, &verifierResponse); err != nil {
+		return "", nil
 	}
 
-	return nil
+	return verifierResponse.RedirectURI, nil
 }
 
 // CreateEncryptedAuthorizationResponse creates an OID4VP Final direct_post.jwt
@@ -250,11 +360,10 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 }
 
 // createJARMResponse creates a JWT-Secured Authorization Response (JARM)
-func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission string, request *types.PresentationRequest, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
-	// Create the response payload
+func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, request *types.PresentationRequest, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
+	// Create the response payload; vp_token is embedded as a JSON object.
 	payload := map[string]interface{}{
-		"vp_token":                vpToken,
-		"presentation_submission": presentationSubmission,
+		"vp_token": json.RawMessage(vpTokenJSON),
 	}
 
 	// Add state if present
@@ -262,6 +371,10 @@ func (p *Oid4vpPresenter) createJARMResponse(vpToken, presentationSubmission str
 		payload["state"] = request.State
 	}
 
+	return p.encryptJARMPayload(payload, encAlg, encEnc, verifierJWKS)
+}
+
+func (p *Oid4vpPresenter) encryptJARMPayload(payload map[string]interface{}, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
 	// Marshal payload to JSON
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -364,22 +477,35 @@ type requestBuilder struct {
 	req                    *CredentialPresentationRequest
 	httpClient             *http.Client
 	allowHTTP              bool
+	draft24                bool
 	x509TrustChainRoots    *x509.CertPool
 	insecureSkipX509Verify bool
 	expectedClientID       string
 	errValidation          error
+	// errorResponseAllowed marks that the request parameters came from plain
+	// query parameters (user-initiated URI). Validation failures on the
+	// Request Object paths occur before the object's signature is verified,
+	// so their response_uri is unauthenticated and must not receive an error
+	// authorization response (unauthenticated outbound POST / SSRF primitive).
+	errorResponseAllowed bool
 }
 
 func NewRequestBuilder() *requestBuilder {
 	return &requestBuilder{
 		req: &CredentialPresentationRequest{
-			OAuthAuthzRequest:      &OAuthAuthzRequest{},
-			ClientMetadata:         &VerifierMetadata{},
-			PresentationDefinition: &PresentationDefinition{},
+			OAuthAuthzRequest: &OAuthAuthzRequest{},
+			ClientMetadata:    &VerifierMetadata{},
 		},
 		x509TrustChainRoots:    nil,
 		insecureSkipX509Verify: false,
 	}
+}
+
+// NewDraft24RequestBuilder creates a builder for Presentation Exchange requests.
+func NewDraft24RequestBuilder() *requestBuilder {
+	b := NewRequestBuilder()
+	b.draft24 = true
+	return b
 }
 
 // WithHTTPAllowed enables HTTP response endpoints for local tests only.
@@ -393,8 +519,12 @@ func (b *requestBuilder) validate() error {
 		return b.errValidation
 	}
 
-	if (b.req.PresentationDefinition == nil || b.req.PresentationDefinition.ID == "") && b.req.DCQLQuery == nil {
-		return fmt.Errorf("presentation_definition or dcql_query is required")
+	if b.draft24 {
+		if (b.req.PresentationDefinition == nil || b.req.PresentationDefinition.ID == "") && (b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0) {
+			return newAuthorizationRequestError(InvalidRequestError, "presentation_definition or dcql_query is required for Draft24")
+		}
+	} else if b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0 {
+		return newAuthorizationRequestError(InvalidRequestError, "dcql_query is required")
 	}
 
 	if b.req.ResponseType == "" {
@@ -414,15 +544,8 @@ func (b *requestBuilder) validate() error {
 	}
 
 	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		if b.req.ResponseURI == "" {
-			return fmt.Errorf("response_uri is required")
-		}
-		responseURI, err := url.Parse(b.req.ResponseURI)
-		if err != nil {
-			return fmt.Errorf("response_uri must be URI: %w", err)
-		}
-		if !b.allowHTTP && !strings.EqualFold(responseURI.Scheme, "https") {
-			return fmt.Errorf("response_uri must use https scheme")
+		if _, err := parseResponseURI(b.req.ResponseURI, b.allowHTTP); err != nil {
+			return err
 		}
 	}
 
@@ -511,9 +634,11 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.RedirectURI = redirectURIFromClientID
-	b.req.Scope = getParam("scope", false)
 	b.req.State = getParam("state", false)
 	b.req.Nonce = getParam("nonce", true)
+	if b.draft24 {
+		b.req.Scope = getParam("scope", false)
+	}
 
 	b.req.ResponseMode = OAuthAuthzReqResponseMode(getParam("response_mode", true))
 
@@ -526,42 +651,57 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	b.req.ResponseURI = responseURIFromParam
 
-	if dcql, exists := params["dcql_query"]; exists && dcql != nil {
-		var query DCQLQuery
-		switch value := dcql.(type) {
-		case string:
-			if err := json.Unmarshal([]byte(value), &query); err != nil {
-				b.errValidation = fmt.Errorf("invalid dcql_query: %w", err)
-				return
+	if b.draft24 {
+		raw, exists := params["presentation_definition"]
+		if exists {
+			var data []byte
+			var err error
+			if value, ok := raw.(string); ok {
+				data = []byte(value)
+			} else {
+				data, err = json.Marshal(raw)
 			}
-		default:
-			jsonBytes, err := json.Marshal(value)
+			var definition PresentationDefinition
+			if err == nil {
+				err = json.Unmarshal(data, &definition)
+			}
 			if err != nil {
-				b.errValidation = fmt.Errorf("failed to marshal dcql_query: %w", err)
-				return
-			}
-			if err := json.Unmarshal(jsonBytes, &query); err != nil {
-				b.errValidation = fmt.Errorf("invalid dcql_query: %w", err)
-				return
-			}
-		}
-		b.req.DCQLQuery = &query
-	}
-
-	if pd := getParam("presentation_definition", b.req.DCQLQuery == nil); pd != "" {
-		// Handle presentation_definition as either string (JSON) or map
-		var presDef PresentationDefinition
-		if pdMap, ok := params["presentation_definition"].(map[string]any); ok {
-			if id, exists := pdMap["id"]; exists {
-				presDef.ID = fmt.Sprintf("%v", id)
-			}
-		} else {
-			if err := json.Unmarshal([]byte(pd), &presDef); err != nil {
 				b.errValidation = fmt.Errorf("invalid presentation_definition: %w", err)
 				return
 			}
+			b.req.PresentationDefinition = &definition
 		}
-		b.req.PresentationDefinition = &presDef
+	} else {
+		// Final uses DCQL. Keep Presentation Exchange behind the explicit Draft24 API.
+		for _, unsupported := range []string{"presentation_definition", "presentation_definition_uri", "presentation_submission"} {
+			if _, exists := params[unsupported]; exists {
+				b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s is not supported; use dcql_query instead", unsupported)
+				return
+			}
+		}
+	}
+
+	// Requesting Credentials via the scope parameter is not supported by this wallet.
+	if scope, exists := params["scope"]; exists && !b.draft24 {
+		if scopeStr, ok := scope.(string); !ok || scopeStr != "" {
+			b.errValidation = newAuthorizationRequestError(InvalidScopeError, "scope parameter is not supported; use dcql_query instead")
+			return
+		}
+	}
+
+	if rawDcqlQuery, exists := params["dcql_query"]; exists {
+		parseQuery := parseDcqlQuery
+		if b.draft24 {
+			parseQuery = parseDraft24DcqlQuery
+		}
+		dcqlQuery, err := parseQuery(rawDcqlQuery)
+		if err != nil {
+			b.errValidation = err
+			return
+		}
+		b.req.DcqlQuery = dcqlQuery
+	} else if !b.draft24 {
+		missing = append(missing, "dcql_query")
 	}
 
 	if cm, exists := params["client_metadata"]; exists && cm != nil {
@@ -591,7 +731,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if len(missing) > 0 {
-		b.errValidation = fmt.Errorf("missing required parameters: %s", strings.Join(missing, ", "))
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "missing required parameters: %s", strings.Join(missing, ", "))
 	}
 
 	if td, exists := params["transaction_data"]; exists && td != nil {
@@ -615,6 +755,8 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	if b.errValidation != nil {
 		return b
 	}
+
+	b.errorResponseAllowed = true
 
 	singleParams := make(map[string]any)
 	for key, values := range params {
@@ -883,20 +1025,48 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 // WithRequestObjectURI constructs the CredentialPresentationRequest
 // with fetching the request object from the given URI using the specified method,
 // and validates its claims and signature as per OID4VP and RFC9101.
+//
+// Per OID4VP draft 24 §5.11, when method is POST the request MUST use the
+// https scheme, set Content-Type: application/x-www-form-urlencoded and
+// Accept: application/oauth-authz-req+jwt. The https requirement is also
+// applied to the GET method for project-wide consistency with the same
+// guard in wallet/receiver/plugins/oid4vci/oid4vci.go (Issue #29).
+// It can be relaxed by setting the VCKNOTS_WALLET_HTTP_ALLOWED environment
+// variable for testing.
 func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMethod) *requestBuilder {
 	if b.errValidation != nil {
 		return b
 	}
 
+	parsedURI, err := url.Parse(uri)
+	if err != nil {
+		b.errValidation = fmt.Errorf("failed to parse request_uri %q: %w", uri, err)
+		return b
+	}
+	scheme := parsedURI.Scheme
+	if strings.EqualFold(scheme, "https") {
+		// HTTPS is always allowed
+	} else if strings.EqualFold(scheme, "http") {
+		if !b.allowHTTP {
+			b.errValidation = fmt.Errorf("unsupported URL scheme for request_uri: %q (https required; explicit HTTP policy required for local tests)", parsedURI.Scheme)
+			return b
+		}
+	} else {
+		b.errValidation = fmt.Errorf("unsupported URL scheme for request_uri: %q (https required; explicit HTTP policy required for local tests)", parsedURI.Scheme)
+		return b
+	}
+
 	var req *http.Request
-	var err error
 
 	switch method {
 	case RequestURIMethodGET:
-		req, err = http.NewRequest(http.MethodGet, uri, nil)
+		req, err = http.NewRequest(http.MethodGet, parsedURI.String(), nil)
 	case RequestURIMethodPOST:
-		body := strings.NewReader(url.Values{"wallet_metadata": []string{"{}"}}.Encode())
-		req, err = http.NewRequest(http.MethodPost, uri, body)
+		var body io.Reader
+		if b.draft24 {
+			body = strings.NewReader(url.Values{"wallet_metadata": []string{"{}"}}.Encode())
+		}
+		req, err = http.NewRequest(http.MethodPost, parsedURI.String(), body)
 	default:
 		b.errValidation = fmt.Errorf("unsupported request_uri_method: %s", method)
 		return b
@@ -908,7 +1078,10 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	}
 
 	req.Header.Set("User-Agent", "")
-	req.Header.Set("Accept", "application/oauth-authz-req+jwt, application/jwt, text/plain, */*")
+	req.Header.Set("Accept", "application/oauth-authz-req+jwt")
+	if b.draft24 {
+		req.Header.Set("Accept", "application/oauth-authz-req+jwt, application/jwt, text/plain, */*")
+	}
 	if method == RequestURIMethodPOST {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}

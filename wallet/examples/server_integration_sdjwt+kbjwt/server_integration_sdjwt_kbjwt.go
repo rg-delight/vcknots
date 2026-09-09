@@ -23,12 +23,12 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/trustknots/vcknots/wallet"
 	"github.com/trustknots/vcknots/wallet/credential"
-	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/examples/common"
+	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 )
 
@@ -90,52 +90,23 @@ func extractDisclosureNames(raw []byte) []string {
 	return names
 }
 
-func buildRequestObjectJSON(vct string, subjectFields []string) string {
-	fieldsJSON := ""
+func buildRequestObjectJSON(vct string) string {
+	// An empty meta object means no additional constraints on the requested credential.
+	metaJSON := "{}"
 	if vct != "" {
-		fieldsJSON += `[
-		{
-			"path": ["$.vct"],
-			"filter": {
-				"type": "string",
-				"const": "` + vct + `"
-			}
-		}`
-
-		for _, field := range subjectFields {
-			fieldsJSON += `,
-		{
-			"path": ["$.` + field + `"],
-			"intent_to_retain": false
-		}`
-		}
-		fieldsJSON += `
-	]`
-	}
-
-	constraintsJSON := ""
-	if fieldsJSON != "" {
-		constraintsJSON = `,
-				"constraints": {
-					"fields": ` + fieldsJSON + `
-				}`
+		metaJSON = `{
+							"vct_values": ["` + vct + `"]
+						}`
 	}
 
 	return `{
 		"query": {
-			"presentation_definition": {
-				"id": "dynamic-presentation-kbjwt",
-				"input_descriptors": [
+			"dcql_query": {
+				"credentials": [
 					{
 						"id": "credential-request",
-						"name": "SD-JWT VC with KB-JWT",
-						"purpose": "Verify credential with key binding",
-						"format": {
-							"dc+sd-jwt": {
-								"sd-jwt_alg_values": ["ES256"],
-								"kb-jwt_alg_values": ["ES256"]
-							}
-						}` + constraintsJSON + `
+						"format": "dc+sd-jwt",
+						"meta": ` + metaJSON + `
 					}
 				]
 			}
@@ -197,8 +168,8 @@ func presentation(w *wallet.Wallet, key *common.MockKeyEntry, receivedCredential
 		"requested_fields", requestedClaims,
 	)
 
-	jsonBody := buildRequestObjectJSON(vct, requestedClaims)
-	logger.Info("Generated presentation definition", "json", jsonBody)
+	jsonBody := buildRequestObjectJSON(vct)
+	logger.Info("Generated DCQL query", "json", jsonBody)
 
 	reqBody := io.NopCloser(strings.NewReader(jsonBody))
 	req, err := http.NewRequest("POST", verifierURL+"/request-object", reqBody)
@@ -230,64 +201,122 @@ func presentation(w *wallet.Wallet, key *common.MockKeyEntry, receivedCredential
 	}
 	logger.Info("Request URI is valid", "scheme", urlParsed.Scheme)
 
-	err = w.PresentCredential(string(body), key, options)
+	redirectURI, err := w.PresentCredential(string(body), key, options)
 	if err != nil {
 		logger.Error("Failed to present credential", "error", err)
 		panic(err)
 	}
+	if redirectURI != "" {
+		logger.Info("Verifier requested redirect", "redirect_uri", redirectURI)
+	}
 	logger.Info("Credential presented successfully")
+}
+
+// fetchCredentialOfferFromServer fetches a Credential Offer URI from the local server.
+func fetchCredentialOfferFromServer(configurationID string, logger *slog.Logger) string {
+	endpoint := fmt.Sprintf("%s/configurations/%s/offer", verifierURL, configurationID)
+	logger.Info("Fetching credential offer", "endpoint", endpoint)
+
+	resp, err := http.Post(endpoint, "application/json", nil)
+	if err != nil {
+		panic(fmt.Sprintf("failed to fetch credential offer: %v", err))
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	offerURI := strings.TrimSpace(string(body))
+	logger.Info("Received credential offer URI", "uri", offerURI)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		panic(fmt.Sprintf("server error fetching offer: %s - %s", resp.Status, offerURI))
+	}
+	return offerURI
+}
+
+// parseCredentialOffer parses an openid-credential-offer:// URI into a wallet.CredentialOffer.
+func parseCredentialOffer(offerURI string, logger *slog.Logger) *wallet.CredentialOffer {
+	parsed, err := url.Parse(offerURI)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse offer URI: %v", err))
+	}
+
+	credentialOfferParam := parsed.Query().Get("credential_offer")
+	if credentialOfferParam == "" {
+		panic("credential_offer parameter is missing from offer URI")
+	}
+
+	var offerJSON struct {
+		CredentialIssuer           string                                  `json:"credential_issuer"`
+		CredentialConfigurationIDs []string                                `json:"credential_configuration_ids"`
+		Grants                     map[string]*wallet.CredentialOfferGrant `json:"grants"`
+	}
+	if err := json.Unmarshal([]byte(credentialOfferParam), &offerJSON); err != nil {
+		panic(fmt.Sprintf("failed to parse credential offer JSON: %v", err))
+	}
+
+	issuerURL, err := url.Parse(offerJSON.CredentialIssuer)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse credential issuer URL: %v", err))
+	}
+
+	logger.Info("Parsed credential offer",
+		"issuer", offerJSON.CredentialIssuer,
+		"configuration_ids", offerJSON.CredentialConfigurationIDs,
+	)
+	return &wallet.CredentialOffer{
+		CredentialIssuer:           issuerURL,
+		CredentialConfigurationIDs: offerJSON.CredentialConfigurationIDs,
+		Grants:                     offerJSON.Grants,
+	}
 }
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
+	logger.Info("Enabled HTTP transport for local server integration testing")
+
 	runtime, err := common.NewOID4VPRuntime(os.Getenv("VCKNOTS_CERT_PATH"))
 	if err != nil {
 		panic(err)
 	}
-	credStore := runtime.CredStore
-	serializer := runtime.Serializer
 	w := runtime.Wallet
-
-	sdJwtCredFile, err := os.ReadFile("example_sd_jwt.txt")
-	if err != nil {
-		panic(err)
-	}
-	sdJwtCredFile = []byte(strings.TrimRight(string(sdJwtCredFile), "\r\n"))
-	err = credStore.SaveCredentialEntry(credstore.CredentialEntry{
-		Id:         "sample-sdjwt-kbjwt",
-		ReceivedAt: time.Now(),
-		Raw:        sdJwtCredFile,
-		MimeType:   string(credential.SDJwtVC),
-	}, credstore.SupportedCredStoreTypes(0))
-	if err != nil {
-		panic(err)
-	}
-
-	savedSdJwtCredEntry, err := credStore.GetCredentialEntry("sample-sdjwt-kbjwt", credstore.SupportedCredStoreTypes(0))
-	if err != nil {
-		panic(err)
-	}
 
 	logger.Info("Starting SD-JWT + KB-JWT server integration check...")
 
 	mockKey := common.NewMockKeyEntry()
 
-	deserializedSdJwtCred, err := serializer.DeserializeCredential(credential.SDJwtVC, savedSdJwtCredEntry.Raw)
-	if err != nil {
-		panic(err)
-	}
+	// Receive an SD-JWT VC from the local sample server via OID4VCI, mirroring the
+	// server_integration_sdjwt example (instead of loading example_sd_jwt.txt).
+	offerURI := fetchCredentialOfferFromServer("UniversityDegreeCredentialSdJwt", logger)
+	offer := parseCredentialOffer(offerURI, logger)
 
-	savedSdJwtCred := wallet.SavedCredential{
-		Credential: deserializedSdJwtCred,
-		Entry:      savedSdJwtCredEntry,
+	savedSdJwtCred, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
+		CredentialOffer: offer,
+		Type:            receiver.Oid4vci,
+		Key:             mockKey,
+		RequestedFormat: credential.SDJwtVC,
+	})
+	if err != nil {
+		logger.Error("Failed to receive SD-JWT credential", "error", err)
+		os.Exit(1)
 	}
-	logger.Info("Deserialized credential", "credential.issuer", deserializedSdJwtCred.Issuer, "credential.claims", deserializedSdJwtCred.Claims)
+	logger.Info("SD-JWT credential received",
+		"id", savedSdJwtCred.Entry.Id,
+		"mime_type", savedSdJwtCred.Entry.MimeType,
+		"issuer", savedSdJwtCred.Credential.Issuer,
+	)
 
 	options := sdjwtvc.SdJwtVcPresentationOptions{
 		SelectedClaims:    []string{"given_name"},
 		RequireKeyBinding: true,
 	}
 
-	presentation(w, mockKey, &savedSdJwtCred, &options, logger)
+	presentation(w, mockKey, savedSdJwtCred, &options, logger)
 }

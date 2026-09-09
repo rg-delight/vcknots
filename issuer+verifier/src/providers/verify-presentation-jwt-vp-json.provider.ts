@@ -1,4 +1,4 @@
-import base64url from 'base64url'
+﻿import base64url from 'base64url'
 import * as jwt from 'jsonwebtoken'
 import { err } from '../errors/vcknots.error'
 import { VerifyVerifiablePresentationProvider } from './provider.types'
@@ -7,7 +7,6 @@ import { VerifiableCredential, parseVerifiableCredentialBase } from '../credenti
 import { selectProvider } from './provider.utils'
 import { jwtVpJsonPayloadSchema, VpTokenPayload } from '../presentation.types'
 import { z } from 'zod'
-import { Cnonce } from '../cnonce.types'
 
 export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProvider &
   WithProviderRegistry => {
@@ -20,7 +19,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
 
     async verify(vp, options): Promise<VpTokenPayload> {
       if (!options || options.kind !== 'jwt_vp_json') {
-        throw err('ILLEGAL_ARGUMENT', {
+        throw err('illegal_argument', {
           message: options?.kind
             ? `${options.kind} is not supported.`
             : 'verify options are required.',
@@ -34,16 +33,24 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
       ][] = []
       const decodedVp = jwt.decode(vp, { complete: true })
       if (!decodedVp) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message: `Invalid vp_token: ${vp}`,
         })
+      }
+      if (options.allowedAlgs) {
+        const vpAlg = decodedVp.header.alg
+        if (!vpAlg || !options.allowedAlgs.includes(vpAlg)) {
+          throw err('verifier_vp_formats_not_supported', {
+            message: `Algorithm '${vpAlg ?? 'missing'}' is not in jwt_vc_json alg_values. Allowed: ${options.allowedAlgs.join(', ')}`,
+          })
+        }
       }
       let rawPayload: unknown
       if (typeof decodedVp.payload === 'string') {
         try {
           rawPayload = JSON.parse(decodedVp.payload)
         } catch {
-          throw err('INVALID_VP_TOKEN', {
+          throw err('invalid_vp_token', {
             message: 'VP token payload is not valid JSON.',
           })
         }
@@ -54,7 +61,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
         rawPayload
       )
       if (!parseResult.success) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message: `VP token payload does not match expected schema: ${parseResult.error.message}`,
         })
       }
@@ -66,7 +73,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
           ? aud === expectedAud
           : Array.isArray(aud) && aud.some((a) => typeof a === 'string' && a === expectedAud)
       if (!audMatches) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message:
             aud === undefined
               ? 'VP token is missing aud claim required for client binding.'
@@ -74,15 +81,11 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
         })
       }
 
-      const nonce = Cnonce(vpPayload.nonce)
-      const nonceStore$ = this.providers.get('cnonce-store-provider')
-      const nonceValid = await nonceStore$.validate(nonce)
-      if (!nonceValid) {
-        throw err('INVALID_NONCE', {
-          message: 'nonce is not valid.',
+      if (options.expectedNonce !== undefined && vpPayload.nonce !== options.expectedNonce) {
+        throw err('invalid_nonce', {
+          message: 'nonce does not match.',
         })
       }
-      await nonceStore$.revoke(nonce)
 
       const vcs = vpPayload.vp.verifiableCredential
       if (Array.isArray(vcs)) {
@@ -91,7 +94,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
             const parts = vc.split('.')
             const vcPayload = parts[1]
             if (parts.length !== 3 || !vcPayload) {
-              throw err('INVALID_CREDENTIAL', {
+              throw err('invalid_credential', {
                 message: 'VC JWT format is invalid.',
               })
             }
@@ -99,7 +102,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
             try {
               decoded = JSON.parse(base64url.decode(vcPayload)) as Record<string, unknown>
             } catch {
-              throw err('INVALID_CREDENTIAL', {
+              throw err('invalid_credential', {
                 message: 'VC JWT payload is not valid JSON.',
               })
             }
@@ -108,42 +111,47 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
               credentials.push([credential, vc])
             }
           } else {
-            throw err('ILLEGAL_ARGUMENT', {
+            throw err('illegal_argument', {
               message: 'VC represented as object is not supported.',
             })
           }
         }
       }
       if (!Array.isArray(credentials) || credentials.length === 0) {
-        throw err('INVALID_CREDENTIAL', {
+        throw err('invalid_credential', {
           message: 'No credentials is included',
         })
       }
 
       const credential$ = this.providers.get('verify-verifiable-credential-provider')
-      const vcValid = await credential$.verify(credentials[0][1])
-      if (!vcValid) {
-        throw err('INVALID_CREDENTIAL', {
-          message: 'credential is not valid.',
+
+      for (const [, vcJwt] of credentials) {
+        const vcValid = await credential$.verify(vcJwt, {
+          allowedAlgs: options.allowedAlgs,
         })
+        if (!vcValid) {
+          throw err('invalid_credential', {
+            message: 'One or more credentials are not valid.',
+          })
+        }
       }
 
       if (!decodedVp.header.kid) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message: `Missing key id in the header: ${JSON.stringify(decodedVp.header)}`,
         })
       }
       const kid = decodedVp.header.kid
       const didSplit = kid.split(':')
       if (didSplit.length < 3 || didSplit[0] !== 'did') {
-        throw err('INVALID_PROOF', {
+        throw err('invalid_proof', {
           message: `Invalid DID format: ${kid}`,
         })
       }
       const did$ = this.providers.get('did-provider')
       const didDoc = await selectProvider(did$, didSplit[1]).resolveDid(kid)
       if (!didDoc || !didDoc.verificationMethod) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message: `Cannot resolve DID: ${decodedVp.header.kid}`,
         })
       }
@@ -153,7 +161,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
         (it) => it.id.startsWith(`${decodedVp.header.kid}`)
       )
       if (!vm || !vm.publicKeyJwk) {
-        throw err('INVALID_VP_TOKEN', {
+        throw err('invalid_vp_token', {
           message: `Cannot find verification method: ${decodedVp.header.kid}`,
         })
       }
@@ -161,7 +169,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
       const jwtSignature$ = this.providers.get('jwt-signature-provider')
       const JwtValid = await jwtSignature$.verify(vp, publicKey)
       if (!JwtValid) {
-        throw err('INVALID_PROOF', {
+        throw err('invalid_proof', {
           message: 'jwt is not valid.',
         })
       }
@@ -171,7 +179,7 @@ export const verifyVerifiablePresentation = (): VerifyVerifiablePresentationProv
         publicKey
       )
       if (!holderBindingValid) {
-        throw err('HOLDER_BINDING_FAILED', {
+        throw err('holder_binding_failed', {
           message: 'Holder binding verification failed.',
         })
       }
