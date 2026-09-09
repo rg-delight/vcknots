@@ -1,5 +1,9 @@
 # vcknots-wallet Local Server Integration Test and Conformance Test Sample
 
+The independent [public Wallet API driver](official_driver/README.md) is used for
+the new official-suite controls. It preserves received credentials between
+processes and reports current API limitations explicitly.
+
 This directory contains sample code that demonstrates two key testing scenarios for vcknots-wallet:
 
 1. **Local server integration test mode**: Tests integration with a local vcknots server

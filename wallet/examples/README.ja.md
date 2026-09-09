@@ -1,5 +1,8 @@
 # vcknots-wallet ローカルサーバー統合テスト・コンフォーマンステストサンプル
 
+新しい公式suiteのcontrolには独立した[公開Wallet API driver](official_driver/README.md)を使用します。
+受領したcredentialをプロセス間で保存し、現在の公開APIの制限も明記しています。
+
 このディレクトリには、vcknots-walletの2つの主要なテストシナリオを実演するサンプルコードが含まれています：
 
 1. **ローカルサーバー統合テストモード**: ローカルのvcknotsサーバーとの統合をテスト
