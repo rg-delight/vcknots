@@ -1916,12 +1916,24 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 	if err != nil {
 		return "", err
 	}
+	if err := validateTransactionDataHolderBinding(req); err != nil {
+		return "", err
+	}
 
 	credentials, flavor, err := w.selectCredentialsForPresentation(req)
 	if err != nil {
 		return "", err
 	}
 
+	if sdOpts, ok := serializeOptions.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
+		if sdOpts == nil {
+			serializeOptions = nil
+		} else {
+			// Request requirements must not change an options object reused by a caller.
+			copy := *sdOpts
+			serializeOptions = &copy
+		}
+	}
 	if serializeOptions == nil {
 		serializeOptions, err = w.serializer.GetDefaultOption(*flavor)
 		if err != nil {
@@ -1929,6 +1941,12 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 		}
 	}
 	applyOID4VPRequestOptions(req, serializeOptions)
+	if sdOpts, ok := serializeOptions.(*sdjwtvc.SdJwtVcPresentationOptions); ok && sdOpts != nil && req.DcqlQuery != nil && len(req.DcqlQuery.Credentials) > 0 {
+		// This API currently answers the first Credential Query (see submitPresentation).
+		// Caller options cannot weaken its holder-binding requirement. An explicit
+		// false permits, but does not require, omitting the KB-JWT (OID4VP B.3).
+		sdOpts.RequireKeyBinding = sdOpts.RequireKeyBinding || req.DcqlQuery.Credentials[0].RequiresHolderBinding()
+	}
 
 	presentation, err := w.buildPresentation(credentials, key, req)
 	if err != nil {
@@ -1997,6 +2015,9 @@ func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPre
 	if req.DcqlQuery == nil {
 		return nil, fmt.Errorf("dcql_query is required for OID4VP Final authorization response")
 	}
+	if err := validateTransactionDataHolderBinding(req); err != nil {
+		return nil, err
+	}
 
 	credentials, selections, err := w.selectCredentialsForDCQL(req.DcqlQuery)
 	if err != nil {
@@ -2017,7 +2038,12 @@ func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPre
 		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
 			sdOpts.SelectedClaims = selection.RequestedClaims
 			sdOpts.LimitDisclosureToSelectedClaims = true
-			sdOpts.RequireKeyBinding = true
+			for _, query := range req.DcqlQuery.Credentials {
+				if query.ID == selection.QueryID {
+					sdOpts.RequireKeyBinding = query.RequiresHolderBinding()
+					break
+				}
+			}
 			sdOpts.Audience = req.ClientID
 			sdOpts.Nonce = req.Nonce
 			sdOpts.TransactionData = req.TransactionData

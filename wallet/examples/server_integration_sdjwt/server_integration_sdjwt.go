@@ -493,8 +493,8 @@ func main() {
 		oid4vpURI = fetchOID4VPURIFromServer(serverURL, savedCred, logger)
 
 		options = &sdjwtvc.SdJwtVcPresentationOptions{
-			SelectedClaims:    []string{"given_name"},
-			RequireKeyBinding: false,
+			SelectedClaims: []string{"given_name"},
+			// PresentCredential derives the minimum key-binding requirement from DCQL.
 		}
 	}
 

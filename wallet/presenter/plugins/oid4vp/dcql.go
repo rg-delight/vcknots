@@ -3,6 +3,7 @@ package oid4vp
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 
 	"github.com/trustknots/vcknots/wallet/credential"
@@ -25,6 +26,14 @@ type CredentialQuery struct {
 	// Credential Query. Defaults to false when omitted.
 	Multiple bool             `json:"multiple,omitempty"`
 	Claims   []DCQLClaimQuery `json:"claims,omitempty"`
+	// RequireCryptographicHolderBinding defaults to true when omitted (OID4VP
+	// 1.0 section 6.1). A pointer preserves an explicitly permitted unbound VC.
+	RequireCryptographicHolderBinding *bool `json:"require_cryptographic_holder_binding,omitempty"`
+}
+
+// RequiresHolderBinding reports the effective Credential Query requirement.
+func (q CredentialQuery) RequiresHolderBinding() bool {
+	return q.RequireCryptographicHolderBinding == nil || *q.RequireCryptographicHolderBinding
 }
 
 // CredentialSetQuery represents a request for one or more Credential Queries
@@ -128,6 +137,21 @@ func parseDraft24DcqlQuery(raw any) (*DcqlQuery, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This Final field was ignored by the Draft24 decoder before it was added
+	// to the shared Go model. Preserve that behavior without mutating input.
+	if credentials, ok := queryMap["credentials"].([]any); ok {
+		queryMap = maps.Clone(queryMap)
+		filtered := make([]any, len(credentials))
+		for i, item := range credentials {
+			filtered[i] = item
+			if query, ok := item.(map[string]any); ok {
+				query = maps.Clone(query)
+				delete(query, "require_cryptographic_holder_binding")
+				filtered[i] = query
+			}
+		}
+		queryMap["credentials"] = filtered
+	}
 	return dcqlQueryFromObject(queryMap)
 }
 
@@ -208,6 +232,11 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 	if rawMultiple, exists := credentialQuery["multiple"]; exists {
 		if _, ok := rawMultiple.(bool); !ok {
 			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].multiple must be a boolean", index)
+		}
+	}
+	if rawBinding, exists := credentialQuery["require_cryptographic_holder_binding"]; exists {
+		if _, ok := rawBinding.(bool); !ok {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].require_cryptographic_holder_binding must be a boolean", index)
 		}
 	}
 

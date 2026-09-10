@@ -253,6 +253,10 @@ time=2025-11-27T14:03:25.174+09:00 level=INFO msg="Credential presented successf
 
 ---
 
+SD-JWT VC の公開 `PresentCredential` API は、提示対象の DCQL query の `require_cryptographic_holder_binding`（省略時は `true`）に従います。
+呼出し側のオプションで省略可能な KB-JWT を必須にできますが、要求された proof を無効にはできません。
+holder binding が必要なときは、署名鍵と一致する `cnf.jwk` がない credential を送信前に拒否します。
+
 ### モード2: コンフォーマンステストモード（外部URL使用）
 
 外部のOpenID4VPコンフォーマンステストサービスに対してテストを実行します。

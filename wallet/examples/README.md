@@ -254,6 +254,8 @@ Reaching this point also means that the authorization server accepted the client
 
 ---
 
+For SD-JWT VC, the public `PresentCredential` API follows the answered DCQL query's `require_cryptographic_holder_binding` value (default: `true`). Caller serialization options can require a KB-JWT when the query permits omission, but cannot disable a required proof. Credentials without a matching `cnf.jwk` are rejected before submission when binding is required.
+
 ### Mode 2: Conformance Test Mode (External URL)
 
 Tests against external OpenID4VP conformance test services.

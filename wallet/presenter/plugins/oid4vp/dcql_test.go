@@ -201,3 +201,51 @@ func TestParseDcqlQuery_UnsupportedFormat(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDcqlQuery_HolderBindingRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		value                  any
+		present, want, invalid bool
+	}{
+		{name: "omitted", want: true},
+		{name: "true", value: true, present: true, want: true},
+		{name: "false", value: false, present: true},
+		{name: "null", present: true, invalid: true},
+		{name: "string", value: "false", present: true, invalid: true},
+		{name: "number", value: 0, present: true, invalid: true},
+		{name: "array", value: []any{false}, present: true, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}}
+			if tc.present {
+				raw["require_cryptographic_holder_binding"] = tc.value
+			}
+			query, err := parseDcqlQuery(map[string]any{"credentials": []any{raw}})
+			if tc.invalid {
+				assertAuthzErrorCode(t, err, InvalidRequestError)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := query.Credentials[0].RequiresHolderBinding(); got != tc.want {
+				t.Fatalf("holder binding = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDraft24DcqlQuery_IgnoresFinalHolderBindingField(t *testing.T) {
+	rawQuery := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}, "require_cryptographic_holder_binding": "ignored"}
+	query, err := parseDraft24DcqlQuery(map[string]any{"credentials": []any{rawQuery}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Credentials[0].RequireCryptographicHolderBinding != nil {
+		t.Fatal("Final field was retained in Draft24 query")
+	}
+	if rawQuery["require_cryptographic_holder_binding"] != "ignored" {
+		t.Fatal("caller input was mutated")
+	}
+}
