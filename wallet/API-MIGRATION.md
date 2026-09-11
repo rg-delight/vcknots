@@ -379,3 +379,23 @@ to the signed paths.
 The `official_driver` adds `present-dcapi` with input
 `{"operation":"present-dcapi","dcapiRequest":{"protocol":..,"data":..},"origin":"https://localhost:33513"}`
 and returns the `DCAPIResponse` JSON for the runner to submit.
+
+## HAIP request delivery attestation
+
+An application that fetches a signed Request Object through `request_uri` at
+admission time and later re-parses the stored JWT with `request=` cannot satisfy
+`enforceHAIPProfile`'s "delivered by reference" check (`requestSource !=
+"reference"`), even though HAIP §5.1 was honoured. The library cannot observe
+the original delivery, so the caller attests it via the new
+`RequestObjectValidationOptions.DeliveredByReference`. Set it only when the
+application's own admission path recorded the `request_uri` fetch.
+
+When `DeliveredByReference` is true and the builder's `requestSource` is
+`"value"`, the HAIP §5.1 check treats the source as `"reference"` for that check
+only; the `wallet_nonce` echo remains bound to an actual `request_uri` POST in
+the same process, so the attestation never suppresses a nonce mismatch. The
+attestation has no effect on the Final profile. The verification result
+`CredentialPresentationRequest.RequestObjectVerification` now also records
+`Delivery` (`"reference"`, `"value"`, or `"query"`, what the library observed)
+and `DeliveryAttested` (true when the caller attestation was accepted for the
+HAIP check).

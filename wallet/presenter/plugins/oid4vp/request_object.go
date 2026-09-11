@@ -43,6 +43,14 @@ type RequestObjectValidationOptions struct {
 	// SigningAlgorithms defaults to ES256 and RS256. This is independent of
 	// encryption keys and algorithms carried in client_metadata.
 	SigningAlgorithms []jose.SignatureAlgorithm
+	// DeliveredByReference is a caller attestation: the application obtained
+	// this Request Object through request_uri (OpenID4VP 1.0 §5.10) and
+	// re-submits it by value, so HAIP §5.1's delivery-by-reference requirement
+	// is already satisfied. Set it only when that is recorded by the
+	// application's own admission path. It is honoured for the HAIP delivery
+	// check only and never for the wallet_nonce echo, which stays bound to an
+	// actual request_uri POST in this process.
+	DeliveredByReference bool
 }
 
 // RequestObjectVerification records the authentication performed by this
@@ -56,6 +64,15 @@ type RequestObjectVerification struct {
 	// echoed by the authenticated Request Object. It is empty for GET and when
 	// no nonce was sent (OID4VP 1.0 §5.10.1).
 	WalletNonce string
+	// Delivery records how this library observed the Request Object arrive:
+	// "reference" (request_uri), "value" (request=), or "query" (plain query
+	// parameters). It is empty when the library did not observe one of those
+	// paths.
+	Delivery string
+	// DeliveryAttested is true when a caller DeliveredByReference attestation
+	// was accepted for the HAIP delivery check, letting a request= Request
+	// Object satisfy the request_uri requirement.
+	DeliveryAttested bool
 }
 
 // WithRequestObjectValidation configures the public builder before loading a

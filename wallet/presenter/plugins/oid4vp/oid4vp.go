@@ -1493,6 +1493,19 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 // once the Final Authorization Request parameters have been assembled. It is
 // deliberately inert on the Draft24 path and for the Final profile.
 func (b *requestBuilder) enforceHAIPProfile() error {
+	// Record how this process observed the Request Object and whether the
+	// caller's DeliveredByReference attestation was accepted. A caller
+	// attestation lets an application that fetched the signed Request Object
+	// through request_uri at admission time and re-submits the stored JWT with
+	// request= satisfy HAIP §5.1 although this process cannot observe the
+	// original delivery. It is scoped to the HAIP delivery check only; the
+	// wallet_nonce echo stays bound to an actual request_uri POST.
+	deliveryAttested := b.profile.IsHAIP() && b.requestSource == "value" &&
+		b.requestObjectValidation != nil && b.requestObjectValidation.DeliveredByReference
+	if b.req.RequestObjectVerification != nil {
+		b.req.RequestObjectVerification.Delivery = b.requestSource
+		b.req.RequestObjectVerification.DeliveryAttested = deliveryAttested
+	}
 	if b.draft24 || !b.profile.IsHAIP() {
 		return nil
 	}
@@ -1521,7 +1534,7 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 		}
 		return nil
 	}
-	if b.requestSource != "reference" {
+	if b.requestSource != "reference" && !deliveryAttested {
 		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
 		// JAR with the request_uri parameter".
 		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri")
