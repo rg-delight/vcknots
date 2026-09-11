@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -193,7 +194,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 
 	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
 	// mechanism at OAuth2 Endpoints that support client authentication".
-	if w.profile.IsHAIP() && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
+	if w.profile.IsHAIP() && w.clientAttestation == nil && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
 		return nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
 	}
 
@@ -243,6 +244,14 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		}
 	}
 
+	// OpenID4VCI 1.0 Appendix D / HAIP §4.5.1: a provider must be available
+	// before anything is sent to the issuer when the selected configuration
+	// requires a key attestation.
+	keyAttestation, err := w.planOID4VCIKeyAttestation(issuerMetadata, credentialConfigurationID, req.IncludeKeyAttestation)
+	if err != nil {
+		return nil, err
+	}
+
 	// §12.3: select the authorization server. A grant authorization_server hint
 	// MUST be listed in authorization_servers; otherwise the first listed server
 	// is used, falling back to the credential issuer when the list is empty.
@@ -278,7 +287,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 			authorizationServerIssuer, authorizationServerEndpoint.String())
 	}
 
-	attestationHeaders, attestationChallenge, err := createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
+	attestationHeaders, attestationChallenge, err := w.createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +343,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		},
 		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			tokenAttestationHeaders := attestationHeaders
-			if req.AttesterKey.Key != nil {
+			if attestationHeaders.ClientAttestation != "" {
 				tokenPop, err := finalReceiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 				if err != nil {
 					return receiverTypes.OAuthClientAttestationHeaders{}, err
@@ -351,7 +360,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
 
-	return w.receiveOID4VCIFinalCredentials(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts)
+	return w.receiveOID4VCIFinalCredentials(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, keyAttestation)
 }
 
 // receiveOID4VCIFinalCredentials performs the §8 credential request (with §14.6
@@ -366,6 +375,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 	clientKey jose.JSONWebKey,
 	encryptionKey *jose.JSONWebKey,
 	deferredPollAttempts int,
+	keyAttestation *oid4vciKeyAttestationPlan,
 ) (*OID4VCIFinalReceiveResult, error) {
 	// §8.2 / §10: build the credential_response_encryption request parameter and
 	// fail closed when the issuer requires encryption but no key is supplied.
@@ -376,7 +386,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 	encryptionRequested := encryptionParams != nil
 
 	credentialIdentifier := credentialIdentifierForConfiguration(token, issuerMetadata, credentialConfigurationID)
-	build := oid4vciFinalCredentialRequestBodyFactory(finalReceiver, issuerMetadata, holderKeys, credentialIdentifier, credentialConfigurationID, encryptionParams)
+	build := oid4vciFinalCredentialRequestBodyFactory(finalReceiver, issuerMetadata, holderKeys, credentialIdentifier, credentialConfigurationID, encryptionParams, keyAttestation)
 
 	// §7: the nonce endpoint is OPTIONAL. Only fetch c_nonce when the issuer
 	// advertises one; otherwise the proof is built without a nonce.
@@ -705,11 +715,28 @@ func oid4vciFinalCredentialRequestBodyFactory(
 	credentialIdentifier *string,
 	credentialConfigurationID string,
 	encryptionParams map[string]any,
+	keyAttestation *oid4vciKeyAttestationPlan,
 ) receiverTypes.CredentialRequestBodyFactory {
 	return func(cNonce string) ([]byte, string, error) {
+		keyAttestationJWT := ""
+		if keyAttestation != nil {
+			request := KeyAttestationRequest{
+				Keys:     holderKeys,
+				Nonce:    cNonce,
+				Audience: issuerMetadata.CredentialIssuer,
+			}
+			attestation, err := keyAttestation.provider.KeyAttestation(context.Background(), request)
+			if err != nil {
+				return nil, "", fmt.Errorf("failed to obtain key attestation: %w", err)
+			}
+			if err := validateKeyAttestation(attestation, request, keyAttestation.requireX5C, time.Now()); err != nil {
+				return nil, "", err
+			}
+			keyAttestationJWT = attestation.JWT
+		}
 		proofs := make([]string, 0, len(holderKeys))
 		for _, key := range holderKeys {
-			proof, err := receiver.CreateCredentialRequestJWTProof(key, issuerMetadata.CredentialIssuer, cNonce)
+			proof, err := receiver.CreateCredentialRequestJWTProofWithKeyAttestation(key, issuerMetadata.CredentialIssuer, cNonce, keyAttestationJWT)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to create credential request proof: %w", err)
 			}
@@ -847,16 +874,90 @@ func selectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIs
 	return issuerEndpoint, nil
 }
 
-func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+// oid4vciKeyAttestationPlan records that a key attestation must be attached to
+// every credential request proof for this issuance.
+type oid4vciKeyAttestationPlan struct {
+	provider   KeyAttestationProvider
+	requireX5C bool
+}
+
+// planOID4VCIKeyAttestation decides whether a key attestation is needed. It
+// fails before any request is sent when the issuer requires one but the wallet
+// has no provider, naming HAIP §4.5.1 under the HAIP profile.
+func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, include bool) (*oid4vciKeyAttestationPlan, error) {
+	required := issuerRequiresKeyAttestation(metadata, credentialConfigurationID)
+	if required && w.keyAttestation == nil {
+		if w.profile.IsHAIP() {
+			return nil, fmt.Errorf("HAIP §4.5.1 requires wallets to support key attestations: the issuer requires a key attestation but no KeyAttestation provider is configured")
+		}
+		return nil, fmt.Errorf("the issuer requires a key attestation but no KeyAttestation provider is configured")
+	}
+	if w.keyAttestation == nil || (!required && !include) {
+		return nil, nil
+	}
+	return &oid4vciKeyAttestationPlan{provider: w.keyAttestation, requireX5C: w.profile.IsHAIP()}, nil
+}
+
+// issuerRequiresKeyAttestation reports whether the selected credential
+// configuration advertises proof_types_supported.jwt.key_attestations_required
+// (OpenID4VCI 1.0 Appendix D). Presence of the object, even empty, is the
+// signal.
+func issuerRequiresKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) bool {
+	if metadata == nil || metadata.CredentialConfigurationSupported == nil {
+		return false
+	}
+	config, ok := metadata.CredentialConfigurationSupported[credentialConfigurationID]
+	if !ok || config.ProofTypesSupported == nil {
+		return false
+	}
+	jwtProof, ok := (*config.ProofTypesSupported)["jwt"]
+	if !ok {
+		return false
+	}
+	return jwtProof.KeyAttestationsRequired != nil
+}
+
+// clientAttestationProvider resolves the provider for this request. A request
+// AttesterKey is only used as a compatibility fallback when no provider is
+// configured.
+func (w *Wallet) clientAttestationProvider(req OID4VCIFinalReceiveRequest) (ClientAttestationProvider, error) {
+	if w.clientAttestation != nil {
+		return w.clientAttestation, nil
+	}
 	if req.AttesterKey.Key == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(req.AttesterIssuer) == "" {
+		return nil, fmt.Errorf("attester issuer is required when attester key is provided")
+	}
+	return &StaticClientAttester{Key: req.AttesterKey, Issuer: req.AttesterIssuer}, nil
+}
+
+func (w *Wallet) createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+	provider, err := w.clientAttestationProvider(req)
+	if err != nil {
+		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
+	}
+	if provider == nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", nil
 	}
-	attesterIssuer := req.AttesterIssuer
-	if attesterIssuer == "" {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("attester issuer is required when attester key is provided")
+	if authorizationServerIssuer == "" {
+		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("authorization server issuer is required for client attestation")
 	}
-	clientAttestation, err := receiver.CreateClientAttestation(req.ClientKey, req.AttesterKey, attesterIssuer, req.ClientID, 5*time.Minute)
+
+	attestationRequest := ClientAttestationRequest{
+		ClientID:            req.ClientID,
+		ClientKey:           req.ClientKey,
+		AuthorizationServer: authorizationServerIssuer,
+	}
+	// HAIP §4.4.1: verify the provider result before any request carrying the
+	// attestation leaves the wallet; the attester signature is not verified
+	// because the wallet does not hold the attester key.
+	attestation, err := provider.ClientAttestation(context.Background(), attestationRequest)
 	if err != nil {
+		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("failed to obtain client attestation: %w", err)
+	}
+	if err := validateClientAttestation(attestation, attestationRequest, w.profile.IsHAIP(), time.Now()); err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
 	}
 
@@ -869,15 +970,12 @@ func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver
 		attestationChallenge = challenge.AttestationChallenge
 	}
 
-	if authorizationServerIssuer == "" {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("authorization server issuer is required for client attestation PoP")
-	}
 	clientAttestationPop, err := receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
 	}
 	return receiverTypes.OAuthClientAttestationHeaders{
-		ClientAttestation:    clientAttestation,
+		ClientAttestation:    attestation.JWT,
 		ClientAttestationPop: clientAttestationPop,
 	}, attestationChallenge, nil
 }

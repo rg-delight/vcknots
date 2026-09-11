@@ -302,6 +302,17 @@ type DisplayLogo struct {
 
 type ProofType struct {
 	ProofSigningAlgValuesSupported []jose.SignatureAlgorithm `json:"proof_signing_alg_values_supported"`
+	// KeyAttestationsRequired is the OpenID4VCI 1.0 Appendix D
+	// proof_types_supported.jwt.key_attestations_required object. Its presence
+	// (even when empty) tells the wallet a key attestation is required.
+	KeyAttestationsRequired *KeyAttestationsRequired `json:"key_attestations_required,omitempty"`
+}
+
+// KeyAttestationsRequired carries the OpenID4VCI 1.0 Appendix D
+// key_attestations_required constraints. Both members are optional.
+type KeyAttestationsRequired struct {
+	KeyStorage         []string `json:"key_storage,omitempty"`
+	UserAuthentication []string `json:"user_authentication,omitempty"`
 }
 
 type CredentialDefinition struct {
@@ -616,6 +627,10 @@ type OID4VCIFinalReceiver interface {
 	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
 	CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error)
 	CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error)
+	// CreateCredentialRequestJWTProofWithKeyAttestation builds the same proof as
+	// CreateCredentialRequestJWTProof and, when keyAttestation is non-empty,
+	// adds the OpenID4VCI 1.0 Appendix D key_attestation header parameter.
+	CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error)
 	CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error)
 	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
 }

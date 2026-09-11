@@ -161,3 +161,36 @@ its own key. Deferred issuance polls with `interval` up to
 `credential_accepted` is sent only after storage succeeded,
 `credential_failure` on verification or storage failure, and
 `NotifyOID4VCIFinalCredentialDeleted` sends `credential_deleted`.
+
+## Attestation providers
+
+`Config.ClientAttestation` (`ClientAttestationProvider`) and
+`Config.KeyAttestation` (`KeyAttestationProvider`) let the caller supply
+attestations from a remote attester. The library never handles the attester's
+private key. `ClientAttestationProvider` is called once per issuance with the
+selected authorization server identifier and must return a compact JWS with typ
+`oauth-client-attestation+jwt`, `sub` = `ClientID` and `cnf.jwk` = the wallet
+instance key; `KeyAttestationProvider` is called with the holder keys and
+`c_nonce` and must return a `key_attestation+jwt` whose `attested_keys` contain
+every holder key.
+
+Before use the wallet validates the provider result without verifying the
+attester signature: typ, `sub`, RFC 7638 `cnf.jwk` thumbprint, and future `exp`
+(respecting an earlier `ClientAttestation.ExpiresAt`). Under HAIP the header
+must also carry a non-self-signed `x5c` leaf (client attestation §4.4.1, key
+attestation §4.5.1). Failures are returned before PAR.
+
+`OID4VCIFinalReceiveRequest.AttesterKey` / `AttesterIssuer` remain as a
+deprecated fallback: when set and no `ClientAttestationProvider` is configured
+they are wrapped into a `StaticClientAttester` for that request. New code
+should configure a provider instead. `StaticClientAttester` and
+`StaticKeyAttester` self-issue for tests and single-operator deployments only.
+
+When the selected credential configuration advertises
+`proof_types_supported.jwt.key_attestations_required`, a `KeyAttestationProvider`
+is required before PAR; under HAIP a missing provider names HAIP §4.5.1. A
+configured provider is otherwise only used when
+`OID4VCIFinalReceiveRequest.IncludeKeyAttestation` is set. The key attestation
+is attached to each `proofs.jwt` entry as the Appendix D `key_attestation`
+protected-header parameter via `CreateCredentialRequestJWTProofWithKeyAttestation`
+(the original `CreateCredentialRequestJWTProof` keeps its signature).

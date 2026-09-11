@@ -83,6 +83,12 @@ type Wallet struct {
 	// bypass the root policy.
 	profile profile.Profile
 
+	// clientAttestation and keyAttestation are the caller-selected attestation
+	// providers. A nil clientAttestation falls back to a StaticClientAttester
+	// built from a per-request AttesterKey for compatibility.
+	clientAttestation ClientAttestationProvider
+	keyAttestation    KeyAttestationProvider
+
 	credentialAcceptance *CredentialAcceptancePolicy
 }
 
@@ -111,7 +117,18 @@ type Config struct {
 	// fails.
 	Profile profile.Profile
 
+	// CredentialAcceptance configures the minimum credential verification rules
+	// applied before a received credential is stored.
 	CredentialAcceptance *CredentialAcceptancePolicy
+
+	// ClientAttestation supplies the OAuth 2.0 Client Attestation JWT for this
+	// wallet instance. When nil, a per-request AttesterKey is wrapped into a
+	// StaticClientAttester for compatibility.
+	ClientAttestation ClientAttestationProvider
+
+	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
+	// the issuer requires them or the caller opts in.
+	KeyAttestation KeyAttestationProvider
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -344,6 +361,9 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 
 		profile: normalizedProfile,
 
+		clientAttestation: config.ClientAttestation,
+		keyAttestation:    config.KeyAttestation,
+
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
 }
@@ -546,8 +566,17 @@ type OID4VCIFinalReceiveRequest struct {
 	// number of proofs must not exceed the issuer's batch_size.
 	AdditionalHolderKeys []jose.JSONWebKey
 	ClientKey            jose.JSONWebKey
-	AttesterKey          jose.JSONWebKey
-	AttesterIssuer       string
+	// AttesterKey and AttesterIssuer are a deprecated fallback: when no
+	// Config.ClientAttestation provider is configured they are wrapped into a
+	// StaticClientAttester for this request. The wallet should never hold the
+	// attester's private key; configure a remote ClientAttestationProvider.
+	AttesterKey    jose.JSONWebKey
+	AttesterIssuer string
+	// IncludeKeyAttestation requests an OpenID4VCI 1.0 Appendix D key
+	// attestation even when the issuer does not list
+	// proof_types_supported.jwt.key_attestations_required. It is ignored when
+	// no KeyAttestation provider is configured.
+	IncludeKeyAttestation bool
 	// DeferredPollAttempts is the number of §9 deferred credential endpoint
 	// polls. Zero means do not poll and return an IssuancePending result the
 	// caller can resume with ResumeOID4VCIFinalDeferredCredential.

@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -65,6 +66,7 @@ type finalIssuanceFixture struct {
 	includeNotification      bool
 	responseEncryption       bool
 	encryptionRequired       bool
+	keyAttestationsRequired  bool
 	batchSize                int
 	parExpiresIn             int
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
@@ -159,12 +161,21 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 	base := f.server.URL
 	switch r.URL.Path {
 	case "/.well-known/openid-credential-issuer":
+		credentialConfiguration := map[string]any{"format": "dc+sd-jwt", "scope": "pid-scope"}
+		if f.keyAttestationsRequired {
+			credentialConfiguration["proof_types_supported"] = map[string]any{
+				"jwt": map[string]any{
+					"proof_signing_alg_values_supported": []string{"ES256"},
+					"key_attestations_required":          map[string]any{"key_storage": []string{"iso_18045_high"}},
+				},
+			}
+		}
 		metadata := map[string]any{
 			"credential_issuer":     f.credentialIssuer(base),
 			"credential_endpoint":   base + "/credential",
 			"authorization_servers": f.resolveAuthorizationServers(base),
 			"credential_configurations_supported": map[string]any{
-				"pid": map[string]any{"format": "dc+sd-jwt", "scope": "pid-scope"},
+				"pid": credentialConfiguration,
 			},
 		}
 		if f.includeNonceEndpoint {
@@ -300,6 +311,27 @@ func finalProofClaims(t *testing.T, proof string) map[string]any {
 	var claims map[string]any
 	require.NoError(t, json.Unmarshal(payload, &claims))
 	return claims
+}
+
+func finalProofHeader(t *testing.T, proof string) map[string]any {
+	t.Helper()
+	parts := strings.Split(proof, ".")
+	require.Len(t, parts, 3)
+	header, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(header, &claims))
+	return claims
+}
+
+// fixedKeyAttestationProvider returns a prebuilt key attestation regardless of
+// the request, so tests can model a misbehaving remote provider.
+type fixedKeyAttestationProvider struct {
+	attestation *KeyAttestation
+}
+
+func (p fixedKeyAttestationProvider) KeyAttestation(context.Context, KeyAttestationRequest) (*KeyAttestation, error) {
+	return p.attestation, nil
 }
 
 func TestResolveCredentialOffer_ByReference(t *testing.T) {
@@ -489,6 +521,71 @@ func TestReceiveOID4VCIFinalCredential_BatchExceedsBatchSize(t *testing.T) {
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
 	require.ErrorContains(t, err, "batch_size")
 	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+func TestReceiveOID4VCIFinalCredential_KeyAttestationRequiredWithProvider(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	keyAttesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: keyAttesterKey, Issuer: "https://key-attester.example"}
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+
+	proofs := fixture.proofJWTs(t)
+	require.Len(t, proofs, 1)
+	header := finalProofHeader(t, proofs[0])
+	keyAttestationJWT, ok := header["key_attestation"].(string)
+	require.True(t, ok, "proof header is missing key_attestation: %#v", header)
+
+	attestationHeader, claims, err := parseAttestationJWT(keyAttestationJWT)
+	require.NoError(t, err)
+	require.Equal(t, keyAttestationJWTType, attestationHeader.Type)
+	require.Equal(t, "credential-nonce-1", claims.Nonce)
+	require.Len(t, claims.AttestedKeys, 1)
+	require.NoError(t, requireJWKThumbprint(fixture.holderKey, claims.AttestedKeys[0]))
+}
+
+func TestReceiveOID4VCIFinalCredential_KeyAttestationRequiredWithoutProvider(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorContains(t, err, "KeyAttestation")
+	require.Equal(t, 0, fixture.parCalls)
+}
+
+func TestReceiveOID4VCIFinalCredential_KeyAttestationProviderMissingHolderKey(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	otherKey := newPrivateJWKForFinalVCITest(t, "other-holder-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	attestation, err := (&StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}).KeyAttestation(
+		context.Background(),
+		KeyAttestationRequest{Keys: []jose.JSONWebKey{otherKey}, Nonce: "credential-nonce-1"},
+	)
+	require.NoError(t, err)
+	fixture.wallet.keyAttestation = fixedKeyAttestationProvider{attestation: attestation}
+
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorContains(t, err, "does not attest the holder key")
+}
+
+func TestReceiveOID4VCIFinalCredential_IncludeKeyAttestationWhenNotRequired(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	keyAttesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: keyAttesterKey, Issuer: "https://key-attester.example"}
+
+	req := fixture.request()
+	req.IncludeKeyAttestation = true
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+
+	header := finalProofHeader(t, fixture.proofJWTs(t)[0])
+	require.Contains(t, header, "key_attestation")
 }
 
 func TestReceiveOID4VCIFinalCredential_DeferredPollIntervalThenSuccess(t *testing.T) {

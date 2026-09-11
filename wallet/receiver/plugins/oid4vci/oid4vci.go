@@ -870,6 +870,10 @@ func (o *Oid4vciReceiver) CreateDpopProof(key jose.JSONWebKey, method string, ra
 }
 
 func (o *Oid4vciReceiver) CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error) {
+	return o.CreateCredentialRequestJWTProofWithKeyAttestation(key, audience, nonce, "")
+}
+
+func (o *Oid4vciReceiver) CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error) {
 	payload := map[string]any{
 		"aud": audience,
 		"iat": time.Now().Unix(),
@@ -878,7 +882,11 @@ func (o *Oid4vciReceiver) CreateCredentialRequestJWTProof(key jose.JSONWebKey, a
 		payload["nonce"] = nonce
 	}
 
-	token, err := signJWTWithPublicJWKHeader(key, "openid4vci-proof+jwt", payload)
+	var extraHeaders map[string]any
+	if keyAttestation != "" {
+		extraHeaders = map[string]any{"key_attestation": keyAttestation}
+	}
+	token, err := signJWTWithPublicJWKHeaderAndExtras(key, "openid4vci-proof+jwt", payload, extraHeaders)
 	if err != nil {
 		return "", fmt.Errorf("failed to create credential request JWT proof: %w", err)
 	}
@@ -1269,6 +1277,10 @@ func dpopHTU(rawURL string) (string, error) {
 }
 
 func signJWTWithPublicJWKHeader(key jose.JSONWebKey, typ string, payload map[string]any) (string, error) {
+	return signJWTWithPublicJWKHeaderAndExtras(key, typ, payload, nil)
+}
+
+func signJWTWithPublicJWKHeaderAndExtras(key jose.JSONWebKey, typ string, payload map[string]any, extraHeaders map[string]any) (string, error) {
 	publicJWK := key.Public()
 	publicJWK.Algorithm = firstOrDefault([]string{publicJWK.Algorithm}, "ES256")
 	if publicJWK.Use == "" {
@@ -1284,6 +1296,9 @@ func signJWTWithPublicJWKHeader(key jose.JSONWebKey, typ string, payload map[str
 	options := (&jose.SignerOptions{}).
 		WithType(jose.ContentType(typ)).
 		WithHeader("jwk", publicJWK)
+	for name, value := range extraHeaders {
+		options = options.WithHeader(jose.HeaderKey(name), value)
+	}
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key.Key}, options)
 	if err != nil {
 		return "", err
