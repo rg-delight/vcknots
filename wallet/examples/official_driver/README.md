@@ -5,10 +5,10 @@ operation on stdin and returns one JSON result on stdout. A protocol error exits
 with code 1; invalid command/configuration input exits with code 2.
 
 The driver supports an initial SD-JWT VC pre-authorized issuance path, the
-OpenID4VCI 1.0 Final authorization code flow, persistent credential listing, and
-the public presentation method. mdoc, platform DC API and remote attestation
-providers are subsequent work. This software-JWK configuration makes no hardware
-protection claim.
+OpenID4VCI 1.0 Final authorization code flow, persistent credential listing, the
+public presentation method, and OpenID4VP 1.0 over the W3C Digital Credentials
+API. mdoc and remote attestation providers are subsequent work. This
+software-JWK configuration makes no hardware protection claim.
 
 ## Configure and run
 
@@ -125,6 +125,9 @@ JSON
 ./official_driver -config /path/to/config.json <<'JSON'
 {"operation":"present","uri":"openid4vp://?client_id=...&request_uri=..."}
 JSON
+./official_driver -config /path/to/config.json <<'JSON'
+{"operation":"present-dcapi","dcapiRequest":{"protocol":"openid4vp-v1-unsigned","data":{"response_type":"vp_token","response_mode":"dc_api.jwt","nonce":"...","client_metadata":{...},"dcql_query":{...}}},"origin":"https://localhost:33513"}
+JSON
 ```
 
 `receive-preauth` returns the saved `credentialId` plus the library's
@@ -141,6 +144,17 @@ emulation is added here. `present` returns `redirectUri` plus `redirectFollowed`
 when not opened). `list` returns `credentialIds` and `total`. Existing fields
 keep their names. Protocol errors from `receive-code` propagate unchanged; the
 driver never retries or repairs them.
+
+`present-dcapi` answers a W3C Digital Credentials API invocation instead of a
+launch URI. `dcapiRequest` is the platform request entry (`protocol` plus the
+protocol `data` object) and `origin` is the platform-authenticated calling
+origin; the origin is never read from `data`. All three protocols are accepted:
+`openid4vp-v1-unsigned`, `openid4vp-v1-signed` and
+`openid4vp-v1-multisigned`. The result is the `DCAPIResponse` object the runner
+submits to the verifier: `{"protocol":<same protocol>,"data":{"vp_token":{...}}}`
+for `dc_api`, or `{"protocol":...,"data":{"response":"<JWE compact>"}}` for
+`dc_api.jwt`. The driver makes no HTTP call. The Key Binding JWT `aud` is
+`origin:<origin>` (OID4VP 1.0 Appendix A.4), not the request `client_id`.
 
 Each invocation is a new process, so listing and presenting use the persisted
 credential. Use the issuer/verifier's complete launch URI unchanged. The driver
@@ -162,6 +176,9 @@ final status is reported as an error naming the status.
 `receive-code`は`redirectUri`を使うauthorization codeフローを実行し、`credentialIds`・`verification`・`notificationId`・`transactionId`を返します（pending時は`pending`）。
 `attesterKeyFile`と`keyAttesterKeyFile`で設定する静的attesterはテスト専用のevidenceであり、本番ではwalletがattester秘密鍵を持たない分割（NICEリポジトリのADR-0074）に従います。
 `present`は保存済みcredentialを使う公開APIの動作をそのまま返します。
+`present-dcapi`はW3C Digital Credentials APIのinvocationを入力に取り（`dcapiRequest`と、platformが認証した`origin`）、
+runnerがverifierへ提出する`DCAPIResponse`（`dc_api`は`vp_token`、`dc_api.jwt`は`response`のJWE）をHTTP呼出しなしで返します。
+unsigned/signed/multisignedの3種を受け付け、KB-JWTの`aud`は`origin:<origin>`です（OID4VP 1.0 Appendix A.4）。
 `followRedirect`が有効（既定は有効）で`redirect_uri`が返ると、same-deviceブラウザと同様に
 TLS設定済みclientでGETし最大5回のリダイレクトを追跡します（fragmentは送信しません）。
 URIの補正、独自の再試行、認証の補完、提示専用seedは行いません。

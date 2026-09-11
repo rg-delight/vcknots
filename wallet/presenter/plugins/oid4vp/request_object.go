@@ -97,22 +97,59 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 	return b
 }
 
-func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
-	if b.expectedClientID == "" {
-		return errors.New("client_id Authorization Request parameter is required with a Request Object")
-	}
+// requestObjectValidationOptions resolves the effective trust, time and
+// signing policy from the builder's explicit validation options and the legacy
+// X509TrustChainRoots, rejecting a configuration that specifies trust roots in
+// both places.
+func (b *requestBuilder) requestObjectValidationOptions() (RequestObjectValidationOptions, error) {
 	options := RequestObjectValidationOptions{RootCAs: b.x509TrustChainRoots}
 	if b.requestObjectValidation != nil {
 		options = *b.requestObjectValidation
 		if b.x509TrustChainRoots != nil && (options.RootCAs != nil || len(options.TrustAnchors) != 0) {
-			return errors.New("configure Request Object trust roots in only one place")
+			return options, errors.New("configure Request Object trust roots in only one place")
 		}
 		if options.RootCAs == nil && len(options.TrustAnchors) == 0 {
 			options.RootCAs = b.x509TrustChainRoots
 		}
 	}
 	if options.ClockSkew < 0 {
-		return errors.New("request object clock skew cannot be negative")
+		return options, errors.New("request object clock skew cannot be negative")
+	}
+	return options, nil
+}
+
+// verifyRequestObjectCertificateChain runs the configured X.509 chain and
+// revocation checks for a leaf-first certificate list. It is shared by the
+// request_uri signed Request Object path and the signed DC API paths.
+func (b *requestBuilder) verifyRequestObjectCertificateChain(certificates []*x509.Certificate, options RequestObjectValidationOptions, now time.Time) (*commonX509.SigningChainResult, error) {
+	crlOptions := options.CRL
+	if crlOptions.RequireStatus && options.AllowUnadvertisedRevocation {
+		return nil, errors.New("conflicting Request Object revocation policies")
+	}
+	crlOptions.RequireStatus = !options.AllowUnadvertisedRevocation
+	if crlOptions.HTTPClient == nil {
+		crlOptions.HTTPClient = b.httpClient
+		if crlOptions.HTTPClient == nil {
+			crlOptions.HTTPClient = (&Oid4vpPresenter{}).httpClient()
+		}
+	}
+	checker, err := commonX509.NewCRLChecker(crlOptions)
+	if err != nil {
+		return nil, err
+	}
+	return commonX509.VerifySigningCertificateChain(context.Background(), certificates, commonX509.SigningChainOptions{
+		TrustAnchors: options.TrustAnchors, Roots: options.RootCAs, CurrentTime: now,
+		KeyUsages: options.CertificateKeyUsages, Revocation: checker,
+	})
+}
+
+func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
+	if b.expectedClientID == "" {
+		return errors.New("client_id Authorization Request parameter is required with a Request Object")
+	}
+	options, err := b.requestObjectValidationOptions()
+	if err != nil {
+		return err
 	}
 	algs := options.SigningAlgorithms
 	if len(algs) == 0 {
@@ -204,25 +241,7 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err := validateRequestObjectClaims(verified, options.WalletAudience, now, options.ClockSkew); err != nil {
 		return fmt.Errorf("JWT standard claims validation failed: %w", err)
 	}
-	crlOptions := options.CRL
-	if crlOptions.RequireStatus && options.AllowUnadvertisedRevocation {
-		return errors.New("conflicting Request Object revocation policies")
-	}
-	crlOptions.RequireStatus = !options.AllowUnadvertisedRevocation
-	if crlOptions.HTTPClient == nil {
-		crlOptions.HTTPClient = b.httpClient
-		if crlOptions.HTTPClient == nil {
-			crlOptions.HTTPClient = (&Oid4vpPresenter{}).httpClient()
-		}
-	}
-	checker, err := commonX509.NewCRLChecker(crlOptions)
-	if err != nil {
-		return err
-	}
-	result, err := commonX509.VerifySigningCertificateChain(context.Background(), certificates, commonX509.SigningChainOptions{
-		TrustAnchors: options.TrustAnchors, Roots: options.RootCAs, CurrentTime: now,
-		KeyUsages: options.CertificateKeyUsages, Revocation: checker,
-	})
+	result, err := b.verifyRequestObjectCertificateChain(certificates, options, now)
 	if err != nil {
 		return fmt.Errorf("request object certificate chain is not trusted: %w", err)
 	}

@@ -326,3 +326,56 @@ modes) return `AuthorizationRequestError{Code: invalid_request}`. §8.2: "If the
 redirect_uri Authorization Request parameter is present when the Response Mode
 is direct_post, the Wallet MUST return an invalid_request Authorization
 Response error."
+
+## OpenID4VP 1.0 over the W3C Digital Credentials API (Appendix A)
+
+The presenter now parses and answers OpenID4VP 1.0 requests delivered through
+the W3C Digital Credentials API (OID4VP 1.0 Appendix A). New public surface in
+`presenter/plugins/oid4vp`:
+
+- `OAuthAuthzReqResponseModeDCAPI` (`"dc_api"`) and
+  `OAuthAuthzReqResponseModeDCAPIJWT` (`"dc_api.jwt"`).
+- `DCAPIProtocolUnsigned`, `DCAPIProtocolSigned`, `DCAPIProtocolMultiSigned`.
+- `DCAPIRequest{Protocol, Data}`, `DCAPIInvocation{Request, Origin}` and
+  `DCAPIResponse{Protocol, Data}`.
+- `(*Oid4vpPresenter).ParseDCAPIRequest(DCAPIInvocation)` and
+  `(*Oid4vpPresenter).BuildDCAPIResponse(*CredentialPresentationRequest, vpToken)`.
+- Root `(*Wallet).PresentCredentialToDCAPI(invocation, key, options...)` in
+  `wallet_dcapi.go`, which reuses the existing DCQL selection/serialization
+  machinery and makes no HTTP call.
+
+The parsed request exposes `ResponseAudience` (`origin:<origin>`) and
+`DCAPIProtocol`; the root overrides the Key Binding JWT audience with
+`ResponseAudience` instead of `client_id`.
+
+Spec rules implemented. A.2: "The client_id parameter MUST be omitted in
+unsigned requests defined in Appendix A.3.1. The Wallet MUST ignore any
+client_id parameter that is present in an unsigned request." The Wallet uses
+`web-origin:<origin>` as the effective identifier. A.2: "The value of the
+response_mode parameter MUST be dc_api when the response is not encrypted and
+dc_api.jwt when the response is encrypted as defined in Section 8.3";
+`response_uri`/`redirect_uri` MUST be absent. A.2: "expected_origins: REQUIRED
+when signed requests defined in Appendix A.3.2 are used ... If the Origin does
+not match any of the entries in expected_origins, the Wallet MUST return an
+error", compared against the platform `Origin`, never the request. A.3.2: signed
+requests are compact JWS with `typ: oauth-authz-req+jwt`, authenticated like a
+Request Object (x5c chain to configured anchors, `client_id` from the protected
+header or payload, x509_hash binding). A.3.2.2: multi-signed requests are JWS
+JSON Serialization, each signature's protected header carries its own
+`client_id`; the Wallet verifies at least one authenticatable signature and
+records it in `RequestObjectVerification.ClientID`. A.4: "The audience for the
+response (for example, the aud value in a Key Binding JWT) MUST be the Origin,
+prefixed with origin:"; `dc_api.jwt` encrypts the response exactly like
+`direct_post.jwt` (§8.3) with the same key selection, while `dc_api` returns the
+plaintext `{"vp_token": {...}}`.
+
+HAIP §5.2: "The Wallet MUST support the Response Mode dc_api.jwt" and "The
+Wallet MUST support unsigned, signed, and multi-signed requests as defined in
+Appendices A.3.1 and A.3.2". `enforceHAIPProfile` therefore accepts
+`dc_api`/`dc_api.jwt` and all three request types instead of rejecting
+`dc_api.jwt` and requiring `request_uri`; the x509_hash rule continues to apply
+to the signed paths.
+
+The `official_driver` adds `present-dcapi` with input
+`{"operation":"present-dcapi","dcapiRequest":{"protocol":..,"data":..},"origin":"https://localhost:33513"}`
+and returns the `DCAPIResponse` JSON for the runner to submit.

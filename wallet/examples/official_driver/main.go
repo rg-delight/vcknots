@@ -103,6 +103,17 @@ type operation struct {
 	Name   string `json:"operation"`
 	URI    string `json:"uri"`
 	TxCode string `json:"txCode"`
+	// DCAPIRequest and Origin carry a W3C Digital Credentials API invocation
+	// for the present-dcapi operation.
+	DCAPIRequest *dcapiRequestInput `json:"dcapiRequest"`
+	Origin       string             `json:"origin"`
+}
+
+// dcapiRequestInput is one platform DigitalCredentialGetRequest entry, as
+// delivered by the browser or operating system.
+type dcapiRequestInput struct {
+	Protocol string          `json:"protocol"`
+	Data     json.RawMessage `json:"data"`
 }
 
 func decode(reader io.Reader, value any) error {
@@ -395,7 +406,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 
 func run(config configuration, request operation) (any, error) {
 	switch request.Name {
-	case "public-keys", "receive-preauth", "receive-code", "present", "list":
+	case "public-keys", "receive-preauth", "receive-code", "present", "present-dcapi", "list":
 	default:
 		return nil, fmt.Errorf("unsupported operation: %s", request.Name)
 	}
@@ -518,6 +529,21 @@ func run(config configuration, request operation) (any, error) {
 			result["redirectStatus"] = status
 		}
 		return result, nil
+	case "present-dcapi":
+		if request.DCAPIRequest == nil {
+			return nil, fmt.Errorf("present-dcapi requires dcapiRequest")
+		}
+		if request.Origin == "" {
+			return nil, fmt.Errorf("present-dcapi requires origin")
+		}
+		invocation := oid4vp.DCAPIInvocation{
+			Request: oid4vp.DCAPIRequest{
+				Protocol: request.DCAPIRequest.Protocol,
+				Data:     request.DCAPIRequest.Data,
+			},
+			Origin: request.Origin,
+		}
+		return w.PresentCredentialToDCAPI(invocation, holder, nil)
 	case "list":
 		entries, total, err := w.GetCredentialEntries(wallet.GetCredentialEntriesRequest{})
 		if err != nil {

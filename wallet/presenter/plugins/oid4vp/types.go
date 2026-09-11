@@ -37,7 +37,50 @@ const (
 	OAuthAuthzReqResponseModeDirectPost OAuthAuthzReqResponseMode = "direct_post"
 	// OAuthAuthzReqResponseModeDirectPostJWT indicates that the authorization response should be returned as a JWT/JWE in a direct POST response parameter.
 	OAuthAuthzReqResponseModeDirectPostJWT OAuthAuthzReqResponseMode = "direct_post.jwt"
+	// OAuthAuthzReqResponseModeDCAPI indicates the authorization response is
+	// returned through the W3C Digital Credentials API (OID4VP 1.0 Appendix A).
+	OAuthAuthzReqResponseModeDCAPI OAuthAuthzReqResponseMode = "dc_api"
+	// OAuthAuthzReqResponseModeDCAPIJWT indicates the authorization response is
+	// returned through the DC API as an encrypted JWT (OID4VP 1.0 Appendix A.2).
+	OAuthAuthzReqResponseModeDCAPIJWT OAuthAuthzReqResponseMode = "dc_api.jwt"
 )
+
+// DC API exchange protocol values (OID4VP 1.0 Appendix A.1). The value 1 is
+// used for the version field; unsigned, signed and multi-signed requests use
+// "unsigned", "signed" and "multisigned" respectively.
+const (
+	DCAPIProtocolUnsigned    = "openid4vp-v1-unsigned"
+	DCAPIProtocolSigned      = "openid4vp-v1-signed"
+	DCAPIProtocolMultiSigned = "openid4vp-v1-multisigned"
+)
+
+// DCAPIRequest is one entry of the platform's DigitalCredentialGetRequest
+// requests array. Data is the protocol data object exactly as delivered by the
+// platform: for unsigned requests it holds the Authorization Request members
+// directly, for signed requests a {"request": <compact JWS>} object, and for
+// multi-signed requests a {"request": {"payload":..,"signatures":[..]}} object.
+type DCAPIRequest struct {
+	Protocol string          `json:"protocol"`
+	Data     json.RawMessage `json:"data"`
+}
+
+// DCAPIInvocation is what the platform (browser/OS) supplies to the Wallet. The
+// origin is authenticated by the platform and is never taken from the request.
+type DCAPIInvocation struct {
+	Request DCAPIRequest
+	// Origin is the calling web origin as reported by the platform, for example
+	// "https://verifier.example".
+	Origin string
+}
+
+// DCAPIResponse is the object returned to the platform (OID4VP 1.0 Appendix
+// A.4). Protocol echoes the request protocol and Data holds the response
+// members: {"vp_token": {...}} for dc_api, or {"response": <JWE compact>} for
+// dc_api.jwt.
+type DCAPIResponse struct {
+	Protocol string         `json:"protocol"`
+	Data     map[string]any `json:"data"`
+}
 
 // OAuthAuthorizationResponse represents a OAuth 2.0 Authorization Response
 // These fields are defined in RFC6749.
@@ -99,6 +142,15 @@ type CredentialPresentationRequest struct {
 	TransactionDataHashesAlg  string                     `json:"transaction_data_hashes_alg,omitempty"` // optional, hash algorithm for transaction_data_hashes
 	VerifierInfo              []any                      `json:"verifier_info,omitempty"`               // optional, to be implemented
 	ResponseURI               string                     `json:"response_uri,omitempty"`                // optional
+	// ResponseAudience is the audience for a DC API response. OID4VP 1.0
+	// Appendix A.4: "The audience for the response (for example, the aud value
+	// in a Key Binding JWT) MUST be the Origin, prefixed with origin:". It is
+	// empty for non-DC-API requests, where client_id remains the audience.
+	ResponseAudience string `json:"-"`
+	// DCAPIProtocol records the DC API exchange protocol the request arrived
+	// with so the response echoes it (OID4VP 1.0 Appendix A.4). Empty for
+	// non-DC-API requests.
+	DCAPIProtocol string `json:"-"`
 }
 
 type RequestURIMethod string

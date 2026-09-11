@@ -839,7 +839,14 @@ func (b *requestBuilder) validate() error {
 		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 
-	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost && b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT && b.req.RedirectURI == "" {
+	// OID4VP 1.0 Appendix A.2: dc_api and dc_api.jwt return the response through
+	// the platform, so no redirect_uri is required. The response endpoint is the
+	// DC API, validated where the response is built.
+	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost &&
+		b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT &&
+		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPI &&
+		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT &&
+		b.req.RedirectURI == "" {
 		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri is required")
 	}
 
@@ -932,6 +939,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			case OID4VPClientIDPrefixX509Hash:
 				// x509_hash binds the request object to an x5c certificate hash,
 				// so it does not derive a redirect URI from client_id.
+			case OID4VPClientIDPrefixWebOrigin:
+				// The DC API effective client identifier uses the platform
+				// Origin; no redirect URI is derived (OID4VP 1.0 Appendix A.2).
 			case OID4VPClientIDPrefixPreRegistered:
 				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
 				// Client Identifier, the Wallet MUST treat the Client Identifier
@@ -981,6 +991,21 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.ResponseURI = responseURIFromParam
+
+	// OID4VP 1.0 Appendix A.2: the response is returned through the DC API, so
+	// response_uri and redirect_uri MUST be absent from the request. This is
+	// enforced on the DC API delivery paths only; a request_uri-delivered
+	// dc_api.jwt request is a different (rejected) delivery and keeps its own
+	// profile error.
+	if (b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed") &&
+		(b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPI || b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPIJWT) {
+		if redirectURIFromParam != "" || responseURIFromParam != "" {
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not be present with response_mode %s", b.req.ResponseMode)
+			return
+		}
+		b.req.RedirectURI = ""
+		b.req.ResponseURI = ""
+	}
 
 	if b.requestSource == "query" && !b.draft24 {
 		if _, hasMethod := params["request_uri_method"]; hasMethod {
@@ -1471,6 +1496,31 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	if b.draft24 || !b.profile.IsHAIP() {
 		return nil
 	}
+	// HAIP §5.2: "The Wallet MUST support the Response Mode dc_api.jwt" and
+	// "The Wallet MUST support unsigned, signed, and multi-signed requests as
+	// defined in Appendices A.3.1 and A.3.2". The request_uri encryption rule
+	// of §5.1 is therefore relaxed for DC API modes.
+	if b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed" {
+		switch b.req.ResponseMode {
+		case OAuthAuthzReqResponseModeDCAPI, OAuthAuthzReqResponseModeDCAPIJWT:
+		default:
+			return newAuthorizationRequestError(InvalidRequestError, "HAIP DC API requires response_mode dc_api or dc_api.jwt")
+		}
+		if b.requestSource == "dcapi-unsigned" {
+			// An unsigned request has no Verifier client_id to authenticate.
+			return nil
+		}
+		clientID, err := parseOID4VPClientID(b.req.ClientID)
+		if err != nil {
+			return err
+		}
+		if clientID.prefix != OID4VPClientIDPrefixX509Hash {
+			// HAIP §5: "For signed requests, the Verifier MUST use, and the
+			// Wallet MUST accept the Client Identifier Prefix x509_hash".
+			return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires the x509_hash Client Identifier Prefix")
+		}
+		return nil
+	}
 	if b.requestSource != "reference" {
 		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
 		// JAR with the request_uri parameter".
@@ -1479,9 +1529,11 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	switch b.req.ResponseMode {
 	case OAuthAuthzReqResponseModeDirectPostJWT:
 		// HAIP §5.1: response encryption MUST use direct_post.jwt.
-	case "dc_api.jwt":
-		// The DC API is out of scope for this wallet build.
-		return newAuthorizationRequestError(InvalidRequestError, "dc_api.jwt is not implemented")
+	case OAuthAuthzReqResponseModeDCAPI, OAuthAuthzReqResponseModeDCAPIJWT:
+		// DC API requests are not delivered through request_uri; they are
+		// handled by ParseDCAPIRequest. Reaching this path means a
+		// request_uri-delivered DC API response mode, which is rejected.
+		return newAuthorizationRequestError(InvalidRequestError, "dc_api.jwt is not implemented for request_uri delivery")
 	default:
 		// HAIP §5.1: "Response encryption MUST be used by utilizing response
 		// mode direct_post.jwt".
@@ -1551,7 +1603,8 @@ func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 		OID4VPClientIDPrefixDID,
 		OID4VPClientIDPrefixVerifierAttestation,
 		OID4VPClientIDPrefixX509SanDNS,
-		OID4VPClientIDPrefixX509Hash:
+		OID4VPClientIDPrefixX509Hash,
+		OID4VPClientIDPrefixWebOrigin:
 		return &OID4VPClientID{
 			original: origin,
 			prefix:   OID4VPClientIDPrefix(prefix),
