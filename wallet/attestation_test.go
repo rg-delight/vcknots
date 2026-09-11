@@ -285,3 +285,83 @@ func TestCreateOID4VCIAttestationHeaders_RejectsBeforeNetwork(t *testing.T) {
 		})
 	}
 }
+
+// HAIP §4.3.1: "Wallet Attestations MUST NOT be reused across different
+// Issuers." A client attestation whose aud names a different authorization
+// server is rejected.
+func TestClientAttestationRejectsForeignAudience(t *testing.T) {
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	request := ClientAttestationRequest{ClientID: "client-1", ClientKey: clientKey, AuthorizationServer: "https://as.example"}
+
+	claims := clientAttestationClaimsFor(clientKey)
+	claims["aud"] = "https://other-as.example"
+	token, err := signAttestationJWT(attesterKey, clientAttestationJWTType, claims)
+	require.NoError(t, err)
+
+	err = validateClientAttestation(&ClientAttestation{JWT: token}, request, false, time.Now())
+	require.ErrorContains(t, err, "does not identify the authorization server")
+}
+
+func TestClientAttestationAcceptsMatchingAudience(t *testing.T) {
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	request := ClientAttestationRequest{ClientID: "client-1", ClientKey: clientKey, AuthorizationServer: "https://as.example"}
+
+	audiences := map[string]any{
+		"string": "https://as.example",
+		"array":  []string{"https://other-as.example", "https://as.example"},
+	}
+	for name, audience := range audiences {
+		t.Run(name, func(t *testing.T) {
+			claims := clientAttestationClaimsFor(clientKey)
+			claims["aud"] = audience
+			token, err := signAttestationJWT(attesterKey, clientAttestationJWTType, claims)
+			require.NoError(t, err)
+			require.NoError(t, validateClientAttestation(&ClientAttestation{JWT: token}, request, false, time.Now()))
+		})
+	}
+}
+
+func TestClientAttestationAcceptsAbsentAudience(t *testing.T) {
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	request := ClientAttestationRequest{ClientID: "client-1", ClientKey: clientKey, AuthorizationServer: "https://as.example"}
+
+	token, err := signAttestationJWT(attesterKey, clientAttestationJWTType, clientAttestationClaimsFor(clientKey))
+	require.NoError(t, err)
+	require.NoError(t, validateClientAttestation(&ClientAttestation{JWT: token}, request, false, time.Now()))
+}
+
+func TestKeyAttestationRejectsForeignAudience(t *testing.T) {
+	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	request := KeyAttestationRequest{Keys: []jose.JSONWebKey{holderKey}, Audience: "https://issuer.example"}
+
+	token, err := signAttestationJWT(attesterKey, keyAttestationJWTType, map[string]any{
+		"iss":           "https://key-attester.example",
+		"iat":           time.Now().Unix(),
+		"exp":           time.Now().Add(time.Minute).Unix(),
+		"attested_keys": []jose.JSONWebKey{publicHolderJWK(holderKey)},
+		"aud":           "https://other-issuer.example",
+	})
+	require.NoError(t, err)
+
+	err = validateKeyAttestation(&KeyAttestation{JWT: token}, request, false, time.Now())
+	require.ErrorContains(t, err, "does not identify the credential issuer")
+}
+
+func TestKeyAttestationAcceptsAbsentAudience(t *testing.T) {
+	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	request := KeyAttestationRequest{Keys: []jose.JSONWebKey{holderKey}, Audience: "https://issuer.example"}
+
+	token, err := signAttestationJWT(attesterKey, keyAttestationJWTType, map[string]any{
+		"iss":           "https://key-attester.example",
+		"iat":           time.Now().Unix(),
+		"exp":           time.Now().Add(time.Minute).Unix(),
+		"attested_keys": []jose.JSONWebKey{publicHolderJWK(holderKey)},
+	})
+	require.NoError(t, err)
+	require.NoError(t, validateKeyAttestation(&KeyAttestation{JWT: token}, request, false, time.Now()))
+}

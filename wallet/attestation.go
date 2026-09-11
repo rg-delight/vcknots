@@ -3,7 +3,6 @@ package wallet
 import (
 	"context"
 	"crypto"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
 // Attestation JWT typ values from the OAuth 2.0 Attestation-Based Client
@@ -53,7 +53,10 @@ type KeyAttestationProvider interface {
 	KeyAttestation(ctx context.Context, request KeyAttestationRequest) (*KeyAttestation, error)
 }
 
-// KeyAttestationRequest is the input to a KeyAttestationProvider.
+// KeyAttestationRequest is the input to a KeyAttestationProvider. Audience is
+// the credential issuer identifier the attestation is for: it is genuine
+// provider input and, when the produced attestation carries an aud claim, the
+// value is checked against it.
 type KeyAttestationRequest struct {
 	Keys     []jose.JSONWebKey // public holder keys to attest, in proof order
 	Nonce    string            // c_nonce when the issuer provides one
@@ -167,8 +170,10 @@ func (a *StaticKeyAttester) KeyAttestation(_ context.Context, request KeyAttesta
 // validateClientAttestation checks a provider result before the wallet sends it
 // to an authorization server. The attester signature is intentionally not
 // verified because the wallet does not hold the attester key; only the shape
-// and the binding to this wallet instance are checked. Under HAIP the x5c
-// chain must be present and its leaf must not be self-signed (HAIP §4.4.1).
+// and the binding to this wallet instance are checked. A present aud claim must
+// identify the authorization server, because HAIP §4.3.1 forbids reusing a
+// Wallet Attestation across Issuers. Under HAIP the x5c chain must be present
+// and its leaf must not be self-signed (HAIP §4.4.1).
 func validateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("client attestation provider returned an empty attestation")
@@ -182,6 +187,13 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 	}
 	if claims.Sub != request.ClientID {
 		return fmt.Errorf("client attestation sub %q does not match client_id %q", claims.Sub, request.ClientID)
+	}
+	// HAIP §4.3.1: "Wallet Attestations MUST NOT be reused across different
+	// Issuers." An absent aud is permitted; a present-but-wrong one is the
+	// reuse the profile forbids.
+	if !attestationAudienceMatches(claims.Aud, request.AuthorizationServer) {
+		return fmt.Errorf("client attestation aud %v does not identify the authorization server %q",
+			claims.Aud, request.AuthorizationServer)
 	}
 	if claims.Cnf == nil || claims.Cnf.JWK.Key == nil {
 		return fmt.Errorf("client attestation is missing cnf.jwk")
@@ -200,7 +212,11 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 		return fmt.Errorf("client attestation is expired")
 	}
 	if requireX5C {
-		if err := requireNonSelfSignedX5C(header, "client attestation"); err != nil {
+		chain, err := commonX509.DecodeX5CChain(header.X5C)
+		if err != nil {
+			return err
+		}
+		if err := commonX509.RequireNonSelfSignedLeaf(chain, "client attestation"); err != nil {
 			return err
 		}
 	}
@@ -209,8 +225,9 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 
 // validateKeyAttestation checks a provider result before it is embedded in a
 // credential request proof. Every requested holder key must appear in
-// attested_keys, the nonce must echo the c_nonce when one was given, exp must
-// be in the future, and under HAIP the x5c leaf must not be self-signed.
+// attested_keys, the nonce must echo the c_nonce when one was given, a present
+// aud claim must identify the request audience, exp must be in the future, and
+// under HAIP the x5c leaf must not be self-signed.
 func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationRequest, requireX5C bool, now time.Time) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("key attestation provider returned an empty attestation")
@@ -231,6 +248,10 @@ func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationR
 	if request.Nonce != "" && claims.Nonce != request.Nonce {
 		return fmt.Errorf("key attestation nonce %q does not match the issuer c_nonce %q", claims.Nonce, request.Nonce)
 	}
+	if !attestationAudienceMatches(claims.Aud, request.Audience) {
+		return fmt.Errorf("key attestation aud %v does not identify the credential issuer %q",
+			claims.Aud, request.Audience)
+	}
 	attested := make(map[string]struct{}, len(claims.AttestedKeys))
 	for index := range claims.AttestedKeys {
 		thumbprint, err := jwkThumbprint(claims.AttestedKeys[index])
@@ -249,7 +270,11 @@ func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationR
 		}
 	}
 	if requireX5C {
-		if err := requireNonSelfSignedX5C(header, "key attestation"); err != nil {
+		chain, err := commonX509.DecodeX5CChain(header.X5C)
+		if err != nil {
+			return err
+		}
+		if err := commonX509.RequireNonSelfSignedLeaf(chain, "key attestation"); err != nil {
 			return err
 		}
 	}
@@ -264,12 +289,43 @@ type attestationJWTHeader struct {
 type attestationJWTClaims struct {
 	Iss          string            `json:"iss"`
 	Sub          string            `json:"sub"`
+	Aud          any               `json:"aud"`
 	Exp          *float64          `json:"exp"`
 	Nonce        string            `json:"nonce"`
 	AttestedKeys []jose.JSONWebKey `json:"attested_keys"`
 	Cnf          *struct {
 		JWK jose.JSONWebKey `json:"jwk"`
 	} `json:"cnf"`
+}
+
+// attestationAudienceMatches reports whether the aud claim of an attestation
+// identifies audience. aud may be a string or an array of strings (the shape
+// encoding/json produces for a JSON array is []any, []string is also accepted
+// for callers that have already normalised it). An absent aud (nil) is
+// permitted: the attestation then makes no audience assertion.
+func attestationAudienceMatches(aud any, audience string) bool {
+	switch value := aud.(type) {
+	case nil:
+		return true
+	case string:
+		return value == audience
+	case []string:
+		for _, entry := range value {
+			if entry == audience {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, entry := range value {
+			if text, ok := entry.(string); ok && text == audience {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // parseAttestationJWT decodes the protected header and claims of a compact JWS
@@ -300,31 +356,6 @@ func parseAttestationJWT(token string) (attestationJWTHeader, attestationJWTClai
 
 func decodeJWSSegment(segment string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(segment, "="))
-}
-
-func requireNonSelfSignedX5C(header attestationJWTHeader, label string) error {
-	if len(header.X5C) == 0 {
-		return fmt.Errorf("%s must include an x5c header chain", label)
-	}
-	der, err := base64.StdEncoding.DecodeString(header.X5C[0])
-	if err != nil {
-		return fmt.Errorf("%s x5c leaf certificate is not base64 DER: %w", label, err)
-	}
-	certificate, err := x509.ParseCertificate(der)
-	if err != nil {
-		return fmt.Errorf("%s x5c leaf certificate is invalid: %w", label, err)
-	}
-	if isSelfSignedCertificate(certificate) {
-		return fmt.Errorf("%s x5c leaf certificate must not be self-signed", label)
-	}
-	return nil
-}
-
-func isSelfSignedCertificate(certificate *x509.Certificate) bool {
-	if certificate == nil || certificate.Issuer.String() != certificate.Subject.String() {
-		return false
-	}
-	return certificate.CheckSignature(certificate.SignatureAlgorithm, certificate.RawTBSCertificate, certificate.Signature) == nil
 }
 
 // requireJWKThumbprint fails when the RFC 7638 thumbprint of want does not
@@ -400,9 +431,9 @@ func signAttestationJWT(key jose.JSONWebKey, typ string, payload map[string]any)
 
 // ValidateClientAttestation is the exported form of the check the wallet
 // performs on a provider result before using it: typ, sub, cnf.jwk thumbprint,
-// exp (and a non-self-signed x5c leaf when requireX5C is set). Applications that
-// receive a pre-issued attestation from their Wallet Provider can reject an
-// unusable one before starting an issuance.
+// aud against the authorization server, exp (and a non-self-signed x5c leaf when
+// requireX5C is set). Applications that receive a pre-issued attestation from
+// their Wallet Provider can reject an unusable one before starting an issuance.
 func ValidateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
 	return validateClientAttestation(attestation, request, requireX5C, now)
 }
