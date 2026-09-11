@@ -188,6 +188,36 @@ type CredentialIssuerMetadata struct {
 	AuthorizationServers             []common.URIField                  `json:"authorization_servers,omitempty"`
 	Display                          []CredentialIssuerMetadataDisplay  `json:"display,omitempty"`
 	CredentialConfigurationSupported map[string]CredentialConfiguration `json:"credential_configurations_supported,omitempty"`
+	// SignedMetadata holds the OpenID4VCI 1.0 §12.2.3 signed Credential Issuer
+	// Metadata. §12.2.3 requires the issuer to secure the metadata with a JWS
+	// (alg MUST NOT be none or a MAC identifier, typ MUST be
+	// openidvci-issuer-metadata+jwt) and to return it with media type
+	// application/jwt; the wallet retains the compact serialization here.
+	SignedMetadata string `json:"signed_metadata,omitempty"`
+	// MetadataSignature records the outcome of verifying SignedMetadata so
+	// callers can audit the signer. It is internal state and never serialized
+	// (json:"-").
+	MetadataSignature *MetadataVerification `json:"-"`
+}
+
+// MetadataVerification records the outcome of verifying the OpenID4VCI 1.0
+// §12.2.3 signed Credential Issuer Metadata. §12.2.3 requires the wallet to
+// establish trust in the signer of the metadata and reject it otherwise; when
+// validating the signature the wallet obtains the keys via JOSE header
+// parameters such as x5c, kid or trust_chain. The fields capture the signer
+// identity the metadata was accepted under; they are never serialized.
+type MetadataVerification struct {
+	// LeafCertificateSHA256 is the SHA-256 fingerprint of the leaf X.509
+	// certificate that signed the metadata.
+	LeafCertificateSHA256 string
+	// Subject is the subject distinguished name of the signing certificate.
+	Subject string
+	// IssuedAt is the JWS iat: the time the Credential Issuer Metadata was
+	// issued, per §12.2.3.
+	IssuedAt time.Time
+	// ExpiresAt is the optional JWS exp, or nil when the signed metadata does
+	// not expire, per §12.2.3.
+	ExpiresAt *time.Time
 }
 
 // BatchSize reports the issuer's §14.6 batch_size, defaulting to one when the
@@ -226,14 +256,15 @@ type BatchCredentialIssuance struct {
 }
 
 type CredentialConfiguration struct {
-	Display                              *[]CredentialConfigurationDisplay `json:"display,omitempty"`
-	ProofTypesSupported                  *map[string]ProofType             `json:"proof_types_supported,omitempty"`
-	Scope                                string                            `json:"scope,omitempty"`
-	CredentialIdentifier                 string                            `json:"credential_identifier,omitempty"`
-	CryptographicBindingMethodsSupported *[]string                         `json:"cryptographic_binding_methods_supported,omitempty"`
-	Format                               string                            `json:"format"`
-	CredentialDefinition                 *CredentialDefinition             `json:"credential_definition,omitempty"`
-	CredentialSigningAlgValuesSupported  []SignatureAlgorithm              `json:"credential_signing_alg_values_supported,omitempty"`
+	Display             *[]CredentialConfigurationDisplay `json:"display,omitempty"`
+	ProofTypesSupported *map[string]ProofType             `json:"proof_types_supported,omitempty"`
+	Scope               string                            `json:"scope,omitempty"`
+	// Deprecated: non-standard; removed once wallet_final_issuance.go stops reading it.
+	CredentialIdentifier                 string                `json:"credential_identifier,omitempty"`
+	CryptographicBindingMethodsSupported *[]string             `json:"cryptographic_binding_methods_supported,omitempty"`
+	Format                               string                `json:"format"`
+	CredentialDefinition                 *CredentialDefinition `json:"credential_definition,omitempty"`
+	CredentialSigningAlgValuesSupported  []SignatureAlgorithm  `json:"credential_signing_alg_values_supported,omitempty"`
 }
 
 var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
