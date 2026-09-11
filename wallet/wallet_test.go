@@ -1097,15 +1097,19 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			require.NotEmpty(t, proofs["jwt"])
 			responseEncryption, ok := body["credential_response_encryption"].(map[string]any)
 			require.True(t, ok)
-			require.Equal(t, "ECDH-ES", responseEncryption["alg"])
+			// OID4VCI Final §8.2: credential_response_encryption carries jwk+enc,
+			// with no top-level alg.
+			_, hasAlg := responseEncryption["alg"]
+			require.False(t, hasAlg)
+			require.NotNil(t, responseEncryption["jwk"])
 			require.Equal(t, "A128GCM", responseEncryption["enc"])
-			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"transaction_id": "tx-1"})
+			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{"transaction_id": "tx-1"})
 		case "/deferred":
 			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			require.Equal(t, "tx-1", body["transaction_id"])
-			mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{
 				"credential":      issuedCredential,
 				"notification_id": "notification-1",
 			})
@@ -1140,6 +1144,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 		ClientKey:                       clientKey,
 		AttesterKey:                     attesterKey,
 		AttesterIssuer:                  "https://client-attester.example.org/",
+		DeferredPollAttempts:            2,
 		CredentialResponseEncryptionKey: &responseEncryptionKey,
 	})
 	require.NoError(t, err)

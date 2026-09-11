@@ -134,3 +134,30 @@ carries `cnf` even when the verifier set
 a Final-accepts / HAIP-rejects test pair. HAIP obligations of the other party
 that the Wallet cannot observe (for example "Verifiers MUST list both A128GCM
 and A256GCM") are not turned into rejections.
+
+## OpenID4VCI 1.0 Final issuance path
+
+`ReceiveOID4VCIFinalCredential` now resolves offers by reference
+(`ResolveCredentialOffer`, `credential_offer_uri`), requires the fetched
+`credential_issuer` to equal the offer value exactly, selects the authorization
+server from the grant's `authorization_server` hint (which must be listed) and
+checks the authorization server metadata `issuer` (RFC 8414 §3.3); the
+authorization response must come back on the registered `redirect_uri`,
+error redirects surface as `AuthorizationResponseError`, `iss` is validated
+when present and required when advertised or under HAIP (RFC 9207), and an
+expired PAR `request_uri` is not used. The Nonce Endpoint is optional (§7);
+token-response `credential_identifiers` are used when present (§6.2);
+`invalid_nonce` triggers one re-proof through
+`PostCredentialEndpointWithNonceRetry` (§8.3.1); credential endpoint failures
+are `receiver/types.CredentialEndpointError` values usable with `errors.Is`.
+Credential response encryption follows §8.2 (`jwk`, `enc`, optional `zip`, no
+`alg`), fails closed when `encryption_required` is set without a key, and
+rejects a plaintext response after encryption was requested. Batch issuance
+sends one proof per holder key (`AdditionalHolderKeys`, bounded by
+`batch_credential_issuance.batch_size`) and verifies each credential against
+its own key. Deferred issuance polls with `interval` up to
+`DeferredPollAttempts`, otherwise returns a pending result that
+`ResumeOID4VCIFinalDeferredCredential` can continue in another process.
+`credential_accepted` is sent only after storage succeeded,
+`credential_failure` on verification or storage failure, and
+`NotifyOID4VCIFinalCredentialDeleted` sends `credential_deleted`.

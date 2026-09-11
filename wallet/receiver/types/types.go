@@ -322,8 +322,11 @@ type CredentialDefinitionDisplay struct {
 }
 
 type AuthorizationServerMetadata struct {
-	PreAuthorizedGrantAnonymousAccessSupported         *bool                      `json:"pre-authorized_grant_anonymous_access_supported"`
-	Issuer                                             common.URIField            `json:"issuer"`
+	PreAuthorizedGrantAnonymousAccessSupported *bool           `json:"pre-authorized_grant_anonymous_access_supported"`
+	Issuer                                     common.URIField `json:"issuer"`
+	// AuthorizationResponseIssParameterSupported advertises RFC 9207 support:
+	// the authorization response then carries iss, which the wallet validates.
+	AuthorizationResponseIssParameterSupported         *bool                      `json:"authorization_response_iss_parameter_supported,omitempty"`
 	AuthorizationEndpoint                              *common.URIField           `json:"authorization_endpoint,omitempty"`
 	TokenEndpoint                                      *common.URIField           `json:"token_endpoint,omitempty"`
 	PushedAuthorizationRequestEndpoint                 *common.URIField           `json:"pushed_authorization_request_endpoint,omitempty"`

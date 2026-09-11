@@ -24,7 +24,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -516,6 +515,10 @@ type CredentialOfferGrant struct {
 	PreAuthorizedCode string           `json:"pre-authorized_code"`
 	IssuerState       string           `json:"issuer_state,omitempty"`
 	TxCode            *TransactionCode `json:"tx_code,omitempty"`
+	// AuthorizationServer is the §4.1.1 authorization_server grant parameter:
+	// the issuer-recommended authorization server identifier. It MUST be one of
+	// the credential issuer metadata's authorization_servers.
+	AuthorizationServer string `json:"authorization_server,omitempty"`
 }
 
 // TxCode is the upstream name for the transaction-code descriptor.
@@ -532,14 +535,23 @@ type TransactionCode struct {
 // credential issuance inputs that are not discoverable from the credential
 // offer or issuer metadata.
 type OID4VCIFinalReceiveRequest struct {
-	CredentialOffer                 *CredentialOffer
-	Type                            receiverTypes.SupportedReceivingTypes
-	ClientID                        string
-	RedirectURI                     string
-	HolderKey                       jose.JSONWebKey
-	ClientKey                       jose.JSONWebKey
-	AttesterKey                     jose.JSONWebKey
-	AttesterIssuer                  string
+	CredentialOffer *CredentialOffer
+	Type            receiverTypes.SupportedReceivingTypes
+	ClientID        string
+	RedirectURI     string
+	HolderKey       jose.JSONWebKey
+	// AdditionalHolderKeys requests §14.6 batch issuance. Each key yields one
+	// proofs.jwt entry (HolderKey plus these, in order), and the returned
+	// credentials are verified against the key at the same index. The total
+	// number of proofs must not exceed the issuer's batch_size.
+	AdditionalHolderKeys []jose.JSONWebKey
+	ClientKey            jose.JSONWebKey
+	AttesterKey          jose.JSONWebKey
+	AttesterIssuer       string
+	// DeferredPollAttempts is the number of §9 deferred credential endpoint
+	// polls. Zero means do not poll and return an IssuancePending result the
+	// caller can resume with ResumeOID4VCIFinalDeferredCredential.
+	DeferredPollAttempts            int
 	CredentialResponseEncryptionKey *jose.JSONWebKey
 	HTTPClient                      *http.Client
 }
@@ -548,6 +560,12 @@ type OID4VCIFinalReceiveResult struct {
 	CredentialResponse *receiverTypes.CredentialResponse
 	SavedCredentials   []*SavedCredential
 	AccessToken        *receiverTypes.CredentialIssuanceAccessToken
+	// TransactionID and NotificationID expose the §9 deferred transaction and
+	// §11 notification identifiers so callers can resume or notify later.
+	TransactionID             string
+	NotificationID            string
+	IssuerMetadata            *receiverTypes.CredentialIssuerMetadata
+	CredentialConfigurationID string
 }
 
 func ParseCredentialOfferURL(rawURL string) (*CredentialOffer, error) {
@@ -559,25 +577,7 @@ func ParseCredentialOfferURL(rawURL string) (*CredentialOffer, error) {
 	if rawOffer == "" {
 		return nil, fmt.Errorf("credential_offer query parameter is required")
 	}
-
-	var raw struct {
-		CredentialIssuer           string                           `json:"credential_issuer"`
-		CredentialConfigurationIDs []string                         `json:"credential_configuration_ids"`
-		Grants                     map[string]*CredentialOfferGrant `json:"grants"`
-	}
-	if err := json.Unmarshal([]byte(rawOffer), &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse credential_offer JSON: %w", err)
-	}
-	issuer, err := url.Parse(raw.CredentialIssuer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential issuer: %w", err)
-	}
-	offer := CredentialOffer{
-		CredentialIssuer:           issuer,
-		CredentialConfigurationIDs: raw.CredentialConfigurationIDs,
-		Grants:                     raw.Grants,
-	}
-	return &offer, nil
+	return parseCredentialOfferJSON(rawOffer)
 }
 
 // GetCredentialEntriesRequest holds parameters for querying credential entries.
@@ -1142,221 +1142,6 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 	return w.storeAndParseCredential(credentialJWT, serializationFlavor, holderKey)
 }
 
-func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (*OID4VCIFinalReceiveResult, error) {
-	if req.Type != receiverTypes.Oid4vci {
-		return nil, fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
-	}
-	if req.CredentialOffer == nil {
-		return nil, fmt.Errorf("credential offer is required")
-	}
-	if req.ClientID == "" {
-		return nil, fmt.Errorf("client ID is required")
-	}
-	if req.RedirectURI == "" {
-		return nil, fmt.Errorf("redirect URI is required")
-	}
-	if req.HolderKey.Key == nil {
-		return nil, fmt.Errorf("holder key is required")
-	}
-	if req.ClientKey.Key == nil {
-		return nil, fmt.Errorf("client key is required")
-	}
-	if len(req.CredentialOffer.CredentialConfigurationIDs) == 0 {
-		return nil, fmt.Errorf("credential configuration IDs are empty")
-	}
-	if req.CredentialOffer.CredentialIssuer == nil {
-		return nil, fmt.Errorf("credential issuer is required")
-	}
-	authCodeGrant := req.CredentialOffer.Grants["authorization_code"]
-	if authCodeGrant == nil {
-		return nil, fmt.Errorf("authorization_code grant is not included in the offer")
-	}
-
-	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
-	// mechanism at OAuth2 Endpoints that support client authentication". Reject
-	// before any network access when neither a client attestation (attester key)
-	// nor a configured client authentication method can authenticate the wallet.
-	if w.profile.IsHAIP() && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
-		return nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
-	}
-
-	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
-	if err != nil {
-		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
-	}
-	credentialConfigurationID := req.CredentialOffer.CredentialConfigurationIDs[0]
-	issuerEndpoint, err := common.ParseURIField(req.CredentialOffer.CredentialIssuer.String())
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
-	}
-	issuerMetadata, err := finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
-	}
-	// HAIP §4.1 constraints on the issuer metadata and the selected credential
-	// configuration are enforced before PAR so an unsupported issuer never sees
-	// an authorization request.
-	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
-	if w.profile.IsHAIP() && profileValidator == nil {
-		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
-	}
-	if profileValidator != nil {
-		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
-			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
-		}
-		if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok {
-			if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
-				return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
-			}
-		}
-	}
-
-	authorizationServerEndpoint := *issuerEndpoint
-	if len(issuerMetadata.AuthorizationServers) > 0 {
-		authorizationServerEndpoint = issuerMetadata.AuthorizationServers[0]
-	}
-	authorizationServerMetadata, err := finalReceiver.FetchAuthorizationServerMetadata(authorizationServerEndpoint, req.Type)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
-	}
-	if authorizationServerMetadata.AuthorizationEndpoint == nil {
-		return nil, fmt.Errorf("authorization endpoint is missing on authorization server")
-	}
-	if authorizationServerMetadata.PushedAuthorizationRequestEndpoint == nil {
-		return nil, fmt.Errorf("pushed authorization request endpoint is missing on authorization server")
-	}
-	if authorizationServerMetadata.TokenEndpoint == nil {
-		return nil, fmt.Errorf("token endpoint is missing on authorization server")
-	}
-	if issuerMetadata.NonceEndpoint == nil {
-		return nil, fmt.Errorf("nonce endpoint is missing on credential issuer")
-	}
-
-	authorizationServerIssuer := authorizationServerEndpoint.String()
-	attestationHeaders, attestationChallenge, err := createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
-	if err != nil {
-		return nil, err
-	}
-
-	codeVerifier, err := randomBase64URL(32)
-	if err != nil {
-		return nil, err
-	}
-	state, err := randomBase64URL(16)
-	if err != nil {
-		return nil, err
-	}
-	codeChallengeBytes := sha256.Sum256([]byte(codeVerifier))
-	scope := credentialConfigurationID
-	if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok && config.Scope != "" {
-		scope = config.Scope
-	}
-	parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, receiverTypes.PushedAuthorizationRequest{
-		ResponseType:        "code",
-		ClientID:            req.ClientID,
-		RedirectURI:         req.RedirectURI,
-		Scope:               scope,
-		State:               state,
-		CodeChallenge:       base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
-		CodeChallengeMethod: "S256",
-		IssuerState:         authCodeGrant.IssuerState,
-	}, attestationHeaders)
-	if err != nil {
-		return nil, fmt.Errorf("failed to push authorization request: %w", err)
-	}
-
-	code, err := requestOID4VCIAuthorizationCode(req.HTTPClient, authorizationServerMetadata.AuthorizationEndpoint, req.ClientID, parResponse.RequestURI, state)
-	if err != nil {
-		return nil, err
-	}
-
-	token, err := finalReceiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
-		*authorizationServerMetadata.TokenEndpoint,
-		receiverTypes.AuthorizationCodeTokenRequest{
-			Code:         code,
-			RedirectURI:  req.RedirectURI,
-			CodeVerifier: codeVerifier,
-			ClientID:     req.ClientID,
-		},
-		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
-			tokenAttestationHeaders := attestationHeaders
-			if req.AttesterKey.Key != nil {
-				tokenPop, err := finalReceiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
-				if err != nil {
-					return receiverTypes.OAuthClientAttestationHeaders{}, err
-				}
-				tokenAttestationHeaders.ClientAttestationPop = tokenPop
-			}
-			return tokenAttestationHeaders, nil
-		},
-		func(nonce string) (string, error) {
-			return finalReceiver.CreateDpopProof(req.ClientKey, http.MethodPost, authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
-	}
-
-	nonce, err := finalReceiver.FetchNonceResponse(*issuerMetadata.NonceEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch credential nonce: %w", err)
-	}
-	proofJWT, err := finalReceiver.CreateCredentialRequestJWTProof(req.HolderKey, issuerMetadata.CredentialIssuer, nonce.CNonce)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create credential request proof: %w", err)
-	}
-
-	credentialResponse, err := postOID4VCICredentialEndpoint(finalReceiver, issuerMetadata, req, *token, issuerMetadata.CredentialEndpoint, map[string]any{
-		"credential_configuration_id": credentialConfigurationID,
-		"proofs": map[string]any{
-			"jwt": []string{proofJWT},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if credentialResponse.TransactionID != "" {
-		if issuerMetadata.DeferredCredentialEndpoint == nil {
-			return nil, fmt.Errorf("deferred credential endpoint is missing on credential issuer")
-		}
-		credentialResponse, err = postOID4VCICredentialEndpoint(finalReceiver, issuerMetadata, req, *token, *issuerMetadata.DeferredCredentialEndpoint, map[string]any{
-			"transaction_id": credentialResponse.TransactionID,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	if credentialResponse.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil {
-		err := finalReceiver.SendCredentialNotificationWithDpopRetry(
-			*issuerMetadata.NotificationEndpoint,
-			token.Token,
-			receiverTypes.NotificationRequest{NotificationID: credentialResponse.NotificationID, Event: "credential_accepted"},
-			func(nonce string) (string, error) {
-				return finalReceiver.CreateDpopProof(req.ClientKey, http.MethodPost, issuerMetadata.NotificationEndpoint.String(), nonce, token.Token)
-			},
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send credential notification: %w", err)
-		}
-	}
-
-	var holderKey *jose.JSONWebKey
-	if req.HolderKey.Key != nil {
-		publicKey := req.HolderKey.Public()
-		holderKey = &publicKey
-	}
-
-	savedCredentials, err := w.storeOID4VCIFinalCredentialResponse(credentialResponse, issuerMetadata, credentialConfigurationID, holderKey)
-	if err != nil {
-		return nil, err
-	}
-	return &OID4VCIFinalReceiveResult{
-		CredentialResponse: credentialResponse,
-		SavedCredentials:   savedCredentials,
-		AccessToken:        token,
-	}, nil
-}
-
 // validateCredentialOffer validates the credential offer and extracts pre-authorization code.
 func (w *Wallet) validateCredentialOffer(offer *CredentialOffer) (string, error) {
 	if offer == nil {
@@ -1836,217 +1621,6 @@ func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFla
 		Entry:        &credentialEntry,
 		Verification: verification,
 	}, nil
-}
-
-func createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
-	if req.AttesterKey.Key == nil {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", nil
-	}
-	attesterIssuer := req.AttesterIssuer
-	if attesterIssuer == "" {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("attester issuer is required when attester key is provided")
-	}
-	clientAttestation, err := receiver.CreateClientAttestation(req.ClientKey, req.AttesterKey, attesterIssuer, req.ClientID, 5*time.Minute)
-	if err != nil {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
-	}
-
-	attestationChallenge := ""
-	if authMetadata.ChallengeEndpoint != nil {
-		challenge, err := receiver.FetchClientAttestationChallenge(*authMetadata.ChallengeEndpoint)
-		if err != nil {
-			return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("failed to fetch client attestation challenge: %w", err)
-		}
-		attestationChallenge = challenge.AttestationChallenge
-	}
-
-	if authorizationServerIssuer == "" {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("authorization server issuer is required for client attestation PoP")
-	}
-	clientAttestationPop, err := receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
-	if err != nil {
-		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
-	}
-	return receiverTypes.OAuthClientAttestationHeaders{
-		ClientAttestation:    clientAttestation,
-		ClientAttestationPop: clientAttestationPop,
-	}, attestationChallenge, nil
-}
-
-func requestOID4VCIAuthorizationCode(client *http.Client, endpoint *common.URIField, clientID string, requestURI string, expectedState string) (string, error) {
-	authorizationURL := url.URL(*endpoint)
-	query := authorizationURL.Query()
-	query.Set("client_id", clientID)
-	query.Set("request_uri", requestURI)
-	authorizationURL.RawQuery = query.Encode()
-
-	authClient := noRedirectHTTPClient(client)
-	response, err := authClient.Get(authorizationURL.String())
-	if err != nil {
-		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
-	}
-	defer response.Body.Close()
-	location := response.Header.Get("Location")
-	if location == "" {
-		return "", fmt.Errorf("authorization endpoint did not redirect: %d", response.StatusCode)
-	}
-	redirectURL, err := url.Parse(location)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse authorization redirect: %w", err)
-	}
-	if !redirectURL.IsAbs() {
-		redirectURL = authorizationURL.ResolveReference(redirectURL)
-	}
-	if state := redirectURL.Query().Get("state"); state != expectedState {
-		return "", fmt.Errorf("authorization redirect state mismatch")
-	}
-	code := redirectURL.Query().Get("code")
-	if code == "" {
-		return "", fmt.Errorf("authorization redirect code is missing")
-	}
-	return code, nil
-}
-
-func noRedirectHTTPClient(client *http.Client) *http.Client {
-	transport := http.DefaultTransport
-	timeout := time.Duration(0)
-	if client != nil {
-		if client.Transport != nil {
-			transport = client.Transport
-		}
-		timeout = client.Timeout
-	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
-func postOID4VCICredentialEndpoint(receiver receiverTypes.OID4VCIFinalReceiver, issuerMetadata *receiverTypes.CredentialIssuerMetadata, req OID4VCIFinalReceiveRequest, accessToken receiverTypes.CredentialIssuanceAccessToken, endpoint common.URIField, payload map[string]any) (*receiverTypes.CredentialResponse, error) {
-	addCredentialResponseEncryption(payload, issuerMetadata, req.CredentialResponseEncryptionKey)
-	body, contentType, err := receiver.EncodeCredentialRequest(payload, issuerMetadata)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode credential request: %w", err)
-	}
-	rawResponse, err := receiver.PostCredentialEndpointWithDpopRetry(endpoint, accessToken.Token, body, contentType, func(nonce string) (string, error) {
-		return receiver.CreateDpopProof(req.ClientKey, http.MethodPost, endpoint.String(), nonce, accessToken.Token)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var decryptionKey any
-	if req.CredentialResponseEncryptionKey != nil {
-		decryptionKey = req.CredentialResponseEncryptionKey.Key
-	}
-	response, err := receiver.DecodeCredentialResponse(rawResponse.Body, rawResponse.ContentType, decryptionKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode credential response: %w", err)
-	}
-	return response, nil
-}
-
-func addCredentialResponseEncryption(payload map[string]any, issuerMetadata *receiverTypes.CredentialIssuerMetadata, key *jose.JSONWebKey) {
-	if issuerMetadata.CredentialResponseEncryption == nil || key == nil {
-		return
-	}
-	publicKey := key.Public()
-	if publicKey.Key == nil {
-		return
-	}
-	enc := "A128GCM"
-	if len(issuerMetadata.CredentialResponseEncryption.EncValuesSupported) > 0 && issuerMetadata.CredentialResponseEncryption.EncValuesSupported[0] != "" {
-		enc = issuerMetadata.CredentialResponseEncryption.EncValuesSupported[0]
-	}
-	// TODO(openid4vc-ts-compat): OID4VCI Final 1.0 defines jwk+enc here, but
-	// @openid4vc/openid4vci currently requires alg. Remove this when upstream
-	// accepts Final 1.0 credential_response_encryption without top-level alg.
-	payload["credential_response_encryption"] = map[string]any{
-		"jwk": publicKey,
-		"alg": publicKey.Algorithm,
-		"enc": enc,
-	}
-}
-
-func (w *Wallet) storeOID4VCIFinalCredentialResponse(response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKey *jose.JSONWebKey) ([]*SavedCredential, error) {
-	if response == nil {
-		return nil, fmt.Errorf("credential response is nil")
-	}
-	mimeType := mimeTypeForCredentialConfiguration(issuerMetadata, credentialConfigurationID)
-	flavor, err := (&types.CredentialEntry{MimeType: mimeType}).SerializationFlavor()
-	if err != nil {
-		return nil, fmt.Errorf("unsupported credential serialization flavor: %w", err)
-	}
-	values := []any{}
-	if response.Credential != nil {
-		values = append(values, response.Credential)
-	}
-	values = append(values, response.Credentials...)
-	if len(values) == 0 {
-		return nil, nil
-	}
-
-	saved := make([]*SavedCredential, 0, len(values))
-	for _, value := range values {
-		raw, err := rawCredentialBytes(value)
-		if err != nil {
-			return nil, err
-		}
-		parsedCredential, verification, err := w.verifyCredentialForAcceptance(raw, flavor, holderKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to verify credential: %w", err)
-		}
-		entry := types.CredentialEntry{
-			Id:         uuid.New().String(),
-			ReceivedAt: time.Now(),
-			Raw:        raw,
-			MimeType:   mimeType,
-		}
-		saved = append(saved, &SavedCredential{
-			Credential:   parsedCredential,
-			Entry:        &entry,
-			Verification: verification,
-		})
-	}
-
-	for _, savedCredential := range saved {
-		if err := w.credStore.SaveCredentialEntry(*savedCredential.Entry, types.SupportedCredStoreTypes(0)); err != nil {
-			return nil, fmt.Errorf("failed to save credential entry: %w", err)
-		}
-	}
-	return saved, nil
-}
-
-func rawCredentialBytes(value any) ([]byte, error) {
-	switch credentialValue := value.(type) {
-	case string:
-		return []byte(credentialValue), nil
-	case []byte:
-		return credentialValue, nil
-	default:
-		raw, err := json.Marshal(credentialValue)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal credential value: %w", err)
-		}
-		return raw, nil
-	}
-}
-
-func mimeTypeForCredentialConfiguration(issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) string {
-	if issuerMetadata != nil {
-		if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok {
-			switch config.Format {
-			case "dc+sd-jwt", "vc+sd-jwt":
-				return string(credential.SDJwtVC)
-			case "jwt_vc_json", "jwt_vc", "vc+jwt":
-				return string(credential.JwtVc)
-			}
-		}
-	}
-	return string(credential.JwtVc)
 }
 
 func randomBase64URL(size int) (string, error) {
