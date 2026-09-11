@@ -20,6 +20,15 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 	if err != nil {
 		return nil, err
 	}
+	// OID4VP 1.0 Final Section 5.1: "If there is more than one element in the
+	// array, the Wallet MUST use only one of the referenced Credentials for
+	// transaction authorization." This pre-pass assigns every transaction_data
+	// entry to one selected credential query, and rejects an entry that
+	// references none of them, before any credential is serialized.
+	transactionDataOwners, err := assignTransactionDataOwners(req.TransactionData, selections)
+	if err != nil {
+		return nil, err
+	}
 	vpToken := make(map[string][]string, len(selections))
 	for _, selection := range selections {
 		saved := credentials[selection.CandidateID]
@@ -67,7 +76,22 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 					break
 				}
 			}
-			sdOpts.TransactionData = req.TransactionData
+			// Section 8.4: "The Wallet that received the transaction_data
+			// parameter in the request MUST include a representation or
+			// reference to the data in the respective Credential
+			// presentation." Only the entries that reference this query
+			// (Section 5.1) and that this query owns are hashed into its
+			// Key Binding JWT; every other presentation stays free of them.
+			referenced, err := transactionDataForQuery(req.TransactionData, selection.QueryID)
+			if err != nil {
+				return nil, err
+			}
+			sdOpts.TransactionData = nil
+			for _, entry := range referenced {
+				if transactionDataOwners[entry] == selection.QueryID {
+					sdOpts.TransactionData = append(sdOpts.TransactionData, entry)
+				}
+			}
 			sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
 			if sdOpts.TransactionDataHashesAlg == "" {
 				sdOpts.TransactionDataHashesAlg = "sha-256"

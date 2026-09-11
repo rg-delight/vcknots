@@ -399,3 +399,147 @@ func TestWallet_SubmitHandlesTransactionData(t *testing.T) {
 		t.Fatal("no encrypted response submitted")
 	}
 }
+
+// presentationURIWithTransactionData builds the same Authorization Request as
+// presentationURI plus the transaction_data parameter, which the Final profile
+// carries as a JSON-serialized array of base64url strings.
+func presentationURIWithTransactionData(t *testing.T, baseURL, query string, entries []string) string {
+	t.Helper()
+	raw, err := json.Marshal(entries)
+	require.NoError(t, err)
+	return "openid4vp://present?" + url.Values{
+		"client_id": {"redirect_uri:" + baseURL + "/response"}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
+		"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "state": {"state-to-preserve"}, "dcql_query": {query},
+		"transaction_data": {string(raw)},
+	}.Encode()
+}
+
+// encodedTransactionData base64url-encodes one transaction_data object.
+func encodedTransactionData(object string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(object))
+}
+
+// transactionDataHashesOf reads the transaction_data_hashes claim of a
+// presentation's Key Binding JWT, returning nil when the claim is absent.
+func transactionDataHashesOf(t *testing.T, wire string) []string {
+	t.Helper()
+	separator := strings.LastIndex(wire, "~")
+	require.Greater(t, separator, -1)
+	parts := strings.Split(wire[separator+1:], ".")
+	require.Len(t, parts, 3, "presentation has no Key Binding JWT")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	raw, present := claims["transaction_data_hashes"]
+	if !present {
+		require.NotContains(t, claims, "transaction_data_hashes_alg")
+		return nil
+	}
+	values, ok := raw.([]any)
+	require.True(t, ok)
+	require.Equal(t, "sha-256", claims["transaction_data_hashes_alg"])
+	hashes := make([]string, 0, len(values))
+	for _, value := range values {
+		hash, ok := value.(string)
+		require.True(t, ok)
+		hashes = append(hashes, hash)
+	}
+	return hashes
+}
+
+// transactionDataFixture stores a holder-bound identity and address credential
+// and accepts the "example" transaction data type.
+func transactionDataFixture(t *testing.T) sdjwtPresentationFixture {
+	t.Helper()
+	fixture := newSDJWTPresentationFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
+	fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
+	presenting, err := fixture.wallet.oid4vpPresenter()
+	require.NoError(t, err)
+	presenting.SetSupportedTransactionDataTypes([]string{"example"})
+	return fixture
+}
+
+// presentWithTransactionData runs the public presentation flow and returns the
+// vp_token the verifier received.
+func presentWithTransactionData(t *testing.T, fixture sdjwtPresentationFixture, query string, entries []string) (map[string][]string, error) {
+	t.Helper()
+	uri := presentationURIWithTransactionData(t, fixture.baseURL, query, entries)
+	redirect, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
+	if err != nil {
+		select {
+		case <-fixture.posted:
+			t.Fatal("rejected transaction_data still disclosed credentials")
+		default:
+		}
+		return nil, err
+	}
+	require.Equal(t, fixture.baseURL+"/done", redirect)
+	var tokens map[string][]string
+	select {
+	case form := <-fixture.posted:
+		require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+	default:
+		t.Fatal("no response received")
+	}
+	return tokens, nil
+}
+
+const twoCredentialDCQLQuery = `{"credentials":[` +
+	`{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
+	`{"id":"addr","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:address"]},"claims":[{"path":["street_address"]}]}]}`
+
+// OID4VP 1.0 Final Section 5.1 binds each transaction_data entry to the
+// credential queries named in its credential_ids, and Section 8.4 requires the
+// hash in "the respective Credential presentation" only. A presentation for a
+// query the entry does not name must stay free of the hash.
+func TestDCQLTransactionDataAttachedOnlyToNamedCredential(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["pid"]}`)
+	tokens, err := presentWithTransactionData(t, fixture, twoCredentialDCQLQuery, []string{entry})
+	require.NoError(t, err)
+	require.Len(t, tokens, 2)
+	digest := sha256.Sum256([]byte(entry))
+	require.Equal(t, []string{base64.RawURLEncoding.EncodeToString(digest[:])}, transactionDataHashesOf(t, tokens["pid"][0]))
+	require.Empty(t, transactionDataHashesOf(t, tokens["addr"][0]))
+}
+
+// OID4VP 1.0 Final Section 5.1: "If there is more than one element in the
+// array, the Wallet MUST use only one of the referenced Credentials for
+// transaction authorization." The wallet authorizes with the first referenced
+// query it is actually presenting, here "addr", and hashes the entry once.
+func TestDCQLTransactionDataAttachedOnceWhenSeveralCredentialIDsMatch(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["addr","pid"]}`)
+	tokens, err := presentWithTransactionData(t, fixture, twoCredentialDCQLQuery, []string{entry})
+	require.NoError(t, err)
+	require.Len(t, tokens, 2)
+	digest := sha256.Sum256([]byte(entry))
+	hash := base64.RawURLEncoding.EncodeToString(digest[:])
+	carriers := []string{}
+	for queryID, presentations := range tokens {
+		require.Len(t, presentations, 1)
+		if len(transactionDataHashesOf(t, presentations[0])) > 0 {
+			carriers = append(carriers, queryID)
+		}
+	}
+	require.Equal(t, []string{"addr"}, carriers)
+	require.Equal(t, []string{hash}, transactionDataHashesOf(t, tokens["addr"][0]))
+}
+
+// OID4VP 1.0 Final lists "the credential_ids does not match, or the referenced
+// Credential(s) are not available in the Wallet" as invalid_transaction_data.
+// The optional "missing" query is part of the request but is not presented, so
+// an entry that only references it must fail before anything is disclosed.
+func TestDCQLTransactionDataRejectsUnmatchedEntry(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	query := `{"credentials":[` +
+		`{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
+		`{"id":"missing","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:missing"]}}],` +
+		`"credential_sets":[{"options":[["pid"]]},{"options":[["missing"]],"required":false}]}`
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["missing"]}`)
+	_, err := presentWithTransactionData(t, fixture, query, []string{entry})
+	require.ErrorContains(t, err, "transaction_data entry 0 references no selected credential (invalid_transaction_data)")
+}

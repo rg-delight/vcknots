@@ -258,3 +258,48 @@ func TestWallet_TransactionDataBindingChecksReferencedQueries(t *testing.T) {
 	req.TransactionData = nil
 	require.NoError(t, validateTransactionDataHolderBinding(req))
 }
+
+// transactionDataForQuery applies the OID4VP 1.0 Final Section 5.1 credential_ids
+// filter and assignTransactionDataOwners the "MUST use only one of the
+// referenced Credentials" rule. Both are exercised here on inputs the public
+// request parser rejects before buildDCQLVPToken can see them.
+func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
+	first := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["pid"]}`))
+	both := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["addr","pid"]}`))
+	entries := []string{first, both}
+
+	matched, err := transactionDataForQuery(entries, "pid")
+	require.NoError(t, err)
+	require.Equal(t, entries, matched)
+	matched, err = transactionDataForQuery(entries, "addr")
+	require.NoError(t, err)
+	require.Equal(t, []string{both}, matched)
+	matched, err = transactionDataForQuery(entries, "other")
+	require.NoError(t, err)
+	require.Empty(t, matched)
+	_, err = transactionDataForQuery([]string{"not-base64!"}, "pid")
+	require.ErrorContains(t, err, "transaction_data entry 0")
+
+	selections := []oid4vp.DCQLCredentialSelection{{QueryID: "pid"}, {QueryID: "addr"}}
+	owners, err := assignTransactionDataOwners(entries, selections)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{first: "pid", both: "addr"}, owners)
+
+	// With only "pid" presented, the entry listing both is authorized by it.
+	owners, err = assignTransactionDataOwners(entries, selections[:1])
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{first: "pid", both: "pid"}, owners)
+
+	owners, err = assignTransactionDataOwners([]string{both, both}, selections)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{both: "addr"}, owners)
+
+	owners, err = assignTransactionDataOwners(nil, selections)
+	require.NoError(t, err)
+	require.Nil(t, owners)
+
+	_, err = assignTransactionDataOwners([]string{both}, []oid4vp.DCQLCredentialSelection{{QueryID: "other"}})
+	require.ErrorContains(t, err, "references no selected credential (invalid_transaction_data)")
+	_, err = assignTransactionDataOwners([]string{"not-base64!"}, selections)
+	require.ErrorContains(t, err, "transaction_data entry 0")
+}
