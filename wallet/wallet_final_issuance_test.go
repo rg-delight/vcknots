@@ -539,7 +539,7 @@ func TestReceiveOID4VCIFinalCredential_IssuerIdentifierMismatch(t *testing.T) {
 		f.credentialIssuerOverride = "https://other.example"
 	})
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
-	require.ErrorContains(t, err, "does not match the credential offer credential_issuer")
+	require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
 	require.Equal(t, 0, fixture.parCalls)
 	require.Equal(t, 0, fixture.credentialCalls)
 }

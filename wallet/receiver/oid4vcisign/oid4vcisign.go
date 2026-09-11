@@ -132,14 +132,39 @@ func (Default) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, o
 
 // CreateClientAttestation self-issues the Client Attestation JWT of
 // draft-ietf-oauth-attestation-based-client-auth Section 3, signing it with a
-// locally held attester key.
+// locally held attester key. It is CreateClientAttestationWithOptions with no
+// options, which produces the same JWT this method always has.
 //
 // A wallet does not hold the attester's private key: the attestation is issued
 // by the attester and reaches the wallet through a ClientAttestationProvider,
 // which is why this method is not part of types.OID4VCIFinalSigner. It remains
 // available for tests, examples and single-operator deployments that act as
 // their own attester.
-func (Default) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error) {
+func (d Default) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error) {
+	return d.CreateClientAttestationWithOptions(clientKey, attesterKey, attesterIssuer, clientID, lifetime, ClientAttestationOptions{})
+}
+
+// ClientAttestationOptions carries the optional inputs of
+// Default.CreateClientAttestationWithOptions that the fixed
+// CreateClientAttestation argument list cannot express. The zero value
+// reproduces the established CreateClientAttestation behaviour.
+type ClientAttestationOptions struct {
+	// Audience, when non-empty, is written as the aud claim and binds the
+	// attestation to a single authorization server. HAIP Section 4.4.1:
+	// "Wallet Attestations MUST NOT be reused across different Issuers." An
+	// attestation issued without an audience asserts nothing about which
+	// server it was minted for, so callers should set the authorization
+	// server identifier they will present it to.
+	Audience string
+}
+
+// CreateClientAttestationWithOptions is CreateClientAttestation taking the
+// optional inputs that the legacy argument list could not carry. It emits the
+// draft-ietf-oauth-attestation-based-client-auth Section 3 attester-issued
+// attestation, adding the aud claim when opts.Audience is set. HAIP Section
+// 4.4.1 requires that "Wallet Attestations MUST NOT be reused across different
+// Issuers", so a caller that knows the authorization server should set it.
+func (Default) CreateClientAttestationWithOptions(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration, opts ClientAttestationOptions) (string, error) {
 	if lifetime == 0 {
 		lifetime = defaultAttestationLifetime
 	}
@@ -158,6 +183,13 @@ func (Default) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jo
 		"cnf": map[string]any{
 			"jwk": clientPublicJWK,
 		},
+	}
+	// HAIP Section 4.4.1: "Wallet Attestations MUST NOT be reused across
+	// different Issuers." An audience-restricted attestation is what lets the
+	// authorization server detect the reuse; one issued without an audience
+	// asserts nothing about which server it was minted for.
+	if audience := strings.TrimSpace(opts.Audience); audience != "" {
+		payload["aud"] = audience
 	}
 
 	token, err := signJWT(attesterKey, "oauth-client-attestation+jwt", payload, x5cHeaders(attesterKey))

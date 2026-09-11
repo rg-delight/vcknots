@@ -30,6 +30,10 @@ var (
 	// share no proof signing algorithm. It aliases the oid4vci plugin's
 	// sentinel for the same reason as ErrHTTPRedirectNotAllowed.
 	ErrProofAlgorithmNotSupported = receiverOid4vci.ErrProofAlgorithmNotSupported
+	// ErrIssuerIdentifierMismatch reports that issuer metadata named a
+	// credential_issuer other than the requested Credential Issuer Identifier
+	// (VCI 1.0 §12.2.4). It aliases the oid4vci plugin's sentinel of that name.
+	ErrIssuerIdentifierMismatch = receiverOid4vci.ErrIssuerIdentifierMismatch
 	// ErrPreRegisteredClientUnknown reports that a pre-registered client_id
 	// was presented which the wallet's client registry does not hold. It
 	// aliases the oid4vp presenter plugin's sentinel, which raises it.

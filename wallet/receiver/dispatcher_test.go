@@ -229,7 +229,7 @@ func TestReceivingDispatcher_DefaultHTTPPolicyIsCaptured(t *testing.T) {
 	t.Setenv(env.DEBUG.String(), "")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"credential_issuer":"https://issuer.example","credential_endpoint":"https://issuer.example/credential"}`)
+		fmt.Fprintf(w, `{"credential_issuer":"http://%s","credential_endpoint":"http://%s/credential"}`, r.Host, r.Host)
 	}))
 	defer server.Close()
 	endpoint, err := common.ParseURIField(server.URL)

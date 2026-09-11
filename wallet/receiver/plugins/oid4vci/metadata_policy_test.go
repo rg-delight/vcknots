@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -59,6 +60,7 @@ func TestIssuerMetadataDoesNotRetryInvalidOrForbiddenResponses(t *testing.T) {
 
 func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T) {
 	var paths []string
+	var acceptedIdentifier string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		if r.URL.Path == "/.well-known/openid-credential-issuer/tenant" {
@@ -66,7 +68,10 @@ func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T
 			fmt.Fprint(w, `{"credential_issuer":"https://discarded.example","credential_request_encryption":{"encryption_required":true}}`)
 			return
 		}
-		fmt.Fprint(w, `{"credential_issuer":"https://accepted.example"}`)
+		// §12.2.4 binds credential_issuer to the requested identifier, which
+		// for this tenant is the base URL plus the /tenant path.
+		acceptedIdentifier = "http://" + r.Host + "/tenant"
+		fmt.Fprint(w, `{"credential_issuer":"`+acceptedIdentifier+`"}`)
 	}))
 	defer server.Close()
 	endpoint, err := common.ParseURIField(server.URL + "/tenant")
@@ -81,7 +86,7 @@ func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T
 	if len(paths) != 2 || paths[1] != "/tenant/.well-known/openid-credential-issuer" {
 		t.Fatalf("paths = %v", paths)
 	}
-	if metadata.CredentialIssuer != "https://accepted.example" || metadata.CredentialRequestEncryption != nil {
+	if metadata.CredentialIssuer != acceptedIdentifier || metadata.CredentialRequestEncryption != nil {
 		t.Fatalf("metadata from discarded response leaked: %+v", metadata)
 	}
 }
@@ -355,6 +360,40 @@ func TestFetchIssuerMetadataRejectsTrailingSlashInSignedMetadataSub(t *testing.T
 	}
 	if !strings.Contains(err.Error(), `does not match the credential issuer "`+serverURL+`"`) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestFetchIssuerMetadataRejectsCredentialIssuerMismatchInSignedMetadata pins
+// that §12.2.4 also binds the credential_issuer member of a signed payload: the
+// sub claim and the credential_issuer parameter must both name the requested
+// Credential Issuer Identifier.
+func TestFetchIssuerMetadataRejectsCredentialIssuerMismatchInSignedMetadata(t *testing.T) {
+	fixture := newSignedMetadataFixture(t)
+	serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+		return "application/jwt", fixture.sign(t, map[string]any{
+			"sub":                 identifier,
+			"iat":                 time.Now().Unix(),
+			"credential_issuer":   "https://other-issuer.example",
+			"credential_endpoint": identifier + "/credential",
+		}, []*x509.Certificate{fixture.leaf})
+	})
+
+	receiver := &Oid4vciReceiver{
+		HTTPClient: client,
+		AllowHTTP:  true,
+		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
+			Request:                     true,
+			TrustAnchors:                []*x509.Certificate{fixture.caCert},
+			AllowUnadvertisedRevocation: true,
+		},
+	}
+
+	metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+	if err == nil {
+		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
+	}
+	if !errors.Is(err, ErrIssuerIdentifierMismatch) {
+		t.Fatalf("errors.Is(ErrIssuerIdentifierMismatch) = false, err = %v", err)
 	}
 }
 

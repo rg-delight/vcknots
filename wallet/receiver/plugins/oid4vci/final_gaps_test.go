@@ -400,6 +400,49 @@ func TestOid4vciReceiver_DecodeCredentialResponseZip(t *testing.T) {
 	}
 }
 
+// §8.2 response encryption: the wallet may publish an RSA response-encryption
+// key, so a Credential Response the issuer encrypted to it with RSA-OAEP-256
+// must decrypt. go-jose v4 implements only RSA-OAEP-256 among the OAEP
+// variants, and RFC 8017 Section 7.2 RSA1_5 must never be accepted.
+func TestOid4vciReceiver_DecodeCredentialResponseRSA(t *testing.T) {
+	recipient, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate recipient key: %v", err)
+	}
+	plaintext := []byte(`{"credential":"rsa-credential","notification_id":"notif-1"}`)
+	encrypter, err := jose.NewEncrypter(
+		jose.A256GCM,
+		jose.Recipient{Algorithm: jose.RSA_OAEP_256, Key: &recipient.PublicKey, KeyID: "wallet-rsa-enc-key"},
+		(&jose.EncrypterOptions{}).WithContentType("json"),
+	)
+	if err != nil {
+		t.Fatalf("failed to create encrypter: %v", err)
+	}
+	encrypted, err := encrypter.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("failed to encrypt response: %v", err)
+	}
+	serialized, err := encrypted.CompactSerialize()
+	if err != nil {
+		t.Fatalf("failed to serialize response: %v", err)
+	}
+
+	receiver := &Oid4vciReceiver{}
+	decoded, err := receiver.DecodeCredentialResponse([]byte(serialized), "application/jwt", recipient)
+	if err != nil {
+		t.Fatalf("DecodeCredentialResponse() error = %v (an RSA response key must be decryptable)", err)
+	}
+	if decoded.Credential != "rsa-credential" || decoded.NotificationID != "notif-1" {
+		t.Fatalf("decoded response = %#v", decoded)
+	}
+
+	for _, alg := range supportedJWEKeyAlgorithms() {
+		if alg == jose.RSA1_5 {
+			t.Fatal("RSA1_5 must never be accepted for response decryption")
+		}
+	}
+}
+
 // §8.2: "Credential Request encryption MUST be used if the
 // `credential_response_encryption` parameter is included, to prevent it being
 // substituted by an attacker." An issuer that advertises no

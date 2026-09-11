@@ -170,9 +170,10 @@ func TestOid4vciReceiver_ProfileIssuerMetadataNonce(t *testing.T) {
 // TestOid4vciReceiver_ProfileAllowHTTP covers the HAIP transport policy.
 func TestOid4vciReceiver_ProfileAllowHTTP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{
-			"credential_issuer":   "https://issuer.example",
-			"credential_endpoint": "https://issuer.example/credential",
+			"credential_issuer":   base,
+			"credential_endpoint": base + "/credential",
 		})
 	}))
 	t.Cleanup(server.Close)

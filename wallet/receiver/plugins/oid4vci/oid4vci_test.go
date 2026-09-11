@@ -142,9 +142,7 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 
 		receiver.AllowHTTP = true
 
-		metadata := types.CredentialIssuerMetadata{
-			CredentialIssuer: "http://example.com",
-		}
+		var metadata types.CredentialIssuerMetadata
 		// Use a raw handler to bypass ServeMux's automatic path cleaning and redirects
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Check RequestURI for double slashes before any normalization
@@ -155,6 +153,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 			mockserver.JSONResponse(w, http.StatusOK, metadata)
 		}))
 		defer server.Close()
+		// §12.2.4 makes credential_issuer identical to the requested identifier,
+		// which drops the endpoint's trailing slash.
+		metadata.CredentialIssuer = server.URL
 
 		// Create endpoint WITH trailing slash
 		endpointURL, _ := url.Parse(server.URL + "/")
@@ -174,9 +175,7 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 
 		receiver.AllowHTTP = true
 
-		metadata := types.CredentialIssuerMetadata{
-			CredentialIssuer: "http://example.com/issuer",
-		}
+		var metadata types.CredentialIssuerMetadata
 		// Use a raw handler to bypass ServeMux's automatic path cleaning and redirects
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.Contains(r.RequestURI, "//") {
@@ -186,6 +185,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 			mockserver.JSONResponse(w, http.StatusOK, metadata)
 		}))
 		defer server.Close()
+		// §12.2.4 makes credential_issuer identical to the requested identifier,
+		// which drops the endpoint's trailing slash.
+		metadata.CredentialIssuer = server.URL + "/issuer"
 
 		// Create endpoint WITH path and trailing slash
 		endpointURL, _ := url.Parse(server.URL + "/issuer/")
@@ -201,8 +203,52 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 }
 
-func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
+// OpenID4VCI 1.0 §12.2.4: "The value MUST be identical to the Credential
+// Issuer's identifier value into which the well-known URI string was inserted
+// to create the URL used to retrieve the metadata. If these values are not
+// identical (when compared using a simple string comparison with no
+// normalization), the data contained in the response MUST NOT be used." These
+// cases drive the mock issuer's configurable identifier.
+func TestOid4vciReceiver_FetchIssuerMetadataCredentialIssuerIdentity(t *testing.T) {
+	t.Run("exact match is accepted", func(t *testing.T) {
+		issuer := mockserver.NewOID4VCIIssuerServer(nil)
+		defer issuer.Close()
 
+		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
+		require.NoError(t, err)
+		require.Equal(t, issuer.IssuerIdentifier(), metadata.CredentialIssuer)
+	})
+
+	t.Run("a different credential_issuer is rejected", func(t *testing.T) {
+		config := mockserver.DefaultOID4VCIIssuerConfig()
+		config.CredentialIssuerIdentifier = "https://other-issuer.example"
+		issuer := mockserver.NewOID4VCIIssuerServer(config)
+		defer issuer.Close()
+
+		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
+		require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
+		require.Nil(t, metadata)
+	})
+
+	t.Run("a trailing-slash difference is rejected", func(t *testing.T) {
+		config := mockserver.DefaultOID4VCIIssuerConfig()
+		issuer := mockserver.NewOID4VCIIssuerServer(config)
+		defer issuer.Close()
+		// The requested identifier has no trailing slash; the document names
+		// the same characters plus one, which the no-normalization rule makes a
+		// different identifier.
+		config.CredentialIssuerIdentifier = issuer.URL() + "/"
+
+		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
+		require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
+		require.Nil(t, metadata)
+	})
+}
+
+func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	// Create mock OID4VCI issuer server (which also serves auth server metadata)
 	issuer := mockserver.NewOID4VCIIssuerServer(nil)
 	defer issuer.Close()
@@ -2127,9 +2173,18 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == tt.expectedPath {
-					w.WriteHeader(http.StatusOK)
-					// Return minimal valid JSON for both types
-					fmt.Fprint(w, `{"issuer": "https://example.com", "credential_issuer": "https://example.com"}`)
+					// The credential_issuer must be the identifier the wallet
+					// requested (VCI 1.0 §12.2.4), which is the request origin
+					// with the well-known prefix removed and any trailing slash
+					// dropped.
+					credentialIssuer := "http://" + r.Host
+					if rest := strings.TrimPrefix(r.URL.Path, "/.well-known/openid-credential-issuer"); rest != "" {
+						credentialIssuer = "http://" + r.Host + strings.TrimSuffix(rest, "/")
+					}
+					mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+						"issuer":            "https://example.com",
+						"credential_issuer": credentialIssuer,
+					})
 					return
 				}
 				w.WriteHeader(http.StatusNotFound)

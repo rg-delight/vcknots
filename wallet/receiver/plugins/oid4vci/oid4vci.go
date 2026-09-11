@@ -203,6 +203,34 @@ var ErrHTTPRedirectNotAllowed = errors.New("OID4VCI endpoint redirected; redirec
 // errors.Is matches either spelling.
 var ErrProofAlgorithmNotSupported = oid4vcisign.ErrProofAlgorithmNotSupported
 
+// ErrIssuerIdentifierMismatch reports that a Credential Issuer Metadata document
+// states a credential_issuer that is not identical to the Credential Issuer
+// Identifier the metadata was requested from. OpenID4VCI 1.0 Section 12.2.4:
+// "The value MUST be identical to the Credential Issuer's identifier value into
+// which the well-known URI string was inserted to create the URL used to retrieve
+// the metadata. If these values are not identical (when compared using a simple
+// string comparison with no normalization), the data contained in the response
+// MUST NOT be used." The root wallet package cannot import a plugin, so it
+// declares its own alias of this sentinel.
+var ErrIssuerIdentifierMismatch = errors.New("credential_issuer does not match the requested Credential Issuer Identifier")
+
+// requireMatchingCredentialIssuer enforces the OpenID4VCI 1.0 Section 12.2.4
+// identity rule on a decoded Credential Issuer Metadata document: the
+// credential_issuer member MUST be the Credential Issuer Identifier the wallet
+// requested the document from, compared as a simple string with no
+// normalization. A document that names any other identifier is not the
+// requested issuer's, whatever it contains, so decoding fails closed before the
+// metadata is returned. Both the unsigned application/json document and the
+// payload of a signed application/jwt one pass through here.
+func requireMatchingCredentialIssuer(declared, identifier string) error {
+	if declared != identifier {
+		return fmt.Errorf(
+			"issuer metadata credential_issuer %q does not match the requested Credential Issuer Identifier %q: %w",
+			declared, identifier, ErrIssuerIdentifierMismatch)
+	}
+	return nil
+}
+
 // rejectOID4VCIRedirect refuses to follow a redirect on any OpenID4VCI request,
 // metadata retrieval included. Credential Issuer Metadata is fetched from the
 // path Section 12.2.2 fixes inside the Credential Issuer Identifier, so a
@@ -512,6 +540,9 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 	if err := json.Unmarshal(bodyBytes, target); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
+	if err := requireMatchingCredentialIssuer(target.CredentialIssuer, identifier); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -527,6 +558,12 @@ func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compac
 	}
 	if err := json.Unmarshal(payload, target); err != nil {
 		return fmt.Errorf("failed to parse signed issuer metadata payload: %w", err)
+	}
+	// Section 12.2.4 binds the credential_issuer member of the payload to the
+	// requested identifier just as Section 12.2.3 binds the sub claim, so a
+	// signed document is rejected on either mismatch.
+	if err := requireMatchingCredentialIssuer(target.CredentialIssuer, identifier); err != nil {
+		return err
 	}
 	target.SignedMetadata = compact
 	target.MetadataSignature = verification
@@ -1858,8 +1895,17 @@ func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
 	}
 }
 
+// supportedJWEKeyAlgorithms lists the JWE key management algorithms accepted
+// when decrypting an encrypted Credential Response (Section 8.2 / Section 10).
+// The wallet may publish either an EC or an RSA response-encryption key, so
+// both RFC 7518 Section 4.6 ECDH-ES and Section 4.3 RSA-OAEP-256 are accepted;
+// omitting RSA-OAEP-256 would leave an RSA key the wallet itself advertised
+// undecryptable. RSA1_5 is deliberately absent: RFC 8017 Section 7.2
+// RSAES-PKCS1-v1_5 is the Bleichenbacher-attackable scheme this library must
+// never be talked into using. go-jose v4 implements only RSA-OAEP-256 among the
+// OAEP variants.
 func supportedJWEKeyAlgorithms() []jose.KeyAlgorithm {
-	return []jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW}
+	return []jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW, jose.RSA_OAEP_256}
 }
 
 func supportedJWEContentEncryptions() []jose.ContentEncryption {
