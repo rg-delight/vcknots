@@ -143,6 +143,10 @@ func (f *requestObjectFixture) presenter() *Oid4vpPresenter {
 
 func (f *requestObjectFixture) claims() map[string]any {
 	return map[string]any{
+		// The HAIP profile requires a bounded Request Object lifetime, so the
+		// shared claims carry one; tests that exercise the missing or
+		// excessive case override exp themselves.
+		"iat": f.now.Unix(), "exp": f.now.Add(5 * time.Minute).Unix(),
 		"aud": "https://self-issued.me/v2", "client_id": f.clientID(),
 		"nonce": "nonce", "response_type": "vp_token", "response_mode": "direct_post.jwt",
 		"response_uri": "https://verifier.example/response",

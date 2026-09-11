@@ -2,6 +2,7 @@ package oid4vp
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 func TestFinalRequestObjectAuthenticatesHashWithoutDNSAndChecksCRL(t *testing.T) {
@@ -43,37 +45,132 @@ func TestFinalRequestObjectAuthenticatesHashWithoutDNSAndChecksCRL(t *testing.T)
 func TestFinalRequestObjectClaims(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	tests := []struct {
-		name      string
+		name string
+		// wantError is the substring the rejection must name. An empty value
+		// means the mutation must be accepted.
+		wantError string
 		mutate    func(map[string]any)
-		wantError bool
 	}{
-		{"optional dates absent", func(c map[string]any) {}, false},
-		{"expired", func(c map[string]any) { c["exp"] = f.now.Add(-time.Second).Unix() }, true},
-		{"expiration boundary", func(c map[string]any) { c["exp"] = f.now.Unix() }, true},
-		{"future nbf", func(c map[string]any) { c["nbf"] = f.now.Add(time.Second).Unix() }, true},
-		{"nbf boundary", func(c map[string]any) { c["nbf"] = f.now.Unix() }, false},
-		{"fractional expiration", func(c map[string]any) { c["exp"] = float64(f.now.Unix()) + 0.5 }, false},
-		{"fractional nbf", func(c map[string]any) { c["nbf"] = float64(f.now.Unix()) + 0.5 }, true},
-		{"iat is not max age policy", func(c map[string]any) { c["iat"] = f.now.Add(time.Hour).Unix() }, false},
-		{"string exp", func(c map[string]any) { c["exp"] = "2000000000" }, true},
-		{"null nbf", func(c map[string]any) { c["nbf"] = nil }, true},
-		{"string iat", func(c map[string]any) { c["iat"] = "yesterday" }, true},
-		{"missing audience", func(c map[string]any) { delete(c, "aud") }, true},
-		{"wrong audience", func(c map[string]any) { c["aud"] = "another-wallet" }, true},
-		{"audience array", func(c map[string]any) { c["aud"] = []string{"another-wallet", "https://self-issued.me/v2"} }, false},
-		{"invalid audience array member", func(c map[string]any) { c["aud"] = []any{1, "https://self-issued.me/v2"} }, true},
-		{"outer client mismatch", func(c map[string]any) { c["client_id"] = "x509_hash:another" }, true},
-		{"nonstring nonce", func(c map[string]any) { c["nonce"] = 42 }, true},
+		{"optional dates absent", "", func(c map[string]any) { delete(c, "exp"); delete(c, "iat") }},
+		{"expired", "request object is outside its exp validity", func(c map[string]any) { c["exp"] = f.now.Add(-time.Second).Unix() }},
+		{"expiration boundary", "request object is outside its exp validity", func(c map[string]any) { c["exp"] = f.now.Unix() }},
+		{"future nbf", "request object is outside its nbf validity", func(c map[string]any) { c["nbf"] = f.now.Add(time.Second).Unix() }},
+		{"nbf boundary", "", func(c map[string]any) { c["nbf"] = f.now.Unix() }},
+		{"fractional expiration", "", func(c map[string]any) { c["exp"] = float64(f.now.Unix()) + 0.5 }},
+		{"fractional nbf", "request object is outside its nbf validity", func(c map[string]any) { c["nbf"] = float64(f.now.Unix()) + 0.5 }},
+		{"iat is not max age policy", "", func(c map[string]any) { c["iat"] = f.now.Add(time.Hour).Unix() }},
+		{"string exp", "exp must be a NumericDate", func(c map[string]any) { c["exp"] = "2000000000" }},
+		{"null nbf", "nbf must be a NumericDate", func(c map[string]any) { c["nbf"] = nil }},
+		{"string iat", "iat must be a NumericDate", func(c map[string]any) { c["iat"] = "yesterday" }},
+		{"missing audience", "request object audience is required", func(c map[string]any) { delete(c, "aud") }},
+		{"wrong audience", "request object audience does not identify this Wallet", func(c map[string]any) { c["aud"] = "another-wallet" }},
+		{"audience array", "", func(c map[string]any) { c["aud"] = []string{"another-wallet", "https://self-issued.me/v2"} }},
+		{"invalid audience array member", "invalid audience claim", func(c map[string]any) { c["aud"] = []any{1, "https://self-issued.me/v2"} }},
+		{"outer client mismatch", "outer client_id does not match request object client_id", func(c map[string]any) { c["client_id"] = "x509_hash:another" }},
+		{"nonstring nonce", "nonce must be a string", func(c map[string]any) { c["nonce"] = 42 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claims := f.claims()
 			tt.mutate(claims)
 			_, err := f.parse(t, claims)
-			if (err != nil) != tt.wantError {
-				t.Fatalf("want error=%v, got %v", tt.wantError, err)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("want the request accepted, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("want error containing %q, got %v", tt.wantError, err)
 			}
 		})
+	}
+}
+
+// TestFinalRequestObjectWithoutExpiryStillAccepted keeps the Final contract:
+// OpenID4VP 1.0 states no exp rule for the Authorization Request Object, so
+// only a caller or the HAIP profile may require one.
+func TestFinalRequestObjectWithoutExpiryStillAccepted(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	delete(claims, "exp")
+	request, err := f.parse(t, claims)
+	if err != nil {
+		t.Fatalf("Final must accept a Request Object without exp: %v", err)
+	}
+	if request.RequestObjectVerification == nil {
+		t.Fatal("accepted Request Object carries no authentication evidence")
+	}
+}
+
+// TestHAIPRequestObjectRequiresExpiry covers the RequireExpiry policy the HAIP
+// profile turns on by default.
+func TestHAIPRequestObjectRequiresExpiry(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	delete(claims, "exp")
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	if err == nil || !strings.Contains(err.Error(), "request object is missing exp") {
+		t.Fatalf("HAIP must require exp: %v", err)
+	}
+}
+
+// TestHAIPRequestObjectRejectsExcessiveLifetime covers the ten-minute MaxAge
+// the HAIP profile applies when the caller configured none.
+func TestHAIPRequestObjectRejectsExcessiveLifetime(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	claims["iat"] = f.now.Unix()
+	claims["exp"] = f.now.Add(time.Hour).Unix()
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	if err == nil || !strings.Contains(err.Error(), "exceeding the configured maximum of 10m0s") {
+		t.Fatalf("HAIP must bound the Request Object lifetime: %v", err)
+	}
+}
+
+func TestHAIPRequestObjectAcceptsBoundedLifetime(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	claims["iat"] = f.now.Unix()
+	claims["exp"] = f.now.Add(5 * time.Minute).Unix()
+	request, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	if err != nil {
+		t.Fatalf("HAIP must accept a bounded Request Object: %v", err)
+	}
+	if request.RequestObjectVerification == nil {
+		t.Fatal("accepted Request Object carries no authentication evidence")
+	}
+}
+
+// TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs covers HAIP Section 5:
+// "The X.509 certificate of the trust anchor MUST NOT be included in the x5c
+// JOSE header of the signed request." The rule used to be inert whenever trust
+// was configured as a *x509.CertPool instead of explicit TrustAnchors.
+func TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(f.root)
+	options := RequestObjectValidationOptions{
+		RootCAs: pool,
+		Now:     func() time.Time { return f.now },
+		// The Request Object is delivered by value here; the attestation is
+		// what lets it satisfy the HAIP Section 5.1 delivery requirement.
+		DeliveredByReference: true,
+	}
+	uri := "openid4vp://authorize?" + url.Values{
+		"client_id": {f.clientID()},
+		"request":   {f.signWithRoot(t, f.claims(), true)},
+	}.Encode()
+
+	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
+	_, err := haip.ParsePresentationRequest(uri)
+	if err == nil || !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
+		t.Fatalf("HAIP must reject the anchor in x5c with a root pool: %v", err)
+	}
+
+	final := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+	if _, err := final.ParsePresentationRequest(uri); err != nil {
+		t.Fatalf("Final must still accept a chain that includes the anchor: %v", err)
 	}
 }
 

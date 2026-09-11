@@ -1597,18 +1597,6 @@ func defaultRequestURINonce() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
-// parseX5CCertificatesFromJWT decodes the x5c chain of a compact JWS protected
-// header.
-//
-// Deprecated: it delegates to commonX509.DecodeX5CFromJWTHeader, the single
-// decoder shared with the credential, attestation and DC API paths. Call that
-// function directly; this wrapper only keeps the remaining call sites in
-// request_object.go, request_object_draft24.go and dcapi.go compiling until they
-// migrate.
-func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {
-	return commonX509.DecodeX5CFromJWTHeader(obj)
-}
-
 // AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority
 // Key Identifiers (RFC 5280 Section 4.2.1.1) of the certificates in the issuer
 // JWT header x5c chain of an SD-JWT VC (or JWT VC) wire value. It lets the

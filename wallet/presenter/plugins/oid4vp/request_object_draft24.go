@@ -4,30 +4,38 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
-// withDraft24RequestObject retains the legacy Draft24 authentication contract.
-// It uses the provided JWT string as the request object
-// to populate the CredentialPresentationRequest,
-// validating its claims and signature as per OID4VP and RFC9101.
+// withDraft24RequestObject authenticates a Draft24 Request Object. It uses the
+// provided JWT string as the request object to populate the
+// CredentialPresentationRequest, validating its claims and signature as per
+// OID4VP and RFC 9101.
+//
+// The Draft24 wire contract (the client_id_scheme parameter and
+// presentation_definition) is preserved here, but an X.509 signed Request
+// Object is authenticated by the same shared path Final uses whenever the
+// caller configured RequestObjectValidationOptions. A caller that configured
+// only the legacy X509TrustChainRoots pool, or the InsecureSkipX509Verify test
+// escape, keeps the original Draft24 behaviour.
 func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	if b.errValidation != nil {
 		return b
 	}
 
-	// Parse the JWT
-	allowedAlgs := []jose.SignatureAlgorithm{jose.ES256, jose.RS256}
-	parsedJWT, err := jwt.ParseSigned(obj, allowedAlgs)
+	options, err := b.requestObjectValidationOptions()
+	if err != nil {
+		b.errValidation = err
+		return b
+	}
+
+	parsedJWT, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
 		b.errValidation = fmt.Errorf("failed to parse request object JWT: %w", err)
 		return b
@@ -66,16 +74,27 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// x509_san_dns
-	clientID, err := parseOID4VPClientID(b.req.ClientID)
-	if err == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash {
-		certificates, err := parseX5CCertificatesFromJWT(obj)
+	clientID, clientIDErr := parseOID4VPClientID(b.req.ClientID)
+	isX509ClientID := clientIDErr == nil &&
+		(clientID.prefix == OID4VPClientIDPrefixX509Hash || clientID.prefix == OID4VPClientIDPrefixX509SanDNS)
+
+	// A configured RequestObjectValidationOptions is the caller's request for
+	// the shared authentication path: trust anchors or a root pool, the CRL
+	// policy, the wallet audience, the clock skew and the signature algorithms
+	// all apply to Draft24 exactly as they do to Final.
+	if isX509ClientID && b.requestObjectValidation != nil && !b.insecureSkipX509Verify {
+		if err := b.authenticateX509RequestObject(obj, parsedJWT, options); err != nil {
+			b.errValidation = err
+		}
+		return b
+	}
+
+	// x509_hash, legacy configuration: the Client Identifier is the leaf
+	// certificate thumbprint, so no chain is verified.
+	if clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash {
+		certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
 		if err != nil {
 			b.errValidation = err
-			return b
-		}
-		if len(certificates) == 0 {
-			b.errValidation = fmt.Errorf("x5c header is empty")
 			return b
 		}
 		thumbprint := sha256.Sum256(certificates[0].Raw)
@@ -93,60 +112,21 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	if err == nil && clientID.prefix == OID4VPClientIDPrefixX509SanDNS {
-		var certificates *[]*x509.Certificate = nil
+	// x509_san_dns, legacy configuration: the chain is verified against the
+	// X509TrustChainRoots pool with the legacy revocation check.
+	if clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509SanDNS {
+		var certificates []*x509.Certificate
 
 		if b.insecureSkipX509Verify {
-			// For testing: Parse certificates from x5c WITHOUT calling x509.Verify(),
-			// which in Go 1.20+ performs strict standards compliance checks that reject
-			// non-compliant certificates (e.g., "OIDF Test" from conformance test suites).
-			// We manually parse the x5c chain and use the certificates directly.
-
-			// Split JWT to get header part
-			parts := strings.Split(obj, ".")
-			if len(parts) < 2 {
-				b.errValidation = fmt.Errorf("invalid JWT format")
-				return b
-			}
-
-			// Decode header (JWT uses base64url encoding without padding)
-			headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+			// For testing: parse the certificates from x5c WITHOUT calling
+			// x509.Verify(), which in Go 1.20+ performs strict standards
+			// compliance checks that reject non-compliant certificates (for
+			// example "OIDF Test" from conformance test suites).
+			certificates, err = commonX509.DecodeX5CFromJWTHeader(obj)
 			if err != nil {
-				b.errValidation = fmt.Errorf("failed to decode JWT header: %w", err)
+				b.errValidation = err
 				return b
 			}
-
-			var header struct {
-				X5C []string `json:"x5c"`
-			}
-			if err := json.Unmarshal(headerJSON, &header); err != nil {
-				b.errValidation = fmt.Errorf("failed to parse JWT header: %w", err)
-				return b
-			}
-
-			if len(header.X5C) == 0 {
-				b.errValidation = fmt.Errorf("x5c header is empty")
-				return b
-			}
-
-			// Parse all certificates in the x5c chain
-			// x5c contains standard base64 encoded (not base64url) DER certificates
-			var certChain []*x509.Certificate
-			for i, certB64 := range header.X5C {
-				certDER, err := base64.StdEncoding.DecodeString(certB64)
-				if err != nil {
-					b.errValidation = fmt.Errorf("failed to decode x5c certificate at index %d: %w", i, err)
-					return b
-				}
-				cert, err := x509.ParseCertificate(certDER)
-				if err != nil {
-					b.errValidation = fmt.Errorf("failed to parse x5c certificate at index %d: %w", i, err)
-					return b
-				}
-				certChain = append(certChain, cert)
-			}
-
-			certificates = &certChain
 		} else {
 			// Production: verify certificate chain
 			certificateChains, err := parsedJWT.Headers[0].Certificates(x509.VerifyOptions{
@@ -161,7 +141,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 				err = commonX509.CheckIfCertsRevoked(chain)
 				if err == nil {
 					b.errValidation = nil
-					certificates = &chain
+					certificates = chain
 					break
 				} else {
 					b.errValidation = err
@@ -174,15 +154,14 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 
 		// Request object must be verified with the leaf certificate in the x5c array (RFC 7515).
 		claims := jwt.Claims{}
-		verifyKey := (*certificates)[0].PublicKey
-		if err := parsedJWT.Claims(verifyKey, &claims); err != nil {
+		if err := parsedJWT.Claims(certificates[0].PublicKey, &claims); err != nil {
 			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %v", err)
 			return b
 		}
 
 		// ClientID should contain DNS name which is same as the SAN of the leaf certificate in the x5c array (OID4VP x509_san_dns). #106
 		matched := false
-		for _, n := range (*certificates)[0].DNSNames {
+		for _, n := range certificates[0].DNSNames {
 			if clientID.original == n {
 				matched = true
 				break

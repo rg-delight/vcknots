@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
@@ -308,6 +309,32 @@ func TestParseDCAPIRequestHAIPRejectsDirectPost(t *testing.T) {
 	}
 	_, err := p.ParseDCAPIRequest(invocation)
 	require.Error(t, err)
+}
+
+// TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs covers HAIP Section 5 on the DC
+// API path: "The X.509 certificate of the trust anchor MUST NOT be included in
+// the x5c JOSE header of the signed request." The rule used to be inert
+// whenever trust was configured as a *x509.CertPool instead of explicit
+// TrustAnchors.
+func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(f.root)
+	options := RequestObjectValidationOptions{RootCAs: pool, Now: func() time.Time { return f.now }}
+	invocation := DCAPIInvocation{
+		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{
+			"request": f.signWithRoot(t, signedDCAPIClaims(f), true),
+		})},
+		Origin: "https://verifier.example",
+	}
+
+	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
+	_, err := haip.ParseDCAPIRequest(invocation)
+	require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
+
+	final := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+	_, err = final.ParseDCAPIRequest(invocation)
+	require.NoError(t, err, "Final must still accept a chain that includes the anchor")
 }
 
 // presenterWithHAIP mirrors requestObjectFixture.presenterWith for the HAIP

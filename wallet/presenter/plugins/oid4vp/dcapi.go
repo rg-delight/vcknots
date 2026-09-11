@@ -1,7 +1,6 @@
 package oid4vp
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -9,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -140,11 +138,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 	if err != nil {
 		return nil, err
 	}
-	algs := options.SigningAlgorithms
-	if len(algs) == 0 {
-		algs = []jose.SignatureAlgorithm{jose.ES256, jose.RS256}
-	}
-	parsed, err := jwt.ParseSigned(obj, algs)
+	parsed, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse DC API request object JWT: %w", err)
 	}
@@ -167,14 +161,11 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 	if clientID == "" {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "signed DC API request must carry client_id")
 	}
-	certificates, err := parseX5CCertificatesFromJWT(obj)
+	certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	if options.Now != nil {
-		now = options.Now()
-	}
+	now := requestObjectNow(options)
 	chainResult, err := b.verifyRequestObjectCertificateChain(certificates, options, now)
 	if err != nil {
 		return nil, fmt.Errorf("DC API request object certificate chain is not trusted: %w", err)
@@ -221,11 +212,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 	if err != nil {
 		return nil, err
 	}
-	algs := options.SigningAlgorithms
-	if len(algs) == 0 {
-		algs = []jose.SignatureAlgorithm{jose.ES256, jose.RS256}
-	}
-	parsed, err := jose.ParseSigned(string(rawRequest), algs)
+	parsed, err := jose.ParseSigned(string(rawRequest), resolveRequestObjectAlgorithms(options))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse DC API multi-signed request: %w", err)
 	}
@@ -254,16 +241,13 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 			lastErr = errors.New("DC API multi-signed client identifier has no configured authentication method")
 			continue
 		}
-		certificates, certErr := parseX5CCertificatesFromHeader(header)
+		certificates, certErr := commonX509.DecodeX5CChain(header["x5c"])
 		if certErr != nil {
 			lastErr = certErr
 			continue
 		}
 		b := p.newDCAPIRequestBuilder(normalizedProfile)
-		now := time.Now()
-		if options.Now != nil {
-			now = options.Now()
-		}
+		now := requestObjectNow(options)
 		chainResult, chainErr := b.verifyRequestObjectCertificateChain(certificates, options, now)
 		if chainErr != nil {
 			lastErr = chainErr
@@ -277,7 +261,9 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 			if verifiedIndex != index {
 				return nil, errors.New("verified DC API signature does not match the authenticated Client Identifier")
 			}
-			claims := map[string]any{}
+			// commonJOSE.Claims keeps JSON numbers exact: a NumericDate or a
+			// DCQL value must not round through float64.
+			claims := commonJOSE.Claims{}
 			if unmarshalErr := json.Unmarshal(payload, &claims); unmarshalErr != nil {
 				return nil, fmt.Errorf("failed to decode DC API multi-signed payload: %w", unmarshalErr)
 			}
@@ -301,7 +287,9 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 // selected signature, enforces the DC API and profile constraints, validates
 // the standard claims and records the authentication result.
 func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certificate, options RequestObjectValidationOptions, chainResult *commonX509.SigningChainResult, clientID string, verify dcapiSignatureVerifier, origin string) (*CredentialPresentationRequest, error) {
-	if len(certificates) == 0 || len(certificates) > 16 {
+	if len(certificates) == 0 {
+		// DecodeX5CChain bounds every decoded chain; this guards the shared
+		// helper against a caller that assembled one by other means.
 		return nil, errors.New("x5c header must contain between 1 and 16 certificates")
 	}
 	verified, err := verify(certificates[0].PublicKey)
@@ -319,16 +307,8 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 	if parsedClientID.prefix != OID4VPClientIDPrefixX509Hash && parsedClientID.prefix != OID4VPClientIDPrefixX509SanDNS {
 		return nil, errors.New("signed DC API request client identifier has no configured authentication method")
 	}
-	if b.profile.IsHAIP() {
-		// HAIP §5: "The X.509 certificate of the trust anchor MUST NOT be
-		// included in the x5c JOSE header of the signed request."
-		for _, certificate := range certificates {
-			for _, anchor := range options.TrustAnchors {
-				if anchor != nil && bytes.Equal(certificate.Raw, anchor.Raw) {
-					return nil, errors.New("HAIP profile does not permit the trust anchor certificate in the x5c header")
-				}
-			}
-		}
+	if err := b.rejectTrustAnchorInX5C(certificates, options); err != nil {
+		return nil, err
 	}
 	if err := bindDCAPIX509ClientID(parsedClientID, certificates[0]); err != nil {
 		return nil, err
@@ -336,11 +316,8 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 	if err := validateDCAPIExpectedOrigins(verified, origin); err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	if options.Now != nil {
-		now = options.Now()
-	}
-	if err := validateRequestObjectClaims(commonJOSE.Claims(verified), options.WalletAudience, now, options.ClockSkew); err != nil {
+	now := requestObjectNow(options)
+	if err := validateRequestObjectClaims(commonJOSE.Claims(verified), b.resolveClaimPolicy(options, now)); err != nil {
 		return nil, fmt.Errorf("JWT standard claims validation failed: %w", err)
 	}
 	b.setParamsWithAnyMap(verified)
@@ -472,36 +449,6 @@ func decodeDCAPIProtectedHeader(encoded string) (map[string]any, error) {
 		return nil, err
 	}
 	return header, nil
-}
-
-// parseX5CCertificatesFromHeader decodes the x5c member of a decoded JWS
-// protected header (used by the multi-signed path).
-func parseX5CCertificatesFromHeader(header map[string]any) ([]*x509.Certificate, error) {
-	raw, present := header["x5c"]
-	if !present {
-		return nil, errors.New("x5c header is required")
-	}
-	list, ok := raw.([]any)
-	if !ok || len(list) == 0 {
-		return nil, errors.New("x5c header is empty")
-	}
-	certificates := make([]*x509.Certificate, 0, len(list))
-	for index, value := range list {
-		encoded, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("x5c certificate at index %d is not a string", index)
-		}
-		der, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode x5c certificate at index %d: %w", index, err)
-		}
-		certificate, err := x509.ParseCertificate(der)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse x5c certificate at index %d: %w", index, err)
-		}
-		certificates = append(certificates, certificate)
-	}
-	return certificates, nil
 }
 
 func dcapiWebOriginClientID(origin string) string {
