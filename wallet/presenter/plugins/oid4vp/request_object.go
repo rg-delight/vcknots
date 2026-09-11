@@ -52,10 +52,10 @@ type RequestObjectValidationOptions struct {
 	DeliveredByReference bool
 	// RequireExpiry rejects a Request Object that carries no exp claim.
 	// OpenID4VP 1.0 states no exp rule for the Authorization Request Object
-	// itself and leaves it to JAR (RFC 9101), so this is relying-party
-	// hardening policy rather than a specification requirement. Final keeps
-	// the permissive default; the HAIP profile turns it on and, being a
-	// tightening profile, does not let a caller turn it back off.
+	// itself and leaves it to JAR (RFC 9101), and HAIP 1.0 adds none, so this
+	// is relying-party hardening policy rather than a specification
+	// requirement. It is off by default in every profile; the official
+	// conformance verifiers sign Request Objects without exp.
 	RequireExpiry bool
 	// MaxAge bounds the lifetime of a Request Object, measured as exp - iat,
 	// or as exp - now when iat is absent. Zero means unbounded. The HAIP
@@ -241,11 +241,10 @@ func (b *requestBuilder) resolveClaimPolicy(options RequestObjectValidationOptio
 		RequireExpiry:    options.RequireExpiry,
 		MaxAge:           options.MaxAge,
 	}
-	if b.haipRequestObjectPolicy() {
-		policy.RequireExpiry = true
-		if policy.MaxAge == 0 {
-			policy.MaxAge = haipRequestObjectMaxAge
-		}
+	if b.haipRequestObjectPolicy() && policy.MaxAge == 0 {
+		// HAIP bounds the lifetime of a Request Object that does carry exp;
+		// it does not require exp (see RequireExpiry).
+		policy.MaxAge = haipRequestObjectMaxAge
 	}
 	return policy
 }

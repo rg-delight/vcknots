@@ -732,7 +732,7 @@ receiver プラグインは Draft 13 では `receiverTypes.Receiver`、Final / H
 * `TrustAnchors` または `RootCAs` のどちらか一方に anchor を設定します。
 * `x509_san_dns` は leaf 証明書の DNS SAN と `response_uri`（`direct_post` モード）または `redirect_uri` を束縛し、`x509_hash` は leaf 証明書の hash を束縛し DNS binding を要求しません。どちらも署名付き Request Object を必要とし、`X509TrustChainRoots` / `RequestObjectValidation` で解決します。
 * `redirect_uri:<uri>` は client identifier に response endpoint を束縛し、コロンを含まない identifier は pre-registered client として扱います（OpenID4VP §5.9.2）。pre-registered の verifier は `Oid4vpPresenter.PreRegisteredClients` または `ResolvePreRegisteredClient` に登録し、解決できない場合は `ErrPreRegisteredClientUnknown` で拒否します。pre-registered client では request 自身の `client_metadata` は権威ではありません。
-* `RequireExpiry` は `exp` の無い Request Object を拒否し、`MaxAge` は有効期間（`exp - iat`、`iat` が無い場合は `exp - now`）を制限します。Final は緩い既定のままで、HAIP profile は `RequireExpiry` を有効にし、呼出し側が `MaxAge` を 0 のままにした場合に 10 分を適用します。
+* `RequireExpiry` は `exp` の無い Request Object を拒否し、`MaxAge` は有効期間（`exp - iat`、`iat` が無い場合は `exp - now`）を制限します。`RequireExpiry` はどの profile でも既定で無効です（OpenID4VP 1.0 も HAIP も Request Object の `exp` を要求せず、公式 conformance verifier は `exp` 無しで署名します）。HAIP profile は `exp` を持つ Request Object に対し、呼出し側が `MaxAge` を 0 のままにした場合に 10 分を適用します。
 * 検証結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request data からは読み取りません。client id、証明書 SHA-256 fingerprint、失効カウンタ、echo された `WalletNonce`、観測した `Delivery`（`"reference"`、`"value"`、`"query"`）、`DeliveryAttested` を記録します。
 
 admission 時に `request_uri` で署名付き Request Object を取得し、後に値を直接再送するアプリは、`RequestObjectValidationOptions.DeliveredByReference` でそれを証明できます。HAIP §5.1 の配送要件をその request についてのみ満たします。アプリ自身の admission 経路が取得を記録した場合にだけ設定してください。
@@ -772,7 +772,7 @@ Wallet の実行時挙動は `wallet/env/env.go` で定義された環境変数�
 * **`response_uri` は client identifier に束縛します。** `direct_post` モードでは `response_uri` が `x509_san_dns` / `redirect_uri` の導出値と一致する必要があり、`redirect_uri` と `response_uri` は同時に指定できません。DC API モードでは `redirect_uri` を指定してはいけません。
 * **pre-registered client にはレジストリが必要です。** コロンを含まない `client_id` は format error ではなく pre-registered client であり、`PreRegisteredClients` / `ResolvePreRegisteredClient` に存在しなければ拒否します。
 * **応答暗号化は A256GCM を優先します。** verifier が両方を列挙した場合、Wallet は A256GCM を使います。object 単位の `transaction_data_hashes_alg` が以前のトップレベルパラメータを置き換えます（Appendix B.3.3.1）。
-* **HAIP は Request Object の有効性を厳格化します。** HAIP は `exp` を要求し、既定で 10 分の `MaxAge` を適用します。Final の緩い既定は変わりません。
+* **HAIP は Request Object の有効期間を制限します。** `exp` を持つ HAIP の Request Object は既定で 10 分に制限されます（`MaxAge`）。`exp` 自体は `RequireExpiry` を設定しない限り任意です。Final の既定は変わりません。
 * **receiver 契約は分割されました。** `receiverTypes.OID4VCIFinalReceiver` は非推奨で、`OID4VCIFinalTransport` + `OID4VCIFinalSigner` に置き換わりました。既存の実装と呼出し側は複合 alias でそのままコンパイルできます。5 つの署名メソッドは `OID4VCIFinalSigner` に移動しました（詳細は `wallet/API-MIGRATION.md`）。
 * **Final 経路では credential 受理が必須です。** `Config.CredentialAcceptance` を設定してください。nil の場合は fail-closed です。`UnverifiedIssuer` は認証しないテスト issuer 向けに以前の緩い保存を維持します。`VerifyCredential` は成功時のみ true を返します。
 

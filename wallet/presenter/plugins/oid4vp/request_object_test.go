@@ -103,15 +103,20 @@ func TestFinalRequestObjectWithoutExpiryStillAccepted(t *testing.T) {
 	}
 }
 
-// TestHAIPRequestObjectRequiresExpiry covers the RequireExpiry policy the HAIP
-// profile turns on by default.
+// TestHAIPRequestObjectRequiresExpiry covers the opt-in RequireExpiry policy:
+// neither OpenID4VP 1.0 nor HAIP 1.0 requires exp on a Request Object (the
+// official conformance verifiers sign without it), so a HAIP request without
+// exp is accepted by default and rejected only when the caller opts in.
 func TestHAIPRequestObjectRequiresExpiry(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	delete(claims, "exp")
-	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference}); err != nil {
+		t.Fatalf("HAIP must accept a Request Object without exp by default: %v", err)
+	}
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, RequireExpiry: true})
 	if err == nil || !strings.Contains(err.Error(), "request object is missing exp") {
-		t.Fatalf("HAIP must require exp: %v", err)
+		t.Fatalf("RequireExpiry must reject a Request Object without exp: %v", err)
 	}
 }
 

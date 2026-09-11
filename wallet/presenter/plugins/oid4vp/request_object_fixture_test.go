@@ -196,10 +196,13 @@ type requestFixtureOptions struct {
 	IncludeRoot  bool
 	AllowHTTP    bool
 	Insecure     bool
+	// RequireExpiry sets the opt-in hardening option on the validation options.
+	RequireExpiry bool
 }
 
 func (f *requestObjectFixture) presenterWith(opts requestFixtureOptions) *Oid4vpPresenter {
 	validation := f.options()
+	validation.RequireExpiry = opts.RequireExpiry
 	return &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &validation,
