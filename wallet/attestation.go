@@ -397,3 +397,12 @@ func signAttestationJWT(key jose.JSONWebKey, typ string, payload map[string]any)
 	}
 	return jwt.Signed(signer).Claims(payload).Serialize()
 }
+
+// ValidateClientAttestation is the exported form of the check the wallet
+// performs on a provider result before using it: typ, sub, cnf.jwk thumbprint,
+// exp (and a non-self-signed x5c leaf when requireX5C is set). Applications that
+// receive a pre-issued attestation from their Wallet Provider can reject an
+// unusable one before starting an issuance.
+func ValidateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
+	return validateClientAttestation(attestation, request, requireX5C, now)
+}

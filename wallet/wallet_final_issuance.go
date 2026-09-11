@@ -1151,6 +1151,19 @@ func rawCredentialBytes(value any) ([]byte, error) {
 		return []byte(credentialValue), nil
 	case []byte:
 		return credentialValue, nil
+	case map[string]any:
+		// OpenID4VCI 1.0 §8.3: "credentials" is an array of objects, each with
+		// a "credential" member carrying the issued credential (a string for
+		// JWT-based formats or a JSON object). Unwrap that envelope; any other
+		// object is the credential itself.
+		if inner, ok := credentialValue["credential"]; ok && len(credentialValue) == 1 {
+			return rawCredentialBytes(inner)
+		}
+		raw, err := json.Marshal(credentialValue)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal credential value: %w", err)
+		}
+		return raw, nil
 	default:
 		raw, err := json.Marshal(credentialValue)
 		if err != nil {

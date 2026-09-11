@@ -718,3 +718,19 @@ func TestRequestOID4VCIAuthorizationCodeValidatesIssuer(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "c1", code)
 }
+
+// OpenID4VCI 1.0 §8.3: each "credentials" entry is an object whose
+// "credential" member carries the issued credential.
+func TestRawCredentialBytesUnwrapsFinalCredentialsEnvelope(t *testing.T) {
+	raw, err := rawCredentialBytes(map[string]any{"credential": "eyJ.abc.def~"})
+	require.NoError(t, err)
+	require.Equal(t, "eyJ.abc.def~", string(raw))
+
+	raw, err = rawCredentialBytes(map[string]any{"credential": map[string]any{"kind": "object"}})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"kind":"object"}`, string(raw))
+
+	raw, err = rawCredentialBytes(map[string]any{"credential": "x", "other": 1})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"credential":"x","other":1}`, string(raw))
+}
