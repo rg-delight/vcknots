@@ -3,6 +3,7 @@ package mockserver
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -78,10 +79,30 @@ type OID4VCIIssuerServer struct {
 	config     *OID4VCIIssuerConfig
 	jwtBuilder *JWTBuilder
 
-	// mu guards tokenRequests, which the handler writes from the server's
-	// goroutine while the test reads it from its own.
-	mu            sync.Mutex
-	tokenRequests []url.Values
+	// mu guards the recorded requests, which the handlers write from the
+	// server's goroutine while the test reads them from its own.
+	mu                 sync.Mutex
+	tokenRequests      []url.Values
+	credentialRequests []CredentialEndpointRequest
+	nonceRequests      int
+}
+
+// CredentialEndpointRequest is one Credential Endpoint request as the issuer saw
+// it. The handler answers every request the same way, so a test that needs to
+// know what the wallet actually sent -- which Authorization scheme, whether a
+// DPoP proof accompanied it, which body and media type -- reads it here instead
+// of inferring it from a successful response.
+type CredentialEndpointRequest struct {
+	// Authorization is the raw Authorization header, scheme included.
+	Authorization string
+	// DPoP is the RFC 9449 proof header, empty when none was sent.
+	DPoP string
+	// ContentType is the request media type: application/json for a plain
+	// request, application/jwt for an encrypted one.
+	ContentType string
+	// Body is the request body exactly as it arrived, still encrypted when the
+	// wallet encrypted it.
+	Body []byte
 }
 
 // NewOID4VCIIssuerServer creates a new OID4VCI issuer mock server
@@ -172,6 +193,23 @@ func (is *OID4VCIIssuerServer) TokenRequests() []url.Values {
 	is.mu.Lock()
 	defer is.mu.Unlock()
 	return slices.Clone(is.tokenRequests)
+}
+
+// CredentialRequests returns every Credential Endpoint request the server has
+// received, in arrival order.
+func (is *OID4VCIIssuerServer) CredentialRequests() []CredentialEndpointRequest {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	return slices.Clone(is.credentialRequests)
+}
+
+// NonceRequests returns how many Nonce Endpoint requests the server has
+// received, so a test can tell a refreshed c_nonce from the constant one the
+// handler serves.
+func (is *OID4VCIIssuerServer) NonceRequests() int {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	return is.nonceRequests
 }
 
 // handleToken handles the token endpoint
@@ -284,6 +322,10 @@ func (is *OID4VCIIssuerServer) handleNonce(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	is.mu.Lock()
+	is.nonceRequests++
+	is.mu.Unlock()
+
 	nonce := "mock-nonce"
 	if configuredNonce, ok := is.config.TokenResponse["c_nonce"].(string); ok && configuredNonce != "" {
 		nonce = configuredNonce
@@ -302,6 +344,20 @@ func (is *OID4VCIIssuerServer) handleCredential(w http.ResponseWriter, r *http.R
 		ErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is allowed")
 		return
 	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, "failed to read credential request body")
+		return
+	}
+	is.mu.Lock()
+	is.credentialRequests = append(is.credentialRequests, CredentialEndpointRequest{
+		Authorization: r.Header.Get("Authorization"),
+		DPoP:          r.Header.Get("DPoP"),
+		ContentType:   r.Header.Get("Content-Type"),
+		Body:          body,
+	})
+	is.mu.Unlock()
 
 	// For simplicity, return a default mock JWT credential
 	// In a real implementation, this would process the request and issue appropriate credentials

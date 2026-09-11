@@ -554,6 +554,25 @@ func TestCredentialAcceptance_ResolveIssuerKeys(t *testing.T) {
 	})
 }
 
+func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
+	// The Final issuance path requires an acceptance policy, so the property
+	// under test here — one unusable credential discards the whole batch — is
+	// exercised with issuer authentication explicitly opted out of rather than
+	// with the policy missing.
+	fixture := newAcceptanceFixture(t, &CredentialAcceptancePolicy{UnverifiedIssuer: true})
+	holder := fixture.holder.PublicKey()
+	valid := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
+	response := &receiverTypes.CredentialResponse{Credentials: []any{valid, "this-is-not-a-credential"}}
+	metadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+			"acceptance-config": {Format: "dc+sd-jwt"},
+		},
+	}
+	_, err := fixture.wallet.storeOID4VCIFinalCredentialResponse(t.Context(), response, metadata, "acceptance-config", &holder)
+	require.Error(t, err)
+	require.Equal(t, 0, fixture.entryCount(t))
+}
+
 func TestVerifyCredential_ValidAndWrongKey(t *testing.T) {
 	fixture := newAcceptanceFixture(t, nil)
 	issuerKey := newTestECKey(t)

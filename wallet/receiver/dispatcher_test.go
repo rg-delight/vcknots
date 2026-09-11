@@ -3,9 +3,12 @@ package receiver
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -203,4 +206,52 @@ func TestReceivingDispatcher_ReceiveCredential(t *testing.T) {
 		}
 		mock.shouldError = false
 	})
+}
+
+func TestReceivingDispatcher_FinalCapability(t *testing.T) {
+	dispatcher, err := NewReceivingDispatcher(WithDefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalReceiver, err := dispatcher.OID4VCIFinalReceiver(types.Oid4vci)
+	if err != nil || finalReceiver == nil {
+		t.Fatalf("built-in OID4VCI Final capability: %v, %v", finalReceiver, err)
+	}
+	for _, protocol := range []types.SupportedReceivingTypes{types.Mock, types.SupportedReceivingTypes(999)} {
+		capability, err := dispatcher.OID4VCIFinalReceiver(protocol)
+		if capability != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
+			t.Errorf("protocol %v: expected unsupported capability, got %v, %v", protocol, capability, err)
+		}
+	}
+}
+
+func TestReceivingDispatcher_DefaultHTTPPolicyIsCaptured(t *testing.T) {
+	t.Setenv(env.DEBUG.String(), "")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"credential_issuer":"https://issuer.example","credential_endpoint":"https://issuer.example/credential"}`)
+	}))
+	defer server.Close()
+	endpoint, err := common.ParseURIField(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow_%t", allow), func(t *testing.T) {
+			t.Setenv(env.HTTP_ALLOWED.String(), fmt.Sprint(allow))
+			dispatcher, err := NewReceivingDispatcher(WithDefaultConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Changing the process setting must not mutate an existing receiver policy.
+			t.Setenv(env.HTTP_ALLOWED.String(), fmt.Sprint(!allow))
+			_, err = dispatcher.FetchIssuerMetadata(*endpoint, types.Oid4vci)
+			if allow && err != nil {
+				t.Fatalf("explicitly allowed local HTTP: %v", err)
+			}
+			if !allow && err == nil {
+				t.Fatal("HTTP must remain disabled")
+			}
+		})
+	}
 }

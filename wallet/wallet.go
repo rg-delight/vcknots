@@ -27,7 +27,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -50,6 +49,7 @@ import (
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -91,6 +91,11 @@ type Wallet struct {
 	// built from a per-request AttesterKey for compatibility.
 	clientAttestation ClientAttestationProvider
 	keyAttestation    KeyAttestationProvider
+
+	// oid4vciSigner is the caller-selected OpenID4VCI Final signer. A nil value
+	// means "ask the receiver plugin, then fall back to oid4vcisign.Default",
+	// which is resolved per issuance by oid4vciFinalSigner.
+	oid4vciSigner receiverTypes.OID4VCIFinalSigner
 
 	credentialAcceptance *CredentialAcceptancePolicy
 }
@@ -136,6 +141,16 @@ type Config struct {
 	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
 	// the issuer requires them or the caller opts in.
 	KeyAttestation KeyAttestationProvider
+
+	// OID4VCISigner builds the private-key operations of an OpenID4VCI 1.0
+	// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt"
+	// key proof and the Client Attestation PoP. Configure it to keep the
+	// wallet's keys in a hardware module or a remote signing service.
+	//
+	// When nil the receiver plugin is used if it implements
+	// receiver/types.OID4VCIFinalSigner, as the bundled OpenID4VCI plugin does,
+	// and oid4vcisign.Default otherwise.
+	OID4VCISigner receiverTypes.OID4VCIFinalSigner
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -179,6 +194,16 @@ func (c ClientAuthConfig) signatureAlgorithm() jose.SignatureAlgorithm {
 	return c.SigningAlg
 }
 
+// clientAuthenticationConfigured reports whether an OAuth2 client
+// authentication mechanism is configured. An empty method defaults to none.
+func clientAuthenticationConfigured(c ClientAuthConfig) bool {
+	method := c.Method
+	if method == "" {
+		method = receiverTypes.None
+	}
+	return method != receiverTypes.None
+}
+
 // curveForSignatureAlgorithm returns the elliptic curve that alg requires.
 // RFC 7518 section 3.4 pairs each ECDSA algorithm with exactly one curve, so
 // the signing key must sit on the curve named here.
@@ -194,12 +219,6 @@ func curveForSignatureAlgorithm(alg jose.SignatureAlgorithm) (elliptic.Curve, er
 		return nil, fmt.Errorf("unsupported client authentication signing algorithm: %q", alg)
 	}
 }
-
-var dpopNonceHTTPClient = &http.Client{
-	Timeout: 10 * time.Second,
-}
-
-const maxDPoPNonceResponseBodyBytes int64 = 4 << 10
 
 // NewWallet creates a Wallet with default dispatcher configurations.
 //
@@ -367,15 +386,44 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 
 		clientAttestation: config.ClientAttestation,
 		keyAttestation:    config.KeyAttestation,
+		oid4vciSigner:     config.OID4VCISigner,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
+}
+
+// oid4vciFinalSigner resolves the OpenID4VCI Final signing primitives for one
+// issuance. Config.OID4VCISigner wins; otherwise the transport plugin itself is
+// used when it also implements the signer, which keeps the bundled plugin's
+// behaviour; otherwise the software default signs.
+func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCIFinalTransport) receiverTypes.OID4VCIFinalSigner {
+	if w.oid4vciSigner != nil {
+		return w.oid4vciSigner
+	}
+	if signer, ok := transport.(receiverTypes.OID4VCIFinalSigner); ok {
+		return signer
+	}
+	return oid4vcisign.Default{}
+}
+
+// oid4vciProfileValidator is the optional receiver capability the root uses to
+// apply HAIP constraints to fetched issuer metadata before PAR. It is asserted
+// at runtime instead of widening the exported Final receiver interface.
+type oid4vciProfileValidator interface {
+	ValidateIssuerMetadataForProfile(*receiverTypes.CredentialIssuerMetadata) error
+	ValidateCredentialConfigurationForProfile(receiverTypes.CredentialConfiguration) error
 }
 
 // setProtocolProfile is implemented by the built-in protocol plugins so the root
 // can propagate its profile to the default dispatchers it constructs itself.
 type setProtocolProfile interface {
 	SetProtocolProfile(profile.Profile)
+}
+
+// setSupportedTransactionDataTypes is implemented by presenter plugins that can
+// accept the wallet's supported transaction_data types.
+type setSupportedTransactionDataTypes interface {
+	SetSupportedTransactionDataTypes([]string)
 }
 
 func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
@@ -392,12 +440,6 @@ func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, val
 			setter.SetProtocolProfile(value)
 		}
 	}
-}
-
-// setSupportedTransactionDataTypes is implemented by presenter plugins that can
-// accept the wallet's supported transaction_data types.
-type setSupportedTransactionDataTypes interface {
-	SetSupportedTransactionDataTypes([]string)
 }
 
 func propagatePresenterTransactionDataTypes(dispatcher *presenter.PresentationDispatcher, values []string) {
@@ -530,7 +572,7 @@ type ReceiveCredentialRequest struct {
 	Key                  IKeyEntry
 	RequestedFormat      credential.SupportedSerializationFlavor
 	CachedIssuerMetadata *receiverTypes.CredentialIssuerMetadata
-	TxCode               string
+	TxCode               string `json:"tx_code,omitempty"`
 }
 
 // CredentialOffer represents a credential offer from an issuer.
@@ -542,14 +584,115 @@ type CredentialOffer struct {
 
 // CredentialOfferGrant represents a grant in a credential offer.
 type CredentialOfferGrant struct {
-	PreAuthorizedCode string  `json:"pre-authorized_code"`
-	TxCode            *TxCode `json:"tx_code,omitempty"`
+	PreAuthorizedCode string           `json:"pre-authorized_code"`
+	IssuerState       string           `json:"issuer_state,omitempty"`
+	TxCode            *TransactionCode `json:"tx_code,omitempty"`
+	// AuthorizationServer is the §4.1.1 authorization_server grant parameter:
+	// the issuer-recommended authorization server identifier. It MUST be one of
+	// the credential issuer metadata's authorization_servers.
+	AuthorizationServer string `json:"authorization_server,omitempty"`
 }
 
-type TxCode struct {
+// TxCode is the upstream name for the transaction-code descriptor.
+type TxCode = TransactionCode
+
+// TransactionCode describes the transaction code expected by the issuer.
+type TransactionCode struct {
 	InputMode   string `json:"input_mode,omitempty"`
 	Length      int    `json:"length,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+// OID4VCIFinalReceiveRequest holds the authorization-code Final/HAIP
+// credential issuance inputs that are not discoverable from the credential
+// offer or issuer metadata.
+type OID4VCIFinalReceiveRequest struct {
+	CredentialOffer *CredentialOffer
+	// CredentialIssuer and CredentialConfigurationID drive a wallet-initiated
+	// issuance (OpenID4VCI 1.0 §5: "The Wallet can also start the issuance
+	// without a Credential Offer"): the wallet obtained the Credential Issuer
+	// metadata itself and picked the Credential Configuration it wants. Both
+	// are required when CredentialOffer is nil, and must be empty when a
+	// Credential Offer is supplied.
+	CredentialIssuer          *url.URL
+	CredentialConfigurationID string
+	Type                      receiverTypes.SupportedReceivingTypes
+	ClientID                  string
+	RedirectURI               string
+	// AuthorizationRequestType selects how the selected Credential
+	// Configuration is requested at the authorization endpoint. The empty
+	// value uses scope when the configuration advertises one and
+	// authorization_details otherwise. "scope" requires the configuration to
+	// advertise a scope (error before PAR otherwise);
+	// "authorization_details" sends an openid_credential entry with the
+	// configuration id and no scope (OpenID4VCI 1.0 §5.1.1).
+	//
+	// Under HAIP only scope is allowed: HAIP §4.1 says "For Grant Type
+	// `authorization_code`, the Issuer MUST include a scope value ... The
+	// Wallet MUST use that value in the `scope` Authorization parameter" and
+	// §4.2 that the Wallet "MUST use the `scope` parameter to communicate
+	// Credential Type(s)". An explicit "authorization_details" fails, and so
+	// does a Credential Configuration that advertises no scope.
+	AuthorizationRequestType string
+	HolderKey                jose.JSONWebKey
+	// AdditionalHolderKeys requests §14.6 batch issuance. Each key yields one
+	// proofs.jwt entry (HolderKey plus these, in order), and the returned
+	// credentials are verified against the key at the same index. The total
+	// number of proofs must not exceed the issuer's batch_size.
+	AdditionalHolderKeys []jose.JSONWebKey
+	ClientKey            jose.JSONWebKey
+	// AttesterKey and AttesterIssuer are a deprecated fallback: when no
+	// Config.ClientAttestation provider is configured they are wrapped into a
+	// StaticClientAttester for this request. The wallet should never hold the
+	// attester's private key; configure a remote ClientAttestationProvider.
+	AttesterKey    jose.JSONWebKey
+	AttesterIssuer string
+	// IncludeKeyAttestation requests an OpenID4VCI 1.0 Appendix D key
+	// attestation even when the issuer does not list
+	// proof_types_supported.jwt.key_attestations_required. It is ignored when
+	// no KeyAttestation provider is configured.
+	IncludeKeyAttestation bool
+	// DeferredPollAttempts is the number of §9 deferred credential endpoint
+	// polls. Zero means do not poll and return an IssuancePending result the
+	// caller can resume with ResumeOID4VCIFinalDeferredCredential.
+	DeferredPollAttempts int
+	// MaxDeferredInterval caps the §9.2 deferred polling interval, including
+	// one the issuer names in its issuance_pending response. Zero uses the
+	// library's 60 second cap.
+	MaxDeferredInterval             time.Duration
+	CredentialResponseEncryptionKey *jose.JSONWebKey
+	HTTPClient                      *http.Client
+	// AllowSelfDrivenAuthorization lets ReceiveOID4VCIFinalCredential drive the
+	// §5.2 authorization endpoint itself, by issuing a bare GET and reading the
+	// Location header. Only an issuer that needs no user interaction answers
+	// that way, so the default is false and a wallet with a user calls
+	// BeginOID4VCIFinalAuthorization, opens the returned URL in the system
+	// browser, and hands the redirect to ResumeOID4VCIFinalAuthorization.
+	AllowSelfDrivenAuthorization bool
+}
+
+type OID4VCIFinalReceiveResult struct {
+	CredentialResponse *receiverTypes.CredentialResponse
+	SavedCredentials   []*SavedCredential
+	AccessToken        *receiverTypes.CredentialIssuanceAccessToken
+	// TransactionID and NotificationID expose the §9 deferred transaction and
+	// §11 notification identifiers so callers can resume or notify later.
+	TransactionID             string
+	NotificationID            string
+	IssuerMetadata            *receiverTypes.CredentialIssuerMetadata
+	CredentialConfigurationID string
+}
+
+func ParseCredentialOfferURL(rawURL string) (*CredentialOffer, error) {
+	offerURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse credential offer URL: %w", err)
+	}
+	rawOffer := offerURL.Query().Get("credential_offer")
+	if rawOffer == "" {
+		return nil, fmt.Errorf("credential_offer query parameter is required")
+	}
+	return parseCredentialOfferJSON(rawOffer)
 }
 
 // GetCredentialEntriesRequest holds parameters for querying credential entries.
@@ -1463,49 +1606,6 @@ func (w *Wallet) fetchCredentialNonce(
 	return nil, fmt.Errorf("nonce response does not contain c_nonce or nonce")
 }
 
-func (w *Wallet) fetchDPoPNonce(issuerMetadata *receiverTypes.CredentialIssuerMetadata) (*string, error) {
-	if issuerMetadata == nil || issuerMetadata.NonceEndpoint == nil {
-		return nil, fmt.Errorf("issuer metadata does not contain nonce endpoint")
-	}
-
-	nonceEndpointURL := url.URL(*issuerMetadata.NonceEndpoint)
-	if !env.IsHTTPAllowed() && !strings.EqualFold(nonceEndpointURL.Scheme, "https") {
-		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", nonceEndpointURL.Scheme)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, nonceEndpointURL.String(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create DPoP nonce request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := dpopNonceHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch DPoP nonce: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxDPoPNonceResponseBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read DPoP nonce response: %w", err)
-	}
-	if int64(len(bodyBytes)) > maxDPoPNonceResponseBodyBytes {
-		return nil, fmt.Errorf("DPoP nonce endpoint response exceeds %d bytes", maxDPoPNonceResponseBodyBytes)
-	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("DPoP nonce endpoint returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	nonce := strings.TrimSpace(resp.Header.Get("DPoP-Nonce"))
-	if nonce == "" {
-		return nil, fmt.Errorf("DPoP nonce endpoint response does not contain DPoP-Nonce header")
-	}
-
-	return &nonce, nil
-}
-
 // requestCredential requests the credential from the issuer with JWT proof.
 func (w *Wallet) requestCredential(
 	req ReceiveCredentialRequest,
@@ -1597,12 +1697,12 @@ func (w *Wallet) requestCredential(
 	}
 
 	credentialJWT, err := receiveCredential(nil)
-	if err != nil && strings.EqualFold(accessToken.TokenType, "DPoP") && errors.Is(err, receiverTypes.ErrUseDPoPNonce) {
-		dpopNonce, nonceErr := w.fetchDPoPNonce(issuerMetadata)
-		if nonceErr != nil {
-			return nil, fmt.Errorf("failed to fetch DPoP nonce: %w", nonceErr)
+	if err != nil && strings.EqualFold(accessToken.TokenType, "DPoP") {
+		// RFC9449 section 9 binds the retry to the resource server's challenge.
+		// The VCI c_nonce endpoint is a different protocol and cannot replace it.
+		if dpopNonce, ok := receiverTypes.DPoPNonceFromError(err); ok && dpopNonce != "" {
+			credentialJWT, err = receiveCredential(&dpopNonce)
 		}
-		credentialJWT, err = receiveCredential(dpopNonce)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive credential: %w", err)
