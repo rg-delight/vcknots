@@ -1,0 +1,195 @@
+package x509
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+)
+
+// SigningChainOptions contains the relying party's trust policy. Trust anchors
+// are provided separately from the untrusted x5c chain. Exactly one of
+// TrustAnchors and Roots must be supplied. Roots preserves CertPool-based
+// integrations; TrustAnchors permits RFC 5280 self-issued rollover paths.
+type SigningChainOptions struct {
+	TrustAnchors []*x509.Certificate
+	Roots        *x509.CertPool
+	CurrentTime  time.Time
+	// KeyUsages constrains EKU when the ecosystem defines a signing purpose.
+	// Empty means no additional EKU policy, not TLS server authentication.
+	KeyUsages []x509.ExtKeyUsage
+	// Revocation belongs to one verification operation, including its candidate
+	// paths. It must not be reused as process-wide protocol state.
+	Revocation *CRLChecker
+}
+
+type SigningChainResult struct {
+	// Chain is leaf first, ending at the selected configured trust anchor.
+	Chain []*x509.Certificate
+	// Fingerprints identify the exact certificates without exposing raw DER.
+	Fingerprints []string
+	Revocation   CRLCheckResult
+}
+
+// SigningChainError keeps configuration, certificate, path and revocation
+// failures distinguishable. Underlying x509 and CRL errors support errors.As.
+type SigningChainError struct {
+	Kind string
+	Err  error
+}
+
+func (e *SigningChainError) Error() string { return fmt.Sprintf("x509 %s: %v", e.Kind, e.Err) }
+func (e *SigningChainError) Unwrap() error { return e.Err }
+
+// VerifySigningCertificateChain verifies a signing certificate before consulting
+// its authenticated revocation locations. It does not impose DNS identity:
+// x509_hash, DNS-based verifier identifiers and credential issuers bind identity
+// differently and apply that binding at their protocol boundary.
+func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Certificate, options SigningChainOptions) (*SigningChainResult, error) {
+	invalid := func(kind string, err error) (*SigningChainResult, error) {
+		return nil, &SigningChainError{Kind: kind, Err: err}
+	}
+	if ctx == nil || options.CurrentTime.IsZero() || options.Revocation == nil {
+		return invalid("configuration", errors.New("context, verification time and revocation checker are required"))
+	}
+	if (len(options.TrustAnchors) == 0) == (options.Roots == nil) {
+		return invalid("configuration", errors.New("supply either trust anchors or a root pool"))
+	}
+	if len(certificates) == 0 || len(certificates) > 16 {
+		return invalid("certificate", errors.New("x5c must contain between 1 and 16 certificates"))
+	}
+	for _, cert := range certificates {
+		if cert == nil || len(cert.Raw) == 0 {
+			return invalid("certificate", errors.New("x5c contains an empty certificate"))
+		}
+	}
+	leaf := certificates[0]
+	if leaf.IsCA || (bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil) {
+		return invalid("certificate", errors.New("signer must be a non-self-signed end-entity certificate"))
+	}
+	if hasKeyUsage(leaf) && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return invalid("certificate", errors.New("signer key usage does not permit digital signatures"))
+	}
+	chains, err := signingPaths(certificates, options)
+	if err != nil {
+		return invalid("path", err)
+	}
+	// Prefer the nearest reached anchor, without requiring certificates carried
+	// above that anchor or spending their revocation-fetch budget.
+	sort.SliceStable(chains, func(i, j int) bool { return len(chains[i]) < len(chains[j]) })
+	var failures []error
+	for _, chain := range chains {
+		if err := ctx.Err(); err != nil {
+			return invalid("revocation", err)
+		}
+		if err := validateSigningPath(chain, options.CurrentTime); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		revocation, err := options.Revocation.Check(ctx, chain, options.CurrentTime)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		fingerprints := make([]string, len(chain))
+		for i, cert := range chain {
+			digest := sha256.Sum256(cert.Raw)
+			fingerprints[i] = hex.EncodeToString(digest[:])
+		}
+		return &SigningChainResult{Chain: chain, Fingerprints: fingerprints, Revocation: revocation}, nil
+	}
+	return invalid("path", errors.Join(failures...))
+}
+
+func signingPaths(certificates []*x509.Certificate, options SigningChainOptions) ([][]*x509.Certificate, error) {
+	// Go 1.26 counts self-issued rollover CAs against pathLenConstraint. With
+	// explicit anchors we can defer only that check, on private copies, until
+	// after standard signature, constraints, EKU and policy validation. Original
+	// certificate fields and signed DER remain untouched. A CertPool cannot be
+	// enumerated, so legacy pools retain Go's stricter path-length behavior.
+	deferPathLength := len(options.TrustAnchors) != 0
+	originals := make(map[string]*x509.Certificate)
+	prepare := func(cert *x509.Certificate) *x509.Certificate {
+		originals[string(cert.Raw)] = cert
+		if !deferPathLength {
+			return cert
+		}
+		copy := *cert
+		copy.MaxPathLen = -1
+		copy.MaxPathLenZero = false
+		return &copy
+	}
+	intermediates := x509.NewCertPool()
+	for _, cert := range certificates[1:] {
+		intermediates.AddCert(prepare(cert))
+	}
+	roots := options.Roots
+	if roots == nil {
+		roots = x509.NewCertPool()
+		for _, cert := range options.TrustAnchors {
+			if cert == nil || len(cert.Raw) == 0 {
+				return nil, errors.New("empty trust anchor")
+			}
+			roots.AddCert(prepare(cert))
+		}
+	}
+	keyUsages := options.KeyUsages
+	if len(keyUsages) == 0 {
+		keyUsages = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
+	}
+	chains, err := prepare(certificates[0]).Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates, CurrentTime: options.CurrentTime, KeyUsages: keyUsages})
+	if err != nil {
+		return nil, err
+	}
+	for _, chain := range chains {
+		for i, cert := range chain {
+			if original := originals[string(cert.Raw)]; original != nil {
+				chain[i] = original
+			}
+		}
+	}
+	return chains, nil
+}
+
+func validateSigningPath(path []*x509.Certificate, now time.Time) error {
+	if len(path) < 2 {
+		return errors.New("signing certificate must be issued below a trust anchor")
+	}
+	for i, cert := range path[1:] {
+		if !cert.IsCA || !cert.BasicConstraintsValid || (hasKeyUsage(cert) && cert.KeyUsage&x509.KeyUsageCertSign == 0) {
+			return errors.New("path issuer is not authorized to sign certificates")
+		}
+		if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+			return errors.New("path issuer is outside its validity period")
+		}
+		if err := path[i].CheckSignatureFrom(cert); err != nil {
+			return err
+		}
+		if cert.BasicConstraintsValid && cert.MaxPathLen >= 0 {
+			count := 0
+			for _, below := range path[1 : i+1] {
+				if !bytes.Equal(below.RawSubject, below.RawIssuer) {
+					count++
+				}
+			}
+			if count > cert.MaxPathLen {
+				return x509.CertificateInvalidError{Cert: cert, Reason: x509.TooManyIntermediates}
+			}
+		}
+	}
+	return nil
+}
+
+func hasKeyUsage(cert *x509.Certificate) bool {
+	for _, extension := range cert.Extensions {
+		if extension.Id.Equal([]int{2, 5, 29, 15}) {
+			return true
+		}
+	}
+	return false
+}

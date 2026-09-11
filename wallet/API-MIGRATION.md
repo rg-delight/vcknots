@@ -51,3 +51,33 @@ The explicit Draft24 JARM operation preserves the legacy fork's JSON-string
 encoding is retained for compatibility, not claimed as normative conformance.
 The NICE sidecar's regular single-format presentations already build an object
 in their own response path. Final response objects are unaffected.
+
+## Final Request Object authentication
+
+`ParsePresentationRequest` and `NewRequestBuilder` now authenticate signed
+Request Objects for the `x509_san_dns` and `x509_hash` Client Identifier
+Prefixes (OpenID4VP 1.0 §5.10) instead of only checking the signature against
+the first `x5c` certificate. The chain must reach a trust anchor configured by
+the relying party through `Oid4vpPresenter.X509TrustChainRoots` or
+`Oid4vpPresenter.RequestObjectValidation` (`RequestObjectValidationOptions`:
+explicit `TrustAnchors` or `RootCAs`, optional EKU policy, CRL revocation with
+`AllowUnadvertisedRevocation`, `WalletAudience`, clock and `SigningAlgorithms`).
+Configure the roots in exactly one of those places. `x509_hash` binds the leaf
+certificate hash only and does not require a DNS SAN (HAIP §5); `x509_san_dns`
+binds the SAN and the `response_uri` (direct_post modes) or `redirect_uri`.
+`aud`, `exp` and `nbf` are validated; `iss` is ignored (§5).
+
+Final plain query-parameter requests that use an X.509 prefix are rejected with
+`invalid_request` because those prefixes require a signed Request Object.
+`InsecureSkipX509Verify` no longer applies to the Final path; explicit test
+anchors must be configured instead. The Draft24 entrypoints
+(`ParseDraft24PresentationRequest`, `NewDraft24RequestBuilder`) keep the
+previous behaviour, including `InsecureSkipX509Verify`.
+
+The verification result is exposed as
+`CredentialPresentationRequest.RequestObjectVerification` (client ID,
+certificate SHA-256 fingerprints, revocation counters). It is produced only by
+the library and never read from request data. The new
+`common/x509.VerifySigningCertificateChain` and `common/x509.NewCRLChecker`
+are the shared signing-certificate path and CRL primitives; issuer-side
+callers are expected to move to them in a later change.

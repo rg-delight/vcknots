@@ -794,11 +794,11 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 	assert.Equal(t, "http", endpoint.Scheme)
 }
 
-func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithoutRedirectURI(t *testing.T) {
+func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
 		dcqlQuery,
 	)
 
@@ -806,7 +806,7 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURIWithou
 	require.NoError(t, err)
 	require.NotNil(t, endpoint)
 	require.NotNil(t, req.DcqlQuery)
-	assert.Empty(t, req.RedirectURI)
+	assert.Equal(t, "https://example.com/response", req.RedirectURI)
 	assert.Equal(t, "https://example.com/response", endpoint.String())
 	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
 }
@@ -832,7 +832,7 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1",
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1",
 		dcqlQuery,
 	)
 
@@ -928,7 +928,8 @@ func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]}]}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=%s&state=state-1&client_metadata=%s",
+		"openid4vp://present?client_id=%s&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=%s&state=state-1&client_metadata=%s",
+		url.QueryEscape("redirect_uri:"+server.URL),
 		dcqlQuery,
 		url.QueryEscape(server.URL),
 		url.QueryEscape(string(clientMetadataBytes)),

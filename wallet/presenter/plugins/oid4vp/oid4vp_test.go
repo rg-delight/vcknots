@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -345,7 +344,7 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	return u
 }
 
-func TestOid4vpPresenter_ParsePresentationRequest(t *testing.T) {
+func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 	// mockserver / httptest.NewServer use http; allow it for these tests.
 
 	// Setup mock verifier server with proper JWT signing
@@ -455,7 +454,7 @@ func TestOid4vpPresenter_ParsePresentationRequest(t *testing.T) {
 			}
 
 			p := &Oid4vpPresenter{AllowHTTP: true}
-			req, err := p.ParsePresentationRequest(uri)
+			req, err := p.ParseDraft24PresentationRequest(uri)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParsePresentationRequest() error = %v, wantErr %v", err, tt.wantErr)
@@ -471,7 +470,7 @@ func TestOid4vpPresenter_ParsePresentationRequest(t *testing.T) {
 	// Test invalid URI
 	t.Run("Invalid URI", func(t *testing.T) {
 		p := &Oid4vpPresenter{AllowHTTP: true}
-		_, err := p.ParsePresentationRequest("://invalid-uri")
+		_, err := p.ParseDraft24PresentationRequest("://invalid-uri")
 		if err == nil {
 			t.Error("Expected error for invalid URI, got nil")
 		}
@@ -479,7 +478,7 @@ func TestOid4vpPresenter_ParsePresentationRequest(t *testing.T) {
 }
 
 // TestOid4vpPresenter_WithRequestObject_TypHeader tests 'typ' header validation
-func TestOid4vpPresenter_WithRequestObject_TypHeader(t *testing.T) {
+func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 	// Setup mock verifier server with proper JWT signing
 	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
 	defer verifierServer.Close()
@@ -515,7 +514,7 @@ func TestOid4vpPresenter_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create signed JWT: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(mockJWT)
 
 		req, err := builder.Build()
@@ -541,7 +540,7 @@ func TestOid4vpPresenter_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create JWT without 'typ' header: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(invalidJWT)
 
 		_, err = builder.Build()
@@ -570,7 +569,7 @@ func TestOid4vpPresenter_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create JWT with wrong 'typ' header: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(invalidJWT)
 
 		_, err = builder.Build()
@@ -584,7 +583,7 @@ func TestOid4vpPresenter_WithRequestObject_TypHeader(t *testing.T) {
 }
 
 // TestOid4vpPresenter_WithRequestObject_IssClaimIgnored tests 'iss' claim handling
-func TestOid4vpPresenter_WithRequestObject_IssClaimIgnored(t *testing.T) {
+func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T) {
 	// Setup mock verifier server with proper JWT signing
 	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
 	defer verifierServer.Close()
@@ -621,7 +620,7 @@ func TestOid4vpPresenter_WithRequestObject_IssClaimIgnored(t *testing.T) {
 			t.Fatalf("Failed to create signed JWT: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(mockJWT)
 
 		req, err := builder.Build()
@@ -643,7 +642,7 @@ func TestOid4vpPresenter_WithRequestObject_IssClaimIgnored(t *testing.T) {
 }
 
 // TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation tests standard JWT claims validation
-func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T) {
+func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *testing.T) {
 	// Setup mock verifier server with proper JWT signing
 	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
 	defer verifierServer.Close()
@@ -696,7 +695,7 @@ func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T
 			t.Fatalf("Failed to create JWT with valid time claims: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(validJWT)
 
 		req, err := builder.Build()
@@ -718,7 +717,7 @@ func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T
 			t.Fatalf("Failed to create expired JWT: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(expiredJWT)
 
 		_, err = builder.Build()
@@ -740,7 +739,7 @@ func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T
 			t.Fatalf("Failed to create JWT with future iat: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(futureIatJWT)
 
 		_, err = builder.Build()
@@ -775,7 +774,7 @@ func TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation(t *testing.T
 			t.Fatalf("Failed to create JWT without exp claim: %v", err)
 		}
 
-		builder := NewRequestBuilder()
+		builder := NewDraft24RequestBuilder()
 		builder = builder.WithRequestObject(noExpJWT)
 
 		req, err := builder.Build()
@@ -881,30 +880,12 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testing.T) {
 	p := &Oid4vpPresenter{}
 	uri := "openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=n&dcql_query=%7B%22credentials%22%3A%5B%7B%22id%22%3A%22pid%22%2C%22format%22%3A%22dc%2Bsd-jwt%22%2C%22meta%22%3A%7B%22vct_values%22%3A%5B%22urn%3Aeudi%3Apid%3A1%22%5D%7D%2C%22claims%22%3A%5B%7B%22path%22%3A%5B%22given_name%22%5D%7D%5D%7D%5D%7D&response_mode=direct_post.jwt&response_uri=https://example.com/response"
-	req, err := p.ParsePresentationRequest(uri)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT {
-		t.Fatalf("expected direct_post.jwt response mode, got %q", req.ResponseMode)
-	}
-	if req.RedirectURI != "" {
-		t.Fatalf("expected no redirect_uri for x509_hash direct_post.jwt, got %q", req.RedirectURI)
-	}
-	if req.PresentationDefinition != nil {
-		t.Fatalf("expected presentation_definition to be omitted, got %#v", req.PresentationDefinition)
-	}
-	if req.DcqlQuery == nil || len(req.DcqlQuery.Credentials) != 1 {
-		t.Fatalf("expected one DCQL credential query, got %#v", req.DcqlQuery)
-	}
-	if got := req.DcqlQuery.Credentials[0].Claims[0].Path[0]; got != "given_name" {
-		t.Fatalf("expected requested claim path given_name, got %q", got)
+	_, err := p.ParsePresentationRequest(uri)
+	if err == nil || !strings.Contains(err.Error(), "require a signed Request Object") {
+		t.Fatalf("unsigned x509_hash must be rejected: %v", err)
 	}
 }
 
-// AC (Issue #606): when an Authorization Request is rejected with an OAuth
-// error code and response_mode=direct_post, the wallet posts the error
-// authorization response (error, error_description, state) to response_uri.
 func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 	p := &Oid4vpPresenter{AllowHTTP: true}
 
@@ -1169,7 +1150,7 @@ func TestOid4vpPresenter_ClientMetadataParsing_And_ResponseModeConstraint(t *tes
 	})
 }
 
-func TestOid4vpPresenter_RequestParameterJWT_Success(t *testing.T) {
+func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 	// Setup mock verifier server with proper JWT signing
 	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
 	defer verifierServer.Close()
@@ -1206,7 +1187,7 @@ func TestOid4vpPresenter_RequestParameterJWT_Success(t *testing.T) {
 	uri := "openid4vp://present?request=" + url.QueryEscape(jwtStr)
 
 	p := &Oid4vpPresenter{}
-	req, err := p.ParsePresentationRequest(uri)
+	req, err := p.ParseDraft24PresentationRequest(uri)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1216,7 +1197,7 @@ func TestOid4vpPresenter_RequestParameterJWT_Success(t *testing.T) {
 }
 
 // x509_san_dns branch tests
-func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *testing.T) {
+func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *testing.T) {
 	// Generate a self-signed certificate with SAN DNS name
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -1273,7 +1254,7 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *
 	}
 
 	// Success: SAN matches client_id and response_uri host
-	builder := NewRequestBuilder()
+	builder := NewDraft24RequestBuilder()
 	builder.x509TrustChainRoots = pool
 	builder = builder.WithRequestObject(jwtStr)
 	if _, err := builder.Build(); err != nil {
@@ -1286,7 +1267,7 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *
 	signerOpts2 = signerOpts2.WithType("oauth-authz-req+jwt").WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(der)})
 	signer2, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: priv}, signerOpts2)
 	badJWT1, _ := jwt.Signed(signer2).Claims(claims).Serialize()
-	b := NewRequestBuilder()
+	b := NewDraft24RequestBuilder()
 	b.x509TrustChainRoots = pool
 	b = b.WithRequestObject(badJWT1)
 	if _, err := b.Build(); err == nil || !strings.Contains(err.Error(), "SAN") {
@@ -1300,7 +1281,7 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *
 	signerOpts3 = signerOpts3.WithType("oauth-authz-req+jwt").WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(der)})
 	signer3, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: priv}, signerOpts3)
 	badJWT2, _ := jwt.Signed(signer3).Claims(claims).Serialize()
-	b2 := NewRequestBuilder()
+	b2 := NewDraft24RequestBuilder()
 	b2.x509TrustChainRoots = pool
 	b2 = b2.WithRequestObject(badJWT2)
 	if _, err := b2.Build(); err == nil || !strings.Contains(err.Error(), "client_id (origin) must be same") {
@@ -1309,25 +1290,10 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *
 }
 
 func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(2),
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatalf("failed to create certificate: %v", err)
-	}
-	hash := sha256.Sum256(der)
-	clientID := "x509_hash:" + base64.RawURLEncoding.EncodeToString(hash[:])
-
+	f := newRequestObjectFixture(t)
+	priv := f.key
+	der := f.leaf.Raw
+	clientID := f.clientID()
 	claims := map[string]any{
 		"aud":           "https://self-issued.me/v2",
 		"nonce":         "n",
@@ -1360,7 +1326,8 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 		t.Fatalf("failed to sign jwt: %v", err)
 	}
 
-	builder := NewRequestBuilder()
+	builder := NewRequestBuilder().WithRequestObjectValidation(f.options())
+	builder.httpClient = f.server.Client()
 	builder.expectedClientID = clientID
 	builder = builder.WithRequestObject(jwtStr)
 	req, err := builder.Build()
@@ -1375,7 +1342,8 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 		t.Fatalf("signed Request Object rounded a DCQL integer: %#v", value)
 	}
 
-	builder = NewRequestBuilder()
+	builder = NewRequestBuilder().WithRequestObjectValidation(f.options())
+	builder.httpClient = f.server.Client()
 	builder.expectedClientID = "x509_hash:wrong"
 	builder = builder.WithRequestObject(jwtStr)
 	if _, err := builder.Build(); err == nil || !strings.Contains(err.Error(), "outer client_id does not match") {
@@ -1387,7 +1355,9 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to sign bad jwt: %v", err)
 	}
-	builder = NewRequestBuilder()
+	builder = NewRequestBuilder().WithRequestObjectValidation(f.options())
+	builder.httpClient = f.server.Client()
+	builder.expectedClientID = "x509_hash:wrong"
 	builder = builder.WithRequestObject(badJWT)
 	if _, err := builder.Build(); err == nil || !strings.Contains(err.Error(), "x509_hash client_id mismatch") {
 		t.Fatalf("expected x509_hash mismatch, got %v", err)
