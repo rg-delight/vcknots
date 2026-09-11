@@ -729,6 +729,25 @@ func decodeAuthorizationDetails(t *testing.T, raw string) []map[string]any {
 	return details
 }
 
+// authorizationDetailsTokenResponse is the §6.2 Token Response an
+// authorization_details request must receive: an openid_credential entry that
+// names the requested configuration and the credential_identifiers the wallet
+// then uses in the Credential Request.
+func authorizationDetailsTokenResponse(credentialConfigurationID, identifier string) map[string]any {
+	return map[string]any{
+		"access_token": "access-1",
+		"token_type":   "DPoP",
+		"expires_in":   3600,
+		"authorization_details": []map[string]any{
+			{
+				"type":                        receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+				"credential_configuration_id": credentialConfigurationID,
+				"credential_identifiers":      []string{identifier},
+			},
+		},
+	}
+}
+
 // OpenID4VCI 1.0 §5.1.2 / §12.2.4: the default requests the scope the
 // Credential Configuration advertises.
 func TestReceiveOID4VCIFinalCredential_DefaultUsesScopeWhenAdvertised(t *testing.T) {
@@ -744,6 +763,7 @@ func TestReceiveOID4VCIFinalCredential_DefaultUsesScopeWhenAdvertised(t *testing
 func TestReceiveOID4VCIFinalCredential_DefaultUsesAuthorizationDetailsWithoutScope(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.omitScope = true
+		f.tokenResponse = authorizationDetailsTokenResponse("pid", "id-1")
 	})
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
 	require.NoError(t, err)
@@ -757,7 +777,9 @@ func TestReceiveOID4VCIFinalCredential_DefaultUsesAuthorizationDetailsWithoutSco
 // OpenID4VCI 1.0 §5.1.1: explicit authorization_details sends an
 // openid_credential entry with credential_configuration_id and no scope.
 func TestReceiveOID4VCIFinalCredential_ExplicitAuthorizationDetails(t *testing.T) {
-	fixture := newFinalIssuanceFixture(t)
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = authorizationDetailsTokenResponse("pid", "id-1")
+	})
 	req := fixture.request()
 	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
@@ -1286,7 +1308,9 @@ func TestReceiveOID4VCIFinalCredential_NoClientAuthSendsNoAssertion(t *testing.T
 // OpenID4VCI 1.0 §5.1.1: with authorization_servers advertised, each
 // authorization detail carries locations = [credential_issuer].
 func TestReceiveOID4VCIFinalCredential_RARCarriesLocationsWhenAuthorizationServersAdvertised(t *testing.T) {
-	fixture := newFinalIssuanceFixture(t)
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = authorizationDetailsTokenResponse("pid", "id-1")
+	})
 	req := fixture.request()
 	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
@@ -1335,7 +1359,9 @@ func TestReceiveOID4VCIFinalCredential_WalletInitiatedUsesRequestedConfiguration
 // With authorization_details the wallet sends the Credential Configuration id
 // it selected from the issuer metadata (OpenID4VCI 1.0 §5.1.1).
 func TestReceiveOID4VCIFinalCredential_WalletInitiatedSendsConfigurationID(t *testing.T) {
-	fixture := newFinalIssuanceFixture(t)
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = authorizationDetailsTokenResponse("pid", "id-1")
+	})
 	req := fixture.walletInitiatedRequest()
 	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
@@ -1598,7 +1624,9 @@ func TestHAIPAuthorizationRequestRejectsScopelessConfiguration(t *testing.T) {
 
 // Final outside HAIP keeps both request types, as §5.1.1 allows.
 func TestFinalAuthorizationRequestStillAllowsAuthorizationDetails(t *testing.T) {
-	fixture := newFinalIssuanceFixture(t)
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = authorizationDetailsTokenResponse("pid", "id-1")
+	})
 	req := fixture.request()
 	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
@@ -1989,4 +2017,114 @@ func TestSelectOID4VCIAuthorizationServer(t *testing.T) {
 		_, err := SelectOID4VCIAuthorizationServer(nil, nil, issuer)
 		require.Error(t, err)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// P2-E G4: authorization_details strict mode.
+// ---------------------------------------------------------------------------
+
+// OpenID4VCI 1.0 §6.2: when the authorization request used
+// authorization_details, the Token Response MUST carry a usable
+// openid_credential entry for the requested Credential Configuration. A
+// missing entry, a foreign configuration, an empty credential_identifiers
+// array and more than one identifier all fail closed with
+// ErrAuthorizationDetailsMissing.
+func TestCredentialIdentifierForConfigurationRequiredModeRejectsUnusableResponses(t *testing.T) {
+	openidDetail := func(configurationID string, identifiers ...string) receiverTypes.CredentialIssuanceAuthorizationDetail {
+		return receiverTypes.CredentialIssuanceAuthorizationDetail{
+			Type:                      receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+			CredentialConfigurationID: configurationID,
+			CredentialIdentifiers:     identifiers,
+		}
+	}
+
+	cases := map[string]*receiverTypes.CredentialIssuanceAccessToken{
+		"missing authorization_details": {Token: "access-1"},
+		"foreign configuration":         {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{openidDetail("other", "id-other")}},
+		"empty credential_identifiers":  {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{openidDetail("pid")}},
+		"multiple credential_identifiers": {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+			openidDetail("pid", "id-1", "id-2"),
+		}},
+	}
+	for name, accessToken := range cases {
+		t.Run(name, func(t *testing.T) {
+			identifier, err := CredentialIdentifierForConfiguration(accessToken, "pid", AuthorizationDetailsRequired)
+			require.ErrorIs(t, err, ErrAuthorizationDetailsMissing)
+			require.Nil(t, identifier)
+		})
+	}
+}
+
+// The required-mode positive case: the matching entry's identifier is selected.
+func TestCredentialIdentifierForConfigurationRequiredModeSelectsMatchingEntry(t *testing.T) {
+	accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+		Token: "access-1",
+		AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{
+			{
+				Type:                      receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+				CredentialConfigurationID: "other",
+				CredentialIdentifiers:     []string{"id-other"},
+			},
+			{
+				Type:                      receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+				CredentialConfigurationID: "pid",
+				CredentialIdentifiers:     []string{"id-1"},
+			},
+		},
+	}
+	identifier, err := CredentialIdentifierForConfiguration(accessToken, "pid", AuthorizationDetailsRequired)
+	require.NoError(t, err)
+	require.NotNil(t, identifier)
+	require.Equal(t, "id-1", *identifier)
+}
+
+// A scope request makes the member OPTIONAL (§6.2), so its absence is accepted
+// and the Credential Request names the configuration. A foreign entry is still
+// not a usable substitute because §6.2 scopes credential_identifiers to their
+// own entry.
+func TestCredentialIdentifierForConfigurationOptionalMode(t *testing.T) {
+	t.Run("missing authorization_details is accepted", func(t *testing.T) {
+		identifier, err := CredentialIdentifierForConfiguration(&receiverTypes.CredentialIssuanceAccessToken{Token: "access-1"}, "pid", AuthorizationDetailsOptional)
+		require.NoError(t, err)
+		require.Nil(t, identifier)
+	})
+
+	t.Run("matching entry is used", func(t *testing.T) {
+		accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+			Token: "access-1",
+			AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{{
+				Type:                      receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+				CredentialConfigurationID: "pid",
+				CredentialIdentifiers:     []string{"id-1"},
+			}},
+		}
+		identifier, err := CredentialIdentifierForConfiguration(accessToken, "pid", AuthorizationDetailsOptional)
+		require.NoError(t, err)
+		require.NotNil(t, identifier)
+		require.Equal(t, "id-1", *identifier)
+	})
+
+	t.Run("foreign entry is rejected", func(t *testing.T) {
+		accessToken := &receiverTypes.CredentialIssuanceAccessToken{
+			Token: "access-1",
+			AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{{
+				Type:                      receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+				CredentialConfigurationID: "other",
+				CredentialIdentifiers:     []string{"id-other"},
+			}},
+		}
+		_, err := CredentialIdentifierForConfiguration(accessToken, "pid", AuthorizationDetailsOptional)
+		require.ErrorContains(t, err, `authorization_details contains no entry for credential_configuration_id "pid"`)
+	})
+}
+
+// The mode is wired into the flow: an authorization_details request whose Token
+// Response omits authorization_details stops before the Credential Endpoint.
+func TestReceiveOID4VCIFinalCredential_AuthorizationDetailsModeViolationStops(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorIs(t, err, ErrAuthorizationDetailsMissing)
+	require.Equal(t, 0, fixture.credentialCalls)
 }

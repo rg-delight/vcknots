@@ -107,6 +107,43 @@ func (o *Oid4vciReceiver) dpopNonceFor(endpointURL url.URL) string {
 	return o.dpopNonces[dpopNonceServerKey(endpointURL)]
 }
 
+// ExportDPoPNonces returns a snapshot of the RFC 9449 §8.2 per-server DPoP
+// nonce store, keyed by dpopNonceServerKey. A copy is returned so a caller can
+// carry the protocol state across an interruption (for example into an
+// OID4VCIFinalTokenGrant.DPoPNonces and back out of it) without holding or
+// mutating the receiver's map. An empty store exports an empty, non-nil map.
+func (o *Oid4vciReceiver) ExportDPoPNonces() map[string]string {
+	o.dpopNonceMu.Lock()
+	defer o.dpopNonceMu.Unlock()
+	exported := make(map[string]string, len(o.dpopNonces))
+	for server, nonce := range o.dpopNonces {
+		exported[server] = nonce
+	}
+	return exported
+}
+
+// ImportDPoPNonces restores the per-server nonces ExportDPoPNonces produced.
+// Each value is remembered for its server, so the first DPoP proof built after
+// a resume already carries the nonce that server last issued instead of paying
+// the wasted challenge round trip RFC 9449 §8.2 exists to avoid. Blank values
+// are ignored, matching rememberDPoPNonce.
+func (o *Oid4vciReceiver) ImportDPoPNonces(nonces map[string]string) {
+	if len(nonces) == 0 {
+		return
+	}
+	o.dpopNonceMu.Lock()
+	defer o.dpopNonceMu.Unlock()
+	if o.dpopNonces == nil {
+		o.dpopNonces = make(map[string]string, len(nonces))
+	}
+	for server, nonce := range nonces {
+		if strings.TrimSpace(nonce) == "" {
+			continue
+		}
+		o.dpopNonces[server] = nonce
+	}
+}
+
 var (
 	_ types.OID4VCIFinalTransport = (*Oid4vciReceiver)(nil)
 	_ types.OID4VCIFinalSigner    = (*Oid4vciReceiver)(nil)
@@ -157,6 +194,28 @@ func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
 	return nil
 }
 
+// RequireBearerTokenType enforces the Final 1.0 default for the anonymous
+// Pre-Authorized Code path: the token response must carry a plain Bearer access
+// token. OpenID4VCI 1.0 §6.1 makes token_type REQUIRED ("The type of the access
+// token"), and RFC 6749 §7.1 defines it as case insensitive, so "Bearer",
+// "bearer" and "BEARER" are the same value. A DPoP-bound token (RFC 9449 §7.1)
+// is refused with ErrDPoPRequired because an anonymous client holds no key to
+// build the proof that scheme requires; any other value is an unsupported
+// token_type rather than a silent fallback to Bearer.
+func RequireBearerTokenType(t *types.CredentialIssuanceAccessToken) error {
+	if t == nil {
+		return fmt.Errorf("token response is required")
+	}
+	switch {
+	case strings.EqualFold(strings.TrimSpace(t.TokenType), "Bearer"):
+		return nil
+	case strings.EqualFold(strings.TrimSpace(t.TokenType), dpopAuthorizationScheme):
+		return fmt.Errorf("%w: token endpoint issued a DPoP-bound access token, which the anonymous Pre-Authorized Code path cannot present", ErrDPoPRequired)
+	default:
+		return fmt.Errorf("token response returned unsupported token_type %q (Bearer required)", t.TokenType)
+	}
+}
+
 type DPoPProofFactory = types.DPoPProofFactory
 
 type OAuthClientAttestationHeadersFactory = types.OAuthClientAttestationHeadersFactory
@@ -195,6 +254,15 @@ var oid4vciHTTPClient = &http.Client{Timeout: 15 * time.Second, CheckRedirect: r
 // Issuer's identity for another. The root wallet package cannot be imported from
 // a plugin, so it declares its own alias of this sentinel.
 var ErrHTTPRedirectNotAllowed = errors.New("OID4VCI endpoint redirected; redirects are not followed")
+
+// ErrDPoPRequired reports that a Credential, Deferred Credential or Notification
+// response demanded a DPoP proof (an RFC 9449 §8 DPoP-Nonce header, or a
+// WWW-Authenticate challenge naming the DPoP scheme of §7.1) while the access
+// token was presented with a scheme that has no key-bound proof to offer. It is
+// the fail-closed answer for a client that holds no DPoP key: continuing would
+// either replay the request without the proof the resource server asked for or
+// invent one the wallet cannot sign.
+var ErrDPoPRequired = errors.New("credential endpoint requires DPoP")
 
 // ErrProofAlgorithmNotSupported reports that the holder key cannot produce any
 // of the algorithms the Credential Issuer lists in
@@ -1039,6 +1107,13 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
 	}
+	// OpenID4VCI 1.0 §7.2: "c_nonce: REQUIRED. String containing a challenge to
+	// be used when creating a proof of possession of the key." A 2xx Nonce
+	// Response that omits it, or returns it empty, hands the wallet no nonce to
+	// put in the proof, so it fails closed instead of proceeding without one.
+	if strings.TrimSpace(response.CNonce) == "" {
+		return nil, fmt.Errorf("nonce response does not contain a c_nonce: %w", types.ErrNonceResponseInvalid)
+	}
 	response.DPoPNonce = strings.TrimSpace(responseHeader.Get("DPoP-Nonce"))
 	return &response, nil
 }
@@ -1542,13 +1617,29 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(ctx context.Context, endp
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return respBody, resp.Header.Get("Content-Type"), nil
 		}
+		responseContentType := resp.Header.Get("Content-Type")
 		nonce := resp.Header.Get("DPoP-Nonce")
+		// OpenID4VCI 1.0 §8.3.1.2: an "invalid_nonce" error means the proof
+		// carried a stale c_nonce, and the wallet has to refresh it from the
+		// Nonce Endpoint. It takes priority over the RFC 9449 §8 DPoP challenge
+		// below: an issuer may set a DPoP-Nonce header on the same response, and
+		// treating that as the challenge would spend the one retry on a DPoP
+		// proof instead of the c_nonce the error actually named.
+		if isCredentialNonceError(responseContentType, respBody) {
+			return nil, "", newCredentialEndpointError(resp.StatusCode, responseContentType, respBody, nonce)
+		}
+		// A response may also demand a DPoP proof the wallet cannot build when
+		// the access token is not DPoP-bound. Failing closed here reports the
+		// real reason instead of repeating a request that carried no proof.
+		if scheme != dpopAuthorizationScheme && dpopChallengeRequested(nonce, resp.Header.Get("WWW-Authenticate")) {
+			return nil, "", ErrDPoPRequired
+		}
 		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) && nonce != "" {
 			dpopNonce = nonce
-			lastStatus, lastContentType, lastBody, lastNonce = resp.StatusCode, resp.Header.Get("Content-Type"), respBody, nonce
+			lastStatus, lastContentType, lastBody, lastNonce = resp.StatusCode, responseContentType, respBody, nonce
 			continue
 		}
-		return nil, "", newCredentialEndpointError(resp.StatusCode, resp.Header.Get("Content-Type"), respBody, nonce)
+		return nil, "", newCredentialEndpointError(resp.StatusCode, responseContentType, respBody, nonce)
 	}
 
 	if lastStatus != 0 {
@@ -2065,6 +2156,31 @@ func authorizationScheme(tokenType string) string {
 		return dpopAuthorizationScheme
 	}
 	return "Bearer"
+}
+
+// isCredentialNonceError reports whether a non-2xx Credential Endpoint response
+// is the OpenID4VCI 1.0 §8.3.1.2 "invalid_nonce" Credential Error Response. The
+// error is read from the body, so a response that also carries a DPoP-Nonce
+// header is still recognised as the c_nonce failure it names. A body that is not
+// JSON cannot be a §8.3.1.2 error object.
+func isCredentialNonceError(contentType string, body []byte) bool {
+	if !strings.Contains(strings.ToLower(contentType), "json") {
+		return false
+	}
+	return tokenErrorCode(body) == types.ErrInvalidNonce.Error()
+}
+
+// dpopChallengeRequested reports whether a response asks the client for a DPoP
+// proof: RFC 9449 §8 provides a DPoP-Nonce response header, and §7.1 names the
+// DPoP scheme in a WWW-Authenticate challenge. Either signal means the request
+// has to carry a proof bound to a key the client holds.
+func dpopChallengeRequested(dpopNonce, wwwAuthenticate string) bool {
+	if strings.TrimSpace(dpopNonce) != "" {
+		return true
+	}
+	scheme, _, _ := strings.Cut(strings.TrimSpace(wwwAuthenticate), " ")
+	scheme, _, _ = strings.Cut(scheme, ",")
+	return strings.EqualFold(scheme, dpopAuthorizationScheme)
 }
 
 func tokenErrorCode(bodyBytes []byte) string {

@@ -23,6 +23,7 @@ var (
 	ErrAuthorizationFailed       = errors.New("authorization failed")
 	ErrTokenRequestFailed        = errors.New("token request failed")
 	ErrInvalidTokenResponse      = errors.New("invalid token response")
+	ErrNonceResponseInvalid      = errors.New("invalid nonce response")
 	ErrProofGenerationFailed     = errors.New("proof generation failed")
 	ErrUseDPoPNonce              = errors.New("use DPoP nonce")
 	ErrInvalidProofType          = errors.New("invalid or unsupported proof type")

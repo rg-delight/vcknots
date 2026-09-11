@@ -827,3 +827,275 @@ func parseCompactJWEHeader(t *testing.T, compact string) jose.Header {
 	}
 	return jwe.Header
 }
+
+// ---------------------------------------------------------------------------
+// P2-C: token_type / DPoP rules.
+// ---------------------------------------------------------------------------
+
+// RequireBearerTokenType validates the Final 1.0 anonymous Pre-Authorized Code
+// token response. token_type is REQUIRED (OpenID4VCI 1.0 §6.1) and case
+// insensitive (RFC 6749 §7.1), so a Bearer spelling is accepted whatever its
+// case and an unknown value is refused.
+func TestRequireBearerTokenType(t *testing.T) {
+	t.Run("bearer is case insensitive", func(t *testing.T) {
+		for _, tokenType := range []string{"Bearer", "bearer", "BEARER", " Bearer "} {
+			if err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: tokenType}); err != nil {
+				t.Fatalf("RequireBearerTokenType(%q) error = %v", tokenType, err)
+			}
+		}
+	})
+
+	t.Run("dpop is refused with ErrDPoPRequired", func(t *testing.T) {
+		for _, tokenType := range []string{"DPoP", "dpop"} {
+			err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: tokenType})
+			if !errors.Is(err, ErrDPoPRequired) {
+				t.Fatalf("RequireBearerTokenType(%q) error = %v, want ErrDPoPRequired", tokenType, err)
+			}
+		}
+	})
+
+	t.Run("unknown token_type is refused", func(t *testing.T) {
+		err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "MAC"})
+		if err == nil {
+			t.Fatal("RequireBearerTokenType(MAC) = nil, want an error")
+		}
+		if errors.Is(err, ErrDPoPRequired) {
+			t.Fatalf("RequireBearerTokenType(MAC) = ErrDPoPRequired, want an unsupported token_type error")
+		}
+	})
+
+	t.Run("nil token response is refused", func(t *testing.T) {
+		if err := RequireBearerTokenType(nil); err == nil {
+			t.Fatal("RequireBearerTokenType(nil) = nil, want an error")
+		}
+	})
+}
+
+// A bearer token cannot answer an RFC 9449 §8 DPoP challenge: it has no key to
+// sign the proof the challenge asks for. The transport fails closed with
+// ErrDPoPRequired after exactly one request, whether the challenge arrives as a
+// DPoP-Nonce header or a WWW-Authenticate scheme.
+func TestBearerTokenDPoPChallengeFailsClosed(t *testing.T) {
+	challenges := map[string]http.HandlerFunc{
+		"DPoP-Nonce header": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("DPoP-Nonce", "server-dpop-nonce")
+			_ = mockserver.JSONResponse(w, http.StatusUnauthorized, map[string]string{"error": "use_dpop_nonce"})
+		},
+		"WWW-Authenticate challenge": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("WWW-Authenticate", `DPoP error="invalid_token"`)
+			_ = mockserver.JSONResponse(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+		},
+	}
+	for name, challenge := range challenges {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				challenge(w, r)
+			}))
+			defer server.Close()
+
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
+				t.Context(),
+				mustURIField(t, server.URL+"/credential"),
+				types.CredentialIssuanceAccessToken{Token: "bearer-access-1", TokenType: "Bearer"},
+				nil,
+				"initial-nonce",
+				func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
+				noopProofFactory,
+			)
+			if !errors.Is(err, ErrDPoPRequired) {
+				t.Fatalf("error = %v, want ErrDPoPRequired", err)
+			}
+			if calls != 1 {
+				t.Fatalf("credential requests = %d, want 1: a bearer token cannot answer a DPoP challenge", calls)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P2-D: invalid_nonce priority and DPoP nonce state across an interruption.
+// ---------------------------------------------------------------------------
+
+// OpenID4VCI 1.0 §8.3.1.2: an "invalid_nonce" answer means the proof carried a
+// stale c_nonce, so the wallet refreshes it from the Nonce Endpoint. That must
+// win over an RFC 9449 §8 DPoP-Nonce header on the same response, or the one
+// retry would be spent re-signing a DPoP proof and the c_nonce retry would never
+// run.
+func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
+	credentialCalls := 0
+	nonceCalls := 0
+	buildNonces := []string{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nonce":
+			nonceCalls++
+			_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "fresh-nonce"})
+		case "/credential":
+			credentialCalls++
+			if credentialCalls == 1 {
+				w.Header().Set("DPoP-Nonce", "server-dpop-nonce")
+				_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
+				return
+			}
+			_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"credential": "credential-jwt"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
+	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetry(
+		mustURIField(t, server.URL+"/credential"),
+		"access-1",
+		&nonceEndpoint,
+		"initial-nonce",
+		func(cNonce string) ([]byte, string, error) {
+			buildNonces = append(buildNonces, cNonce)
+			return []byte("{}"), "application/json", nil
+		},
+		noopProofFactory,
+	)
+	if err != nil {
+		t.Fatalf("PostCredentialEndpointWithNonceRetry() error = %v", err)
+	}
+	if usedNonce != "fresh-nonce" {
+		t.Fatalf("usedNonce = %q, want fresh-nonce", usedNonce)
+	}
+	if nonceCalls != 1 {
+		t.Fatalf("nonce endpoint calls = %d, want 1", nonceCalls)
+	}
+	if credentialCalls != 2 {
+		t.Fatalf("credential endpoint calls = %d, want 2", credentialCalls)
+	}
+	if len(buildNonces) != 2 || buildNonces[0] != "initial-nonce" || buildNonces[1] != "fresh-nonce" {
+		t.Fatalf("build nonces = %#v", buildNonces)
+	}
+}
+
+// A second invalid_nonce stops with the typed §8.3.1.2 sentinel even when every
+// response also carries a DPoP-Nonce header.
+func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing.T) {
+	credentialCalls := 0
+	nonceCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nonce":
+			nonceCalls++
+			_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "fresh-nonce"})
+		case "/credential":
+			credentialCalls++
+			w.Header().Set("DPoP-Nonce", "server-dpop-nonce")
+			_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
+	_, _, err := receiver.PostCredentialEndpointWithNonceRetry(
+		mustURIField(t, server.URL+"/credential"),
+		"access-1",
+		&nonceEndpoint,
+		"initial-nonce",
+		func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
+		noopProofFactory,
+	)
+	if !errors.Is(err, types.ErrInvalidNonce) {
+		t.Fatalf("error = %v, want ErrInvalidNonce", err)
+	}
+	if credentialCalls != 2 {
+		t.Fatalf("credential endpoint calls = %d, want 2 (no third attempt)", credentialCalls)
+	}
+	if nonceCalls != 1 {
+		t.Fatalf("nonce endpoint calls = %d, want 1", nonceCalls)
+	}
+}
+
+// ExportDPoPNonces must hand out a copy: a caller carrying the nonces across an
+// interruption cannot mutate the receiver's own store.
+func TestExportDPoPNoncesReturnsCopy(t *testing.T) {
+	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	if _, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce")); err != nil {
+		t.Fatalf("FetchNonceResponse() error = %v", err)
+	}
+
+	exported := receiver.ExportDPoPNonces()
+	if len(exported) == 0 {
+		t.Fatal("ExportDPoPNonces() returned no server entries")
+	}
+	for key := range exported {
+		exported[key] = "tampered"
+	}
+	for key, nonce := range receiver.ExportDPoPNonces() {
+		if nonce == "tampered" {
+			t.Fatalf("mutating the exported map changed the receiver store (key %q)", key)
+		}
+	}
+}
+
+// Export then Import carries the RFC 9449 §8.2 nonce store across the process
+// interruption the receiver's in-memory map cannot survive, so the first proof
+// after the resume is already seeded instead of paying a wasted challenge round
+// trip.
+func TestExportImportDPoPNoncesSeedsRetryAfterInterruption(t *testing.T) {
+	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
+	exporter := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	key := newDPoPNonceTestKey(t)
+
+	if _, err := exporter.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce")); err != nil {
+		t.Fatalf("FetchNonceResponse() error = %v", err)
+	}
+	receiver.ImportDPoPNonces(exporter.ExportDPoPNonces())
+
+	postOneCredentialRequest(t, receiver, key, fixture.server.URL+"/credential")
+
+	proofs := fixture.proofs()
+	if len(proofs) != 1 {
+		t.Fatalf("credential requests = %d, want exactly one", len(proofs))
+	}
+	claims := dpopProofClaims(t, proofs[0])
+	if claims["nonce"] != "server-dpop-nonce-1" {
+		t.Fatalf("first proof after import nonce = %#v, want server-dpop-nonce-1", claims["nonce"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P2-E G5: the Nonce Response c_nonce is REQUIRED.
+// ---------------------------------------------------------------------------
+
+// OpenID4VCI 1.0 §7.2: "c_nonce: REQUIRED. String containing a challenge to be
+// used when creating a proof of possession of the key." A 2xx Nonce Response
+// that omits it, or returns it empty, fails closed as ErrNonceResponseInvalid.
+func TestFetchNonceResponseRejectsEmptyCNonce(t *testing.T) {
+	bodies := map[string]map[string]any{
+		"empty c_nonce":   {"c_nonce": ""},
+		"missing c_nonce": {},
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = mockserver.JSONResponse(w, http.StatusOK, body)
+			}))
+			defer server.Close()
+
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			response, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, server.URL+"/nonce"))
+			if !errors.Is(err, types.ErrNonceResponseInvalid) {
+				t.Fatalf("error = %v, want ErrNonceResponseInvalid", err)
+			}
+			if response != nil {
+				t.Fatalf("response = %#v, want nil", response)
+			}
+		})
+	}
+}

@@ -251,10 +251,15 @@ type oid4vciFinalFlow struct {
 	authorizationServerIssuer   string
 	credentialConfigurationID   string
 	credentialConfiguration     receiverTypes.CredentialConfiguration
-	holderKeys                  []jose.JSONWebKey
-	keyAttestation              *oid4vciKeyAttestationPlan
-	usePrivateKeyJwt            bool
-	generateClientAssertion     func() (string, error)
+	// authorizationDetailsMode is how the authorization request asked for the
+	// configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2), derived by
+	// newOID4VCIFinalFlow from oid4vciAuthorizationRequestParameters so the
+	// Token Response can be judged against the request that produced it.
+	authorizationDetailsMode AuthorizationDetailsMode
+	holderKeys               []jose.JSONWebKey
+	keyAttestation           *oid4vciKeyAttestationPlan
+	usePrivateKeyJwt         bool
+	generateClientAssertion  func() (string, error)
 }
 
 // issuerPolicy is the RFC 9207 expectation the authorization response must meet.
@@ -657,6 +662,20 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		usePrivateKeyJwt = true
 	}
 
+	// §5.1.1/§5.1.2: record whether the request used authorization_details, so
+	// the Token Response is judged against the §6.2 mode that matches the
+	// request that produced it. The mode is derived here, from the same
+	// oid4vciAuthorizationRequestParameters decision the PAR uses, rather than
+	// being stored on the serialisable authorization sidecar.
+	_, authorizationDetails, err := oid4vciAuthorizationRequestParameters(req.AuthorizationRequestType, credentialConfigurationID, config, w.profile.IsHAIP())
+	if err != nil {
+		return nil, err
+	}
+	authorizationDetailsMode := AuthorizationDetailsOptional
+	if len(authorizationDetails) > 0 {
+		authorizationDetailsMode = AuthorizationDetailsRequired
+	}
+
 	return &oid4vciFinalFlow{
 		receiver:                    finalReceiver,
 		signer:                      w.oid4vciFinalSigner(finalReceiver),
@@ -665,6 +684,7 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		authorizationServerIssuer:   authorizationServerIssuer,
 		credentialConfigurationID:   credentialConfigurationID,
 		credentialConfiguration:     config,
+		authorizationDetailsMode:    authorizationDetailsMode,
 		holderKeys:                  holderKeys,
 		keyAttestation:              keyAttestation,
 		usePrivateKeyJwt:            usePrivateKeyJwt,
@@ -758,7 +778,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 		return nil, fmt.Errorf("credential response encryption: %w", err)
 	}
 
-	credentialIdentifier, err := credentialIdentifierForConfiguration(token, flow.credentialConfigurationID)
+	credentialIdentifier, err := CredentialIdentifierForConfiguration(token, flow.credentialConfigurationID, flow.authorizationDetailsMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1248,11 +1268,13 @@ func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clien
 }
 
 func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
-	var decryptionKey any
-	if key != nil {
-		decryptionKey = key.Key
-	}
-	response, err := receiver.DecodeCredentialResponse(raw.Body, raw.ContentType, decryptionKey)
+	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
+		DecryptionKey: key,
+		// The high-level wallet path still accepts the pre-Final shape and
+		// §14.6 batch issuance; the exported validator is the strict single
+		// credential contract for the sidecar wire (ADR-0032 / ADR-0062).
+		allowLegacyCredentialShape: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential response: %w", err)
 	}
@@ -1311,17 +1333,51 @@ func oid4vciAuthorizationRequestParameters(requestedType, credentialConfiguratio
 	}
 }
 
-// credentialIdentifierForConfiguration selects the credential_identifier to put
+// AuthorizationDetailsMode records how the authorization request asked for the
+// Credential Configuration. It is what lets the Token Response be judged against
+// the request that produced it: OpenID4VCI 1.0 §6.2 makes
+// `authorization_details` in the Token Response "REQUIRED when the
+// `authorization_details` parameter ... is used in either the Authorization
+// Request or Token Request. OPTIONAL when `scope` parameter was used".
+type AuthorizationDetailsMode int
+
+const (
+	// AuthorizationDetailsOptional accepts a Token Response that carries no
+	// usable openid_credential authorization_details, because the request used
+	// scope and §6.2 makes the member OPTIONAL there.
+	AuthorizationDetailsOptional AuthorizationDetailsMode = iota
+	// AuthorizationDetailsRequired demands a usable openid_credential entry,
+	// because the request used authorization_details and §6.2 makes the member
+	// REQUIRED there.
+	AuthorizationDetailsRequired
+)
+
+// ErrAuthorizationDetailsMissing reports a Token Response that carries no
+// usable openid_credential authorization_details for the requested Credential
+// Configuration even though the authorization request used authorization_details.
+// OpenID4VCI 1.0 §6.2 makes the member REQUIRED in that case, and §8.1 makes
+// `credential_configuration_id` unusable once a `credential_identifiers` array
+// was returned, so a request that falls back to the configuration id would be
+// rejected by the issuer anyway.
+var ErrAuthorizationDetailsMissing = errors.New("token response carries no usable authorization_details")
+
+// CredentialIdentifierForConfiguration selects the credential_identifier to put
 // in the Credential Request. OpenID4VCI 1.0 §6.2 binds each
 // authorization_details entry of the token response to its own
 // credential_configuration_id and lists that entry's credential_identifiers
 // under it, so an identifier is only usable for the configuration whose entry
 // carried it. A token response with no openid_credential entry yields no
-// identifier, and the request names the configuration instead (§8.1); a token
-// response that has entries but none for the requested configuration is an
-// error rather than a guess.
-func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, credentialConfigurationID string) (*string, error) {
+// identifier and the request names the configuration instead (§8.1) when the
+// mode is AuthorizationDetailsOptional; under AuthorizationDetailsRequired that
+// absence, a foreign configuration, an empty credential_identifiers array or
+// more than one identifier is ErrAuthorizationDetailsMissing. It is exported so
+// integrators migrating the sidecar can apply the library's single
+// implementation of the §6.2 mapping instead of copying it.
+func CredentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, credentialConfigurationID string, mode AuthorizationDetailsMode) (*string, error) {
 	if accessToken == nil {
+		if mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("token response is missing an access token with authorization_details for %q: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+		}
 		return nil, nil
 	}
 	entries := 0
@@ -1333,20 +1389,44 @@ func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialI
 		if detail.CredentialConfigurationID != credentialConfigurationID {
 			continue
 		}
-		for _, identifier := range detail.CredentialIdentifiers {
-			if identifier != "" {
-				selected := identifier
-				return &selected, nil
+		identifiers := nonEmptyCredentialIdentifiers(detail.CredentialIdentifiers)
+		if len(identifiers) == 0 {
+			if mode == AuthorizationDetailsRequired {
+				return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries no credential_identifiers: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
 			}
+			// The entry matched but carries no identifier: the Credential
+			// Request names the configuration, as it does without
+			// authorization_details.
+			return nil, nil
 		}
-		// The entry matched but carries no identifier: the Credential Request
-		// names the configuration, as it does without authorization_details.
-		return nil, nil
+		if len(identifiers) > 1 && mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries %d credential_identifiers, but this wallet requests exactly one credential: %w", credentialConfigurationID, len(identifiers), ErrAuthorizationDetailsMissing)
+		}
+		selected := identifiers[0]
+		return &selected, nil
 	}
 	if entries == 0 {
+		if mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("token response for credential_configuration_id %q carries no authorization_details: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+		}
 		return nil, nil
 	}
+	if mode == AuthorizationDetailsRequired {
+		return nil, fmt.Errorf("token response authorization_details carries no entry for credential_configuration_id %q: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+	}
 	return nil, fmt.Errorf("access token authorization_details contains no entry for credential_configuration_id %q", credentialConfigurationID)
+}
+
+// nonEmptyCredentialIdentifiers drops the blank strings a malformed entry may
+// contain, so only a real identifier is ever selected.
+func nonEmptyCredentialIdentifiers(identifiers []string) []string {
+	usable := identifiers[:0:0]
+	for _, identifier := range identifiers {
+		if strings.TrimSpace(identifier) != "" {
+			usable = append(usable, identifier)
+		}
+	}
+	return usable
 }
 
 func resolveOID4VCIFinalHolderKeys(req OID4VCIFinalReceiveRequest) ([]jose.JSONWebKey, error) {
