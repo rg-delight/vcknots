@@ -1344,7 +1344,7 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 						"vct_values": []string{"urn:eudi:pid:1"},
 					},
 					"claims": []map[string]any{
-						{"path": []string{"given_name"}},
+						{"path": []string{"account_number"}, "values": []any{int64(9007199254740993)}},
 					},
 				},
 			},
@@ -1369,6 +1369,10 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 	}
 	if req.DcqlQuery == nil || req.DcqlQuery.Credentials[0].ID != "pid" {
 		t.Fatalf("expected DCQL query to be parsed, got %#v", req.DcqlQuery)
+	}
+
+	if value := req.DcqlQuery.Credentials[0].Claims[0].Values[0]; value != json.Number("9007199254740993") {
+		t.Fatalf("signed Request Object rounded a DCQL integer: %#v", value)
 	}
 
 	builder = NewRequestBuilder()

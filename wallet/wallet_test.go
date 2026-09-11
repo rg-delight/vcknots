@@ -1165,28 +1165,28 @@ func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
 func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
 	t.Helper()
 	disclosures := make([]string, 0, len(claims))
+	hashes := make([]string, 0, len(claims))
 	for name, value := range claims {
 		disclosureBytes, err := json.Marshal([]any{"salt-" + name, name, value})
 		require.NoError(t, err)
-		disclosures = append(disclosures, base64.RawURLEncoding.EncodeToString(disclosureBytes))
+		encoded := base64.RawURLEncoding.EncodeToString(disclosureBytes)
+		disclosures = append(disclosures, encoded)
+		hash := sha256.Sum256([]byte(encoded))
+		hashes = append(hashes, base64.RawURLEncoding.EncodeToString(hash[:]))
 	}
-
-	holderPublicJWK := holderPublicKey.Public()
 	payload := map[string]any{
-		"iss":     "https://issuer.example.test",
-		"vct":     "urn:eudi:pid:1",
-		"cnf":     map[string]any{"jwk": holderPublicJWK},
-		"iat":     float64(time.Now().Unix()),
-		"_sd":     []string{},
-		"_sd_alg": "sha-256",
+		"iss": "https://issuer.example.test", "vct": "urn:eudi:pid:1",
+		"cnf": map[string]any{"jwk": holderPublicKey.Public()},
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+		"_sd": hashes, "_sd_alg": "sha-256",
 	}
-	headerBytes, err := json.Marshal(map[string]any{"alg": "ES256", "typ": "dc+sd-jwt"})
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	payloadBytes, err := json.Marshal(payload)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
 	require.NoError(t, err)
-	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
-	sdJWT := base64.RawURLEncoding.EncodeToString(headerBytes) + "." + base64.RawURLEncoding.EncodeToString(payloadBytes) + "." + signature
-	return sdJWT + "~" + strings.Join(disclosures, "~") + "~"
+	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
+	require.NoError(t, err)
+	return strings.Join(append([]string{signed}, disclosures...), "~") + "~"
 }
 
 func TestController_PresentCredential_MissingRequiredFields_Integration(t *testing.T) {

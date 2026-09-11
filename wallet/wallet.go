@@ -51,7 +51,6 @@ import (
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
-	sdjwtvc "github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -1920,40 +1919,15 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 		return "", err
 	}
 
-	credentials, flavor, err := w.selectCredentialsForPresentation(req)
+	vpToken, err := w.buildDCQLVPToken(req, key, serializeOptions)
 	if err != nil {
 		return "", err
 	}
-
-	if sdOpts, ok := serializeOptions.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
-		if sdOpts == nil {
-			serializeOptions = nil
-		} else {
-			// Request requirements must not change an options object reused by a caller.
-			copy := *sdOpts
-			serializeOptions = &copy
-		}
+	presentationRequest := &presenterTypes.PresentationRequest{
+		State:          req.State,
+		ClientMetadata: req.ClientMetadata,
 	}
-	if serializeOptions == nil {
-		serializeOptions, err = w.serializer.GetDefaultOption(*flavor)
-		if err != nil {
-			return "", err
-		}
-	}
-	applyOID4VPRequestOptions(req, serializeOptions)
-	if sdOpts, ok := serializeOptions.(*sdjwtvc.SdJwtVcPresentationOptions); ok && sdOpts != nil && req.DcqlQuery != nil && len(req.DcqlQuery.Credentials) > 0 {
-		// This API currently answers the first Credential Query (see submitPresentation).
-		// Caller options cannot weaken its holder-binding requirement. An explicit
-		// false permits, but does not require, omitting the KB-JWT (OID4VP B.3).
-		sdOpts.RequireKeyBinding = sdOpts.RequireKeyBinding || req.DcqlQuery.Credentials[0].RequiresHolderBinding()
-	}
-
-	presentation, err := w.buildPresentation(credentials, key, req)
-	if err != nil {
-		return "", err
-	}
-
-	redirectURI, err := w.submitPresentation(presentation, flavor, endpoint, req, key, serializeOptions)
+	redirectURI, err := w.presenter.PresentDCQL(presenterTypes.Oid4vp, *endpoint, vpToken, presentationRequest)
 	if err != nil {
 		return "", err
 	}
@@ -2019,48 +1993,9 @@ func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPre
 		return nil, err
 	}
 
-	credentials, selections, err := w.selectCredentialsForDCQL(req.DcqlQuery)
+	vpToken, err := w.buildDCQLVPToken(req, key, nil)
 	if err != nil {
 		return nil, err
-	}
-
-	vpToken := map[string][]string{}
-	for _, selection := range selections {
-		savedCredential := credentials[selection.CandidateID]
-		flavor, err := savedCredential.Entry.SerializationFlavor()
-		if err != nil {
-			return nil, fmt.Errorf("failed to detect selected credential format: %w", err)
-		}
-		options, err := w.serializer.GetDefaultOption(flavor)
-		if err != nil {
-			return nil, err
-		}
-		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
-			sdOpts.SelectedClaims = selection.RequestedClaims
-			sdOpts.LimitDisclosureToSelectedClaims = true
-			for _, query := range req.DcqlQuery.Credentials {
-				if query.ID == selection.QueryID {
-					sdOpts.RequireKeyBinding = query.RequiresHolderBinding()
-					break
-				}
-			}
-			sdOpts.Audience = req.ClientID
-			sdOpts.Nonce = req.Nonce
-			sdOpts.TransactionData = req.TransactionData
-			if req.TransactionDataHashesAlg != "" {
-				sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
-			}
-		}
-
-		presentation, err := w.buildPresentation([]*SavedCredential{savedCredential}, key, req)
-		if err != nil {
-			return nil, err
-		}
-		serialized, _, err := w.serializer.SerializePresentation(flavor, presentation, key, options)
-		if err != nil {
-			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", selection.CandidateID, err)
-		}
-		vpToken[selection.QueryID] = append(vpToken[selection.QueryID], string(serialized))
 	}
 
 	response := OID4VPFinalAuthorizationResponse{
@@ -2149,14 +2084,16 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 		if err != nil {
 			continue
 		}
-		_, vpFormat, err := flavor.OID4VPFormatIdentifier()
+		vcFormat, _, err := flavor.OID4VPFormatIdentifier()
 		if err != nil {
 			continue
 		}
 		claimNames := []string{}
+		claimValues := map[string]any{}
 		if entry.Credential.Claims != nil {
-			for name := range *entry.Credential.Claims {
+			for name, value := range *entry.Credential.Claims {
 				claimNames = append(claimNames, name)
+				claimValues[name] = value
 			}
 		}
 		vct := ""
@@ -2165,10 +2102,11 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 		}
 		credentialsByID[entry.Entry.Id] = entry
 		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
-			ID:     entry.Entry.Id,
-			Format: vpFormat,
-			VCT:    vct,
-			Claims: claimNames,
+			ID:          entry.Entry.Id,
+			Format:      vcFormat,
+			VCT:         vct,
+			Claims:      claimNames,
+			ClaimValues: claimValues,
 		})
 	}
 
@@ -2265,49 +2203,4 @@ func applyOID4VPRequestOptions(req *oid4vp.CredentialPresentationRequest, option
 	}
 	options.SetAudience(req.ClientID)
 	options.SetNonce(req.Nonce)
-}
-
-// submitPresentation serializes and submits the presentation to the verifier.
-func (w *Wallet) submitPresentation(presentation *credential.CredentialPresentation, flavor *credential.SupportedSerializationFlavor, endpoint *url.URL, req *oid4vp.CredentialPresentationRequest, key IKeyEntry, options serializerTypes.SerializePresentationOptions) (string, error) {
-	if len(req.TransactionData) > 0 {
-		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok && sdOpts != nil {
-			transactionDataHashesAlg := req.TransactionDataHashesAlg
-			if transactionDataHashesAlg == "" {
-				// OID4VP transaction_data_hashes_alg default when omitted.
-				transactionDataHashesAlg = "sha-256"
-			}
-
-			sdOpts.TransactionData = req.TransactionData
-			sdOpts.TransactionDataHashesAlg = transactionDataHashesAlg
-		}
-	}
-
-	bytes, _, err := w.serializer.SerializePresentation(
-		*flavor,
-		presentation,
-		key,
-		options,
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize presentation: %w", err)
-	}
-
-	// The presentation is fixed to answer the first Credential Query for now
-	// (Issue #606); its id becomes the key of the vp_token JSON object.
-	presentationRequest := &presenterTypes.PresentationRequest{
-		State:             req.State,
-		CredentialQueryID: req.DcqlQuery.Credentials[0].ID,
-		ClientMetadata:    req.ClientMetadata,
-	}
-
-	if req.ClientMetadata != nil {
-		presentationRequest.AuthorizationEncryptedRespAlg = req.ClientMetadata.AuthorizationEncryptedResponseAlg
-		presentationRequest.AuthorizationEncryptedRespEnc = req.ClientMetadata.AuthorizationEncryptedResponseEnc
-	}
-
-	redirectURI, err := w.presenter.Present(presenterTypes.Oid4vp, *endpoint, bytes, presentationRequest)
-	if err != nil {
-		return "", err
-	}
-	return redirectURI, nil
 }

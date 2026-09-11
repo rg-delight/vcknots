@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
@@ -192,16 +193,34 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 // defined in OID4VP 1.0 Section 8.1:
 // {"<credential query id>": ["<presentation>"]}
 func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *types.PresentationRequest) (string, error) {
-	if protocol != types.Oid4vp {
-		return "", fmt.Errorf("plugin type mismatch")
-	}
-
 	if request == nil || request.CredentialQueryID == "" {
 		return "", fmt.Errorf("credential query id is required to build vp_token")
 	}
-	vpTokenJSON, err := json.Marshal(map[string][]string{
+	return p.PresentDCQL(protocol, endpoint, map[string][]string{
 		request.CredentialQueryID: {string(serializedPresentation)},
-	})
+	}, request)
+}
+
+// PresentDCQL sends one authorization response containing all selected DCQL
+// queries. The existing Present API remains a single-query convenience wrapper.
+func (p *Oid4vpPresenter) PresentDCQL(protocol types.SupportedPresentationProtocol, endpoint url.URL, vpToken map[string][]string, request *types.PresentationRequest) (string, error) {
+	if protocol != types.Oid4vp {
+		return "", fmt.Errorf("plugin type mismatch")
+	}
+	if request == nil || len(vpToken) == 0 {
+		return "", fmt.Errorf("presentation request and vp_token are required")
+	}
+	for id, tokens := range vpToken {
+		if id == "" || len(tokens) == 0 {
+			return "", fmt.Errorf("vp_token query id and presentations must not be empty")
+		}
+		for _, token := range tokens {
+			if token == "" {
+				return "", fmt.Errorf("vp_token presentation must not be empty")
+			}
+		}
+	}
+	vpTokenJSON, err := json.Marshal(vpToken)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal vp_token: %w", err)
 	}
@@ -813,7 +832,7 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 	}
 
 	// extract claims without verification for initial processing
-	claims := make(map[string]any)
+	claims := make(commonJOSE.Claims)
 	if err := parsedJWT.UnsafeClaimsWithoutVerification(&claims); err != nil {
 		b.errValidation = fmt.Errorf("failed to get JWT claims: %w", err)
 		return b
@@ -1005,7 +1024,7 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 	}
 
 	// extract all verified claims for parameter processing
-	verifiedClaims := make(map[string]any)
+	verifiedClaims := make(commonJOSE.Claims)
 	if err := parsedJWT.Claims(&k, &verifiedClaims); err != nil {
 		b.errValidation = fmt.Errorf("failed to extract verified claims: %w", err)
 		return b

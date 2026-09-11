@@ -349,6 +349,23 @@ cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 ```
 
+### DCQL presentation selection
+
+`PresentCredential` and `BuildOID4VPFinalAuthorizationResponse` match each DCQL
+query by credential format, `vct_values`, and requested claims. All required
+queries must be satisfied before any response is sent. The response maps each
+query ID to its own presentation array; `credential_sets` can express alternatives.
+For SD-JWT VC, omitted `claims` means no selective disclosures. Plaintext claims
+already in the issuer JWT remain present. Explicit `SelectedClaims` is a caller
+limit, so requested claims outside that limit cause an error.
+
+The current claim selector handles top-level string paths. General nested and
+array paths remain unsupported. This does not establish full Final/HAIP
+conformance, issuer authentication before storage, or platform DC API support.
+The existing single-query `Oid4vpPresenter.Present` API remains available;
+`PresentDCQL` adds submission of a complete map of query presentations. Custom
+presenter plugins opt into that additional capability.
+
 ### Wallet Runtime Environment Variables
 
 In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by environment variables defined in `wallet/env/env.go`.

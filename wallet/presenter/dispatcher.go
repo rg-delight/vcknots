@@ -75,6 +75,25 @@ func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol,
 	return redirectURI, nil
 }
 
+// PresentDCQL uses the registered plugin's multiple-query presentation capability.
+func (d *PresentationDispatcher) PresentDCQL(protocol SupportedPresentationProtocol, endpoint url.URL, vpToken map[string][]string, request *PresentationRequest) (string, error) {
+	plugin, err := d.getPlugin(protocol)
+	if err != nil {
+		return "", err
+	}
+	dcql, ok := plugin.(interface {
+		PresentDCQL(types.SupportedPresentationProtocol, url.URL, map[string][]string, *PresentationRequest) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", types.ErrUnsupportedProtocol)
+	}
+	redirectURI, err := dcql.PresentDCQL(protocol, endpoint, vpToken, request)
+	if err != nil {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", err)
+	}
+	return redirectURI, nil
+}
+
 func (d *PresentationDispatcher) SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *oid4vp.VerifierMetadata) (string, error) {
 	plugin, err := d.getPlugin(types.Oid4vp)
 	if err != nil {

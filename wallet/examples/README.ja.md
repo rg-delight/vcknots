@@ -350,6 +350,19 @@ cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 ```
 
+### DCQL の提示対象と開示範囲
+
+`PresentCredential` と `BuildOID4VPFinalAuthorizationResponse` は、credential の形式、`vct_values`、要求 claim を照合します。
+すべての必須 query が成立してから送信し、query ID ごとの提示配列を返します。
+`credential_sets` は代替の組合せを指定できます。
+SD-JWT VC では `claims` を省略すると選択開示はゼロになります。Issuer JWT 内の平文 claim は残ります。
+caller が明示した `SelectedClaims` を上限とし、その範囲外の要求はエラーになります。
+
+現在の claim 選択は最上位の文字列 path に対応します。一般の nested/array path は未対応です。
+この機能は Final/HAIP 全体の適合、保存前の Issuer 認証、platform DC API の実装を示すものではありません。
+既存の単一 query 用 `Oid4vpPresenter.Present` を維持し、`PresentDCQL` で query ごとの提示をまとめて送信できます。
+独自 presenter plugin はこの追加 capability を実装して対応します。
+
 ### Wallet 実行時の環境変数
 
 `VCKNOTS_CERT_PATH` に加えて、wallet の実行時挙動は `wallet/env/env.go` で定義された環境変数で制御されます。
