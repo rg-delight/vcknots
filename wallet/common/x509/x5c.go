@@ -15,6 +15,11 @@ import (
 // decoder is never rejected for its length further along the trust path.
 const maxX5CCertificates = 16
 
+// ErrX5CInvalid classifies every malformed x5c header this package rejects, so
+// a caller can tell a decoding failure from an authentication failure with
+// errors.Is instead of matching error text.
+var ErrX5CInvalid = errors.New("x5c header is invalid")
+
 // DecodeX5CChain decodes a JOSE x5c header value into its certificate chain,
 // leaf first. raw is the value as it appears in a decoded JOSE header: either
 // a []string read into a typed header, or the []any of strings encoding/json
@@ -34,17 +39,17 @@ func DecodeX5CChain(raw any) ([]*x509.Certificate, error) {
 		return nil, err
 	}
 	if len(encoded) == 0 || len(encoded) > maxX5CCertificates {
-		return nil, fmt.Errorf("x5c header must contain between 1 and %d certificates", maxX5CCertificates)
+		return nil, fmt.Errorf("x5c header must contain between 1 and %d certificates: %w", maxX5CCertificates, ErrX5CInvalid)
 	}
 	chain := make([]*x509.Certificate, 0, len(encoded))
 	for index, entry := range encoded {
 		der, err := base64.StdEncoding.DecodeString(entry)
 		if err != nil {
-			return nil, fmt.Errorf("x5c certificate %d is not valid base64 DER: %w", index, err)
+			return nil, fmt.Errorf("x5c certificate %d is not valid base64 DER: %w: %w", index, err, ErrX5CInvalid)
 		}
 		certificate, err := x509.ParseCertificate(der)
 		if err != nil {
-			return nil, fmt.Errorf("x5c certificate %d is not valid base64 DER: %w", index, err)
+			return nil, fmt.Errorf("x5c certificate %d is not valid base64 DER: %w: %w", index, err, ErrX5CInvalid)
 		}
 		chain = append(chain, certificate)
 	}
@@ -59,21 +64,21 @@ func DecodeX5CChain(raw any) ([]*x509.Certificate, error) {
 func DecodeX5CFromJWTHeader(obj string) ([]*x509.Certificate, error) {
 	parts := strings.Split(obj, ".")
 	if len(parts) < 2 {
-		return nil, errors.New("x5c source is not a compact JWS")
+		return nil, fmt.Errorf("x5c source is not a compact JWS: %w", ErrX5CInvalid)
 	}
 	// Trim padding a non-conforming producer may have added: the protected
 	// header is base64url without padding (RFC 7515 Section 2).
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[0], "="))
 	if err != nil {
-		return nil, fmt.Errorf("JWS protected header is not valid base64url: %w", err)
+		return nil, fmt.Errorf("JWS protected header is not valid base64url: %w: %w", err, ErrX5CInvalid)
 	}
 	header := map[string]any{}
 	if err := json.Unmarshal(raw, &header); err != nil {
-		return nil, fmt.Errorf("JWS protected header is not valid JSON: %w", err)
+		return nil, fmt.Errorf("JWS protected header is not valid JSON: %w: %w", err, ErrX5CInvalid)
 	}
 	value, present := header["x5c"]
 	if !present {
-		return nil, errors.New("x5c header is required")
+		return nil, fmt.Errorf("x5c header is required: %w", ErrX5CInvalid)
 	}
 	return DecodeX5CChain(value)
 }
@@ -118,14 +123,14 @@ func x5cHeaderEntries(raw any) ([]string, error) {
 		for index, item := range value {
 			entry, ok := item.(string)
 			if !ok {
-				return nil, fmt.Errorf("x5c certificate %d is not a string", index)
+				return nil, fmt.Errorf("x5c certificate %d is not a string: %w", index, ErrX5CInvalid)
 			}
 			entries = append(entries, entry)
 		}
 		return entries, nil
 	case nil:
-		return nil, errors.New("x5c header is required")
+		return nil, fmt.Errorf("x5c header is required: %w", ErrX5CInvalid)
 	default:
-		return nil, errors.New("x5c header must be an array of base64-encoded certificates")
+		return nil, fmt.Errorf("x5c header must be an array of base64-encoded certificates: %w", ErrX5CInvalid)
 	}
 }

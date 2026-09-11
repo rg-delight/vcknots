@@ -125,9 +125,6 @@ type finalIssuanceFixture struct {
 
 func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) *finalIssuanceFixture {
 	t.Helper()
-	httpAllowed := env.IsHTTPAllowed()
-	t.Cleanup(func() { env.SetHTTPAllowed(httpAllowed) })
-	env.SetHTTPAllowed(true)
 
 	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -162,12 +159,9 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 	// Config.CredentialAcceptance, so the fixture wallet authenticates the
 	// issuer key it signs with.
 	acceptance := acceptIssuerKeyPolicy(f.issuerKey)
-	if f.walletProfile == "" && f.oid4vciSigner == nil && f.wrapReceiverPlugin == nil {
-		f.wallet = createTestControllerWithAcceptance(t, acceptance)
-		return f
-	}
-	// HAIP serves over TLS, so only the Final fixtures need the plain-HTTP
-	// allowance the default dispatcher takes from the environment.
+	// The fixture always registers its own receiver plugin so the plain-HTTP
+	// escape is the receiver's explicit AllowHTTP flag, not a process-wide
+	// environment setting. HAIP serves over TLS and pins the flag off.
 	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
 		HTTPClient: f.server.Client(),
 		AllowHTTP:  !f.walletProfile.IsHAIP(),
@@ -545,6 +539,53 @@ func TestReceiveOID4VCIFinalCredential_IssuerIdentifierMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "does not match the credential offer credential_issuer")
 	require.Equal(t, 0, fixture.parCalls)
 	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// OpenID4VCI 1.0 §12.2.2 requires the credential issuer to be identified by an
+// https URL. A Final wallet that has not enabled the plain-HTTP escape refuses
+// a plain-http issuer at metadata discovery, before any authorization request
+// leaves the wallet.
+func TestReceiveOID4VCIFinalCredentialRefusesPlainHTTPIssuerWithoutAllowance(t *testing.T) {
+	t.Setenv(env.HTTP_ALLOWED.String(), "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{})
+	}))
+	defer server.Close()
+	issuerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
+		HTTPClient: server.Client(),
+		AllowHTTP:  false,
+	})
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
+	require.NoError(t, err)
+	wallet, err := NewWalletWithConfig(Config{
+		CredStore:            newProfileCredStore(t),
+		Receiver:             receiving,
+		CredentialAcceptance: acceptIssuerKeyPolicy(issuerKey),
+	})
+	require.NoError(t, err)
+
+	_, err = wallet.ReceiveOID4VCIFinalCredential(OID4VCIFinalReceiveRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"pid"},
+			Grants: map[string]*CredentialOfferGrant{
+				"authorization_code": {IssuerState: "issuer-state-1"},
+			},
+		},
+		Type:                         receiverTypes.Oid4vci,
+		ClientID:                     "client-1",
+		RedirectURI:                  "openid-credential-offer://callback",
+		HolderKey:                    newPrivateJWKForFinalVCITest(t, "holder-key-1"),
+		ClientKey:                    newPrivateJWKForFinalVCITest(t, "client-key-1"),
+		AllowSelfDrivenAuthorization: true,
+	})
+	require.ErrorContains(t, err, "https required")
 }
 
 func TestReceiveOID4VCIFinalCredential_AuthorizationServerHintNotListed(t *testing.T) {
@@ -1326,6 +1367,10 @@ func TestReceiveOID4VCIFinalCredential_WalletInitiatedHAIPRequiresClientAuthenti
 // must authenticate the credential it receives. A wallet configured without an
 // acceptance policy fails rather than storing an unauthenticated credential.
 func TestReceiveOID4VCIFinalCredentialFailsWithoutAcceptancePolicy(t *testing.T) {
+	// This test builds a wallet through NewWallet, whose default receiver takes
+	// its plain-HTTP allowance from the environment, so scope that allowance to
+	// this test only.
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
 	fixture := newFinalIssuanceFixture(t)
 	fixture.wallet = createTestControllerWithDefaults(t)
 
@@ -1338,6 +1383,10 @@ func TestReceiveOID4VCIFinalCredentialFailsWithoutAcceptancePolicy(t *testing.T)
 }
 
 func TestResumeOID4VCIFinalDeferredCredentialFailsWithoutAcceptancePolicy(t *testing.T) {
+	// Scope the plain-HTTP allowance to this test: the replacement wallet is
+	// built through NewWallet, whose default receiver reads it from the
+	// environment.
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.includeDeferredEndpoint = true
 	})

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/keystore"
+	"github.com/trustknots/vcknots/wallet/serializer/types"
 )
 
 func TestNewJwtVcSerializer(t *testing.T) {
@@ -663,4 +664,36 @@ func TestDeserializeCredential_RejectsAlgNone(t *testing.T) {
 
 	_, err = serializer.DeserializeCredential(credential.JwtVc, []byte(unsigned))
 	require.Error(t, err)
+}
+
+// signJwtVcWithVCClaims signs a JWT whose vc claim is exactly the supplied
+// object, so a test can exercise payload shapes DeserializeCredential rejects.
+func signJwtVcWithVCClaims(t *testing.T, vc map[string]any) string {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, nil)
+	require.NoError(t, err)
+
+	raw, err := jwt.Signed(signer).Claims(map[string]any{"vc": vc}).Serialize()
+	require.NoError(t, err)
+	return raw
+}
+
+// A JWT VC without vc.id must fail with a typed error, not panic the wallet.
+func TestDeserializeCredential_RejectsMissingVCID(t *testing.T) {
+	serializer, err := NewJwtVcSerializer()
+	require.NoError(t, err)
+
+	jwtVC := signJwtVcWithVCClaims(t, map[string]any{
+		"type":              []any{"VerifiableCredential"},
+		"issuer":            "https://issuer.example.com",
+		"credentialSubject": map[string]any{"id": "did:example:subject"},
+	})
+
+	_, err = serializer.DeserializeCredential(credential.JwtVc, []byte(jwtVC))
+	require.Error(t, err)
+	require.ErrorContains(t, err, "jwt vc payload has no vc.id")
+	require.ErrorIs(t, err, types.ErrInvalidCredential)
 }

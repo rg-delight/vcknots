@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -98,6 +99,45 @@ func TestDecodeX5CChainRejectsOversizeChain(t *testing.T) {
 	}
 	if _, err := DecodeX5CChain(oversize[:maxX5CCertificates]); err != nil {
 		t.Fatalf("a chain at the bound must decode: %v", err)
+	}
+}
+
+// TestDecodeX5CFailuresClassifyAsErrX5CInvalid proves a caller can tell a
+// malformed x5c apart from any other error with errors.Is, for the empty,
+// oversize and bad-base64 cases.
+func TestDecodeX5CFailuresClassifyAsErrX5CInvalid(t *testing.T) {
+	leaf, _, _ := x5cTestChain(t)
+	entry := base64.StdEncoding.EncodeToString(leaf.certificate.Raw)
+	oversize := make([]string, maxX5CCertificates+1)
+	for index := range oversize {
+		oversize[index] = entry
+	}
+
+	for name, raw := range map[string]any{
+		"empty":      []string{},
+		"oversize":   oversize,
+		"bad base64": []string{"not base64 !!"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeX5CChain(raw)
+			if !errors.Is(err, ErrX5CInvalid) {
+				t.Fatalf("DecodeX5CChain(%s) err = %v, want ErrX5CInvalid", name, err)
+			}
+		})
+	}
+
+	// The compact-JWS entry point shares the classification: a missing x5c
+	// member and a header that is not base64url are both invalid x5c.
+	for name, obj := range map[string]string{
+		"missing header": base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256"}`)) + ".payload.signature",
+		"bad base64":     "not-a-compact-jws",
+	} {
+		t.Run("jwt "+name, func(t *testing.T) {
+			_, err := DecodeX5CFromJWTHeader(obj)
+			if !errors.Is(err, ErrX5CInvalid) {
+				t.Fatalf("DecodeX5CFromJWTHeader(%s) err = %v, want ErrX5CInvalid", name, err)
+			}
+		})
 	}
 }
 

@@ -364,6 +364,12 @@ func (s *JwtVcSerializer) convertVCDataToCredential(vcData map[string]any) (*cre
 		}
 	}
 
+	// A JWT VC that carries no vc.id has no credential identifier to store;
+	// returning a typed error keeps the caller out of the nil *url.URL panic.
+	if id == nil {
+		return nil, types.NewInvalidCredentialError("jwt vc payload has no vc.id", nil)
+	}
+
 	return &credential.Credential{
 		ID:          id.String(),
 		Types:       credTypes,
