@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"net/http"
@@ -20,6 +21,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/profile"
+	"github.com/trustknots/vcknots/wallet/serializer"
+	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
 // CredentialAcceptancePolicy decides whether a received credential may be stored.
@@ -59,8 +63,14 @@ type CredentialAcceptancePolicy struct {
 	// a caller can narrow acceptance without rebuilding the dispatcher. An
 	// algorithm listed here that no plugin implements is still rejected.
 	SigningAlgorithms []jose.SignatureAlgorithm
-	Now               func() time.Time
-	ClockSkew         time.Duration
+	// ExpectedSDJWTVCType is the SD-JWT VC `vct` claim the credential must
+	// carry. An empty value checks nothing, which is the behaviour before this
+	// field existed; a non-empty value rejects a credential whose vct differs,
+	// so a wallet that asked one Credential Configuration for a credential
+	// cannot store a credential of another type under it.
+	ExpectedSDJWTVCType string
+	Now                 func() time.Time
+	ClockSkew           time.Duration
 }
 
 // DefaultCredentialSigningAlgorithms is the issuer signature algorithm policy
@@ -84,6 +94,92 @@ func acceptedSigningAlgorithms(policy *CredentialAcceptancePolicy) []jose.Signat
 		return DefaultCredentialSigningAlgorithms
 	}
 	return policy.SigningAlgorithms
+}
+
+// CredentialAcceptor runs the credential acceptance rules over a raw
+// credential without a credential store. It holds only the profile,
+// serializer and verifier an acceptance run needs, so an integrator that
+// accepts credentials outside a Wallet build can construct it once and reuse
+// it for every credential instead of creating a Wallet — and with it a
+// credstore dispatcher — per credential. Its fields are never mutated after
+// construction, so concurrent calls are safe.
+type CredentialAcceptor struct {
+	profile    profile.Profile
+	serializer *serializer.SerializationDispatcher
+	verifier   *verifier.VerificationDispatcher
+}
+
+// NewCredentialAcceptor builds a reusable acceptance checker from the same
+// profile, serializer and verifier a Wallet would use. The profile is
+// normalized, so an unknown value is rejected here rather than silently
+// treated as Final. A nil serializer or verifier is refused: acceptance needs
+// both to deserialize the credential and to check its issuer signature.
+func NewCredentialAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *verifier.VerificationDispatcher) (*CredentialAcceptor, error) {
+	normalized, err := p.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, errors.New("credential acceptor requires a serialization dispatcher")
+	}
+	if v == nil {
+		return nil, errors.New("credential acceptor requires a verification dispatcher")
+	}
+	return &CredentialAcceptor{profile: normalized, serializer: s, verifier: v}, nil
+}
+
+// CredentialAcceptanceOption adjusts one CredentialAcceptor.Verify call.
+type CredentialAcceptanceOption func(*credentialAcceptanceRun)
+
+// credentialAcceptanceRun is the per-call state an option mutates.
+type credentialAcceptanceRun struct {
+	flavor    credential.SupportedSerializationFlavor
+	holderKey *jose.JSONWebKey
+}
+
+// WithAcceptanceFlavor names the serialization of the raw credential. Without
+// it Verify infers SD-JWT VC from the disclosure separator and JWT VC
+// otherwise.
+func WithAcceptanceFlavor(flavor credential.SupportedSerializationFlavor) CredentialAcceptanceOption {
+	return func(run *credentialAcceptanceRun) { run.flavor = flavor }
+}
+
+// WithAcceptanceHolderKey supplies the holder key a credential's cnf.jwk is
+// compared against. Without it a cnf has nothing to be compared with, so a
+// policy that sets RequireHolderBinding refuses the credential instead of
+// storing an unproven binding.
+func WithAcceptanceHolderKey(key *jose.JSONWebKey) CredentialAcceptanceOption {
+	return func(run *credentialAcceptanceRun) { run.holderKey = key }
+}
+
+// Verify runs the acceptance rules for policy over raw and returns what it
+// verified. It stores nothing and opens no credential store. The raw
+// credential's serialization is inferred unless WithAcceptanceFlavor names it,
+// and cnf holder binding is only established when WithAcceptanceHolderKey
+// supplies the holder key. Every failure wraps the sentinels declared in
+// errors_final.go, so errors.Is decides what went wrong.
+func (a *CredentialAcceptor) Verify(ctx context.Context, raw []byte, policy CredentialAcceptancePolicy, options ...CredentialAcceptanceOption) (*CredentialVerification, error) {
+	run := credentialAcceptanceRun{flavor: inferredFlavor(raw)}
+	for _, option := range options {
+		if option != nil {
+			option(&run)
+		}
+	}
+	_, verification, err := a.verify(ctx, raw, run.flavor, run.holderKey, &policy, true)
+	if err != nil {
+		return nil, err
+	}
+	return verification, nil
+}
+
+// inferredFlavor reports the serialization of raw without a caller hint: an
+// SD-JWT VC always carries at least the trailing disclosure separator, a `~`
+// that neither base64url nor a compact JWS contains.
+func inferredFlavor(raw []byte) credential.SupportedSerializationFlavor {
+	if bytes.IndexByte(raw, '~') >= 0 {
+		return credential.SDJwtVC
+	}
+	return credential.JwtVc
 }
 
 // IssuerX509TrustOptions is relying-party trust configuration for issuer x5c chains.
@@ -164,8 +260,17 @@ func (w *Wallet) VerifyCredentialWithPolicy(ctx context.Context, raw []byte, fla
 
 // verifyCredentialForAcceptanceWithPolicy is the acceptance check itself, run
 // against an explicit policy so that the wallet-configured and the per-call
-// entrypoints share one implementation.
+// entrypoints share one implementation. It delegates to the store-free
+// CredentialAcceptor built from the wallet's own profile, serializer and
+// verifier.
 func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
+	acceptor := &CredentialAcceptor{profile: w.profile, serializer: w.serializer, verifier: w.verifier}
+	return acceptor.verify(ctx, raw, flavor, holderKey, policy, requirePolicy)
+}
+
+// verify is the acceptance check itself, shared by the Wallet entrypoints and
+// the exported CredentialAcceptor.Verify.
+func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
 	if requirePolicy && policy == nil {
 		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
 	}
@@ -195,7 +300,17 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 		}
 	}
 
-	if w.profile.IsHAIP() && flavor == credential.SDJwtVC {
+	if policy != nil && policy.ExpectedSDJWTVCType != "" {
+		// The Credential Configuration the wallet asked for names the vct it
+		// advertised. A credential carrying another type is not the credential
+		// that was requested, so it is refused before any key is resolved.
+		vct, _ := payload["vct"].(string)
+		if vct != policy.ExpectedSDJWTVCType {
+			return nil, nil, fmt.Errorf("%w: SD-JWT VC vct %q is not the expected type %q", ErrCredentialTypInvalid, vct, policy.ExpectedSDJWTVCType)
+		}
+	}
+
+	if a.profile.IsHAIP() && flavor == credential.SDJwtVC {
 		if _, present := header["x5c"]; !present {
 			// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's
 			// signing certificate along with a trust chain in the x5c JOSE
@@ -214,7 +329,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 	if !slices.Contains(acceptedSigningAlgorithms(policy), jose.SignatureAlgorithm(algorithm)) {
 		return nil, nil, fmt.Errorf("%w: issuer JWT alg %q is not listed by the credential acceptance policy", ErrCredentialAlgUnsupported, algorithm)
 	}
-	if !slices.Contains(w.verifier.GetSupportedAlgorithms(), jose.SignatureAlgorithm(algorithm)) {
+	if !slices.Contains(a.verifier.GetSupportedAlgorithms(), jose.SignatureAlgorithm(algorithm)) {
 		return nil, nil, fmt.Errorf("%w: issuer JWT alg %q is not supported by the verifier", ErrCredentialAlgUnsupported, algorithm)
 	}
 
@@ -222,7 +337,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 	// an algorithm the wallet will not accept, or a typ it did not ask for,
 	// must be reported as such rather than as whatever the deserializer makes
 	// of the credential.
-	parsedCredential, err := w.serializer.DeserializeCredential(flavor, raw)
+	parsedCredential, err := a.serializer.DeserializeCredential(flavor, raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrCredentialParse, err)
 	}
@@ -285,7 +400,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := w.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, issuer, now, verification); err != nil {
+	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, issuer, now, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -305,7 +420,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
 // bounds the CRL retrieval the trust path may perform.
-func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
+func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
 	var candidateKeys []jose.JSONWebKey
 
 	// An x5c header is trust evidence only when the caller configured X.509
@@ -332,7 +447,7 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 		if err != nil {
 			return err
 		}
-		if w.profile.IsHAIP() {
+		if a.profile.IsHAIP() {
 			// HAIP §6.1.1: "The X.509 certificate of the trust anchor MUST NOT
 			// be included" in the x5c header. Both anchor forms are consulted,
 			// so configuring trust as a *x509.CertPool does not silently
@@ -396,7 +511,7 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 
 	verifiedKey := -1
 	for i := range candidateKeys {
-		ok, err := w.verifier.Verify(parsedCredential.Proof, &candidateKeys[i])
+		ok, err := a.verifier.Verify(parsedCredential.Proof, &candidateKeys[i])
 		if err == nil && ok {
 			verifiedKey = i
 			break

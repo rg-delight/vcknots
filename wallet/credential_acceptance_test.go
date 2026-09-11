@@ -33,6 +33,8 @@ import (
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
+	"github.com/trustknots/vcknots/wallet/serializer"
+	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
 type acceptanceFixture struct {
@@ -1224,5 +1226,145 @@ func TestIssuerSignedJOSEHeader(t *testing.T) {
 		notJSON := base64.RawURLEncoding.EncodeToString([]byte("not json"))
 		_, err := IssuerSignedJOSEHeader(credential.JwtVc, []byte(notJSON+"."+payload+".signature"))
 		require.ErrorIs(t, err, ErrCredentialParse)
+	})
+}
+
+// newTestCredentialAcceptor builds the store-free acceptor with the default
+// serialization and verification plugins, which is what NewWallet configures.
+func newTestCredentialAcceptor(t *testing.T) *CredentialAcceptor {
+	t.Helper()
+	serialization, err := serializer.NewSerializationDispatcher(serializer.WithDefaultConfig())
+	require.NoError(t, err)
+	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
+	require.NoError(t, err)
+	acceptor, err := NewCredentialAcceptor(profile.Final, serialization, verification)
+	require.NoError(t, err)
+	require.NotNil(t, acceptor)
+	return acceptor
+}
+
+func TestNewCredentialAcceptorValidatesInputs(t *testing.T) {
+	serialization, err := serializer.NewSerializationDispatcher(serializer.WithDefaultConfig())
+	require.NoError(t, err)
+	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
+	require.NoError(t, err)
+
+	t.Run("a nil serializer is refused", func(t *testing.T) {
+		_, err := NewCredentialAcceptor(profile.Final, nil, verification)
+		require.ErrorContains(t, err, "serialization dispatcher")
+	})
+	t.Run("a nil verifier is refused", func(t *testing.T) {
+		_, err := NewCredentialAcceptor(profile.Final, serialization, nil)
+		require.ErrorContains(t, err, "verification dispatcher")
+	})
+	t.Run("an unknown profile is refused", func(t *testing.T) {
+		_, err := NewCredentialAcceptor(profile.Profile("draft24"), serialization, verification)
+		require.Error(t, err)
+	})
+	t.Run("the zero profile normalizes to Final", func(t *testing.T) {
+		acceptor, err := NewCredentialAcceptor(profile.Profile(""), serialization, verification)
+		require.NoError(t, err)
+		require.Equal(t, profile.Final, acceptor.profile)
+	})
+}
+
+// TestCredentialAcceptorVerifyReuse pins the property the sidecar needs: one
+// acceptor built once answers every credential identically without a wallet or
+// credential store per call, inferring the SD-JWT VC serialization from the raw
+// value and establishing holder binding from the supplied holder key.
+func TestCredentialAcceptorVerifyReuse(t *testing.T) {
+	acceptor := newTestCredentialAcceptor(t)
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
+	policy := CredentialAcceptancePolicy{
+		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+			return []jose.JSONWebKey{issuerJWK}, nil
+		},
+		RequireHolderBinding: true,
+	}
+
+	first, err := acceptor.Verify(t.Context(), wire, policy, WithAcceptanceHolderKey(&holder))
+	require.NoError(t, err)
+	require.Equal(t, "issuer-key-1", first.IssuerKeyID)
+	require.True(t, first.HolderBound)
+
+	second, err := acceptor.Verify(t.Context(), wire, policy, WithAcceptanceHolderKey(&holder))
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+
+	t.Run("the inferred serialization is SD-JWT VC", func(t *testing.T) {
+		require.Equal(t, credential.SDJwtVC, inferredFlavor(wire))
+	})
+}
+
+// TestCredentialAcceptorExpectedSDJWTVCType pins the vct agreement the field
+// adds: a credential whose vct is not the type the caller asked for is refused
+// under ErrCredentialTypInvalid, and an empty expectation checks nothing.
+func TestCredentialAcceptorExpectedSDJWTVCType(t *testing.T) {
+	acceptor := newTestCredentialAcceptor(t)
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder, vct: "urn:test:acceptance"}))
+	resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) {
+		return []jose.JSONWebKey{issuerJWK}, nil
+	}
+
+	t.Run("a matching vct is accepted", func(t *testing.T) {
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, ExpectedSDJWTVCType: "urn:test:acceptance"}
+		_, err := acceptor.Verify(t.Context(), wire, policy)
+		require.NoError(t, err)
+	})
+
+	t.Run("a different vct is refused", func(t *testing.T) {
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, ExpectedSDJWTVCType: "urn:test:other"}
+		_, err := acceptor.Verify(t.Context(), wire, policy)
+		require.ErrorIs(t, err, ErrCredentialTypInvalid)
+	})
+
+	t.Run("an empty expectation checks nothing", func(t *testing.T) {
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve}
+		_, err := acceptor.Verify(t.Context(), wire, policy)
+		require.NoError(t, err)
+	})
+}
+
+// TestCredentialAcceptorRequireHolderBindingFailClosed pins the fail-closed
+// reading of RequireHolderBinding at the CredentialAcceptor API: a credential
+// that carries a cnf confirmation key is only bound once a holder key is
+// supplied with WithAcceptanceHolderKey, so a call that supplies none is
+// refused with ErrHolderBindingMissing rather than accepted with HolderBound
+// false. The same holds for a credential with no cnf at all.
+func TestCredentialAcceptorRequireHolderBindingFailClosed(t *testing.T) {
+	acceptor := newTestCredentialAcceptor(t)
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) {
+		return []jose.JSONWebKey{issuerJWK}, nil
+	}
+
+	t.Run("a cnf with no holder key to compare is refused", func(t *testing.T) {
+		wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, RequireHolderBinding: true}
+		_, err := acceptor.Verify(t.Context(), wire, policy)
+		require.ErrorIs(t, err, ErrHolderBindingMissing)
+	})
+
+	t.Run("a cnf compared with the holder key is accepted", func(t *testing.T) {
+		wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, RequireHolderBinding: true}
+		verification, err := acceptor.Verify(t.Context(), wire, policy, WithAcceptanceHolderKey(&holder))
+		require.NoError(t, err)
+		require.True(t, verification.HolderBound)
+	})
+
+	t.Run("no cnf at all is refused", func(t *testing.T) {
+		wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1"}))
+		policy := CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, RequireHolderBinding: true}
+		_, err := acceptor.Verify(t.Context(), wire, policy)
+		require.ErrorIs(t, err, ErrHolderBindingMissing)
 	})
 }
