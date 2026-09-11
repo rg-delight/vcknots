@@ -47,6 +47,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -78,6 +79,11 @@ type Wallet struct {
 
 	dpop       DPoPConfig
 	clientAuth ClientAuthConfig
+
+	// profile is the explicit Final/HAIP policy this wallet enforces. It is also
+	// propagated to every registered protocol plugin so no lower-level API can
+	// bypass the root policy.
+	profile profile.Profile
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -98,6 +104,12 @@ type Config struct {
 
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
+
+	// Profile selects the explicit Final/HAIP policy for the wallet. The zero
+	// value normalizes to profile.Final. Caller-injected dispatchers must have
+	// every protocol plugin carrying the same profile or NewWalletWithConfig
+	// fails.
+	Profile profile.Profile
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -236,6 +248,16 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		return nil, err
 	}
 
+	normalizedProfile, err := config.Profile.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet profile: %w", err)
+	}
+	// A dispatcher supplied by the caller keeps ownership of its plugin
+	// profiles; the root only verifies they match. Default dispatchers built
+	// here are configured by the root before being verified.
+	receiverInjected := config.Receiver != nil
+	presenterInjected := config.Presenter != nil
+
 	if config.CredStore == nil {
 		credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 		if err != nil {
@@ -284,6 +306,19 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		config.Presenter = presenter
 	}
 
+	if !receiverInjected {
+		propagateReceiverProfile(config.Receiver, normalizedProfile)
+	}
+	if err := validateReceiverPluginProfiles(config.Receiver, normalizedProfile); err != nil {
+		return nil, err
+	}
+	if !presenterInjected {
+		propagatePresenterProfile(config.Presenter, normalizedProfile)
+	}
+	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
+		return nil, err
+	}
+
 	if config.DPoP.Enabled && config.DPoP.Key == nil {
 		key, err := newInMemoryECKeyEntry()
 		if err != nil {
@@ -300,7 +335,62 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		presenter:  config.Presenter,
 		dpop:       config.DPoP,
 		clientAuth: config.ClientAuth,
+
+		profile: normalizedProfile,
 	}, nil
+}
+
+// setProtocolProfile is implemented by the built-in protocol plugins so the root
+// can propagate its profile to the default dispatchers it constructs itself.
+type setProtocolProfile interface {
+	SetProtocolProfile(profile.Profile)
+}
+
+func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setProtocolProfile); ok {
+			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, value profile.Profile) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setProtocolProfile); ok {
+			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+// validateReceiverPluginProfiles fails when a registered plugin that exposes a
+// protocol profile disagrees with the wallet. Draft-only plugins that do not
+// implement profile.Carrier are ignored.
+func validateReceiverPluginProfiles(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) error {
+	for _, plugin := range dispatcher.Plugins() {
+		carrier, ok := plugin.(profile.Carrier)
+		if !ok {
+			continue
+		}
+		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
+			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
+		}
+	}
+	return nil
+}
+
+// validatePresenterPluginProfiles fails when a registered presenter plugin does
+// not carry the wallet profile.
+func validatePresenterPluginProfiles(dispatcher *presenter.PresentationDispatcher, value profile.Profile) error {
+	for _, plugin := range dispatcher.Plugins() {
+		carrier, ok := plugin.(profile.Carrier)
+		if !ok {
+			continue
+		}
+		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
+			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
+		}
+	}
+	return nil
 }
 
 func validateClientAuthConfig(config ClientAuthConfig) error {

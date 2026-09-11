@@ -72,6 +72,17 @@ func (d *ReceivingDispatcher) getPlugin(receivingType types.SupportedReceivingTy
 }
 
 // FetchIssuerMetadata fetches OID4VCI Credential Issuer Metadata using the appropriate plugin
+// Plugins returns the registered receiver plugins for profile propagation and
+// inspection. The returned slice is a copy, so callers cannot mutate the
+// dispatcher's registry.
+func (d *ReceivingDispatcher) Plugins() []types.Receiver {
+	plugins := make([]types.Receiver, 0, len(d.plugins))
+	for _, plugin := range d.plugins {
+		plugins = append(plugins, plugin)
+	}
+	return plugins
+}
+
 func (d *ReceivingDispatcher) FetchIssuerMetadata(endpoint common.URIField, receivingType types.SupportedReceivingTypes) (*types.CredentialIssuerMetadata, error) {
 	plugin, err := d.getPlugin(receivingType)
 	if err != nil {
