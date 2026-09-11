@@ -164,3 +164,11 @@ final status is reported as an error naming the status.
 TLS設定済みclientでGETし最大5回のリダイレクトを追跡します（fragmentは送信しません）。
 URIの補正、独自の再試行、認証の補完、提示専用seedは行いません。
 software JWKの試験設定を実attestationやハードウェア保護の実証とは扱いません。
+
+### additionalHolderKeys
+
+`additionalHolderKeys` (integer, default 0) makes `receive-code` send that many
+extra proofs with ephemeral P-256 keys so an issuer that advertises
+`batch_credential_issuance` returns several credentials (OpenID4VCI 1.0 §14.6).
+The ephemeral keys are discarded after the run; the resulting credentials are
+stored but cannot be presented later. Use it only for batch controls.

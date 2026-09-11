@@ -62,6 +62,11 @@ type configuration struct {
 	// CredentialResponseEncryption generates an ephemeral P-256 key per run so
 	// the issuer encrypts the credential response.
 	CredentialResponseEncryption bool `json:"credentialResponseEncryption"`
+	// AdditionalHolderKeys generates that many ephemeral P-256 holder keys for a
+	// batch credential request (OpenID4VCI 1.0 §14.6). The keys live only for
+	// this run, so those credentials cannot be presented later; the option
+	// exists to exercise batch issuance in official controls.
+	AdditionalHolderKeys int `json:"additionalHolderKeys"`
 
 	Profile                             string   `json:"profile"`
 	VerifierAllowUnadvertisedRevocation bool     `json:"verifierAllowUnadvertisedRevocation"`
@@ -436,8 +441,17 @@ func run(config configuration, request operation) (any, error) {
 			generated := jose.JSONWebKey{Key: privateKey}
 			encryptionKey = &generated
 		}
+		var additionalHolderKeys []jose.JSONWebKey
+		for index := 0; index < config.AdditionalHolderKeys; index++ {
+			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate additional holder key: %w", err)
+			}
+			additionalHolderKeys = append(additionalHolderKeys, jose.JSONWebKey{Key: privateKey})
+		}
 		result, receiveErr := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
 			CredentialOffer:                 offer,
+			AdditionalHolderKeys:            additionalHolderKeys,
 			Type:                            receiverTypes.Oid4vci,
 			ClientID:                        config.ClientID,
 			RedirectURI:                     config.RedirectURI,
