@@ -50,7 +50,6 @@ func TestOid4vpPresenter_PresentDCQL_RejectsInvalidInputBeforeNetwork(t *testing
 	}{
 		{name: "nil request", tokens: map[string][]string{"identity": {"token"}}},
 		{name: "nil vp_token", request: &types.PresentationRequest{}},
-		{name: "empty vp_token", tokens: map[string][]string{}, request: &types.PresentationRequest{}},
 		{name: "empty query id", tokens: map[string][]string{"": {"token"}}, request: &types.PresentationRequest{}},
 		{name: "nil token list", tokens: map[string][]string{"identity": nil}, request: &types.PresentationRequest{}},
 		{name: "empty token list", tokens: map[string][]string{"identity": {}}, request: &types.PresentationRequest{}},

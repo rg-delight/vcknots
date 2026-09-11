@@ -209,6 +209,11 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 
 	req, err := builder.Build()
 	if err != nil {
+		// Attach the sentinel that names the Request Object authentication
+		// failure (or leave the error unchanged) so a caller can branch with
+		// errors.Is instead of matching the library's message text. The
+		// message and the *AuthorizationRequestError chain are preserved.
+		err = classifyRequestObjectFailure(err)
 		// OID4VP: when the Authorization Request is rejected with an OAuth
 		// error code and response_mode=direct_post, deliver the error
 		// authorization response to the Verifier's response_uri. Requests
@@ -317,7 +322,12 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("verifier returned non-200 status: %d, body: %s", resp.StatusCode, string(body))
+		// The response body is controlled by the Verifier and may echo state or
+		// secrets; retain only the OAuth error code (ADR-0013).
+		return nil, &VerifierResponseError{
+			StatusCode: resp.StatusCode,
+			OAuthError: oauthErrorCodeFromResponseBody(body),
+		}
 	}
 	if readErr != nil {
 		return nil, fmt.Errorf("failed to read verifier response: %w", readErr)
@@ -344,7 +354,12 @@ func (p *Oid4vpPresenter) PresentDCQL(protocol types.SupportedPresentationProtoc
 	if protocol != types.Oid4vp {
 		return "", fmt.Errorf("plugin type mismatch")
 	}
-	if request == nil || len(vpToken) == 0 {
+	// A nil vp_token is a caller mistake: json.Marshal would send the JSON
+	// literal null, which is not the object OID4VP 1.0 §8.1 defines. An empty
+	// non-nil map is the answer to a request whose optional credential_sets the
+	// holder declined for every query (OID4VP 1.0 §6.4.2) and must be sent as
+	// the empty object {}.
+	if request == nil || vpToken == nil {
 		return "", fmt.Errorf("presentation request and vp_token are required")
 	}
 	for id, tokens := range vpToken {
@@ -670,7 +685,13 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 		return "", fmt.Errorf("failed to read authorization response submission body: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("verifier returned non-2xx status: %d, body: %s", resp.StatusCode, string(body))
+		// As in postAuthorizationResponse, only the status and the normalized
+		// OAuth error code leave this boundary; the verifier-controlled body is
+		// discarded (ADR-0013).
+		return "", &VerifierResponseError{
+			StatusCode: resp.StatusCode,
+			OAuthError: oauthErrorCodeFromResponseBody(body),
+		}
 	}
 	return string(body), nil
 }
