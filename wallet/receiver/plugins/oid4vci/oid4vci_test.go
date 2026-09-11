@@ -2137,3 +2137,124 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		})
 	}
 }
+
+func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
+	t.Run("sends the assertion parameters when set", func(t *testing.T) {
+		var captured url.Values
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			captured = r.Form
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
+		}))
+		defer server.Close()
+
+		parsed, err := url.Parse(server.URL)
+		require.NoError(t, err)
+		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+			ResponseType:        "code",
+			ClientID:            "client-1",
+			RedirectURI:         "https://wallet.example/callback",
+			ClientAssertion:     "assertion-jwt",
+			ClientAssertionType: types.ClientAssertionTypeJWTBearer,
+		}, types.OAuthClientAttestationHeaders{})
+		require.NoError(t, err)
+		assert.Equal(t, "assertion-jwt", captured.Get("client_assertion"))
+		assert.Equal(t, types.ClientAssertionTypeJWTBearer, captured.Get("client_assertion_type"))
+	})
+
+	t.Run("omits the assertion parameters when unset", func(t *testing.T) {
+		var captured url.Values
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = r.ParseForm()
+			captured = r.Form
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1"})
+		}))
+		defer server.Close()
+
+		parsed, err := url.Parse(server.URL)
+		require.NoError(t, err)
+		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+			ResponseType: "code",
+			ClientID:     "client-1",
+			RedirectURI:  "https://wallet.example/callback",
+		}, types.OAuthClientAttestationHeaders{})
+		require.NoError(t, err)
+		assert.Empty(t, captured.Get("client_assertion"))
+		assert.Empty(t, captured.Get("client_assertion_type"))
+	})
+}
+
+func TestOid4vciReceiver_ExchangeAuthorizationCodeClientAssertion(t *testing.T) {
+	var captured url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		captured = r.Form
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	token, err := receiver.ExchangeAuthorizationCode(common.URIField(*parsed), types.AuthorizationCodeTokenRequest{
+		Code:                "code-1",
+		RedirectURI:         "https://wallet.example/callback",
+		CodeVerifier:        "verifier-1",
+		ClientID:            "client-1",
+		ClientAssertion:     "assertion-jwt",
+		ClientAssertionType: types.ClientAssertionTypeJWTBearer,
+	}, types.OAuthClientAttestationHeaders{}, "dpop-proof")
+	require.NoError(t, err)
+	assert.Equal(t, "access-1", token.Token)
+	assert.Equal(t, "assertion-jwt", captured.Get("client_assertion"))
+	assert.Equal(t, types.ClientAssertionTypeJWTBearer, captured.Get("client_assertion_type"))
+}
+
+func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(t *testing.T) {
+	attempts := 0
+	var captured []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		_ = r.ParseForm()
+		captured = append(captured, r.Form)
+		if attempts == 1 {
+			w.Header().Set("DPoP-Nonce", "nonce-1")
+			http.Error(w, "use nonce", http.StatusBadRequest)
+			return
+		}
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	factoryCalls := 0
+	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+		common.URIField(*parsed),
+		types.AuthorizationCodeTokenRequest{
+			Code:                "code-1",
+			RedirectURI:         "https://wallet.example/callback",
+			CodeVerifier:        "verifier-1",
+			ClientID:            "client-1",
+			ClientAssertionType: types.ClientAssertionTypeJWTBearer,
+			ClientAssertionFactory: func() (string, error) {
+				factoryCalls++
+				return fmt.Sprintf("assertion-%d", factoryCalls), nil
+			},
+		},
+		func() (types.OAuthClientAttestationHeaders, error) { return types.OAuthClientAttestationHeaders{}, nil },
+		func(string) (string, error) { return "dpop-proof", nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+	require.Equal(t, 2, factoryCalls)
+	require.Len(t, captured, 2)
+	for _, form := range captured {
+		assert.Equal(t, types.ClientAssertionTypeJWTBearer, form.Get("client_assertion_type"))
+	}
+	assert.NotEqual(t, captured[0].Get("client_assertion"), captured[1].Get("client_assertion"))
+}

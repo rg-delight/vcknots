@@ -163,7 +163,7 @@ func TestParseRequestRejectsInvalidOuterClientIDBeforeFetch(t *testing.T) {
 	}))
 	defer server.Close()
 	p := &Oid4vpPresenter{AllowHTTP: true}
-	_, err := p.ParsePresentationRequest("openid4vp://present?client_id=invalid&request_uri=" + url.QueryEscape(server.URL))
+	_, err := p.ParsePresentationRequest("openid4vp://present?client_id=origin:https://verifier.example&request_uri=" + url.QueryEscape(server.URL))
 	require.Error(t, err)
 	select {
 	case <-called:

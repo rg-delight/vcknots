@@ -245,7 +245,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 			State: "state-1",
 			ClientMetadata: &VerifierMetadata{
 				Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-					Key: &recipient.PublicKey, KeyID: "enc-key", Use: "enc",
+					Key: &recipient.PublicKey, KeyID: "enc-key", Use: "enc", Algorithm: "ECDH-ES",
 				}}},
 				EncryptedResponseEncValuesSupported: []string{"A256GCM"},
 			},
@@ -287,7 +287,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 			ClientMetadata: &VerifierMetadata{
 				Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
 					{Key: &rsaKey.PublicKey, KeyID: "rsa-sig", Use: "sig"},
-					{Key: &recipient.PublicKey, KeyID: "ec-enc", Use: "enc"},
+					{Key: &recipient.PublicKey, KeyID: "ec-enc", Use: "enc", Algorithm: "ECDH-ES"},
 				}},
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
@@ -362,7 +362,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 		s := newEncryptionServer(t)
 		request := &types.PresentationRequest{
 			ClientMetadata: &VerifierMetadata{
-				Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "haip-enc", Use: "enc"}}},
+				Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "haip-enc", Use: "enc", Algorithm: "ECDH-ES"}}},
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
 		}
@@ -398,7 +398,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 		s := newEncryptionServer(t)
 		request := &types.PresentationRequest{
 			ClientMetadata: &VerifierMetadata{
-				Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, Use: "enc"}}},
+				Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, Use: "enc", Algorithm: "ECDH-ES"}}},
 				EncryptedResponseEncValuesSupported: []string{"A128CBC-HS256"},
 			},
 		}
@@ -416,7 +416,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 func TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 	recipient := newP256Recipient(t)
 	metadata := &VerifierMetadata{
-		Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "shared", Use: "enc"}}},
+		Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "shared", Use: "enc", Algorithm: "ECDH-ES"}}},
 		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
 	}
 	p := &Oid4vpPresenter{}

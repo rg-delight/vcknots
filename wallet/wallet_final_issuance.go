@@ -289,6 +289,32 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 			authorizationServerIssuer, authorizationServerEndpoint.String())
 	}
 
+	// RFC 9126 §2 / HAIP §4.3: the PAR and token endpoints authenticate the
+	// client the same way. When private_key_jwt is configured, each endpoint
+	// gets its own freshly signed assertion because RFC 7523 §3 requires a
+	// unique jti. The authorization server must advertise the method before any
+	// request leaves the wallet.
+	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
+	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
+	usePrivateKeyJwt := false
+	if w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
+		if !asMetadataSupportsAuthMethod(authorizationServerMetadata, receiverTypes.PrivateKeyJwt) {
+			return nil, fmt.Errorf("authorization server metadata does not advertise the configured private_key_jwt client authentication method")
+		}
+		if _, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); !ok {
+			return nil, errNoUsableClientAuthMethod
+		}
+		usePrivateKeyJwt = true
+	}
+	generateClientAssertion := func() (string, error) {
+		return w.generateClientAssertion(
+			w.clientAuth.Key,
+			w.clientAuth.ClientID,
+			clientAssertionAudience,
+			w.clientAuth.signatureAlgorithm(),
+		)
+	}
+
 	attestationHeaders, attestationChallenge, err := w.createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
 	if err != nil {
 		return nil, err
@@ -307,7 +333,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok && config.Scope != "" {
 		scope = config.Scope
 	}
-	parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, receiverTypes.PushedAuthorizationRequest{
+	parRequest := receiverTypes.PushedAuthorizationRequest{
 		ResponseType:        "code",
 		ClientID:            req.ClientID,
 		RedirectURI:         req.RedirectURI,
@@ -316,7 +342,16 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		CodeChallenge:       base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
 		CodeChallengeMethod: "S256",
 		IssuerState:         authCodeGrant.IssuerState,
-	}, attestationHeaders)
+	}
+	if usePrivateKeyJwt {
+		assertion, err := generateClientAssertion()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
+		}
+		parRequest.ClientAssertion = assertion
+		parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+	}
+	parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("failed to push authorization request: %w", err)
 	}
@@ -335,14 +370,22 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, err
 	}
 
+	tokenRequest := receiverTypes.AuthorizationCodeTokenRequest{
+		Code:         code,
+		RedirectURI:  req.RedirectURI,
+		CodeVerifier: codeVerifier,
+		ClientID:     req.ClientID,
+	}
+	if usePrivateKeyJwt {
+		// The factory is invoked once per HTTP attempt, so a DPoP nonce retry
+		// re-sends the token request with a fresh client_assertion (new jti)
+		// rather than replaying the first one.
+		tokenRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+		tokenRequest.ClientAssertionFactory = generateClientAssertion
+	}
 	token, err := finalReceiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
 		*authorizationServerMetadata.TokenEndpoint,
-		receiverTypes.AuthorizationCodeTokenRequest{
-			Code:         code,
-			RedirectURI:  req.RedirectURI,
-			CodeVerifier: codeVerifier,
-			ClientID:     req.ClientID,
-		},
+		tokenRequest,
 		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			tokenAttestationHeaders := attestationHeaders
 			if attestationHeaders.ClientAttestation != "" {

@@ -74,6 +74,14 @@ const (
 	TemporarilyUnavailableError OAuthAuthzError = "temporarily_unavailable"
 	// VPFormatsNotSupportedError indicates that the Wallet does not support any of the Credential formats requested by the Verifier. (defined in OID4VP)
 	VPFormatsNotSupportedError OAuthAuthzError = "vp_formats_not_supported"
+	// InvalidRequestURIMethodError indicates that the request_uri_method value is neither get nor post (case-sensitive). (OID4VP 1.0 §8.5)
+	InvalidRequestURIMethodError OAuthAuthzError = "invalid_request_uri_method"
+	// InvalidTransactionDataError indicates that a transaction_data object uses an unknown/unsupported type or is otherwise invalid. (OID4VP 1.0 §8.5)
+	InvalidTransactionDataError OAuthAuthzError = "invalid_transaction_data"
+	// WalletUnavailableError indicates that the Wallet is unavailable and unable to respond to the request. (OID4VP 1.0 §8.5)
+	WalletUnavailableError OAuthAuthzError = "wallet_unavailable"
+	// InvalidClientError indicates a problem with the Client Identifier / client_metadata relationship. (OID4VP 1.0 §8.5)
+	InvalidClientError OAuthAuthzError = "invalid_client"
 )
 
 // CredentialPresentationRequest represents a OAuth 2.0 Authorization Request

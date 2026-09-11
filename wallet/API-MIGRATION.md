@@ -194,3 +194,30 @@ configured provider is otherwise only used when
 is attached to each `proofs.jwt` entry as the Appendix D `key_attestation`
 protected-header parameter via `CreateCredentialRequestJWTProofWithKeyAttestation`
 (the original `CreateCredentialRequestJWTProof` keeps its signature).
+
+## Final request validation and private_key_jwt at PAR
+
+The Final OpenID4VP parser now rejects `response_type` values other than
+`vp_token`, a request carrying both `request` and `request_uri`, a
+`request_uri_method` that is not exactly `get` or `post` or that appears
+without `request_uri`, `transaction_data` entries that are not base64url JSON
+objects with a supported `type` and known `credential_ids`, and malformed
+`meta` (`vct_values`, `doctype_value`). A colon-less `client_id` is treated as
+a pre-registered client (OpenID4VP 1.0 §5.9.2) instead of a format error; HAIP
+still requires `x509_hash`. `Oid4vpPresenter.SupportedTransactionDataTypes`
+lists the transaction data types the application understands; with an empty
+list every `transaction_data` request is rejected with
+`invalid_transaction_data`. Encryption keys in `client_metadata.jwks` must
+carry `alg` (§8.3); keys without it are skipped. Error responses for
+`direct_post.jwt` are encrypted when the verifier metadata allows it and sent
+in plaintext only as the §8.3.1 fallback. The new error codes are
+`invalid_request_uri_method`, `invalid_transaction_data`,
+`wallet_unavailable` and `invalid_client`.
+
+`ReceiveOID4VCIFinalCredential` sends `client_assertion` /
+`client_assertion_type` at the PAR endpoint and, freshly per attempt, at the
+token endpoint when `ClientAuth.Method` is `private_key_jwt` (RFC 9126 §2,
+RFC 7523, HAIP §4.3). `PushedAuthorizationRequest` and
+`AuthorizationCodeTokenRequest` carry the assertion fields;
+`AuthorizationCodeTokenRequest.ClientAssertionFactory` produces a new
+assertion for each retry.

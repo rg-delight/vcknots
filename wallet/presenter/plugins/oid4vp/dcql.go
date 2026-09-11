@@ -267,8 +267,12 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 	}
 	// An empty meta object means no additional constraints on the metadata or
 	// validity of the requested Credential.
-	if _, ok := rawMeta.(map[string]any); !ok {
+	meta, ok := rawMeta.(map[string]any)
+	if !ok {
 		return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta must be a JSON object", index)
+	}
+	if err := validateCredentialQueryMeta(index, format, meta); err != nil {
+		return err
 	}
 
 	// multiple is optional and defaults to false; when present it must be a boolean.
@@ -284,6 +288,33 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 	}
 
 	return validateDCQLClaimQueries(credentialQuery)
+}
+
+// validateCredentialQueryMeta enforces the format-specific constraints on the
+// Credential Query meta object (OID4VP 1.0 §6.1, Appendix B.2.3 and B.3.5).
+// Meta keys of other formats stay unconstrained beyond being a JSON object.
+func validateCredentialQueryMeta(index int, format string, meta map[string]any) error {
+	switch format {
+	case "dc+sd-jwt":
+		if rawVct, exists := meta["vct_values"]; exists {
+			values, ok := rawVct.([]any)
+			if !ok || len(values) == 0 {
+				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.vct_values must be a non-empty array of strings", index)
+			}
+			for _, rawValue := range values {
+				if value, ok := rawValue.(string); !ok || value == "" {
+					return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.vct_values must contain only non-empty strings", index)
+				}
+			}
+		}
+	case "mso_mdoc":
+		if rawDoctype, exists := meta["doctype_value"]; exists {
+			if _, ok := rawDoctype.(string); !ok {
+				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.doctype_value must be a string", index)
+			}
+		}
+	}
+	return nil
 }
 
 func validateDCQLClaimQueries(query map[string]any) error {

@@ -1117,7 +1117,7 @@ func TestOid4vpPresenter_UnsupportedRequestURIMethod(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unsupported request_uri_method")
 	}
-	if !strings.Contains(err.Error(), "unsupported request_uri_method") {
+	if !strings.Contains(err.Error(), "invalid_request_uri_method") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

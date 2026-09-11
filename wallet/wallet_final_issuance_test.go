@@ -69,8 +69,11 @@ type finalIssuanceFixture struct {
 	keyAttestationsRequired  bool
 	batchSize                int
 	parExpiresIn             int
+	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
+	authSigningAlgsSupported []jose.SignatureAlgorithm
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
 	tokenResponse            map[string]any
+	tokenHandler             http.HandlerFunc
 	credentialHandler        http.HandlerFunc
 	deferredHandler          http.HandlerFunc
 
@@ -83,6 +86,8 @@ type finalIssuanceFixture struct {
 	notificationEvents []string
 	pushedState        string
 	lastCredentialBody map[string]any
+	parForm            url.Values
+	tokenForms         []url.Values
 }
 
 func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) *finalIssuanceFixture {
@@ -198,17 +203,25 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		mockserver.JSONResponse(w, http.StatusOK, metadata)
 	case "/.well-known/oauth-authorization-server":
-		mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+		metadata := map[string]any{
 			"issuer":                                f.authorizationServerIssuer(base),
 			"authorization_endpoint":                base + "/authorize",
 			"pushed_authorization_request_endpoint": base + "/par",
 			"token_endpoint":                        base + "/token",
 			"pre-authorized_grant_anonymous_access_supported": true,
 			"response_types_supported":                        []string{"code"},
-		})
+		}
+		if f.authMethodsSupported != nil {
+			metadata["token_endpoint_auth_methods_supported"] = f.authMethodsSupported
+		}
+		if f.authSigningAlgsSupported != nil {
+			metadata["token_endpoint_auth_signing_alg_values_supported"] = f.authSigningAlgsSupported
+		}
+		mockserver.JSONResponse(w, http.StatusOK, metadata)
 	case "/par":
 		f.parCalls++
 		_ = r.ParseForm()
+		f.parForm = r.Form
 		f.pushedState = r.Form.Get("state")
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": f.parExpiresIn})
 	case "/authorize":
@@ -217,6 +230,12 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusFound)
 	case "/token":
 		f.tokenCalls++
+		_ = r.ParseForm()
+		f.tokenForms = append(f.tokenForms, r.Form)
+		if f.tokenHandler != nil {
+			f.tokenHandler(w, r)
+			return
+		}
 		mockserver.JSONResponse(w, http.StatusOK, f.tokenResponseValue())
 	case "/nonce":
 		f.nonceCalls++
@@ -776,4 +795,117 @@ func TestReceiveOID4VCIFinalCredential_BatchCredentialsMayArriveOutOfOrder(t *te
 	req2.AdditionalHolderKeys = []jose.JSONWebKey{fixture2.additionalKey}
 	_, err = fixture2.wallet.ReceiveOID4VCIFinalCredential(req2)
 	require.ErrorContains(t, err, "not part of the request")
+}
+
+// verifyFinalClientAssertion parses a private_key_jwt client_assertion and
+// checks its signature, issuer, subject and audience.
+func verifyFinalClientAssertion(t *testing.T, assertion string, publicKey jose.JSONWebKey, expectedAudience, expectedClientID string) map[string]any {
+	t.Helper()
+	signature, err := jose.ParseSigned(assertion, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+	payload, err := signature.Verify(publicKey)
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	require.Equal(t, expectedClientID, claims["iss"])
+	require.Equal(t, expectedClientID, claims["sub"])
+	require.Equal(t, expectedAudience, claims["aud"])
+	exp, ok := claims["exp"].(float64)
+	require.True(t, ok)
+	require.Greater(t, int64(exp), time.Now().Unix())
+	return claims
+}
+
+func TestReceiveOID4VCIFinalCredential_PrivateKeyJwtClientAssertion(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.authMethodsSupported = []receiverTypes.TokenEndpointAuthMethod{receiverTypes.PrivateKeyJwt}
+		f.authSigningAlgsSupported = []jose.SignatureAlgorithm{jose.ES256}
+	})
+	keyEntry, publicJWK := newClientAuthKeyEntry(t, "client-key-1")
+	fixture.wallet.clientAuth = ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "client-1",
+		Key:      keyEntry,
+	}
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+
+	parForm := fixture.parForm
+	require.Equal(t, receiverTypes.ClientAssertionTypeJWTBearer, parForm.Get("client_assertion_type"))
+	require.NotEmpty(t, parForm.Get("client_assertion"))
+	parClaims := verifyFinalClientAssertion(t, parForm.Get("client_assertion"), publicJWK, fixture.server.URL, "client-1")
+
+	require.Len(t, fixture.tokenForms, 1)
+	tokenForm := fixture.tokenForms[0]
+	require.Equal(t, receiverTypes.ClientAssertionTypeJWTBearer, tokenForm.Get("client_assertion_type"))
+	require.NotEmpty(t, tokenForm.Get("client_assertion"))
+	tokenClaims := verifyFinalClientAssertion(t, tokenForm.Get("client_assertion"), publicJWK, fixture.server.URL, "client-1")
+
+	require.NotEqual(t, parClaims["jti"], tokenClaims["jti"])
+}
+
+func TestReceiveOID4VCIFinalCredential_PrivateKeyJwtNotAdvertisedFailsBeforePAR(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.authMethodsSupported = []receiverTypes.TokenEndpointAuthMethod{receiverTypes.ClientSecretBasic}
+		f.authSigningAlgsSupported = []jose.SignatureAlgorithm{jose.ES256}
+	})
+	keyEntry, _ := newClientAuthKeyEntry(t, "client-key-1")
+	fixture.wallet.clientAuth = ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "client-1",
+		Key:      keyEntry,
+	}
+
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorContains(t, err, "private_key_jwt")
+	require.Equal(t, 0, fixture.parCalls)
+}
+
+func TestReceiveOID4VCIFinalCredential_PrivateKeyJwtTokenRetryRefreshesAssertion(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.authMethodsSupported = []receiverTypes.TokenEndpointAuthMethod{receiverTypes.PrivateKeyJwt}
+		f.authSigningAlgsSupported = []jose.SignatureAlgorithm{jose.ES256}
+		f.tokenHandler = func(w http.ResponseWriter, r *http.Request) {
+			if f.tokenCalls == 1 {
+				w.Header().Set("DPoP-Nonce", "nonce-1")
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_dpop_nonce"})
+				return
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"access_token": "access-1", "token_type": "DPoP", "expires_in": 3600})
+		}
+	})
+	keyEntry, publicJWK := newClientAuthKeyEntry(t, "client-key-1")
+	fixture.wallet.clientAuth = ClientAuthConfig{
+		Method:   receiverTypes.PrivateKeyJwt,
+		ClientID: "client-1",
+		Key:      keyEntry,
+	}
+
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Equal(t, 2, fixture.tokenCalls)
+	require.Len(t, fixture.tokenForms, 2)
+
+	first := fixture.tokenForms[0].Get("client_assertion")
+	second := fixture.tokenForms[1].Get("client_assertion")
+	require.NotEmpty(t, first)
+	require.NotEmpty(t, second)
+	firstClaims := verifyFinalClientAssertion(t, first, publicJWK, fixture.server.URL, "client-1")
+	secondClaims := verifyFinalClientAssertion(t, second, publicJWK, fixture.server.URL, "client-1")
+	require.NotEqual(t, first, second)
+	require.NotEqual(t, firstClaims["jti"], secondClaims["jti"])
+}
+
+func TestReceiveOID4VCIFinalCredential_NoClientAuthSendsNoAssertion(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Empty(t, fixture.parForm.Get("client_assertion"))
+	require.Empty(t, fixture.parForm.Get("client_assertion_type"))
+	require.Len(t, fixture.tokenForms, 1)
+	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
+	require.Empty(t, fixture.tokenForms[0].Get("client_assertion_type"))
 }

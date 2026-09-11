@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -43,6 +44,11 @@ type Oid4vpPresenter struct {
 	// RequestURINonce generates the wallet_nonce sent with a Final request_uri
 	// POST. A nil value uses 32 random bytes, base64url-encoded without padding.
 	RequestURINonce func() (string, error)
+	// SupportedTransactionDataTypes lists the transaction_data "type" values the
+	// wallet can process. A nil or empty list means the wallet supports no
+	// transaction_data type, so any request carrying transaction_data is
+	// rejected with invalid_transaction_data (OID4VP 1.0 §5.1, §8.4).
+	SupportedTransactionDataTypes []string
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -125,25 +131,52 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
 	builder.walletMetadata = p.WalletMetadata
 	builder.requestURINonce = p.RequestURINonce
+	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
 	if p.RequestObjectValidation != nil {
 		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
 	}
 
+	requestURI := queryParams.Get("request_uri")
+	requestObj := queryParams.Get("request")
+	requestURIMethod := queryParams.Get("request_uri_method")
+	if !draft24 {
+		// RFC 9101 §5: "If this parameter is present in the authorization
+		// request, request_uri MUST NOT be present." The reciprocal sentence
+		// applies to request_uri. OID4VP 1.0 §5.10.2 requires terminating.
+		if requestURI != "" && requestObj != "" {
+			return nil, newAuthorizationRequestError(InvalidRequestError, "request and request_uri must not both be present in the same request")
+		}
+	}
+
 	// Request Object by Reference
-	if requestURI := queryParams.Get("request_uri"); requestURI != "" {
+	if requestURI != "" {
 		method := RequestURIMethodGET // Default to GET if not specified
-		if m := queryParams.Get("request_uri_method"); m != "" {
-			switch strings.ToLower(m) {
-			case "get":
-				method = RequestURIMethodGET
-			case "post":
-				method = RequestURIMethodPOST
-			default:
-				return nil, fmt.Errorf("unsupported request_uri_method: %s", m)
+		if requestURIMethod != "" {
+			if draft24 {
+				switch strings.ToLower(requestURIMethod) {
+				case "get":
+					method = RequestURIMethodGET
+				case "post":
+					method = RequestURIMethodPOST
+				default:
+					return nil, fmt.Errorf("unsupported request_uri_method: %s", requestURIMethod)
+				}
+			} else {
+				// OID4VP 1.0 §5.1: the two valid values are case-sensitive
+				// get and post; anything else is invalid_request_uri_method
+				// (OID4VP 1.0 §8.5).
+				switch requestURIMethod {
+				case "get":
+					method = RequestURIMethodGET
+				case "post":
+					method = RequestURIMethodPOST
+				default:
+					return nil, newAuthorizationRequestError(InvalidRequestURIMethodError, "request_uri_method must be 'get' or 'post' (case-sensitive), got %q", requestURIMethod)
+				}
 			}
 		}
 		builder = builder.WithRequestObjectURI(requestURI, method)
-	} else if requestObj := queryParams.Get("request"); requestObj != "" {
+	} else if requestObj != "" {
 		builder = builder.WithRequestObject(requestObj)
 	} else {
 		builder = builder.WithQueryParams(queryParams)
@@ -171,10 +204,18 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 
 // sendAuthorizationErrorResponse posts the OAuth 2.0 error authorization
 // response (error, error_description and state) to the Verifier's
-// response_uri when response_mode=direct_post. It is a no-op when the
-// partially parsed request has no usable direct_post response_uri.
+// response_uri. For response_mode=direct_post.jwt the error is encrypted into
+// the "response" JWE member when the verifier's encryption metadata is usable;
+// OID4VP 1.0 §8.3.1 permits plaintext when the Wallet is unable to generate an
+// encrypted response. It is a no-op when the partially parsed request has no
+// usable response_uri. Callers must have established that the request was
+// authenticated before allowing an outbound POST (see errorResponseAllowed).
 func (p *Oid4vpPresenter) sendAuthorizationErrorResponse(req *CredentialPresentationRequest, authzErr *AuthorizationRequestError) error {
-	if req == nil || req.ResponseMode != OAuthAuthzReqResponseModeDirectPost || req.ResponseURI == "" {
+	if req == nil || req.ResponseURI == "" {
+		return nil
+	}
+	encrypted := req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT
+	if req.ResponseMode != OAuthAuthzReqResponseModeDirectPost && !encrypted {
 		return nil
 	}
 
@@ -184,12 +225,32 @@ func (p *Oid4vpPresenter) sendAuthorizationErrorResponse(req *CredentialPresenta
 	}
 
 	formData := url.Values{}
-	formData.Set("error", string(authzErr.Code))
-	if authzErr.Err != nil {
-		formData.Set("error_description", authzErr.Err.Error())
+	if encrypted {
+		errorValues := map[string]any{"error": string(authzErr.Code)}
+		if authzErr.Err != nil {
+			errorValues["error_description"] = authzErr.Err.Error()
+		}
+		if req.State != "" {
+			errorValues["state"] = req.State
+		}
+		metadata := req.ClientMetadata
+		if payload, marshalErr := json.Marshal(errorValues); marshalErr == nil {
+			if token, encErr := p.encryptAuthorizationResponseJWE(payload, metadata); encErr == nil {
+				formData.Set("response", token)
+			}
+		}
 	}
-	if req.State != "" {
-		formData.Set("state", req.State)
+
+	// Plaintext error response, used for direct_post and, per §8.3.1, as the
+	// fallback when an encrypted response cannot be generated.
+	if formData.Get("response") == "" {
+		formData.Set("error", string(authzErr.Code))
+		if authzErr.Err != nil {
+			formData.Set("error_description", authzErr.Err.Error())
+		}
+		if req.State != "" {
+			formData.Set("state", req.State)
+		}
 	}
 
 	if _, err := p.postAuthorizationResponse(responseURI.String(), formData); err != nil {
@@ -485,7 +546,8 @@ func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool) *jose
 
 // usableVerifierEncryptionKey reports whether key supports ECDH-ES response
 // encryption. use must be "enc" or empty, the key must be EC (P-256, plus
-// P-384/P-521 under Final only) and alg must be empty or a supported key
+// P-384/P-521 under Final only) and alg must be present (OID4VP 1.0 §8.3:
+// "The `alg` parameter MUST be present in the JWKs.") and a supported key
 // agreement algorithm.
 func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool) bool {
 	if key == nil || key.Key == nil {
@@ -508,7 +570,8 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool) bool {
 		return false
 	}
 	if key.Algorithm == "" {
-		return true
+		// OID4VP 1.0 §8.3 requires alg on every JWK used for encryption.
+		return false
 	}
 	if _, err := parseJWEKeyAlgorithm(key.Algorithm); err != nil {
 		return false
@@ -549,7 +612,7 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
 	if err != nil {
 		return "", fmt.Errorf("failed to read authorization response submission body: %w", err)
 	}
@@ -690,6 +753,9 @@ type requestBuilder struct {
 	expectedClientID        string
 	walletMetadata          map[string]any
 	requestURINonce         func() (string, error)
+	// supportedTransactionDataTypes is copied from the presenter for the Final
+	// transaction_data validation.
+	supportedTransactionDataTypes []string
 	// sentWalletNonce records the wallet_nonce sent with a Final request_uri
 	// POST so the returned Request Object can be required to echo it
 	// (OID4VP 1.0 §5.10.1). It is empty for GET and when no nonce was sent.
@@ -747,6 +813,13 @@ func (b *requestBuilder) validate() error {
 
 	if b.req.ResponseType == "" {
 		return fmt.Errorf("response_type is required")
+	}
+
+	if !b.draft24 && b.req.ResponseType != "vp_token" {
+		// OID4VP 1.0 §5.6 defines the Response Type vp_token; §8 Table 1 leaves
+		// the VP Token behavior unspecified for any other value. This wallet
+		// presents vp_token only and rejects the others as invalid_request.
+		return newAuthorizationRequestError(InvalidRequestError, "response_type must be vp_token, got %q", b.req.ResponseType)
 	}
 
 	if b.req.ClientID == "" {
@@ -845,6 +918,17 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			case OID4VPClientIDPrefixX509Hash:
 				// x509_hash binds the request object to an x5c certificate hash,
 				// so it does not derive a redirect URI from client_id.
+			case OID4VPClientIDPrefixPreRegistered:
+				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
+				// Client Identifier, the Wallet MUST treat the Client Identifier
+				// as referencing a pre-registered client." No Verifier
+				// authentication is performed. A signed pre-registered Request
+				// Object would need a caller-resolved key; that is left
+				// unsupported and refused on the Request Object path.
+				if b.draft24 {
+					b.errValidation = fmt.Errorf("invalid client_id format")
+					return
+				}
 			default: // unimplemented: other client_id prefixes
 				b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
 			}
@@ -879,6 +963,16 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.ResponseURI = responseURIFromParam
+
+	if b.requestSource == "query" && !b.draft24 {
+		if _, hasMethod := params["request_uri_method"]; hasMethod {
+			// OID4VP 1.0 §5.1: "request_uri_method parameter MUST NOT be
+			// present if a request_uri parameter is not present." This path is
+			// only reached when request_uri and request are both absent.
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "request_uri_method must not be present without request_uri")
+			return
+		}
+	}
 
 	if b.draft24 {
 		raw, exists := params["presentation_definition"]
@@ -918,25 +1012,6 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	if rawDcqlQuery, exists := params["dcql_query"]; exists {
-		var dcqlQuery *DcqlQuery
-		var err error
-		if b.draft24 {
-			dcqlQuery, err = parseDraft24DcqlQuery(rawDcqlQuery)
-		} else {
-			// The HAIP format restriction is applied where the Final DCQL query
-			// is validated (dcql.go), not by re-parsing after the fact.
-			dcqlQuery, err = parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
-		}
-		if err != nil {
-			b.errValidation = err
-			return
-		}
-		b.req.DcqlQuery = dcqlQuery
-	} else if !b.draft24 {
-		missing = append(missing, "dcql_query")
-	}
-
 	if cm, exists := params["client_metadata"]; exists && cm != nil {
 		var clientMeta VerifierMetadata
 		if cmMap, ok := cm.(map[string]any); ok {
@@ -963,24 +1038,139 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ClientMetadata = &clientMeta
 	}
 
+	if rawDcqlQuery, exists := params["dcql_query"]; exists {
+		var dcqlQuery *DcqlQuery
+		var err error
+		if b.draft24 {
+			dcqlQuery, err = parseDraft24DcqlQuery(rawDcqlQuery)
+		} else {
+			// The HAIP format restriction is applied where the Final DCQL query
+			// is validated (dcql.go), not by re-parsing after the fact.
+			dcqlQuery, err = parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
+		}
+		if err != nil {
+			b.errValidation = err
+			return
+		}
+		b.req.DcqlQuery = dcqlQuery
+	} else if !b.draft24 {
+		missing = append(missing, "dcql_query")
+	}
+
 	if len(missing) > 0 {
 		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "missing required parameters: %s", strings.Join(missing, ", "))
 	}
 
 	if td, exists := params["transaction_data"]; exists && td != nil {
-		switch v := td.(type) {
-		case []interface{}:
-			for _, item := range v {
-				if str, ok := item.(string); ok {
+		if b.draft24 {
+			switch v := td.(type) {
+			case []interface{}:
+				for _, item := range v {
+					if str, ok := item.(string); ok {
+						b.req.TransactionData = append(b.req.TransactionData, str)
+					}
+				}
+			case []string:
+				b.req.TransactionData = v
+			}
+		} else {
+			switch v := td.(type) {
+			case []interface{}:
+				for _, item := range v {
+					str, ok := item.(string)
+					if !ok {
+						b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data entries must be base64url strings")
+						return
+					}
 					b.req.TransactionData = append(b.req.TransactionData, str)
 				}
+			case []string:
+				b.req.TransactionData = v
+			case string:
+				// application/x-www-form-urlencoded transfers the array as a
+				// JSON-serialized string.
+				var entries []string
+				if err := json.Unmarshal([]byte(v), &entries); err != nil {
+					b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be a JSON array of strings")
+					return
+				}
+				b.req.TransactionData = entries
+			default:
+				b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be an array of strings")
+				return
 			}
-		case []string:
-			b.req.TransactionData = v
 		}
 	}
 
 	b.req.TransactionDataHashesAlg = getParam("transaction_data_hashes_alg", false)
+
+	if !b.draft24 && b.errValidation == nil && len(b.req.TransactionData) > 0 {
+		if err := b.validateFinalTransactionData(); err != nil {
+			b.errValidation = err
+			return
+		}
+	}
+}
+
+// validateFinalTransactionData enforces OID4VP 1.0 §5.1 and §8.4/§8.5 for the
+// Final path: every transaction_data entry must be base64url-encoded JSON with
+// a supported type and a non-empty credential_ids array referencing the DCQL
+// queries. Any failure is invalid_transaction_data.
+func (b *requestBuilder) validateFinalTransactionData() error {
+	supported := make(map[string]bool, len(b.supportedTransactionDataTypes))
+	for _, dataType := range b.supportedTransactionDataTypes {
+		supported[dataType] = true
+	}
+	queryIDs := make(map[string]bool)
+	if b.req.DcqlQuery != nil {
+		for _, query := range b.req.DcqlQuery.Credentials {
+			queryIDs[query.ID] = true
+		}
+	}
+	for i, encoded := range b.req.TransactionData {
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+		if err != nil {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d] is not base64url-encoded JSON: %v", i, err)
+		}
+		var entry map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&entry); err != nil {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d] is not a JSON object: %v", i, err)
+		}
+		dataType, ok := entry["type"].(string)
+		if !ok || dataType == "" {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].type is required and must be a string", i)
+		}
+		if !supported[dataType] {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].type %q is not supported", i, dataType)
+		}
+		credentialIDs, ok := entry["credential_ids"].([]any)
+		if !ok || len(credentialIDs) == 0 {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids must be a non-empty array", i)
+		}
+		for _, rawID := range credentialIDs {
+			id, ok := rawID.(string)
+			if !ok || !queryIDs[id] {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
+			}
+		}
+		// OID4VP 1.0 Appendix B.3.3.1 places transaction_data_hashes_alg in the
+		// transaction_data object alongside type and credential_ids, not at the
+		// Authorization Request top level.
+		if rawAlg, exists := entry["transaction_data_hashes_alg"]; exists {
+			algs, ok := rawAlg.([]any)
+			if !ok || len(algs) == 0 {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must be a non-empty array of strings", i)
+			}
+			for _, rawName := range algs {
+				if name, ok := rawName.(string); !ok || name == "" {
+					return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must contain only non-empty strings", i)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // WithQueryParams populates the CredentialPresentationRequest fields from URL query parameters.
@@ -1250,6 +1440,9 @@ const (
 	OID4VPClientIDPrefixX509SanDNS          OID4VPClientIDPrefix = "x509_san_dns"
 	OID4VPClientIDPrefixX509Hash            OID4VPClientIDPrefix = "x509_hash"
 	OID4VPClientIDPrefixOriginal            OID4VPClientIDPrefix = "origin"
+	// OID4VPClientIDPrefixPreRegistered is the pseudo-prefix used when the
+	// client_id contains no ":" character (OID4VP 1.0 §5.9.2).
+	OID4VPClientIDPrefixPreRegistered OID4VPClientIDPrefix = "pre-registered"
 )
 
 // parseOID4VPClientID parses and validates the client_id according to OID4VP specification.
@@ -1261,7 +1454,13 @@ func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 
 	parts := strings.SplitN(clientID, ":", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid client_id format")
+		// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the Client
+		// Identifier, the Wallet MUST treat the Client Identifier as
+		// referencing a pre-registered client."
+		if clientID == "" {
+			return nil, fmt.Errorf("invalid client_id format")
+		}
+		return &OID4VPClientID{original: clientID, prefix: OID4VPClientIDPrefixPreRegistered}, nil
 	}
 
 	prefix := parts[0]

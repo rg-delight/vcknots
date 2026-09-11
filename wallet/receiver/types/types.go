@@ -503,6 +503,14 @@ type PushedAuthorizationRequest struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	IssuerState         string
+	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
+	// private_key_jwt client authentication. RFC 9126 §2 requires the PAR
+	// request to carry the client authentication of the token endpoint. An
+	// empty value omits the parameter.
+	ClientAssertion string
+	// ClientAssertionType is the matching client_assertion_type. Empty omits
+	// the parameter.
+	ClientAssertionType string
 }
 
 type PushedAuthorizationResponse struct {
@@ -510,11 +518,29 @@ type PushedAuthorizationResponse struct {
 	ExpiresIn  int    `json:"expires_in,omitempty"`
 }
 
+// ClientAssertionFactory produces a fresh client_assertion for a single HTTP
+// attempt. RFC 7523 §3 requires every assertion to carry a unique jti, so a
+// retry that re-sends the token request (for example after a DPoP nonce
+// challenge) must not replay the previous assertion.
+type ClientAssertionFactory func() (string, error)
+
 type AuthorizationCodeTokenRequest struct {
 	Code         string
 	RedirectURI  string
 	CodeVerifier string
 	ClientID     string
+	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
+	// private_key_jwt client authentication. An empty value omits the
+	// parameter.
+	ClientAssertion string
+	// ClientAssertionType is the matching client_assertion_type. Empty omits
+	// the parameter.
+	ClientAssertionType string
+	// ClientAssertionFactory, when set, is called once per HTTP attempt to
+	// obtain a fresh client_assertion; it takes precedence over
+	// ClientAssertion. The retry wrappers use it so a DPoP nonce retry never
+	// replays the same jti.
+	ClientAssertionFactory ClientAssertionFactory
 }
 
 type ClientAttestationChallengeResponse struct {

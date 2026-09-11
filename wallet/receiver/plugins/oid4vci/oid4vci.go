@@ -475,6 +475,11 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, req
 	if request.IssuerState != "" {
 		formData.Set("issuer_state", request.IssuerState)
 	}
+	// RFC 9126 §2: a PAR request carries the token endpoint's client
+	// authentication. Client attestation headers and a client assertion are
+	// different mechanisms and may coexist on the wire, but a deployment uses
+	// one of them.
+	setClientAssertionForm(formData, request.ClientAssertion, request.ClientAssertionType)
 
 	var response types.PushedAuthorizationResponse
 	if err := o.doFinalRequest(http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", headersToMap(headers), &response); err != nil {
@@ -494,6 +499,7 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 	formData.Set("redirect_uri", request.RedirectURI)
 	formData.Set("code_verifier", request.CodeVerifier)
 	formData.Set("client_id", request.ClientID)
+	setClientAssertionForm(formData, request.ClientAssertion, request.ClientAssertionType)
 
 	requestHeaders := headersToMap(headers)
 	if dpopProof != "" {
@@ -521,15 +527,29 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(e
 	if err != nil {
 		return nil, err
 	}
-	formData := url.Values{}
-	formData.Set("grant_type", "authorization_code")
-	formData.Set("code", request.Code)
-	formData.Set("redirect_uri", request.RedirectURI)
-	formData.Set("code_verifier", request.CodeVerifier)
-	formData.Set("client_id", request.ClientID)
+	// The form is rebuilt for every attempt so a fresh client_assertion
+	// (unique jti, RFC 7523 §3) accompanies each re-sent request.
+	buildBody := func() ([]byte, error) {
+		assertion := request.ClientAssertion
+		if request.ClientAssertionFactory != nil {
+			fresh, err := request.ClientAssertionFactory()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
+			}
+			assertion = fresh
+		}
+		formData := url.Values{}
+		formData.Set("grant_type", "authorization_code")
+		formData.Set("code", request.Code)
+		formData.Set("redirect_uri", request.RedirectURI)
+		formData.Set("code_verifier", request.CodeVerifier)
+		formData.Set("client_id", request.ClientID)
+		setClientAssertionForm(formData, assertion, request.ClientAssertionType)
+		return []byte(formData.Encode()), nil
+	}
 
 	var response types.CredentialIssuanceAccessToken
-	if err := o.doFormRequestWithDpopAndAttestationRetry(endpoint, strings.NewReader(formData.Encode()), headersFactory, proofFactory, &response); err != nil {
+	if err := o.doFormRequestWithDpopAndAttestationRetry(endpoint, buildBody, headersFactory, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
@@ -1067,11 +1087,11 @@ func newCredentialEndpointError(statusCode int, contentType string, body []byte,
 	return credentialErr
 }
 
-func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint common.URIField, body io.Reader, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {
+func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint common.URIField, bodyFactory func() ([]byte, error), headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {
 	if headersFactory == nil {
 		return fmt.Errorf("OAuth client attestation headers factory is required")
 	}
-	return o.doFormRequestWithDpopAndHeadersRetry(endpoint, body, func() (map[string]string, error) {
+	return o.doFormRequestWithDpopAndHeadersRetry(endpoint, bodyFactory, func() (map[string]string, error) {
 		headers, err := headersFactory()
 		if err != nil {
 			return nil, err
@@ -1080,18 +1100,17 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint comm
 	}, proofFactory, target)
 }
 
-func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.URIField, body io.Reader, headersFactory func() (map[string]string, error), proofFactory DPoPProofFactory, target any) error {
+func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.URIField, bodyFactory func() ([]byte, error), headersFactory func() (map[string]string, error), proofFactory DPoPProofFactory, target any) error {
 	if proofFactory == nil {
 		return fmt.Errorf("DPoP proof factory is required")
 	}
 	if headersFactory == nil {
 		return fmt.Errorf("headers factory is required")
 	}
-
-	bodyBytes, err := io.ReadAll(body)
-	if err != nil {
-		return err
+	if bodyFactory == nil {
+		return fmt.Errorf("body factory is required")
 	}
+
 	endpointURL := url.URL(endpoint)
 	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
@@ -1104,6 +1123,10 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.U
 			return err
 		}
 		headers, err := headersFactory()
+		if err != nil {
+			return err
+		}
+		bodyBytes, err := bodyFactory()
 		if err != nil {
 			return err
 		}
@@ -1150,6 +1173,22 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(endpoint common.U
 	}
 
 	return fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+}
+
+// setClientAssertionForm adds the RFC 7523 §2.2 private_key_jwt client
+// authentication parameters to a form. Both members are omitted when no
+// assertion is present, so an unauthenticated request carries no client
+// authentication parameters. A supplied assertion without an explicit type is
+// sent with the JWT bearer value, the only type private_key_jwt uses.
+func setClientAssertionForm(formData url.Values, clientAssertion, clientAssertionType string) {
+	if strings.TrimSpace(clientAssertion) == "" {
+		return
+	}
+	if strings.TrimSpace(clientAssertionType) == "" {
+		clientAssertionType = types.ClientAssertionTypeJWTBearer
+	}
+	formData.Set("client_assertion", clientAssertion)
+	formData.Set("client_assertion_type", clientAssertionType)
 }
 
 func headersToMap(headers types.OAuthClientAttestationHeaders) map[string]string {
