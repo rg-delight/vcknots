@@ -88,6 +88,7 @@ type finalIssuanceFixture struct {
 	pushedState        string
 	lastCredentialBody map[string]any
 	parForm            url.Values
+	parHeaders         http.Header
 	tokenForms         []url.Values
 }
 
@@ -226,6 +227,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		f.parCalls++
 		_ = r.ParseForm()
 		f.parForm = r.Form
+		f.parHeaders = r.Header.Clone()
 		f.pushedState = r.Form.Get("state")
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": f.parExpiresIn})
 	case "/authorize":
@@ -1017,4 +1019,22 @@ func TestReceiveOID4VCIFinalCredential_RARCarriesLocationsWhenAuthorizationServe
 	// The fixture always advertises authorization_servers, so locations must
 	// name the credential issuer identifier.
 	require.Equal(t, []any{fixture.credentialIssuer(fixture.server.URL)}, details[0]["locations"])
+}
+
+// Attestation-based client authentication takes precedence over a configured
+// private_key_jwt ClientAuth: no client_assertion is sent and the authorization
+// server does not have to advertise private_key_jwt.
+func TestReceiveOID4VCIFinalCredential_AttestationSupersedesPrivateKeyJwt(t *testing.T) {
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-1")
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.authMethodsSupported = []receiverTypes.TokenEndpointAuthMethod{receiverTypes.ClientSecretBasic}
+	})
+	keyEntry, _ := newClientAuthKeyEntry(t, "client-key-1")
+	fixture.wallet.clientAuth = ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: "client-1", Key: keyEntry}
+	fixture.wallet.clientAttestation = &StaticClientAttester{Key: attesterKey, Issuer: "https://attester.example"}
+	req := fixture.request()
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+	require.Empty(t, fixture.parForm.Get("client_assertion"))
+	require.NotEmpty(t, fixture.parHeaders.Get("OAuth-Client-Attestation"))
 }

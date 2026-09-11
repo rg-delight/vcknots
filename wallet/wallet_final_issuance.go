@@ -307,7 +307,13 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
 	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
 	usePrivateKeyJwt := false
-	if w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
+	// Attestation-based client authentication (Appendix E) and private_key_jwt
+	// are alternative mechanisms; a wallet uses one per issuance. When an
+	// attestation provider is in use it authenticates the client, so a
+	// ClientAuth configured for other flows is not sent and the authorization
+	// server need not advertise private_key_jwt.
+	attestationInUse := w.clientAttestation != nil || req.AttesterKey.Key != nil
+	if !attestationInUse && w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
 		if !asMetadataSupportsAuthMethod(authorizationServerMetadata, receiverTypes.PrivateKeyJwt) {
 			return nil, fmt.Errorf("authorization server metadata does not advertise the configured private_key_jwt client authentication method")
 		}
