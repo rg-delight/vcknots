@@ -2,6 +2,7 @@ package presenter
 
 import (
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/env"
 	"net/url"
 
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
@@ -30,7 +31,7 @@ func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (
 
 func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
-		oid4vpReceiver := &oid4vp.Oid4vpPresenter{}
+		oid4vpReceiver := &oid4vp.Oid4vpPresenter{AllowHTTP: env.IsHTTPAllowed()}
 		return d.registerPlugin(types.Oid4vp, oid4vpReceiver)
 	}
 }
@@ -85,6 +86,45 @@ func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol,
 	return redirectURI, nil
 }
 
+// PresentDCQL uses the registered plugin's multiple-query presentation capability.
+func (d *PresentationDispatcher) PresentDCQL(protocol SupportedPresentationProtocol, endpoint url.URL, vpToken map[string][]string, request *PresentationRequest) (string, error) {
+	plugin, err := d.getPlugin(protocol)
+	if err != nil {
+		return "", err
+	}
+	dcql, ok := plugin.(interface {
+		PresentDCQL(types.SupportedPresentationProtocol, url.URL, map[string][]string, *PresentationRequest) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", types.ErrUnsupportedProtocol)
+	}
+	redirectURI, err := dcql.PresentDCQL(protocol, endpoint, vpToken, request)
+	if err != nil {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", err)
+	}
+	return redirectURI, nil
+}
+
+func (d *PresentationDispatcher) SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *oid4vp.VerifierMetadata) (string, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
+	}
+
+	finalPresenter, ok := plugin.(interface {
+		SubmitEncryptedAuthorizationResponse(url.URL, map[string]any, *oid4vp.VerifierMetadata) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", types.ErrUnsupportedProtocol)
+	}
+
+	body, err := finalPresenter.SubmitEncryptedAuthorizationResponse(endpoint, authzResponse, metadata)
+	if err != nil {
+		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
+	}
+	return body, nil
+}
+
 func (d *PresentationDispatcher) ParseRequestURI(uriString string) (*oid4vp.CredentialPresentationRequest, error) {
 	// Determine protocol from URI (currently only OID4VP is supported)
 	protocol := types.Oid4vp
@@ -103,4 +143,37 @@ func (d *PresentationDispatcher) ParseRequestURI(uriString string) (*oid4vp.Cred
 		return req, nil
 	}
 	return nil, types.NewPresenterError(protocol, "", "parse_uri", types.ErrUnsupportedProtocol)
+}
+
+// ParseDraft24RequestURI parses a Presentation Exchange request using the registered Draft24 capability.
+func (d *PresentationDispatcher) ParseDraft24RequestURI(uri string) (*oid4vp.CredentialPresentationRequest, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return nil, err
+	}
+	draft, ok := plugin.(interface {
+		ParseDraft24PresentationRequest(string) (*oid4vp.CredentialPresentationRequest, error)
+	})
+	if !ok {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_draft24", types.ErrUnsupportedProtocol)
+	}
+	return draft.ParseDraft24PresentationRequest(uri)
+}
+
+// PresentDraft24 submits a legacy Presentation Exchange response through the registered capability.
+func (d *PresentationDispatcher) PresentDraft24(protocol SupportedPresentationProtocol, endpoint url.URL, serialized []byte, submission types.PresentationSubmission, request *PresentationRequest) (string, error) {
+	if len(serialized) == 0 {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrInvalidPresentation)
+	}
+	plugin, err := d.getPlugin(protocol)
+	if err != nil {
+		return "", err
+	}
+	draft, ok := plugin.(interface {
+		PresentDraft24(types.SupportedPresentationProtocol, url.URL, []byte, types.PresentationSubmission, *types.PresentationRequest) (string, error)
+	})
+	if !ok {
+		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrUnsupportedProtocol)
+	}
+	return draft.PresentDraft24(protocol, endpoint, serialized, submission, request)
 }

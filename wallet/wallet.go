@@ -53,7 +53,7 @@ import (
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
-	sdjwtvc "github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
+	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -113,6 +113,10 @@ type Config struct {
 	// every protocol plugin carrying the same profile or NewWalletWithConfig
 	// fails.
 	Profile profile.Profile
+
+	// SupportedTransactionDataTypes lists the transaction_data "type" values
+	// the wallet can process. It is propagated to the default presenter plugin.
+	SupportedTransactionDataTypes []string
 
 	// CredentialAcceptance configures the minimum credential verification rules
 	// applied before a received credential is stored.
@@ -321,6 +325,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}
 	if !presenterInjected {
 		propagatePresenterProfile(config.Presenter, normalizedProfile)
+		propagatePresenterTransactionDataTypes(config.Presenter, config.SupportedTransactionDataTypes)
 	}
 	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
 		return nil, err
@@ -367,6 +372,20 @@ func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, val
 	for _, plugin := range dispatcher.Plugins() {
 		if setter, ok := plugin.(setProtocolProfile); ok {
 			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+// setSupportedTransactionDataTypes is implemented by presenter plugins that can
+// accept the wallet's supported transaction_data types.
+type setSupportedTransactionDataTypes interface {
+	SetSupportedTransactionDataTypes([]string)
+}
+
+func propagatePresenterTransactionDataTypes(dispatcher *presenter.PresentationDispatcher, values []string) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setSupportedTransactionDataTypes); ok {
+			setter.SetSupportedTransactionDataTypes(values)
 		}
 	}
 }
@@ -530,6 +549,10 @@ type SavedCredential struct {
 	// credential. It is nil for credentials loaded from storage.
 	Verification *CredentialVerification
 }
+
+// OID4VPFinalAuthorizationResponse represents the JSON payload that is
+// encrypted into a direct_post.jwt response for OID4VP Final DCQL requests.
+type OID4VPFinalAuthorizationResponse map[string]any
 
 // RedirectHandler is called when the verifier returns a redirect URI.
 type RedirectHandler func(string) error
@@ -1627,26 +1650,20 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 	if err != nil {
 		return "", err
 	}
-
-	credentials, flavor, err := w.selectCredentialsForPresentation(req)
-	if err != nil {
+	if err := validateTransactionDataHolderBinding(req); err != nil {
 		return "", err
 	}
 
-	if serializeOptions == nil {
-		serializeOptions, err = w.serializer.GetDefaultOption(*flavor)
-		if err != nil {
-			return "", err
-		}
-	}
-	applyOID4VPRequestOptions(req, serializeOptions)
-
-	presentation, err := w.buildPresentation(credentials, key, req)
+	vpToken, err := w.buildDCQLVPToken(req, key, serializeOptions)
 	if err != nil {
 		return "", err
 	}
-
-	redirectURI, err := w.submitPresentation(presentation, flavor, endpoint, req, key, serializeOptions)
+	presentationRequest := &presenterTypes.PresentationRequest{
+		State:          req.State,
+		ResponseMode:   string(req.ResponseMode),
+		ClientMetadata: req.ClientMetadata,
+	}
+	redirectURI, err := w.presenter.PresentDCQL(presenterTypes.Oid4vp, *endpoint, vpToken, presentationRequest)
 	if err != nil {
 		return "", err
 	}
@@ -1659,6 +1676,70 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 	return redirectURI, nil
 }
 
+// BuildOID4VPFinalAuthorizationResponse builds an OID4VP Final DCQL
+// authorization response from credentials already stored in the wallet. The
+// returned value is ready to encrypt with Oid4vpPresenter.CreateEncryptedAuthorizationResponse
+// and submit as the direct_post.jwt "response" form field.
+func (w *Wallet) BuildOID4VPFinalAuthorizationResponse(uriString string, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
+	req, _, err := w.parseAuthorizationRequest(uriString)
+	if err != nil {
+		return nil, err
+	}
+	return w.buildOID4VPFinalAuthorizationResponse(req, key)
+}
+
+// SubmitOID4VPFinalAuthorizationResponse builds, encrypts, and submits an
+// OID4VP Final direct_post.jwt authorization response for credentials already
+// stored in the wallet. The returned body is the verifier response after posting
+// the encrypted "response" form field to response_uri.
+func (w *Wallet) SubmitOID4VPFinalAuthorizationResponse(uriString string, key IKeyEntry) (string, error) {
+	req, endpoint, err := w.parseAuthorizationRequest(uriString)
+	if err != nil {
+		return "", err
+	}
+	return w.SubmitOID4VPFinalAuthorizationRequest(req, *endpoint, key)
+}
+
+// SubmitOID4VPFinalAuthorizationRequest builds, encrypts, and submits an
+// already-parsed OID4VP Final direct_post.jwt authorization request. This keeps
+// adapters from re-fetching one-time request_uri values when they need to inspect
+// the request before handing control to the wallet API.
+func (w *Wallet) SubmitOID4VPFinalAuthorizationRequest(req *oid4vp.CredentialPresentationRequest, endpoint url.URL, key IKeyEntry) (string, error) {
+	if req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPostJWT {
+		return "", fmt.Errorf("response_mode must be direct_post.jwt for OID4VP Final encrypted submission")
+	}
+	if req.ClientMetadata == nil {
+		return "", fmt.Errorf("client_metadata is required for OID4VP Final encrypted submission")
+	}
+	response, err := w.buildOID4VPFinalAuthorizationResponse(req, key)
+	if err != nil {
+		return "", err
+	}
+	return w.presenter.SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint, map[string]any(response), req.ClientMetadata)
+}
+
+func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPresentationRequest, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
+	if req.DcqlQuery == nil {
+		return nil, fmt.Errorf("dcql_query is required for OID4VP Final authorization response")
+	}
+	if err := validateTransactionDataHolderBinding(req); err != nil {
+		return nil, err
+	}
+
+	vpToken, err := w.buildDCQLVPToken(req, key, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	response := OID4VPFinalAuthorizationResponse{
+		"vp_token": vpToken,
+	}
+	if req.State != "" {
+		response["state"] = req.State
+	}
+	return response, nil
+}
+
 // parseAuthorizationRequest parses the authorization request URI and determines the endpoint.
 func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.CredentialPresentationRequest, *url.URL, error) {
 	req, err := w.presenter.ParseRequestURI(uriString)
@@ -1666,14 +1747,14 @@ func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.Credential
 		return nil, nil, fmt.Errorf("failed to parse request URI: %w", err)
 	}
 
-	if req.RedirectURI == "" {
+	if req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPost && req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPostJWT && req.RedirectURI == "" {
 		return nil, nil, fmt.Errorf("redirect_uri is not specified")
 	}
 
 	var endpoint *url.URL
-	if req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPost {
+	if req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPost || req.ResponseMode == oid4vp.OAuthAuthzReqResponseModeDirectPostJWT {
 		if req.ResponseURI == "" {
-			return nil, nil, fmt.Errorf("response_uri is not specified for response_mode=direct_post")
+			return nil, nil, fmt.Errorf("response_uri is not specified for response_mode=%s", req.ResponseMode)
 		}
 		endpoint, err = url.Parse(req.ResponseURI)
 		if err != nil {
@@ -1686,7 +1767,7 @@ func (w *Wallet) parseAuthorizationRequest(uriString string) (*oid4vp.Credential
 		}
 	}
 
-	if req.DcqlQuery == nil {
+	if req.DcqlQuery == nil || len(req.DcqlQuery.Credentials) == 0 {
 		return nil, nil, fmt.Errorf("dcql_query is not specified")
 	}
 
@@ -1715,6 +1796,96 @@ func (w *Wallet) selectCredentialsForPresentation(req *oid4vp.CredentialPresenta
 	}
 
 	return selectedCredentials, serializationFlavor, nil
+}
+
+func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*SavedCredential, []oid4vp.DCQLCredentialSelection, error) {
+	entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{
+		Offset: 0,
+		Limit:  nil,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get credential entries: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil, newAccessDeniedError("no credentials available for presentation")
+	}
+
+	credentialsByID := map[string]*SavedCredential{}
+	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(entries))
+	for _, entry := range entries {
+		flavor, err := entry.Entry.SerializationFlavor()
+		if err != nil {
+			continue
+		}
+		vcFormat, _, err := flavor.OID4VPFormatIdentifier()
+		if err != nil {
+			continue
+		}
+		claimNames := []string{}
+		claimValues := map[string]any{}
+		claimObject := map[string]any{}
+		if entry.Credential.Claims != nil {
+			for name, value := range *entry.Credential.Claims {
+				claimNames = append(claimNames, name)
+				claimValues[name] = value
+				claimObject[name] = value
+			}
+		}
+		if flavor == credential.SDJwtVC {
+			if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(entry.Entry.Raw)); reconstructErr == nil {
+				claimObject = reconstructed
+			}
+		}
+		vct := ""
+		if len(entry.Credential.Types) > 0 {
+			vct = entry.Credential.Types[0]
+		}
+		credentialsByID[entry.Entry.Id] = entry
+		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
+			ID:              entry.Entry.Id,
+			Format:          vcFormat,
+			VCT:             vct,
+			Claims:          claimNames,
+			ClaimValues:     claimValues,
+			ClaimObject:     claimObject,
+			HolderBound:     boolPointer(credentialHasHolderBinding(flavor, entry)),
+			AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(entry.Entry.Raw)),
+		})
+	}
+
+	selections, err := oid4vp.ResolveSatisfiableDCQLCredentials(query, candidates)
+	if err != nil {
+		// OID4VP 1.0 Section 8.5: the Wallet did not have the requested
+		// Credentials to satisfy the Authorization Request.
+		return nil, nil, newAccessDeniedError("%v", err)
+	}
+	if len(selections) == 0 {
+		return nil, nil, newAccessDeniedError("dcql_query cannot be satisfied by stored credentials")
+	}
+	return credentialsByID, selections, nil
+}
+
+// newAccessDeniedError returns the typed OID4VP 1.0 Section 8.5 access_denied
+// error so callers can send an authorization error response.
+func newAccessDeniedError(format string, args ...any) *oid4vp.AuthorizationRequestError {
+	return &oid4vp.AuthorizationRequestError{Code: oid4vp.AccessDeniedError, Err: fmt.Errorf(format, args...)}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+// credentialHasHolderBinding reports whether a stored credential carries a
+// cryptographic holder binding key.
+func credentialHasHolderBinding(flavor credential.SupportedSerializationFlavor, entry *SavedCredential) bool {
+	if flavor == credential.SDJwtVC {
+		return sdJWTCarriesConfirmation(entry.Entry.Raw)
+	}
+	if entry.Credential == nil || entry.Credential.Claims == nil {
+		return false
+	}
+	_, present := (*entry.Credential.Claims)["cnf"]
+	return present
 }
 
 func newestCredentials(entries []*SavedCredential, limit int) []*SavedCredential {
@@ -1800,49 +1971,4 @@ func applyOID4VPRequestOptions(req *oid4vp.CredentialPresentationRequest, option
 	}
 	options.SetAudience(req.ClientID)
 	options.SetNonce(req.Nonce)
-}
-
-// submitPresentation serializes and submits the presentation to the verifier.
-func (w *Wallet) submitPresentation(presentation *credential.CredentialPresentation, flavor *credential.SupportedSerializationFlavor, endpoint *url.URL, req *oid4vp.CredentialPresentationRequest, key IKeyEntry, options serializerTypes.SerializePresentationOptions) (string, error) {
-	if len(req.TransactionData) > 0 {
-		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok && sdOpts != nil {
-			transactionDataHashesAlg := req.TransactionDataHashesAlg
-			if transactionDataHashesAlg == "" {
-				// OID4VP transaction_data_hashes_alg default when omitted.
-				transactionDataHashesAlg = "sha-256"
-			}
-
-			sdOpts.TransactionData = req.TransactionData
-			sdOpts.TransactionDataHashesAlg = transactionDataHashesAlg
-		}
-	}
-
-	bytes, _, err := w.serializer.SerializePresentation(
-		*flavor,
-		presentation,
-		key,
-		options,
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize presentation: %w", err)
-	}
-
-	// The presentation is fixed to answer the first Credential Query for now
-	// (Issue #606); its id becomes the key of the vp_token JSON object.
-	presentationRequest := &presenterTypes.PresentationRequest{
-		State:             req.State,
-		CredentialQueryID: req.DcqlQuery.Credentials[0].ID,
-		ClientMetadata:    req.ClientMetadata,
-	}
-
-	if req.ClientMetadata != nil {
-		presentationRequest.AuthorizationEncryptedRespAlg = req.ClientMetadata.AuthorizationEncryptedResponseAlg
-		presentationRequest.AuthorizationEncryptedRespEnc = req.ClientMetadata.AuthorizationEncryptedResponseEnc
-	}
-
-	redirectURI, err := w.presenter.Present(presenterTypes.Oid4vp, *endpoint, bytes, presentationRequest)
-	if err != nil {
-		return "", err
-	}
-	return redirectURI, nil
 }

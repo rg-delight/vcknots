@@ -52,6 +52,11 @@ func NewPresenterError(protocol SupportedPresentationProtocol, endpoint, op stri
 // PresentationRequest contains the information needed to present a credential
 type PresentationRequest struct {
 	State string
+	// ResponseMode is the Authorization Request response_mode. For the Final
+	// DCQL path "direct_post.jwt" requires an encrypted response and
+	// "direct_post" a plaintext one; an empty value lets the presenter infer the
+	// mode from the verifier's encryption metadata (legacy direct plugin use).
+	ResponseMode string
 	// CredentialQueryID is the id of the DCQL Credential Query the presentation
 	// responds to. It becomes the key of the vp_token JSON object.
 	CredentialQueryID             string
@@ -69,3 +74,17 @@ type SupportedPresentationProtocol int
 const (
 	Oid4vp SupportedPresentationProtocol = iota
 )
+
+// PresentationSubmission and DescriptorMapItem are used by the explicit Draft24 API.
+type PresentationSubmission struct {
+	ID            string              `json:"id"`
+	DefinitionID  string              `json:"definition_id"`
+	DescriptorMap []DescriptorMapItem `json:"descriptor_map"`
+}
+
+type DescriptorMapItem struct {
+	ID         string             `json:"id"`
+	Format     string             `json:"format"`
+	Path       string             `json:"path"`
+	PathNested *DescriptorMapItem `json:"path_nested,omitempty"`
+}

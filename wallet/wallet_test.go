@@ -737,14 +737,16 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 }
 
 func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
+	// VP §5.9.3: with response_mode direct_post the redirect_uri: Client
+	// Identifier is the Response URI, so the two must be the same value.
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
 		dcqlQuery,
 	)
 
@@ -754,14 +756,14 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 }
 
 func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
 		dcqlQuery,
 	)
 
@@ -3501,11 +3503,11 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 }
 
 // createMockOID4VPServer creates a mock HTTP server for OID4VP testing
-func createMockOID4VPServer() *mockserver.OID4VPPresenterServer {
-	return mockserver.NewOID4VPPresenterServer(nil)
-}
 
 func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
@@ -3513,9 +3515,6 @@ func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 
 	serverURL, _ := url.Parse(server.URL())
 
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Errorf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -3533,14 +3532,13 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
-
 	serverURL, err := url.Parse(server.URL())
 	require.NoError(t, err)
 
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	req := ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
@@ -3562,66 +3560,8 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 	require.Contains(t, err.Error(), `credential configuration "unsupported-config" is not supported by issuer metadata`)
 }
 
-func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
-	// First, create a mock OID4VCI server to get a credential
-	vciServer := createMockOID4VCIServer()
-	defer vciServer.Close()
-
-	// Create a mock OID4VP server for presentation
-	vpServer := createMockOID4VPServer()
-	defer vpServer.Close()
-
-	controller := createTestControllerWithDefaults(t)
-
-	vciServerURL, _ := url.Parse(vciServer.URL())
-	vpEndpointURL, _ := url.Parse(vpServer.URL() + "/present")
-
-	// Step 1: First receive a credential via OID4VCI
-	receiveReq := ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           vciServerURL,
-			CredentialConfigurationIDs: []string{"test-config"},
-			Grants: map[string]*CredentialOfferGrant{
-				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
-					PreAuthorizedCode: "test-code",
-				},
-			},
-		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
-	}
-
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
-	savedCredential, err := controller.ReceiveCredential(receiveReq)
-	if err != nil {
-		t.Logf("Failed to receive credential for presentation test: %v", err)
-		return
-	}
-
-	t.Logf("Successfully received credential for presentation: %s", savedCredential.Entry.Id)
-
-	// Step 2: Now present the credential via OID4VP
-	// Create OID4VP URI with all required parameters per OID4VP specification
-	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`
-	presentationURI := fmt.Sprintf("openid4vp://present?dcql_query=%s&client_id=test-verifier&redirect_uri=%s&response_type=vp_token&response_mode=direct_post&nonce=test-nonce-123&state=test-state-456",
-		url.QueryEscape(dcqlQuery), vpEndpointURL.String())
-
-	mockKey := newMockKeyEntry()
-	_, err = controller.PresentCredential(presentationURI, mockKey, nil)
-	if err != nil {
-		t.Fatalf("PresentCredential failed: %v", err)
-	}
-
-	t.Log("PresentCredential succeeded with full OID4VCI->OID4VP flow")
-}
-
 func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
-	// First, create a mock OID4VCI server to get a credential
-	vciServer := createMockOID4VCIServer()
-	defer vciServer.Close()
-
+	controller, mockKey := receiveCredentialForPresentationTest(t)
 	redirectTarget := "https://example.com/redirect"
 	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3630,36 +3570,9 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 	}))
 	defer responseServer.Close()
 
-	controller := createTestControllerWithDefaults(t)
-
-	vciServerURL, _ := url.Parse(vciServer.URL())
-
-	// Step 1: First receive a credential via OID4VCI
-	receiveReq := ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           vciServerURL,
-			CredentialConfigurationIDs: []string{"test-config"},
-			Grants: map[string]*CredentialOfferGrant{
-				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {
-					PreAuthorizedCode: "test-code",
-				},
-			},
-		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
-	}
-
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	_, err := controller.ReceiveCredential(receiveReq)
-	if err != nil {
-		t.Skipf("ReceiveCredential failed with mock server, skipping redirect handler test: %v", err)
-	}
-
 	// Step 2: Present the credential and verify redirect handler execution
 	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`
-	clientID := "redirect_uri:https://example.com/cb"
+	clientID := "redirect_uri:" + responseServer.URL
 	presentationURI := fmt.Sprintf(
 		"openid4vp://present?dcql_query=%s&client_id=%s&response_type=vp_token&response_mode=direct_post&response_uri=%s&nonce=test-nonce-123&state=test-state-456",
 		url.QueryEscape(dcqlQuery),
@@ -3677,7 +3590,6 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 		},
 	}
 
-	mockKey := newMockKeyEntry()
 	redirectURI, err := controller.PresentCredentialWithOptions(presentationURI, mockKey, options)
 	require.NoError(t, err)
 	require.Equal(t, redirectTarget, redirectURI)
@@ -3686,6 +3598,9 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 }
 
 func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	controller := createTestControllerWithDefaults(t)
 
 	tests := []struct {
@@ -3724,9 +3639,6 @@ func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *test
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-			defer env.SetHTTPAllowed(http_allowed)
-			env.SetHTTPAllowed(true)
 			serverURL := tt.setupURL()
 			_, err := controller.FetchCredentialIssuerMetadata(serverURL, tt.receiverType)
 
@@ -4405,6 +4317,97 @@ func TestWallet_validateCredentialConfigurationIDs(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+		})
+	}
+}
+
+func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry) {
+	t.Helper()
+	t.Setenv(env.DEBUG.String(), "")
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
+	controller := createTestControllerWithDefaults(t)
+	issuer, _, closeServer := newReceiveCredentialTestServer(t)
+	t.Cleanup(closeServer)
+	key := newMockKeyEntry()
+	saved, err := controller.ReceiveCredential(ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"test-config"},
+			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "test-code"}},
+		}, Type: receiverTypes.Oid4vci, Key: key,
+	})
+	require.NoError(t, err, "presentation test must receive and store a real signed credential")
+	require.NotNil(t, saved)
+	require.NotEmpty(t, saved.Entry.Raw)
+	return controller, key
+}
+
+func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
+	for _, draft := range []bool{false, true} {
+		name := "final"
+		if draft {
+			name = "draft24"
+		}
+		t.Run(name, func(t *testing.T) {
+			controller, key := receiveCredentialForPresentationTest(t)
+			captured := make(chan url.Values, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				captured <- r.PostForm
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"redirect_uri":"https://verifier.example/done"}`))
+			}))
+			defer server.Close()
+			params := url.Values{
+				"client_id": {"redirect_uri:" + server.URL}, "response_uri": {server.URL},
+				"response_type": {"vp_token"}, "response_mode": {"direct_post"},
+				"nonce": {"test-nonce"}, "state": {"test-state"},
+			}
+			if draft {
+				params.Set("scope", "openid")
+				params.Set("presentation_definition", `{"id":"definition","input_descriptors":[{"id":"identity","format":{"jwt_vp_json":{"alg":["ES256"]}}}]}`)
+			} else {
+				params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"jwt_vc_json","meta":{}}]}`)
+			}
+			uri := "openid4vp://present?" + params.Encode()
+			if draft {
+				require.NoError(t, controller.PresentDraft24Credential(uri, key, nil))
+			} else {
+				redirect, err := controller.PresentCredential(uri, key, nil)
+				require.NoError(t, err)
+				require.Equal(t, "https://verifier.example/done", redirect)
+			}
+			var form url.Values
+			select {
+			case form = <-captured:
+			default:
+				t.Fatal("verifier received no presentation")
+			}
+			require.Equal(t, "test-state", form.Get("state"))
+			var serialized string
+			if draft {
+				serialized = form.Get("vp_token")
+				var submission struct {
+					DefinitionID string `json:"definition_id"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(form.Get("presentation_submission")), &submission))
+				require.Equal(t, "definition", submission.DefinitionID)
+			} else {
+				require.NotContains(t, form, "presentation_submission")
+				var response map[string][]string
+				require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &response))
+				require.Len(t, response["identity"], 1)
+				serialized = response["identity"][0]
+			}
+			signed, err := jwt.ParseSigned(serialized, []jose.SignatureAlgorithm{jose.ES256})
+			require.NoError(t, err)
+			var claims map[string]any
+			require.NoError(t, signed.Claims(key.PublicKey().Key, &claims))
+			require.Equal(t, "test-nonce", claims["nonce"])
+			vp, ok := claims["vp"].(map[string]any)
+			require.True(t, ok)
+			require.Len(t, vp["verifiableCredential"], 1)
 		})
 	}
 }
