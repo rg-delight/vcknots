@@ -2186,6 +2186,39 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 	})
 }
 
+func TestOid4vciReceiver_PushAuthorizationRequestAuthorizationDetails(t *testing.T) {
+	var captured url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		captured = r.Form
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+		ResponseType: "code",
+		ClientID:     "client-1",
+		RedirectURI:  "https://wallet.example/callback",
+		AuthorizationDetails: []map[string]any{
+			{
+				"type":                        types.AuthorizationDetailTypeOpenIDCredential,
+				"credential_configuration_id": "pid",
+			},
+		},
+	}, types.OAuthClientAttestationHeaders{})
+	require.NoError(t, err)
+
+	assert.Empty(t, captured.Get("scope"), "scope must be omitted when authorization_details is used")
+	var details []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(captured.Get("authorization_details")), &details))
+	require.Len(t, details, 1)
+	assert.Equal(t, types.AuthorizationDetailTypeOpenIDCredential, details[0]["type"])
+	assert.Equal(t, "pid", details[0]["credential_configuration_id"])
+}
+
 func TestOid4vciReceiver_ExchangeAuthorizationCodeClientAssertion(t *testing.T) {
 	var captured url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

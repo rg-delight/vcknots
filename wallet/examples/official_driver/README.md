@@ -42,6 +42,7 @@ absolute paths in the configuration.
 | `issuerJWKSFiles` | []string | `[]` | JWKS files (`{"keys":[...]}`) of public issuer keys for credentials without an `x5c` header. Non-empty sets `CredentialAcceptancePolicy.ResolveIssuerKeys`, which returns all operator-chosen keys; the library matches `kid`. Private keys are rejected. |
 | `requireHolderBinding` | bool | `false` | → `CredentialAcceptancePolicy.RequireHolderBinding`; credentials without `cnf` are rejected. |
 | `redirectUri` | string | `""` | Wallet's registered redirect URI for the authorization code flow. Required by `receive-code`. |
+| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`. Selects how `receive-code` requests the Credential Configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2): `""` uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope (error before PAR otherwise); `"authorization_details"` sends `[{"type":"openid_credential","credential_configuration_id":...}]` and no scope. HAIP defaults to `scope` because HAIP §4.2 requires it; an explicit `"authorization_details"` is allowed. |
 | `attesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticClientAttester` → `wallet.Config.ClientAttestation`. Must be set together with `attesterIssuer`. The JWK's `x5c` chain, when present, becomes the client attestation header chain. |
 | `attesterIssuer` | string | `""` | `iss` of the static client attester. Must be set together with `attesterKeyFile`. |
 | `keyAttesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticKeyAttester` → `wallet.Config.KeyAttestation`. Must be set together with `keyAttesterIssuer`. |
@@ -90,6 +91,7 @@ Example configuration:
   "clientKeyFile": "/path/to/client.jwk",
   "clientId": "registered-wallet-client",
   "redirectUri": "https://wallet.example/callback",
+  "authorizationRequestType": "",
   "attesterKeyFile": "/path/to/attester.jwk",
   "attesterIssuer": "https://attester.example",
   "keyAttesterKeyFile": "/path/to/key-attester.jwk",

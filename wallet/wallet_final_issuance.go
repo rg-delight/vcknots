@@ -30,6 +30,16 @@ import (
 // resolution.
 const maxCredentialOfferResponseBytes int64 = 64 << 10
 
+// OID4VCIFinalReceiveRequest.AuthorizationRequestType selects how the selected
+// Credential Configuration is requested at the authorization endpoint as
+// defined by OpenID4VCI 1.0 §5.1.1 (authorization_details) and §5.1.2 (scope).
+// The empty value lets the wallet choose: scope when the Credential
+// Configuration advertises one, authorization_details otherwise.
+const (
+	OID4VCIAuthorizationRequestTypeScope                = "scope"
+	OID4VCIAuthorizationRequestTypeAuthorizationDetails = "authorization_details"
+)
+
 // AuthorizationResponseError is the RFC 6749 §4.1.2 / RFC 9207 §2.4 error
 // redirect payload returned to the wallet's registered redirect_uri.
 type AuthorizationResponseError struct {
@@ -329,19 +339,27 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, err
 	}
 	codeChallengeBytes := sha256.Sum256([]byte(codeVerifier))
-	scope := credentialConfigurationID
-	if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok && config.Scope != "" {
-		scope = config.Scope
+	// §5.1.1/§5.1.2: the Credential Configuration is requested either with
+	// scope or with authorization_details. An explicit scope on a
+	// configuration that does not advertise one fails here, before PAR.
+	scope, authorizationDetails, err := oid4vciAuthorizationRequestParameters(
+		req.AuthorizationRequestType,
+		credentialConfigurationID,
+		issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID],
+	)
+	if err != nil {
+		return nil, err
 	}
 	parRequest := receiverTypes.PushedAuthorizationRequest{
-		ResponseType:        "code",
-		ClientID:            req.ClientID,
-		RedirectURI:         req.RedirectURI,
-		Scope:               scope,
-		State:               state,
-		CodeChallenge:       base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
-		CodeChallengeMethod: "S256",
-		IssuerState:         authCodeGrant.IssuerState,
+		ResponseType:         "code",
+		ClientID:             req.ClientID,
+		RedirectURI:          req.RedirectURI,
+		Scope:                scope,
+		AuthorizationDetails: authorizationDetails,
+		State:                state,
+		CodeChallenge:        base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
+		CodeChallengeMethod:  "S256",
+		IssuerState:          authCodeGrant.IssuerState,
 	}
 	if usePrivateKeyJwt {
 		assertion, err := generateClientAssertion()
@@ -825,6 +843,39 @@ func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalRec
 	return response, nil
 }
 
+// oid4vciAuthorizationRequestParameters resolves how the selected Credential
+// Configuration is requested at the authorization endpoint. OpenID4VCI 1.0
+// §5.1.1 defines the authorization_details member and §5.1.2 the scope member.
+// The default uses scope when the configuration advertises one, because
+// §12.2.4 says "If scope is absent, the only way to request the Credential is
+// using authorization_details"; otherwise it sends an openid_credential entry
+// carrying credential_configuration_id.
+func oid4vciAuthorizationRequestParameters(requestedType, credentialConfigurationID string, config receiverTypes.CredentialConfiguration) (string, []map[string]any, error) {
+	scope := strings.TrimSpace(config.Scope)
+	authorizationDetails := []map[string]any{
+		{
+			"type":                        receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+			"credential_configuration_id": credentialConfigurationID,
+		},
+	}
+	switch strings.TrimSpace(requestedType) {
+	case "":
+		if scope != "" {
+			return config.Scope, nil, nil
+		}
+		return "", authorizationDetails, nil
+	case OID4VCIAuthorizationRequestTypeScope:
+		if scope == "" {
+			return "", nil, fmt.Errorf("authorization request type %q requires the credential configuration %q to advertise a scope", OID4VCIAuthorizationRequestTypeScope, credentialConfigurationID)
+		}
+		return config.Scope, nil, nil
+	case OID4VCIAuthorizationRequestTypeAuthorizationDetails:
+		return "", authorizationDetails, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported authorization request type %q", requestedType)
+	}
+}
+
 func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) *string {
 	if accessToken == nil {
 		return nil
@@ -833,6 +884,17 @@ func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialI
 	for _, detail := range accessToken.AuthorizationDetails {
 		if detail.Type != receiverTypes.AuthorizationDetailTypeOpenIDCredential {
 			continue
+		}
+		// §6.2: each authorization_details entry corresponds to the Credential
+		// Configuration named by credential_configuration_id. When the issuer
+		// echoes it, use the first credential_identifier of the matching entry.
+		if detail.CredentialConfigurationID == credentialConfigurationID {
+			for _, identifier := range detail.CredentialIdentifiers {
+				if identifier != "" {
+					selected := identifier
+					return &selected
+				}
+			}
 		}
 		for _, identifier := range detail.CredentialIdentifiers {
 			if identifier != "" {

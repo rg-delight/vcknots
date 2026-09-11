@@ -559,7 +559,17 @@ type OID4VCIFinalReceiveRequest struct {
 	Type            receiverTypes.SupportedReceivingTypes
 	ClientID        string
 	RedirectURI     string
-	HolderKey       jose.JSONWebKey
+	// AuthorizationRequestType selects how the selected Credential
+	// Configuration is requested at the authorization endpoint. The empty
+	// value uses scope when the configuration advertises one and
+	// authorization_details otherwise. "scope" requires the configuration to
+	// advertise a scope (error before PAR otherwise);
+	// "authorization_details" sends an openid_credential entry with the
+	// configuration id and no scope (OpenID4VCI 1.0 §5.1.1). Under HAIP the
+	// default remains scope because HAIP §4.2 requires it, but HAIP does not
+	// forbid an explicit authorization_details request.
+	AuthorizationRequestType string
+	HolderKey                jose.JSONWebKey
 	// AdditionalHolderKeys requests §14.6 batch issuance. Each key yields one
 	// proofs.jwt entry (HolderKey plus these, in order), and the returned
 	// credentials are verified against the key at the same index. The total

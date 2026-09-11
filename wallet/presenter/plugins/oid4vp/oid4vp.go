@@ -485,7 +485,7 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 		allowedEncryptions = haipJWEOnlyContentEncryptions
 	}
 
-	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, haip)
+	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, haip, metadata.AuthorizationEncryptedResponseAlg)
 	if key == nil {
 		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks")
 	}
@@ -531,13 +531,13 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 // selectUsableVerifierEncryptionKey iterates client_metadata.jwks.keys in order
 // and returns the first key usable for response encryption, skipping unusable
 // keys silently (RFC 7517 §5, "ignore unusable keys").
-func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool) *jose.JSONWebKey {
+func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool, legacyAlg string) *jose.JSONWebKey {
 	if set == nil {
 		return nil
 	}
 	for i := range set.Keys {
 		key := &set.Keys[i]
-		if usableVerifierEncryptionKey(key, haip) {
+		if usableVerifierEncryptionKey(key, haip, legacyAlg) {
 			return key
 		}
 	}
@@ -549,7 +549,7 @@ func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool) *jose
 // P-384/P-521 under Final only) and alg must be present (OID4VP 1.0 §8.3:
 // "The `alg` parameter MUST be present in the JWKs.") and a supported key
 // agreement algorithm.
-func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool) bool {
+func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool, legacyAlg string) bool {
 	if key == nil || key.Key == nil {
 		return false
 	}
@@ -569,14 +569,21 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool) bool {
 	default:
 		return false
 	}
-	if key.Algorithm == "" {
-		// OID4VP 1.0 §8.3 requires alg on every JWK used for encryption.
+	algName := key.Algorithm
+	if algName == "" {
+		// OID4VP 1.0 §8.3 requires alg on every JWK used for encryption. A
+		// verifier that still advertises the draft-era
+		// authorization_encrypted_response_alg member instead is accepted on the
+		// Final profile for interoperability; HAIP keeps the strict rule.
+		if haip || legacyAlg == "" {
+			return false
+		}
+		algName = legacyAlg
+	}
+	if _, err := parseJWEKeyAlgorithm(algName); err != nil {
 		return false
 	}
-	if _, err := parseJWEKeyAlgorithm(key.Algorithm); err != nil {
-		return false
-	}
-	if haip && key.Algorithm != "ECDH-ES" {
+	if haip && algName != "ECDH-ES" {
 		return false
 	}
 	return true

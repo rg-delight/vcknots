@@ -66,6 +66,7 @@ type finalIssuanceFixture struct {
 	includeNotification      bool
 	responseEncryption       bool
 	encryptionRequired       bool
+	omitScope                bool
 	keyAttestationsRequired  bool
 	batchSize                int
 	parExpiresIn             int
@@ -166,7 +167,10 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 	base := f.server.URL
 	switch r.URL.Path {
 	case "/.well-known/openid-credential-issuer":
-		credentialConfiguration := map[string]any{"format": "dc+sd-jwt", "scope": "pid-scope"}
+		credentialConfiguration := map[string]any{"format": "dc+sd-jwt"}
+		if !f.omitScope {
+			credentialConfiguration["scope"] = "pid-scope"
+		}
 		if f.keyAttestationsRequired {
 			credentialConfiguration["proof_types_supported"] = map[string]any{
 				"jwt": map[string]any{
@@ -463,6 +467,93 @@ func TestReceiveOID4VCIFinalCredential_UsesCredentialIdentifier(t *testing.T) {
 		}
 	})
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Equal(t, "id-1", fixture.lastCredentialBody["credential_identifier"])
+	_, hasConfigurationID := fixture.lastCredentialBody["credential_configuration_id"]
+	require.False(t, hasConfigurationID)
+}
+
+func decodeAuthorizationDetails(t *testing.T, raw string) []map[string]any {
+	t.Helper()
+	require.NotEmpty(t, raw)
+	var details []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &details))
+	return details
+}
+
+// OpenID4VCI 1.0 §5.1.2 / §12.2.4: the default requests the scope the
+// Credential Configuration advertises.
+func TestReceiveOID4VCIFinalCredential_DefaultUsesScopeWhenAdvertised(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Equal(t, "pid-scope", fixture.parForm.Get("scope"))
+	require.Empty(t, fixture.parForm.Get("authorization_details"))
+}
+
+// OpenID4VCI 1.0 §12.2.4: "If scope is absent, the only way to request the
+// Credential is using authorization_details".
+func TestReceiveOID4VCIFinalCredential_DefaultUsesAuthorizationDetailsWithoutScope(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.omitScope = true
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Empty(t, fixture.parForm.Get("scope"))
+	details := decodeAuthorizationDetails(t, fixture.parForm.Get("authorization_details"))
+	require.Len(t, details, 1)
+	require.Equal(t, receiverTypes.AuthorizationDetailTypeOpenIDCredential, details[0]["type"])
+	require.Equal(t, "pid", details[0]["credential_configuration_id"])
+}
+
+// OpenID4VCI 1.0 §5.1.1: explicit authorization_details sends an
+// openid_credential entry with credential_configuration_id and no scope.
+func TestReceiveOID4VCIFinalCredential_ExplicitAuthorizationDetails(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+	require.Empty(t, fixture.parForm.Get("scope"))
+	details := decodeAuthorizationDetails(t, fixture.parForm.Get("authorization_details"))
+	require.Len(t, details, 1)
+	require.Equal(t, receiverTypes.AuthorizationDetailTypeOpenIDCredential, details[0]["type"])
+	require.Equal(t, "pid", details[0]["credential_configuration_id"])
+}
+
+// OpenID4VCI 1.0 §5.1.2: explicit scope requires an advertised scope; the
+// failure happens before PAR.
+func TestReceiveOID4VCIFinalCredential_ExplicitScopeWithoutAdvertisedScopeFailsBeforePAR(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.omitScope = true
+	})
+	req := fixture.request()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeScope
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorContains(t, err, "scope")
+	require.Equal(t, 0, fixture.parCalls)
+}
+
+// OpenID4VCI 1.0 §6.2: the token response entry names the Credential
+// Configuration; the wallet uses the first credential_identifier of the entry
+// that matches the requested configuration.
+func TestReceiveOID4VCIFinalCredential_RARPathMapsCredentialIdentifierByConfiguration(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = map[string]any{
+			"access_token": "access-1",
+			"token_type":   "DPoP",
+			"authorization_details": []map[string]any{
+				{
+					"type":                        receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+					"credential_configuration_id": "pid",
+					"credential_identifiers":      []string{"id-1"},
+				},
+			},
+		}
+	})
+	req := fixture.request()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
 	require.NoError(t, err)
 	require.Equal(t, "id-1", fixture.lastCredentialBody["credential_identifier"])
 	_, hasConfigurationID := fixture.lastCredentialBody["credential_configuration_id"]

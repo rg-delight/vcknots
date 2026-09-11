@@ -410,8 +410,12 @@ const (
 
 // RFC 9396 (Rich Authorization Requests)
 type CredentialIssuanceAuthorizationDetail struct {
-	Type                  string   `json:"type,omitempty"`
-	CredentialIdentifiers []string `json:"credential_identifiers,omitempty"`
+	Type string `json:"type,omitempty"`
+	// CredentialConfigurationID is the OpenID4VCI 1.0 §6.2 token response
+	// member that ties the credential_identifiers to the Credential
+	// Configuration requested with authorization_details.
+	CredentialConfigurationID string   `json:"credential_configuration_id,omitempty"`
+	CredentialIdentifiers     []string `json:"credential_identifiers,omitempty"`
 }
 
 const AuthorizationDetailTypeOpenIDCredential = "openid_credential"
@@ -495,14 +499,21 @@ type PreAuthorizedCodeTokenRequest struct {
 }
 
 type PushedAuthorizationRequest struct {
-	ResponseType        string
-	ClientID            string
-	RedirectURI         string
-	Scope               string
-	State               string
-	CodeChallenge       string
-	CodeChallengeMethod string
-	IssuerState         string
+	ResponseType string
+	ClientID     string
+	RedirectURI  string
+	// Scope is the OAuth 2.0 scope parameter. OpenID4VCI 1.0 §5.1.2 uses it to
+	// select the Credential Configuration; empty omits the parameter.
+	Scope string
+	// AuthorizationDetails is the RFC 9396 §2 authorization_details JSON array
+	// parameter. OpenID4VCI 1.0 §5.1.1 uses entries of type
+	// openid_credential with credential_configuration_id to request a
+	// Credential Configuration. Empty omits the parameter.
+	AuthorizationDetails []map[string]any
+	State                string
+	CodeChallenge        string
+	CodeChallengeMethod  string
+	IssuerState          string
 	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
 	// private_key_jwt client authentication. RFC 9126 §2 requires the PAR
 	// request to carry the client authentication of the token endpoint. An

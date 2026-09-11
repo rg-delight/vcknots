@@ -45,6 +45,10 @@ type configuration struct {
 	// RedirectURI is the wallet's registered redirect URI for the OpenID4VCI
 	// authorization code flow (receive-code).
 	RedirectURI string `json:"redirectUri"`
+	// AuthorizationRequestType selects how receive-code requests the Credential
+	// Configuration at the authorization endpoint: "" (default), "scope" or
+	// "authorization_details" (OpenID4VCI 1.0 §5.1.1/§5.1.2).
+	AuthorizationRequestType string `json:"authorizationRequestType"`
 	// AttesterKeyFile/AttesterIssuer configure a test-only StaticClientAttester.
 	// AttesterKeyFile is a private JWK whose x5c chain (when present) becomes the
 	// attestation header chain.
@@ -455,6 +459,7 @@ func run(config configuration, request operation) (any, error) {
 			Type:                            receiverTypes.Oid4vci,
 			ClientID:                        config.ClientID,
 			RedirectURI:                     config.RedirectURI,
+			AuthorizationRequestType:        config.AuthorizationRequestType,
 			HolderKey:                       holderKey,
 			ClientKey:                       clientKey,
 			CredentialResponseEncryptionKey: encryptionKey,

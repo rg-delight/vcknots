@@ -468,7 +468,19 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, req
 	formData.Set("response_type", request.ResponseType)
 	formData.Set("client_id", request.ClientID)
 	formData.Set("redirect_uri", request.RedirectURI)
-	formData.Set("scope", request.Scope)
+	// OpenID4VCI 1.0 §5.1.1/§5.1.2: scope and authorization_details are
+	// alternative ways to select the requested Credential Configuration; an
+	// empty value omits the parameter so the other method is unambiguous.
+	if request.Scope != "" {
+		formData.Set("scope", request.Scope)
+	}
+	if len(request.AuthorizationDetails) > 0 {
+		encoded, err := json.Marshal(request.AuthorizationDetails)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode authorization_details: %w", err)
+		}
+		formData.Set("authorization_details", string(encoded))
+	}
 	formData.Set("state", request.State)
 	formData.Set("code_challenge", request.CodeChallenge)
 	formData.Set("code_challenge_method", request.CodeChallengeMethod)
