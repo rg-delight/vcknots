@@ -81,8 +81,10 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 				request := &types.PresentationRequest{State: "state", CredentialQueryID: "identity"}
 				if encrypted {
 					request.ClientMetadata = &VerifierMetadata{
-						AuthorizationEncryptedResponseAlg: "ECDH-ES", AuthorizationEncryptedResponseEnc: "A256GCM",
-						Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "recipient", Use: "enc", Algorithm: "ECDH-ES"}}},
+						AuthorizationEncryptedResponseAlg:   "ECDH-ES",
+						AuthorizationEncryptedResponseEnc:   "A256GCM",
+						EncryptedResponseEncValuesSupported: []string{"A256GCM"},
+						Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "recipient", Use: "enc", Algorithm: "ECDH-ES"}}},
 					}
 				}
 				var redirect string

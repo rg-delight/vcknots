@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,15 +20,27 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
+	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
+
+func sameKeyThumbprint(t *testing.T, a, b jose.JSONWebKey) bool {
+	t.Helper()
+	aThumbprint, err := a.Thumbprint(crypto.SHA256)
+	require.NoError(t, err)
+	bThumbprint, err := b.Thumbprint(crypto.SHA256)
+	require.NoError(t, err)
+	return bytes.Equal(aThumbprint, bThumbprint)
+}
 
 type sdjwtPresentationFixture struct {
 	wallet        *Wallet
@@ -127,6 +141,19 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 		signed, err := jwt.Signed(signer).Claims(claims).Serialize()
 		require.NoError(t, err)
 		wire := strings.Join(append([]string{signed}, disclosures...), "~") + "~"
+		if boundKey != nil && !sameKeyThumbprint(t, *boundKey, holder.PublicKey()) {
+			// Deliberately persist a credential bound to a different holder key
+			// so presentation tests can exercise holder-binding enforcement,
+			// which reception now rejects through the public API.
+			entry := credstoreTypes.CredentialEntry{
+				Id:         uuid.NewString(),
+				ReceivedAt: time.Now(),
+				Raw:        []byte(wire),
+				MimeType:   string(credential.SDJwtVC),
+			}
+			require.NoError(t, controller.credStore.SaveCredentialEntry(entry, credstoreTypes.SupportedCredStoreTypes(0)))
+			return
+		}
 		wires <- wire
 		issuer, err := url.Parse(server.URL)
 		require.NoError(t, err)

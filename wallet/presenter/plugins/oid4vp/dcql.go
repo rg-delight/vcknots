@@ -85,14 +85,30 @@ var supportedCredentialFormats = func() map[string]bool {
 // a non-empty string consisting of alphanumeric, underscore and hyphen characters.
 var credentialQueryIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// haipCredentialFormats are the only DCQL Credential Format Identifiers HAIP
+// 1.0 permits: SD-JWT VC is dc+sd-jwt and ISO mdoc is mso_mdoc (HAIP §5.3.2,
+// §6.1). Other Final formats are valid for OpenID4VP but not for HAIP.
+var haipCredentialFormats = map[string]bool{
+	"dc+sd-jwt": true,
+	"mso_mdoc":  true,
+}
+
 // parseDcqlQuery validates the dcql_query Authorization Request parameter and
-// returns the typed query. raw may be a JSON string (query parameter) or an
-// already-decoded JSON object (Request Object claim).
+// returns the typed query for the Final profile.
+func parseDcqlQuery(raw any) (*DcqlQuery, error) {
+	return parseDcqlQueryWithHAIP(raw, false)
+}
+
+// parseDcqlQueryWithHAIP validates the dcql_query Authorization Request
+// parameter and returns the typed query. raw may be a JSON string (query
+// parameter) or an already-decoded JSON object (Request Object claim). When
+// haip is true the accepted Credential Format Identifiers are restricted to
+// HAIP 1.0's dc+sd-jwt and mso_mdoc.
 //
 // Validation failures are returned as *AuthorizationRequestError:
 //   - invalid_request for syntactically malformed queries
 //   - vp_formats_not_supported when a requested Credential format is not supported
-func parseDcqlQuery(raw any) (*DcqlQuery, error) {
+func parseDcqlQueryWithHAIP(raw any, haip bool) (*DcqlQuery, error) {
 	queryMap, err := decodeDcqlQueryObject(raw)
 	if err != nil {
 		return nil, err
@@ -113,7 +129,7 @@ func parseDcqlQuery(raw any) (*DcqlQuery, error) {
 		if !ok {
 			return nil, newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d] must be a JSON object", i)
 		}
-		if err := validateCredentialQuery(i, credentialQuery, seenIDs); err != nil {
+		if err := validateCredentialQuery(i, credentialQuery, seenIDs, haip); err != nil {
 			return nil, err
 		}
 	}
@@ -213,7 +229,7 @@ func decodeDcqlQueryObject(raw any) (map[string]any, error) {
 
 // validateCredentialQuery validates a single Credential Query object as per
 // OID4VP 1.0 Section 6.1, recording its id in seenIDs for duplicate detection.
-func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs map[string]bool) error {
+func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs map[string]bool, haip bool) error {
 	rawID, exists := credentialQuery["id"]
 	if !exists {
 		return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].id is required", index)
@@ -234,6 +250,12 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 	format, ok := rawFormat.(string)
 	if !ok || format == "" {
 		return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].format must be a non-empty string", index)
+	}
+	if haip && !haipCredentialFormats[format] {
+		// HAIP §5.3.2 / §6.1: HAIP only uses the dc+sd-jwt and mso_mdoc
+		// Credential Format Identifiers. A Final format such as jwt_vc_json is
+		// invalid rather than merely unsupported under this profile.
+		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile only permits the dc+sd-jwt and mso_mdoc credential formats, got %q", format)
 	}
 	if !supportedCredentialFormats[format] {
 		return newAuthorizationRequestError(VPFormatsNotSupportedError, "dcql_query.credentials[%d].format %q is not supported by this wallet", index, format)

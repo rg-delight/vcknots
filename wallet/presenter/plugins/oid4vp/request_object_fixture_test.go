@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -18,16 +19,18 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 type requestObjectFixture struct {
-	root, leaf   *x509.Certificate
-	rootKey, key *ecdsa.PrivateKey
-	now          time.Time
-	server       *httptest.Server
-	mu           sync.RWMutex
-	crl          []byte
-	crlRequests  int
+	root, leaf    *x509.Certificate
+	rootKey, key  *ecdsa.PrivateKey
+	now           time.Time
+	server        *httptest.Server
+	mu            sync.RWMutex
+	crl           []byte
+	crlRequests   int
+	requestObject []byte
 }
 
 func newRequestObjectFixture(t *testing.T, dnsNames ...string) *requestObjectFixture {
@@ -58,15 +61,23 @@ func newRequestObjectFixture(t *testing.T, dnsNames ...string) *requestObjectFix
 	}
 	f.setCRL(t, false)
 	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/root.crl" {
+		f.mu.RLock()
+		crl := f.crl
+		requestObject := f.requestObject
+		f.mu.RUnlock()
+		switch r.URL.Path {
+		case "/root.crl":
+			f.mu.Lock()
+			f.crlRequests++
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/pkix-crl")
+			_, _ = w.Write(crl)
+		case "/request-object":
+			w.Header().Set("Content-Type", "application/oauth-authz-req+jwt")
+			_, _ = w.Write(requestObject)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.crlRequests++
-		w.Header().Set("Content-Type", "application/pkix-crl")
-		_, _ = w.Write(f.crl)
 	}))
 	t.Cleanup(f.server.Close)
 	leaf := &x509.Certificate{
@@ -146,4 +157,93 @@ func (f *requestObjectFixture) parse(t *testing.T, claims map[string]any) (*Cred
 	t.Helper()
 	uri := "openid4vp://authorize?" + url.Values{"client_id": []string{f.clientID()}, "request": []string{f.sign(t, claims, nil)}}.Encode()
 	return f.presenter().ParsePresentationRequest(uri)
+}
+
+type requestDelivery string
+
+const (
+	deliverByValue     requestDelivery = "value"
+	deliverByReference requestDelivery = "reference"
+	deliverByQuery     requestDelivery = "query"
+)
+
+// requestFixtureOptions selects how a signed Request Object is delivered and
+// which Final/HAIP policy the presenter enforces.
+type requestFixtureOptions struct {
+	Profile      profile.Profile
+	Delivery     requestDelivery
+	ResponseMode string
+	DCQLFormat   string
+	IncludeRoot  bool
+	AllowHTTP    bool
+	Insecure     bool
+}
+
+func (f *requestObjectFixture) presenterWith(opts requestFixtureOptions) *Oid4vpPresenter {
+	validation := f.options()
+	return &Oid4vpPresenter{
+		HTTPClient:              f.server.Client(),
+		RequestObjectValidation: &validation,
+		Profile:                 opts.Profile,
+		AllowHTTP:               opts.AllowHTTP,
+		InsecureSkipX509Verify:  opts.Insecure,
+	}
+}
+
+// parseRequest signs the claims with the fixture certificate and parses the
+// Authorization Request using the requested delivery method and profile.
+func (f *requestObjectFixture) parseRequest(t *testing.T, claims map[string]any, opts requestFixtureOptions) (*CredentialPresentationRequest, error) {
+	t.Helper()
+	if opts.ResponseMode != "" {
+		claims["response_mode"] = opts.ResponseMode
+	}
+	if opts.DCQLFormat != "" {
+		query := claims["dcql_query"].(map[string]any)
+		credentials := query["credentials"].([]any)
+		credentials[0].(map[string]any)["format"] = opts.DCQLFormat
+	}
+	clientID, _ := claims["client_id"].(string)
+
+	switch opts.Delivery {
+	case deliverByQuery:
+		values := url.Values{}
+		for key, value := range claims {
+			if text, ok := value.(string); ok {
+				values.Set(key, text)
+				continue
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values.Set(key, string(encoded))
+		}
+		return f.presenterWith(opts).ParsePresentationRequest("openid4vp://authorize?" + values.Encode())
+	case deliverByReference:
+		f.mu.Lock()
+		f.requestObject = []byte(f.signWithRoot(t, claims, opts.IncludeRoot))
+		f.mu.Unlock()
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id":   {clientID},
+			"request_uri": {f.server.URL + "/request-object"},
+		}.Encode()
+		return f.presenterWith(opts).ParsePresentationRequest(uri)
+	default:
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id": {clientID},
+			"request":   {f.signWithRoot(t, claims, opts.IncludeRoot)},
+		}.Encode()
+		return f.presenterWith(opts).ParsePresentationRequest(uri)
+	}
+}
+
+// signWithRoot signs the claims with x5c containing the leaf, and optionally
+// the trust-anchor root as well.
+func (f *requestObjectFixture) signWithRoot(t *testing.T, claims map[string]any, includeRoot bool) string {
+	t.Helper()
+	x5c := []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)}
+	if includeRoot {
+		x5c = append(x5c, base64.StdEncoding.EncodeToString(f.root.Raw))
+	}
+	return f.sign(t, claims, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt").WithHeader("x5c", x5c))
 }

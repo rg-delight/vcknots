@@ -81,3 +81,26 @@ the library and never read from request data. The new
 `common/x509.VerifySigningCertificateChain` and `common/x509.NewCRLChecker`
 are the shared signing-certificate path and CRL primitives; issuer-side
 callers are expected to move to them in a later change.
+
+## Credential acceptance before storage
+
+`ReceiveCredential` and `ReceiveOID4VCIFinalCredential` now verify a credential
+before saving it (`credential_acceptance.go`). Without a policy the minimum
+rules apply: the credential must parse, the issuer JWT must carry a supported
+`alg` and (for SD-JWT VC) a `dc+sd-jwt` / `vc+sd-jwt` `typ`, and a `cnf.jwk`
+that does not match the holder key used for the credential request proof is
+rejected. A Final response that contains one unverifiable credential stores
+nothing.
+
+`Config.CredentialAcceptance` (`CredentialAcceptancePolicy`) adds issuer
+authentication: `IssuerX509` verifies the `x5c` chain with the shared
+`common/x509` signing-chain and CRL primitives (explicit anchors or a root
+pool, optional EKU policy, `AllowUnadvertisedRevocation`, optional
+`RequireIssuerDNSBinding` as an ecosystem policy rather than an SD-JWT VC §3.5
+requirement); `ResolveIssuerKeys` supplies keys for credentials without `x5c`
+(JWKS, DID or a static registry chosen by the caller). With a policy the
+signature, `exp` / `nbf` and SD-JWT disclosure integrity (every disclosure
+referenced exactly once by an `_sd` or `...` digest) are also checked.
+`SavedCredential.Verification` records the key, certificate fingerprints and
+revocation counters. `VerifyCredential` previously returned true only when
+verification errored; it now returns true only on success.

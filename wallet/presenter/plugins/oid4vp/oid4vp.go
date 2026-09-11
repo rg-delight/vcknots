@@ -1,6 +1,8 @@
 package oid4vp
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 type Oid4vpPresenter struct {
@@ -28,6 +31,10 @@ type Oid4vpPresenter struct {
 	// WARNING: This should NEVER be set to true in production environments.
 	// This is only for conformance testing with self-signed or non-standard certificates.
 	InsecureSkipX509Verify bool
+	// Profile selects the OpenID4VP protocol policy. The zero value normalizes to
+	// profile.Final, which applies no HAIP constraints. Set it to profile.HAIP to
+	// enforce HAIP 1.0 on the Final path; the Draft24 entrypoints ignore it.
+	Profile profile.Profile
 }
 
 func (p *Oid4vpPresenter) httpClient() *http.Client {
@@ -57,6 +64,19 @@ func (p *Oid4vpPresenter) ParseDraft24PresentationRequest(uriString string) (*Cr
 }
 
 func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 bool) (*CredentialPresentationRequest, error) {
+	// Normalize the profile once per parse so an unknown value fails closed
+	// before any network access and every checkpoint reads a validated value.
+	normalizedProfile, err := p.Profile.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
+	}
+	if !draft24 && normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
+		// HAIP §5: the profile requires TLS verifier endpoints and verified
+		// X.509 request signing; the test-only escapes must not weaken it. The
+		// Draft24 entrypoints are exempt from the HAIP policy.
+		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
+	}
+
 	parsedURL, err := url.Parse(uriString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URI: %w", err)
@@ -71,6 +91,7 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 
 	builder := NewRequestBuilder()
 	builder.draft24 = draft24
+	builder.profile = normalizedProfile
 	builder.httpClient = p.httpClient()
 	builder.allowHTTP = p.AllowHTTP
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
@@ -227,30 +248,34 @@ func (p *Oid4vpPresenter) PresentDCQL(protocol types.SupportedPresentationProtoc
 		return "", fmt.Errorf("failed to marshal vp_token: %w", err)
 	}
 
-	// Check if JARM (JWT-Secured Authorization Response Mode) is required
-	var useJARM bool
-	var encryptionAlg, encryptionEnc string
-	var verifierJWKS *jose.JSONWebKeySet
-
-	if request.ClientMetadata != nil {
-		if metadata, ok := request.ClientMetadata.(*VerifierMetadata); ok {
-			if metadata.AuthorizationEncryptedResponseAlg != "" {
-				useJARM = true
-				encryptionAlg = metadata.AuthorizationEncryptedResponseAlg
-				encryptionEnc = metadata.AuthorizationEncryptedResponseEnc
-				verifierJWKS = &metadata.Jwks
-			}
-		}
+	// OID4VP 1.0 §8.3: a direct_post.jwt request carries the verifier's
+	// response-encryption metadata (client_metadata.jwks and/or
+	// encrypted_response_enc_values_supported), while a direct_post request
+	// does not. When encryption is requested the response MUST be encrypted;
+	// there is no plaintext fallback.
+	verifierMetadata, _ := request.ClientMetadata.(*VerifierMetadata)
+	var encryptResponse bool
+	switch request.ResponseMode {
+	case string(OAuthAuthzReqResponseModeDirectPostJWT):
+		// The response mode is authoritative: direct_post.jwt is never
+		// answered in plaintext, even when the verifier omitted its metadata.
+		encryptResponse = true
+	case string(OAuthAuthzReqResponseModeDirectPost):
+		encryptResponse = false
+	case "":
+		encryptResponse = verifierEncryptionRequested(verifierMetadata)
+	default:
+		return "", fmt.Errorf("response_mode %q is not supported by PresentDCQL", request.ResponseMode)
 	}
 
 	// OID4VP direct_post requires application/x-www-form-urlencoded
 	formData := url.Values{}
 
-	if useJARM {
-		// JARM: Create JWT with response parameters, encrypt it, and send as "response" parameter
-		jarmToken, err := p.createJARMResponse(vpTokenJSON, request, encryptionAlg, encryptionEnc, verifierJWKS)
+	if encryptResponse {
+		// Encrypted response: the JWE is sent as the "response" parameter.
+		jarmToken, err := p.createJARMResponse(vpTokenJSON, request, verifierMetadata)
 		if err != nil {
-			return "", fmt.Errorf("failed to create JARM response: %w", err)
+			return "", fmt.Errorf("failed to create encrypted authorization response: %w", err)
 		}
 		formData.Set("response", jarmToken)
 	} else {
@@ -293,46 +318,26 @@ func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map
 		return "", fmt.Errorf("failed to marshal authorization response: %w", err)
 	}
 
-	encryptionKey, err := selectVerifierEncryptionKey(&metadata.Jwks)
-	if err != nil {
-		return "", err
-	}
+	return p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
+}
 
-	alg := encryptionKey.Algorithm
-	if alg == "" {
-		alg = metadata.AuthorizationEncryptedResponseAlg
-	}
-	if alg == "" {
-		alg = "ECDH-ES"
-	}
-
-	enc := ""
-	if len(metadata.EncryptedResponseEncValuesSupported) > 0 {
-		enc = metadata.EncryptedResponseEncValuesSupported[0]
-	}
-	if enc == "" {
-		enc = metadata.AuthorizationEncryptedResponseEnc
-	}
-	if enc == "" {
-		enc = "A128GCM"
-	}
-
-	keyAlg, err := parseJWEKeyAlgorithm(alg)
-	if err != nil {
-		return "", err
-	}
-	contentEnc, err := parseJWEContentEncryption(enc)
+// encryptAuthorizationResponseJWE selects a usable verifier encryption key and
+// encrypts payload as an OID4VP 1.0 §8.3 authorization response JWE. It is the
+// single selection path shared by PresentDCQL and
+// CreateEncryptedAuthorizationResponse so both behave identically.
+func (p *Oid4vpPresenter) encryptAuthorizationResponseJWE(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
+	selection, err := p.selectResponseEncryption(metadata)
 	if err != nil {
 		return "", err
 	}
 
 	options := (&jose.EncrypterOptions{}).WithContentType("json")
 	encrypter, err := jose.NewEncrypter(
-		contentEnc,
+		selection.enc,
 		jose.Recipient{
-			Algorithm: keyAlg,
-			Key:       encryptionKey.Key,
-			KeyID:     encryptionKey.KeyID,
+			Algorithm: selection.alg,
+			Key:       selection.key.Key,
+			KeyID:     selection.key.KeyID,
 		},
 		options,
 	)
@@ -351,6 +356,152 @@ func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map
 	}
 
 	return serialized, nil
+}
+
+// responseEncryption is the selected verifier key agreement and content
+// encryption for one authorization response.
+type responseEncryption struct {
+	key *jose.JSONWebKey
+	alg jose.KeyAlgorithm
+	enc jose.ContentEncryption
+}
+
+// jweContentEncryptions are the content encryption algorithms the library
+// supports. HAIP permits only A128GCM and A256GCM (HAIP §5).
+var (
+	jweContentEncryptions = map[string]jose.ContentEncryption{
+		"A128GCM":       jose.A128GCM,
+		"A192GCM":       jose.A192GCM,
+		"A256GCM":       jose.A256GCM,
+		"A128CBC-HS256": jose.A128CBC_HS256,
+		"A192CBC-HS384": jose.A192CBC_HS384,
+		"A256CBC-HS512": jose.A256CBC_HS512,
+	}
+	haipJWEOnlyContentEncryptions = map[string]jose.ContentEncryption{
+		"A128GCM": jose.A128GCM,
+		"A256GCM": jose.A256GCM,
+	}
+)
+
+// selectResponseEncryption applies OID4VP 1.0 §8.3 and RFC 7517 §5 key
+// selection, then enforces the HAIP combination when the profile is HAIP:
+// ECDH-ES with a P-256 key and A128GCM or A256GCM content encryption.
+func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (*responseEncryption, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response")
+	}
+	haip := p.Profile.IsHAIP()
+	allowedEncryptions := jweContentEncryptions
+	if haip {
+		allowedEncryptions = haipJWEOnlyContentEncryptions
+	}
+
+	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, haip)
+	if key == nil {
+		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks")
+	}
+
+	// The key's own alg wins; authorization_encrypted_response_alg is retained
+	// only as a compatibility fallback, then ECDH-ES is the default.
+	algName := key.Algorithm
+	if algName == "" {
+		algName = metadata.AuthorizationEncryptedResponseAlg
+	}
+	if algName == "" {
+		algName = "ECDH-ES"
+	}
+	if haip && algName != "ECDH-ES" {
+		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q", algName)
+	}
+	alg, err := parseJWEKeyAlgorithm(algName)
+	if err != nil {
+		return nil, err
+	}
+
+	var enc jose.ContentEncryption
+	if len(metadata.EncryptedResponseEncValuesSupported) > 0 {
+		for _, candidate := range metadata.EncryptedResponseEncValuesSupported {
+			if value, ok := allowedEncryptions[candidate]; ok {
+				enc = value
+				break
+			}
+		}
+		if enc == "" {
+			// §8.3 default does not rescue an explicit list with no usable
+			// value; the verifier offered only unsupported algorithms.
+			return nil, fmt.Errorf("encrypted_response_enc_values_supported has no supported content encryption")
+		}
+	} else {
+		// §8.3: absent list defaults to A128GCM.
+		enc = jose.A128GCM
+	}
+
+	return &responseEncryption{key: key, alg: alg, enc: enc}, nil
+}
+
+// selectUsableVerifierEncryptionKey iterates client_metadata.jwks.keys in order
+// and returns the first key usable for response encryption, skipping unusable
+// keys silently (RFC 7517 §5, "ignore unusable keys").
+func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool) *jose.JSONWebKey {
+	if set == nil {
+		return nil
+	}
+	for i := range set.Keys {
+		key := &set.Keys[i]
+		if usableVerifierEncryptionKey(key, haip) {
+			return key
+		}
+	}
+	return nil
+}
+
+// usableVerifierEncryptionKey reports whether key supports ECDH-ES response
+// encryption. use must be "enc" or empty, the key must be EC (P-256, plus
+// P-384/P-521 under Final only) and alg must be empty or a supported key
+// agreement algorithm.
+func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool) bool {
+	if key == nil || key.Key == nil {
+		return false
+	}
+	if key.Use != "" && key.Use != "enc" {
+		return false
+	}
+	publicKey, ok := key.Key.(*ecdsa.PublicKey)
+	if !ok {
+		return false
+	}
+	switch publicKey.Curve {
+	case elliptic.P256():
+	case elliptic.P384(), elliptic.P521():
+		if haip {
+			return false
+		}
+	default:
+		return false
+	}
+	if key.Algorithm == "" {
+		return true
+	}
+	if _, err := parseJWEKeyAlgorithm(key.Algorithm); err != nil {
+		return false
+	}
+	if haip && key.Algorithm != "ECDH-ES" {
+		return false
+	}
+	return true
+}
+
+// verifierEncryptionRequested reports whether client_metadata asks for an
+// encrypted authorization response. In the Final flow the direct_post.jwt
+// response mode is the only one that carries response-encryption metadata.
+func verifierEncryptionRequested(metadata *VerifierMetadata) bool {
+	if metadata == nil {
+		return false
+	}
+	return len(metadata.Jwks.Keys) > 0 ||
+		len(metadata.EncryptedResponseEncValuesSupported) > 0 ||
+		metadata.AuthorizationEncryptedResponseAlg != "" ||
+		metadata.AuthorizationEncryptedResponseEnc != ""
 }
 
 // SubmitEncryptedAuthorizationResponse encrypts an OID4VP Final authorization
@@ -380,8 +531,9 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	return string(body), nil
 }
 
-// createJARMResponse creates a JWT-Secured Authorization Response (JARM)
-func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, request *types.PresentationRequest, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
+// createJARMResponse creates the encrypted JWE authorization response for a
+// direct_post.jwt request, embedding vp_token and state.
+func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, request *types.PresentationRequest, metadata *VerifierMetadata) (string, error) {
 	// Create the response payload; vp_token is embedded as a JSON object.
 	payload := map[string]interface{}{
 		"vp_token": json.RawMessage(vpTokenJSON),
@@ -392,7 +544,11 @@ func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, request *types.
 		payload["state"] = request.State
 	}
 
-	return p.encryptJARMPayload(payload, encAlg, encEnc, verifierJWKS)
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal authorization response payload: %w", err)
+	}
+	return p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
 }
 
 func (p *Oid4vpPresenter) encryptJARMPayload(payload map[string]interface{}, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
@@ -499,11 +655,17 @@ type requestBuilder struct {
 	httpClient              *http.Client
 	allowHTTP               bool
 	draft24                 bool
+	profile                 profile.Profile
 	x509TrustChainRoots     *x509.CertPool
 	insecureSkipX509Verify  bool
 	requestObjectValidation *RequestObjectValidationOptions
 	expectedClientID        string
 	errValidation           error
+	// requestSource records how the Authorization Request parameters arrived:
+	// "query" for plain query parameters, "value" for a Request Object supplied
+	// with the request= parameter, and "reference" for a Request Object fetched
+	// through request_uri. HAIP §5.1 requires reference.
+	requestSource string
 	// errorResponseAllowed marks that the request parameters came from plain
 	// query parameters (user-initiated URI). Validation failures on the
 	// Request Object paths occur before the object's signature is verified,
@@ -723,11 +885,15 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if rawDcqlQuery, exists := params["dcql_query"]; exists {
-		parseQuery := parseDcqlQuery
+		var dcqlQuery *DcqlQuery
+		var err error
 		if b.draft24 {
-			parseQuery = parseDraft24DcqlQuery
+			dcqlQuery, err = parseDraft24DcqlQuery(rawDcqlQuery)
+		} else {
+			// The HAIP format restriction is applied where the Final DCQL query
+			// is validated (dcql.go), not by re-parsing after the fact.
+			dcqlQuery, err = parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
 		}
-		dcqlQuery, err := parseQuery(rawDcqlQuery)
 		if err != nil {
 			b.errValidation = err
 			return
@@ -790,6 +956,7 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	}
 
 	b.errorResponseAllowed = true
+	b.requestSource = "query"
 
 	singleParams := make(map[string]any)
 	for key, values := range params {
@@ -907,7 +1074,11 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	return b.WithRequestObject(string(body))
+	b.WithRequestObject(string(body))
+	// The Request Object arrived by reference; HAIP §5.1 distinguishes this from
+	// a Request Object supplied by value in the request= parameter.
+	b.requestSource = "reference"
+	return b
 }
 
 func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {
@@ -951,7 +1122,45 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
 	}
+	if err := b.enforceHAIPProfile(); err != nil {
+		return nil, err
+	}
 	return b.req, nil
+}
+
+// enforceHAIPProfile applies the HAIP 1.0 constraints that can only be checked
+// once the Final Authorization Request parameters have been assembled. It is
+// deliberately inert on the Draft24 path and for the Final profile.
+func (b *requestBuilder) enforceHAIPProfile() error {
+	if b.draft24 || !b.profile.IsHAIP() {
+		return nil
+	}
+	if b.requestSource != "reference" {
+		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
+		// JAR with the request_uri parameter".
+		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri")
+	}
+	switch b.req.ResponseMode {
+	case OAuthAuthzReqResponseModeDirectPostJWT:
+		// HAIP §5.1: response encryption MUST use direct_post.jwt.
+	case "dc_api.jwt":
+		// The DC API is out of scope for this wallet build.
+		return newAuthorizationRequestError(InvalidRequestError, "dc_api.jwt is not implemented")
+	default:
+		// HAIP §5.1: "Response encryption MUST be used by utilizing response
+		// mode direct_post.jwt".
+		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires response_mode direct_post.jwt")
+	}
+	clientID, err := parseOID4VPClientID(b.req.ClientID)
+	if err != nil {
+		return err
+	}
+	if clientID.prefix != OID4VPClientIDPrefixX509Hash {
+		// HAIP §5: "For signed requests, the Verifier MUST use, and the Wallet
+		// MUST accept the Client Identifier Prefix x509_hash".
+		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires the x509_hash Client Identifier Prefix")
+	}
+	return nil
 }
 
 type OID4VPClientID struct {

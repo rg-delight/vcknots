@@ -108,8 +108,8 @@ func TestOid4vpPresenter_PresentDCQL_EncryptedResponsePreservesAllQueries(t *tes
 	redirect, err := p.PresentDCQL(types.Oid4vp, endpoint, want, &types.PresentationRequest{
 		State: "encrypted-state",
 		ClientMetadata: &VerifierMetadata{
-			AuthorizationEncryptedResponseAlg: string(jose.ECDH_ES),
-			AuthorizationEncryptedResponseEnc: string(jose.A256GCM),
+			AuthorizationEncryptedResponseAlg:   string(jose.ECDH_ES),
+			EncryptedResponseEncValuesSupported: []string{"A256GCM"},
 			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 				Key: &recipient.PublicKey, KeyID: "verifier-encryption", Use: "enc", Algorithm: string(jose.ECDH_ES),
 			}}},

@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
@@ -74,6 +75,7 @@ func (b *requestBuilder) WithExpectedClientID(clientID string) *requestBuilder {
 // WithRequestObject authenticates Final Request Objects. Draft24 keeps its
 // original behavior behind the explicit Draft24 builder and parse entrypoint.
 func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
+	b.requestSource = "value"
 	if b.draft24 {
 		return b.withDraft24RequestObject(obj)
 	}
@@ -159,6 +161,19 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	}
 	if len(certificates) == 0 || len(certificates) > 16 {
 		return errors.New("x5c header must contain between 1 and 16 certificates")
+	}
+	if b.profile.IsHAIP() {
+		// HAIP §5: "The X.509 certificate of the trust anchor MUST NOT be
+		// included in the x5c JOSE header of the signed request." Anchors are
+		// only enumerable when configured as TrustAnchors; with RootCAs this
+		// check cannot be performed here.
+		for _, certificate := range certificates {
+			for _, anchor := range options.TrustAnchors {
+				if anchor != nil && bytes.Equal(certificate.Raw, anchor.Raw) {
+					return errors.New("HAIP profile does not permit the trust anchor certificate in the x5c header")
+				}
+			}
+		}
 	}
 	if err := bindX509ClientID(clientID, certificates[0], b.req); err != nil {
 		return err

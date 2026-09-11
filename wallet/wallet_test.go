@@ -1005,6 +1005,8 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	responseEncryptionKey.Algorithm = "ECDH-ES"
 	responseEncryptionKey.Use = "enc"
 
+	issuedCredential := buildTestSDJWTVC(t, holderKey, map[string]string{"given_name": "Taro"})
+
 	var server *httptest.Server
 	pushedState := ""
 	tokenAttempts := 0
@@ -1104,7 +1106,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			require.Equal(t, "tx-1", body["transaction_id"])
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{
-				"credential":      "issued-sd-jwt",
+				"credential":      issuedCredential,
 				"notification_id": "notification-1",
 			})
 		case "/notification":
@@ -1142,9 +1144,9 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result.CredentialResponse)
-	require.Equal(t, "issued-sd-jwt", result.CredentialResponse.Credential)
+	require.Equal(t, issuedCredential, result.CredentialResponse.Credential)
 	require.Len(t, result.SavedCredentials, 1)
-	require.Equal(t, []byte("issued-sd-jwt"), result.SavedCredentials[0].Entry.Raw)
+	require.Equal(t, []byte(issuedCredential), result.SavedCredentials[0].Entry.Raw)
 	require.Equal(t, string(credential.SDJwtVC), result.SavedCredentials[0].Entry.MimeType)
 	require.Equal(t, 2, tokenAttempts)
 	require.Equal(t, 2, credentialAttempts)

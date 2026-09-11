@@ -77,6 +77,8 @@ type Wallet struct {
 
 	dpop       DPoPConfig
 	clientAuth ClientAuthConfig
+
+	credentialAcceptance *CredentialAcceptancePolicy
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -97,6 +99,8 @@ type Config struct {
 
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
+
+	CredentialAcceptance *CredentialAcceptancePolicy
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -293,6 +297,8 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		presenter:  config.Presenter,
 		dpop:       config.DPoP,
 		clientAuth: config.ClientAuth,
+
+		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
 }
 
@@ -371,7 +377,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 	}
 
 	result, err := w.verifier.Verify(credential.Proof, &pubKey)
-	return err != nil && result
+	return err == nil && result
 }
 
 // DIDCreateOptions holds options for DID creation.
@@ -477,6 +483,9 @@ type GetCredentialEntriesRequest struct {
 type SavedCredential struct {
 	Credential *credential.Credential
 	Entry      *types.CredentialEntry
+	// Verification records what the wallet authenticated before storing this
+	// credential. It is nil for credentials loaded from storage.
+	Verification *CredentialVerification
 }
 
 // OID4VPFinalAuthorizationResponse represents the JSON payload that is
@@ -1016,7 +1025,13 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 		return nil, err
 	}
 
-	return w.storeAndParseCredential(credentialJWT, serializationFlavor)
+	var holderKey *jose.JSONWebKey
+	if req.Key != nil {
+		publicKey := req.Key.PublicKey()
+		holderKey = &publicKey
+	}
+
+	return w.storeAndParseCredential(credentialJWT, serializationFlavor, holderKey)
 }
 
 func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (*OID4VCIFinalReceiveResult, error) {
@@ -1192,7 +1207,13 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		}
 	}
 
-	savedCredentials, err := w.storeOID4VCIFinalCredentialResponse(credentialResponse, issuerMetadata, credentialConfigurationID)
+	var holderKey *jose.JSONWebKey
+	if req.HolderKey.Key != nil {
+		publicKey := req.HolderKey.Public()
+		holderKey = &publicKey
+	}
+
+	savedCredentials, err := w.storeOID4VCIFinalCredentialResponse(credentialResponse, issuerMetadata, credentialConfigurationID, holderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1654,10 +1675,16 @@ func (w *Wallet) requestCredential(
 	return credentialJWT, nil
 }
 
-// storeAndParseCredential stores the credential and parses it for return.
-func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor) (*SavedCredential, error) {
+// storeAndParseCredential verifies the credential for acceptance, stores it and
+// parses it for return. Nothing is stored when verification fails.
+func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*SavedCredential, error) {
 	if serializationFlavor == "" {
 		serializationFlavor = credential.JwtVc
+	}
+
+	parsedCredential, verification, verificationErr := w.verifyCredentialForAcceptance([]byte(*credentialJWT), serializationFlavor, holderKey)
+	if verificationErr != nil {
+		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}
 
 	credentialEntry := types.CredentialEntry{
@@ -1671,19 +1698,10 @@ func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFla
 		return nil, fmt.Errorf("failed to save credential entry: %w", err)
 	}
 
-	f, err := credentialEntry.SerializationFlavor()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential: %w", err)
-	}
-
-	credential, err := w.serializer.DeserializeCredential(f, credentialEntry.Raw)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential: %w", err)
-	}
-
 	return &SavedCredential{
-		Credential: credential,
-		Entry:      &credentialEntry,
+		Credential:   parsedCredential,
+		Entry:        &credentialEntry,
+		Verification: verification,
 	}, nil
 }
 
@@ -1820,11 +1838,15 @@ func addCredentialResponseEncryption(payload map[string]any, issuerMetadata *rec
 	}
 }
 
-func (w *Wallet) storeOID4VCIFinalCredentialResponse(response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) ([]*SavedCredential, error) {
+func (w *Wallet) storeOID4VCIFinalCredentialResponse(response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKey *jose.JSONWebKey) ([]*SavedCredential, error) {
 	if response == nil {
 		return nil, fmt.Errorf("credential response is nil")
 	}
 	mimeType := mimeTypeForCredentialConfiguration(issuerMetadata, credentialConfigurationID)
+	flavor, err := (&types.CredentialEntry{MimeType: mimeType}).SerializationFlavor()
+	if err != nil {
+		return nil, fmt.Errorf("unsupported credential serialization flavor: %w", err)
+	}
 	values := []any{}
 	if response.Credential != nil {
 		values = append(values, response.Credential)
@@ -1840,22 +1862,27 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponse(response *receiverTypes.Cre
 		if err != nil {
 			return nil, err
 		}
+		parsedCredential, verification, err := w.verifyCredentialForAcceptance(raw, flavor, holderKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to verify credential: %w", err)
+		}
 		entry := types.CredentialEntry{
 			Id:         uuid.New().String(),
 			ReceivedAt: time.Now(),
 			Raw:        raw,
 			MimeType:   mimeType,
 		}
-		if err := w.credStore.SaveCredentialEntry(entry, types.SupportedCredStoreTypes(0)); err != nil {
+		saved = append(saved, &SavedCredential{
+			Credential:   parsedCredential,
+			Entry:        &entry,
+			Verification: verification,
+		})
+	}
+
+	for _, savedCredential := range saved {
+		if err := w.credStore.SaveCredentialEntry(*savedCredential.Entry, types.SupportedCredStoreTypes(0)); err != nil {
 			return nil, fmt.Errorf("failed to save credential entry: %w", err)
 		}
-		savedCredential := &SavedCredential{Entry: &entry}
-		if flavor, err := entry.SerializationFlavor(); err == nil {
-			if parsed, err := w.serializer.DeserializeCredential(flavor, entry.Raw); err == nil {
-				savedCredential.Credential = parsed
-			}
-		}
-		saved = append(saved, savedCredential)
 	}
 	return saved, nil
 }
@@ -1925,6 +1952,7 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 	}
 	presentationRequest := &presenterTypes.PresentationRequest{
 		State:          req.State,
+		ResponseMode:   string(req.ResponseMode),
 		ClientMetadata: req.ClientMetadata,
 	}
 	redirectURI, err := w.presenter.PresentDCQL(presenterTypes.Oid4vp, *endpoint, vpToken, presentationRequest)
