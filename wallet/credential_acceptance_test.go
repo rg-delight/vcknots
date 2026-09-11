@@ -448,6 +448,21 @@ func TestCredentialAcceptance_X509Policy(t *testing.T) {
 		require.ErrorContains(t, err, "x5c issuer authentication is not configured")
 		require.Equal(t, 0, fixture.entryCount(t))
 	})
+
+	t.Run("x5c is ignored when the caller resolves issuer keys without X.509 trust", func(t *testing.T) {
+		leafPublic := jose.JSONWebKey{Key: chain.leafKey.Public(), KeyID: "leaf"}
+		fixture := newAcceptanceFixture(t, &CredentialAcceptancePolicy{
+			ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+				return []jose.JSONWebKey{leafPublic}, nil
+			},
+		})
+		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
+		saved, err := fixture.storeCredential(t, wire, &holder)
+		require.NoError(t, err)
+		require.Nil(t, saved.Verification.CertificateSHA256)
+		require.Equal(t, "leaf", saved.Verification.IssuerKeyID)
+		require.Equal(t, 1, fixture.entryCount(t))
+	})
 }
 
 func TestCredentialAcceptance_ResolveIssuerKeys(t *testing.T) {

@@ -97,8 +97,11 @@ authentication: `IssuerX509` verifies the `x5c` chain with the shared
 `common/x509` signing-chain and CRL primitives (explicit anchors or a root
 pool, optional EKU policy, `AllowUnadvertisedRevocation`, optional
 `RequireIssuerDNSBinding` as an ecosystem policy rather than an SD-JWT VC §3.5
-requirement); `ResolveIssuerKeys` supplies keys for credentials without `x5c`
-(JWKS, DID or a static registry chosen by the caller). With a policy the
+requirement); `ResolveIssuerKeys` supplies keys through a mechanism the caller chose
+(JWKS, DID or a static registry); when `IssuerX509` is not configured it is
+used even for credentials that carry `x5c`, and the chain is then not
+consulted. A credential with `x5c` and neither mechanism configured is
+rejected. With a policy the
 signature, `exp` / `nbf` and SD-JWT disclosure integrity (every disclosure
 referenced exactly once by an `_sd` or `...` digest) are also checked.
 `SavedCredential.Verification` records the key, certificate fingerprints and

@@ -189,10 +189,16 @@ func (w *Wallet) resolveAndVerifyIssuerKey(parsedCredential *credential.Credenti
 	policy := w.credentialAcceptance
 	var candidateKeys []jose.JSONWebKey
 
-	if x5cRaw, x5cPresent := header["x5c"]; x5cPresent {
-		if policy.IssuerX509 == nil {
-			return fmt.Errorf("x5c issuer authentication is not configured")
-		}
+	// An x5c header is trust evidence only when the caller configured X.509
+	// issuer trust. A caller that resolves issuer keys itself (JWKS, DID or a
+	// static registry, SD-JWT VC §3.5 leaves the mechanism to ecosystem policy)
+	// keeps that mechanism even when the credential also carries x5c; the chain
+	// is then not consulted. Neither configured is a fail-closed error.
+	x5cRaw, x5cPresent := header["x5c"]
+	if x5cPresent && policy.IssuerX509 == nil && policy.ResolveIssuerKeys == nil {
+		return fmt.Errorf("x5c issuer authentication is not configured")
+	}
+	if x5cPresent && policy.IssuerX509 != nil {
 		certificates, err := decodeX5CCertificates(x5cRaw)
 		if err != nil {
 			return err
