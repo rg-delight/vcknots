@@ -1,9 +1,13 @@
 package wallet
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
+	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
@@ -53,6 +57,13 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 			for _, query := range req.DcqlQuery.Credentials {
 				if query.ID == selection.QueryID {
 					sdOpts.RequireKeyBinding = sdOpts.RequireKeyBinding || query.RequiresHolderBinding()
+					// HAIP §6.1.1.1: "If the credential has cryptographic holder
+					// binding, a KB-JWT ... MUST always be present". A credential
+					// that carries cnf is holder-bound even when the verifier
+					// waived the requirement, so HAIP forces the KB-JWT.
+					if w.profile.IsHAIP() && flavor == credential.SDJwtVC && sdJWTCarriesConfirmation(saved.Entry.Raw) {
+						sdOpts.RequireKeyBinding = true
+					}
 					break
 				}
 			}
@@ -73,4 +84,28 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 		vpToken[selection.QueryID] = append(vpToken[selection.QueryID], string(serialized))
 	}
 	return vpToken, nil
+}
+
+// sdJWTCarriesConfirmation reports whether the SD-JWT VC wire value's issuer
+// JWT payload contains a cnf claim, i.e. the credential has cryptographic
+// holder binding.
+func sdJWTCarriesConfirmation(raw []byte) bool {
+	issuerJWT := string(raw)
+	if separator := strings.IndexByte(issuerJWT, '~'); separator >= 0 {
+		issuerJWT = issuerJWT[:separator]
+	}
+	parts := strings.Split(issuerJWT, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false
+	}
+	_, present := payload["cnf"]
+	return present
 }

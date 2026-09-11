@@ -47,6 +47,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -78,6 +79,11 @@ type Wallet struct {
 	dpop       DPoPConfig
 	clientAuth ClientAuthConfig
 
+	// profile is the explicit Final/HAIP policy this wallet enforces. It is also
+	// propagated to every registered protocol plugin so no lower-level API can
+	// bypass the root policy.
+	profile profile.Profile
+
 	credentialAcceptance *CredentialAcceptancePolicy
 }
 
@@ -99,6 +105,12 @@ type Config struct {
 
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
+
+	// Profile selects the explicit Final/HAIP policy for the wallet. The zero
+	// value normalizes to profile.Final. Caller-injected dispatchers must have
+	// every protocol plugin carrying the same profile or NewWalletWithConfig
+	// fails.
+	Profile profile.Profile
 
 	CredentialAcceptance *CredentialAcceptancePolicy
 }
@@ -142,6 +154,16 @@ func (c ClientAuthConfig) signatureAlgorithm() jose.SignatureAlgorithm {
 		return jose.ES256
 	}
 	return c.SigningAlg
+}
+
+// clientAuthenticationConfigured reports whether an OAuth2 client
+// authentication mechanism is configured. An empty method defaults to none.
+func clientAuthenticationConfigured(c ClientAuthConfig) bool {
+	method := c.Method
+	if method == "" {
+		method = receiverTypes.None
+	}
+	return method != receiverTypes.None
 }
 
 // curveForSignatureAlgorithm returns the elliptic curve that alg requires.
@@ -233,6 +255,16 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		return nil, err
 	}
 
+	normalizedProfile, err := config.Profile.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet profile: %w", err)
+	}
+	// A dispatcher supplied by the caller keeps ownership of its plugin
+	// profiles; the root only verifies they match. Default dispatchers built
+	// here are configured by the root before being verified.
+	receiverInjected := config.Receiver != nil
+	presenterInjected := config.Presenter != nil
+
 	if config.CredStore == nil {
 		credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 		if err != nil {
@@ -281,6 +313,19 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		config.Presenter = presenter
 	}
 
+	if !receiverInjected {
+		propagateReceiverProfile(config.Receiver, normalizedProfile)
+	}
+	if err := validateReceiverPluginProfiles(config.Receiver, normalizedProfile); err != nil {
+		return nil, err
+	}
+	if !presenterInjected {
+		propagatePresenterProfile(config.Presenter, normalizedProfile)
+	}
+	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
+		return nil, err
+	}
+
 	if config.DPoP.Enabled && config.DPoP.Key == nil {
 		key, err := newInMemoryECKeyEntry()
 		if err != nil {
@@ -298,8 +343,71 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		dpop:       config.DPoP,
 		clientAuth: config.ClientAuth,
 
+		profile: normalizedProfile,
+
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
+}
+
+// oid4vciProfileValidator is the optional receiver capability the root uses to
+// apply HAIP constraints to fetched issuer metadata before PAR. It is asserted
+// at runtime instead of widening the exported Final receiver interface.
+type oid4vciProfileValidator interface {
+	ValidateIssuerMetadataForProfile(*receiverTypes.CredentialIssuerMetadata) error
+	ValidateCredentialConfigurationForProfile(receiverTypes.CredentialConfiguration) error
+}
+
+// setProtocolProfile is implemented by the built-in protocol plugins so the root
+// can propagate its profile to the default dispatchers it constructs itself.
+type setProtocolProfile interface {
+	SetProtocolProfile(profile.Profile)
+}
+
+func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setProtocolProfile); ok {
+			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, value profile.Profile) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setProtocolProfile); ok {
+			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+// validateReceiverPluginProfiles fails when a registered plugin that exposes a
+// protocol profile disagrees with the wallet. Draft-only plugins that do not
+// implement profile.Carrier are ignored.
+func validateReceiverPluginProfiles(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) error {
+	for _, plugin := range dispatcher.Plugins() {
+		carrier, ok := plugin.(profile.Carrier)
+		if !ok {
+			continue
+		}
+		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
+			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
+		}
+	}
+	return nil
+}
+
+// validatePresenterPluginProfiles fails when a registered presenter plugin does
+// not carry the wallet profile.
+func validatePresenterPluginProfiles(dispatcher *presenter.PresentationDispatcher, value profile.Profile) error {
+	for _, plugin := range dispatcher.Plugins() {
+		carrier, ok := plugin.(profile.Carrier)
+		if !ok {
+			continue
+		}
+		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
+			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
+		}
+	}
+	return nil
 }
 
 func validateClientAuthConfig(config ClientAuthConfig) error {
@@ -1064,6 +1172,14 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, fmt.Errorf("authorization_code grant is not included in the offer")
 	}
 
+	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
+	// mechanism at OAuth2 Endpoints that support client authentication". Reject
+	// before any network access when neither a client attestation (attester key)
+	// nor a configured client authentication method can authenticate the wallet.
+	if w.profile.IsHAIP() && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
+		return nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
+	}
+
 	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
@@ -1076,6 +1192,23 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	issuerMetadata, err := finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+	}
+	// HAIP §4.1 constraints on the issuer metadata and the selected credential
+	// configuration are enforced before PAR so an unsupported issuer never sees
+	// an authorization request.
+	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
+	if w.profile.IsHAIP() && profileValidator == nil {
+		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
+	}
+	if profileValidator != nil {
+		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
+			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
+		}
+		if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok {
+			if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
+				return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
+			}
+		}
 	}
 
 	authorizationServerEndpoint := *issuerEndpoint

@@ -72,6 +72,17 @@ func (d *ReceivingDispatcher) getPlugin(receivingType types.SupportedReceivingTy
 	return plugin, nil
 }
 
+// Plugins returns the registered receiver plugins for profile propagation and
+// inspection. The returned slice is a copy, so callers cannot mutate the
+// dispatcher's registry.
+func (d *ReceivingDispatcher) Plugins() []types.Receiver {
+	plugins := make([]types.Receiver, 0, len(d.plugins))
+	for _, plugin := range d.plugins {
+		plugins = append(plugins, plugin)
+	}
+	return plugins
+}
+
 // OID4VCIFinalReceiver returns the optional Final 1.0 / HAIP capability for a
 // receiver plugin without changing the legacy Draft 13 Receiver contract.
 func (d *ReceivingDispatcher) OID4VCIFinalReceiver(receivingType types.SupportedReceivingTypes) (types.OID4VCIFinalReceiver, error) {

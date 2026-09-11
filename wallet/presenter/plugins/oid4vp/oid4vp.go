@@ -37,11 +37,29 @@ type Oid4vpPresenter struct {
 	Profile profile.Profile
 }
 
+var _ profile.Carrier = (*Oid4vpPresenter)(nil)
+
 func (p *Oid4vpPresenter) httpClient() *http.Client {
 	if p.HTTPClient != nil {
 		return p.HTTPClient
 	}
 	return &http.Client{Timeout: 30 * time.Second}
+}
+
+// ProtocolProfile reports the normalized OpenID4VP profile this presenter
+// enforces.
+func (p *Oid4vpPresenter) ProtocolProfile() profile.Profile {
+	normalized, err := p.Profile.Normalize()
+	if err != nil {
+		return p.Profile
+	}
+	return normalized
+}
+
+// SetProtocolProfile is used by the wallet root to propagate its profile to the
+// default presenter plugin it constructs itself.
+func (p *Oid4vpPresenter) SetProtocolProfile(value profile.Profile) {
+	p.Profile = value
 }
 
 // ParsePresentationRequest parses the presentation request URI and returns a CredentialPresentationRequest,

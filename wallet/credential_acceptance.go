@@ -99,6 +99,15 @@ func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.Sup
 		}
 	}
 
+	if w.profile.IsHAIP() && flavor == credential.SDJwtVC {
+		if _, present := header["x5c"]; !present {
+			// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's
+			// signing certificate along with a trust chain in the x5c JOSE
+			// header".
+			return nil, nil, fmt.Errorf("HAIP requires the issuer signing certificate in the x5c header")
+		}
+	}
+
 	algorithm, _ := header["alg"].(string)
 	if algorithm == "" || strings.EqualFold(algorithm, "none") {
 		return nil, nil, fmt.Errorf("issuer JWT alg header is missing or none")
@@ -187,6 +196,17 @@ func (w *Wallet) resolveAndVerifyIssuerKey(parsedCredential *credential.Credenti
 		certificates, err := decodeX5CCertificates(x5cRaw)
 		if err != nil {
 			return err
+		}
+		if w.profile.IsHAIP() {
+			for _, certificate := range certificates {
+				for _, anchor := range policy.IssuerX509.TrustAnchors {
+					if bytes.Equal(certificate.Raw, anchor.Raw) {
+						// HAIP §6.1.1: "The X.509 certificate of the trust anchor
+						// MUST NOT be included" in the x5c header.
+						return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header")
+					}
+				}
+			}
 		}
 		crlOptions := policy.IssuerX509.CRL
 		if crlOptions.RequireStatus && policy.IssuerX509.AllowUnadvertisedRevocation {

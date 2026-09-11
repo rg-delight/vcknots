@@ -104,3 +104,30 @@ referenced exactly once by an `_sd` or `...` digest) are also checked.
 `SavedCredential.Verification` records the key, certificate fingerprints and
 revocation counters. `VerifyCredential` previously returned true only when
 verification errored; it now returns true only on success.
+
+## Explicit Final / HAIP profile
+
+Package `profile` defines `profile.Final` (default) and `profile.HAIP`.
+`wallet.Config.Profile` selects the policy for the root Wallet; the built-in
+`oid4vci.Oid4vciReceiver.Profile` and `oid4vp.Oid4vpPresenter.Profile` carry
+the same value for direct plugin use. A Wallet constructed with caller-injected
+dispatchers fails when a registered plugin that implements `profile.Carrier`
+reports a different profile, so the root policy cannot be bypassed through a
+lower-level API. The Draft entrypoints ignore the profile.
+
+Under HAIP the Final paths additionally reject: `AllowHTTP` /
+`InsecureSkipX509Verify`; access tokens that are not DPoP-bound; credential
+configurations without a `scope` or with a format other than `dc+sd-jwt` /
+`mso_mdoc`; issuers that advertise cryptographic binding without a
+`nonce_endpoint`; issuance without any configured OAuth client authentication
+(client attestation or `ClientAuth`); SD-JWT VCs without an `x5c` header or
+whose `x5c` includes a configured trust anchor; presentation requests whose
+client identifier prefix is not `x509_hash`, that were not delivered by
+`request_uri`, whose response mode is not `direct_post.jwt`, or whose DCQL
+formats are not `dc+sd-jwt` / `mso_mdoc`; response encryption other than
+ECDH-ES with A128GCM or A256GCM; and a missing KB-JWT for an SD-JWT VC that
+carries `cnf` even when the verifier set
+`require_cryptographic_holder_binding` to false. Each constraint is covered by
+a Final-accepts / HAIP-rejects test pair. HAIP obligations of the other party
+that the Wallet cannot observe (for example "Verifiers MUST list both A128GCM
+and A256GCM") are not turned into rejections.

@@ -21,6 +21,7 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -28,9 +29,58 @@ type Oid4vciReceiver struct {
 	HTTPClient *http.Client
 	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
 	AllowHTTP bool
+	// Profile selects the OpenID4VCI Final/HAIP policy. The zero value normalizes
+	// to profile.Final, which applies no HAIP constraints. Set it to profile.HAIP
+	// to enforce HAIP 1.0 on the Final path.
+	Profile profile.Profile
 }
 
 var _ types.OID4VCIFinalReceiver = (*Oid4vciReceiver)(nil)
+var _ profile.Carrier = (*Oid4vciReceiver)(nil)
+
+// ProtocolProfile reports the normalized OID4VCI profile this receiver enforces.
+func (o *Oid4vciReceiver) ProtocolProfile() profile.Profile {
+	normalized, err := o.Profile.Normalize()
+	if err != nil {
+		return o.Profile
+	}
+	return normalized
+}
+
+// SetProtocolProfile is used by the wallet root to propagate its profile to the
+// default receiver plugin it constructs itself.
+func (o *Oid4vciReceiver) SetProtocolProfile(p profile.Profile) {
+	o.Profile = p
+}
+
+// normalizedProfile normalizes the configured profile once. Unknown values fail
+// closed before any network access so every checkpoint reads a validated value.
+func (o *Oid4vciReceiver) normalizedProfile() (profile.Profile, error) {
+	normalized, err := o.Profile.Normalize()
+	if err != nil {
+		return "", fmt.Errorf("invalid OID4VCI profile: %w", err)
+	}
+	return normalized, nil
+}
+
+// requireHAIPTransport rejects the test-only HTTP escape when HAIP is selected.
+// HAIP §4 requires TLS for issuer and authorization server endpoints.
+func (o *Oid4vciReceiver) requireHAIPTransport(normalized profile.Profile) error {
+	if normalized.IsHAIP() && o.AllowHTTP {
+		return fmt.Errorf("HAIP profile does not permit AllowHTTP")
+	}
+	return nil
+}
+
+// requireDPoPTokenType enforces HAIP §4 "Sender-constrained access token: MUST
+// support DPoP" on a parsed token response. A token_type other than DPoP
+// (case-insensitive) cannot bind the access token to the wallet's key.
+func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
+	if normalized.IsHAIP() && !strings.EqualFold(strings.TrimSpace(tokenType), "DPoP") {
+		return fmt.Errorf("HAIP requires a DPoP-bound access token")
+	}
+	return nil
+}
 
 type DPoPProofFactory = types.DPoPProofFactory
 
@@ -150,9 +200,16 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported serialization flavor")
 	}
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
+	}
+	if err := o.requireHAIPTransport(normalized); err != nil {
+		return nil, err
+	}
 
 	var finalMetadata types.CredentialIssuerMetadata
-	err := o.fetchFinalIssuerMetadata(endpoint, &finalMetadata)
+	err = o.fetchFinalIssuerMetadata(endpoint, &finalMetadata)
 	if err == nil {
 		return &finalMetadata, nil
 	}
@@ -204,6 +261,13 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
+	}
+	if err := o.requireHAIPTransport(normalized); err != nil {
+		return nil, err
+	}
 
 	var metadata types.AuthorizationServerMetadata
 	if err := o.doRequest("GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
@@ -222,6 +286,10 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 ) (*types.CredentialIssuanceAccessToken, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
+	}
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
 	}
 	formData := url.Values{}
 	formData.Set("grant_type", "urn:ietf:params:oauth:grant-type:pre-authorized_code")
@@ -326,6 +394,9 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	if err := json.Unmarshal(bodyBytes, &accessToken); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
+	if err := requireDPoPTokenType(normalized, accessToken.TokenType); err != nil {
+		return nil, err
+	}
 	return &accessToken, nil
 
 }
@@ -333,6 +404,9 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
+	}
+	if _, err := o.normalizedProfile(); err != nil {
+		return nil, err
 	}
 
 	nonceEndpointURL := url.URL(endpoint)
@@ -385,6 +459,9 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 }
 
 func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, request types.PushedAuthorizationRequest, headers types.OAuthClientAttestationHeaders) (*types.PushedAuthorizationResponse, error) {
+	if _, err := o.normalizedProfile(); err != nil {
+		return nil, err
+	}
 	formData := url.Values{}
 	formData.Set("response_type", request.ResponseType)
 	formData.Set("client_id", request.ClientID)
@@ -405,6 +482,10 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(endpoint common.URIField, req
 }
 
 func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, dpopProof string) (*types.CredentialIssuanceAccessToken, error) {
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
+	}
 	formData := url.Values{}
 	formData.Set("grant_type", "authorization_code")
 	formData.Set("code", request.Code)
@@ -421,6 +502,9 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 	if err := o.doFinalRequest(http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
+	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
+		return nil, err
+	}
 	return &response, nil
 }
 
@@ -431,6 +515,10 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopRetry(endpoint common
 }
 
 func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
+	}
 	formData := url.Values{}
 	formData.Set("grant_type", "authorization_code")
 	formData.Set("code", request.Code)
@@ -441,6 +529,9 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(e
 	var response types.CredentialIssuanceAccessToken
 	if err := o.doFormRequestWithDpopAndAttestationRetry(endpoint, strings.NewReader(formData.Encode()), headersFactory, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
+	}
+	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
+		return nil, err
 	}
 	return &response, nil
 }
@@ -459,6 +550,56 @@ func (o *Oid4vciReceiver) FetchNonceResponse(endpoint common.URIField) (*types.N
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
 	}
 	return &response, nil
+}
+
+// ValidateCredentialConfigurationForProfile applies the HAIP 1.0 constraints on
+// a single Credential Configuration. Under Final every configuration is
+// accepted. HAIP §4.1: "The Credential Issuer metadata MUST include a scope for
+// every Credential Configuration it supports"; HAIP §5.3.2 and §6 restrict the
+// offered credential formats to SD-JWT VC (dc+sd-jwt) and ISO mdoc (mso_mdoc).
+func (o *Oid4vciReceiver) ValidateCredentialConfigurationForProfile(config types.CredentialConfiguration) error {
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return err
+	}
+	if !normalized.IsHAIP() {
+		return nil
+	}
+	if strings.TrimSpace(config.Scope) == "" {
+		return fmt.Errorf("HAIP requires a scope for every credential configuration")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Format)) {
+	case "dc+sd-jwt", "mso_mdoc":
+		return nil
+	default:
+		return fmt.Errorf("HAIP requires credential format dc+sd-jwt or mso_mdoc, got %q", config.Format)
+	}
+}
+
+// ValidateIssuerMetadataForProfile applies the HAIP 1.0 constraints on the
+// Credential Issuer metadata. Under Final the metadata is accepted unchanged.
+// HAIP §4.1: "the nonce_endpoint MUST be present ... if the Credential Issuer
+// metadata ... includes cryptographic_binding_methods_supported".
+func (o *Oid4vciReceiver) ValidateIssuerMetadataForProfile(metadata *types.CredentialIssuerMetadata) error {
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return err
+	}
+	if !normalized.IsHAIP() {
+		return nil
+	}
+	if metadata == nil {
+		return fmt.Errorf("issuer metadata is required")
+	}
+	if metadata.NonceEndpoint != nil {
+		return nil
+	}
+	for id, config := range metadata.CredentialConfigurationSupported {
+		if config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0 {
+			return fmt.Errorf("HAIP requires nonce_endpoint when credential configuration %q advertises cryptographic_binding_methods_supported", id)
+		}
+	}
+	return nil
 }
 
 func (o *Oid4vciReceiver) RequestCredential(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, dpopProof string) (*types.CredentialResponse, error) {

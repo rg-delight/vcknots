@@ -35,3 +35,11 @@ func (p Profile) Normalize() (Profile, error) {
 func (p Profile) IsHAIP() bool {
 	return p == HAIP
 }
+
+// Carrier is implemented by protocol plugins that expose the explicit profile
+// they enforce. The wallet root uses it to verify that every registered plugin
+// carries the same profile as the wallet instead of silently accepting a
+// low-level API call that bypasses the root policy.
+type Carrier interface {
+	ProtocolProfile() Profile
+}
