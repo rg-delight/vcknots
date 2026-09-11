@@ -5,6 +5,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
@@ -140,20 +143,59 @@ func TestVerificationDispatcher_Verify(t *testing.T) {
 		t.Error("Verify() should return true for valid signature")
 	}
 
-	// Test with unsupported algorithm
-	unsupportedProof := credential.CredentialProof{
-		Algorithm: jose.ES384, // Not registered by default
-		Signature: signature,
-		Payload:   payload,
+	// Test with unsupported algorithm. HS256 is a MAC rather than a digital
+	// signature and "none" is the unsigned JWS of RFC 7515 Section 3.6;
+	// WithDefaultConfig() registers neither, so both reach no plugin.
+	for _, algorithm := range []jose.SignatureAlgorithm{jose.HS256, jose.SignatureAlgorithm("none")} {
+		unsupportedProof := credential.CredentialProof{
+			Algorithm: algorithm,
+			Signature: signature,
+			Payload:   payload,
+		}
+
+		_, err = dispatcher.Verify(&unsupportedProof, publicKeyJWK)
+		if err == nil {
+			t.Errorf("Verify() should return error for unsupported algorithm %s", algorithm)
+			continue
+		}
+		expectedErr := fmt.Sprintf("verification error (algorithm: %s): plugin not found: verifier plugin not found", algorithm)
+		if err.Error() != expectedErr {
+			t.Errorf("Expected error message '%s', got '%s'", expectedErr, err.Error())
+		}
+		if !errors.Is(err, types.ErrPluginNotFound) {
+			t.Errorf("Verify() should report ErrPluginNotFound for %s", algorithm)
+		}
+	}
+}
+
+// TestWithDefaultConfig_RegistersEveryBundledAlgorithm pins the algorithms a
+// default dispatcher can verify, so a plugin that stops being registered is
+// caught here rather than in a credential acceptance failure.
+func TestWithDefaultConfig_RegistersEveryBundledAlgorithm(t *testing.T) {
+	dispatcher, err := NewVerificationDispatcher(WithDefaultConfig())
+	if err != nil {
+		t.Fatalf("NewVerificationDispatcher() should not return error: %v", err)
 	}
 
-	_, err = dispatcher.Verify(&unsupportedProof, publicKeyJWK)
-	if err == nil {
-		t.Error("Verify() should return error for unsupported algorithm")
+	expected := []jose.SignatureAlgorithm{
+		jose.ES256, jose.ES384, jose.ES512,
+		jose.RS256, jose.RS384, jose.RS512,
+		jose.PS256, jose.PS384, jose.PS512,
+		jose.EdDSA,
 	}
-	expectedErr := "verification error (algorithm: ES384): plugin not found: verifier plugin not found"
-	if err.Error() != expectedErr {
-		t.Errorf("Expected error message '%s', got '%s'", expectedErr, err.Error())
+	supported := dispatcher.GetSupportedAlgorithms()
+	if len(supported) != len(expected) {
+		t.Errorf("GetSupportedAlgorithms() returned %v, want the %d bundled algorithms", supported, len(expected))
+	}
+	for _, algorithm := range expected {
+		if !slices.Contains(supported, algorithm) {
+			t.Errorf("GetSupportedAlgorithms() should include %s", algorithm)
+		}
+	}
+	for _, algorithm := range []jose.SignatureAlgorithm{jose.HS256, jose.HS384, jose.HS512, jose.SignatureAlgorithm("none")} {
+		if slices.Contains(supported, algorithm) {
+			t.Errorf("GetSupportedAlgorithms() must not include %s", algorithm)
+		}
 	}
 }
 

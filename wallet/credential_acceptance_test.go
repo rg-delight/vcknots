@@ -3,8 +3,10 @@ package wallet
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -167,8 +169,16 @@ type acceptanceWire struct {
 	nbf             *time.Time
 	disclosures     map[string]string
 	extraDisclosure bool
-	x5c             []string
+	// sdAlg overrides the _sd_alg claim written next to the disclosure
+	// digests, so a hash the wallet does not accept can be offered.
+	sdAlg string
+	x5c   []string
+	// signingKey is the ECDSA issuer key of an ES256 credential, which is what
+	// most cases need. alg and signer together replace it when the credential
+	// must be signed with another algorithm or key type.
 	signingKey      *ecdsa.PrivateKey
+	alg             jose.SignatureAlgorithm
+	signer          any
 	kid             string
 	tamperSignature bool
 }
@@ -187,7 +197,13 @@ func buildAcceptanceWire(t *testing.T, spec acceptanceWire) string {
 	if spec.exp.IsZero() {
 		spec.exp = time.Now().Add(time.Hour)
 	}
-	require.NotNil(t, spec.signingKey)
+	if spec.alg == "" {
+		spec.alg = jose.ES256
+	}
+	if spec.signer == nil {
+		require.NotNil(t, spec.signingKey)
+		spec.signer = spec.signingKey
+	}
 
 	claims := map[string]any{
 		"iss": spec.issuer,
@@ -222,6 +238,9 @@ func buildAcceptanceWire(t *testing.T, spec acceptanceWire) string {
 	if len(hashes) > 0 {
 		claims["_sd"] = hashes
 		claims["_sd_alg"] = "sha-256"
+		if spec.sdAlg != "" {
+			claims["_sd_alg"] = spec.sdAlg
+		}
 	}
 	if spec.extraDisclosure {
 		raw, err := json.Marshal([]any{"orphan-salt", "orphan_claim", "orphan-value"})
@@ -236,7 +255,7 @@ func buildAcceptanceWire(t *testing.T, spec acceptanceWire) string {
 	if spec.kid != "" {
 		signerOptions = signerOptions.WithHeader("kid", spec.kid)
 	}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: spec.signingKey}, signerOptions)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: spec.alg, Key: spec.signer}, signerOptions)
 	require.NoError(t, err)
 	signed, err := jwt.Signed(signer).Claims(claims).Serialize()
 	require.NoError(t, err)
@@ -727,4 +746,416 @@ func TestAcceptanceRejectsUnsupportedConfirmationMethod(t *testing.T) {
 		require.False(t, saved.Verification.HolderBound)
 		require.Equal(t, 1, fixture.entryCount(t))
 	})
+}
+
+// acceptanceIssuer is an issuer key of one algorithm together with the JWK a
+// resolution hook hands back for it, so the algorithm coverage cases differ
+// only in the key they are built from.
+type acceptanceIssuer struct {
+	algorithm jose.SignatureAlgorithm
+	private   any
+	public    jose.JSONWebKey
+}
+
+// acceptanceIssuers builds one issuer per signature algorithm the bundled
+// verification plugins implement. The RSA keys are generated once and shared:
+// the algorithms differ in digest and padding, not in the key.
+func acceptanceIssuers(t *testing.T) []acceptanceIssuer {
+	t.Helper()
+	issuers := make([]acceptanceIssuer, 0, 10)
+	for _, ec := range []struct {
+		algorithm jose.SignatureAlgorithm
+		curve     elliptic.Curve
+	}{
+		{jose.ES256, elliptic.P256()},
+		{jose.ES384, elliptic.P384()},
+		{jose.ES512, elliptic.P521()},
+	} {
+		key, err := ecdsa.GenerateKey(ec.curve, rand.Reader)
+		require.NoError(t, err)
+		issuers = append(issuers, acceptanceIssuer{
+			algorithm: ec.algorithm,
+			private:   key,
+			public:    jose.JSONWebKey{Key: &key.PublicKey, KeyID: "issuer-key-1", Algorithm: string(ec.algorithm)},
+		})
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	for _, algorithm := range []jose.SignatureAlgorithm{jose.RS256, jose.RS384, jose.RS512, jose.PS256, jose.PS384, jose.PS512} {
+		issuers = append(issuers, acceptanceIssuer{
+			algorithm: algorithm,
+			private:   rsaKey,
+			public:    jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "issuer-key-1", Algorithm: string(algorithm)},
+		})
+	}
+
+	edPublic, edPrivate, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	issuers = append(issuers, acceptanceIssuer{
+		algorithm: jose.EdDSA,
+		private:   edPrivate,
+		public:    jose.JSONWebKey{Key: edPublic, KeyID: "issuer-key-1", Algorithm: string(jose.EdDSA)},
+	})
+	return issuers
+}
+
+// TestVerifyCredentialForAcceptance_SigningAlgorithms proves that every
+// algorithm the default verification dispatcher registers authenticates a real
+// credential end to end, and that reaching it takes a policy that lists the
+// algorithm: registering a plugin alone never widens what is accepted.
+func TestVerifyCredentialForAcceptance_SigningAlgorithms(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+
+	for _, issuer := range acceptanceIssuers(t) {
+		t.Run(string(issuer.algorithm), func(t *testing.T) {
+			wire := buildAcceptanceWire(t, acceptanceWire{
+				alg:    issuer.algorithm,
+				signer: issuer.private,
+				kid:    "issuer-key-1",
+				cnf:    &holder,
+			})
+			// The issuer key is handed back the way a JWKS or a DID document
+			// delivers one: serialized JWK JSON, so the kty and crv of every
+			// algorithm go through the JWK to public key conversion.
+			encoded, err := issuer.public.MarshalJSON()
+			require.NoError(t, err)
+			resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) {
+				var key jose.JSONWebKey
+				if err := key.UnmarshalJSON(encoded); err != nil {
+					return nil, err
+				}
+				return []jose.JSONWebKey{key}, nil
+			}
+
+			listed, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{
+				ResolveIssuerKeys: resolve,
+				SigningAlgorithms: []jose.SignatureAlgorithm{issuer.algorithm},
+			})
+			parsed, verification, err := listed.VerifyCredentialForAcceptance(t.Context(), []byte(wire), credential.SDJwtVC, &holder)
+			require.NoError(t, err)
+			require.NotNil(t, parsed)
+			require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
+			require.True(t, verification.HolderBound)
+
+			// A tampered signature must fail for every algorithm, so a
+			// positive result cannot come from a check that was skipped.
+			tampered := buildAcceptanceWire(t, acceptanceWire{
+				alg:             issuer.algorithm,
+				signer:          issuer.private,
+				kid:             "issuer-key-1",
+				cnf:             &holder,
+				tamperSignature: true,
+			})
+			_, _, err = listed.VerifyCredentialForAcceptance(t.Context(), []byte(tampered), credential.SDJwtVC, &holder)
+			require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
+
+			// The same credential under a policy that lists no algorithm falls
+			// back to DefaultCredentialSigningAlgorithms, which is ES256 alone.
+			unlisted, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{ResolveIssuerKeys: resolve})
+			_, _, err = unlisted.VerifyCredentialForAcceptance(t.Context(), []byte(wire), credential.SDJwtVC, &holder)
+			if issuer.algorithm == jose.ES256 {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrCredentialAlgUnsupported)
+			require.ErrorContains(t, err, "is not listed by the credential acceptance policy")
+		})
+	}
+}
+
+// TestVerifyCredentialForAcceptance_AlgorithmWithoutPlugin covers the second
+// half of the algorithm decision: an algorithm the caller's policy lists but no
+// verification plugin implements is still refused, rather than accepted with
+// its signature unchecked.
+func TestVerifyCredentialForAcceptance_AlgorithmWithoutPlugin(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	policy := &CredentialAcceptancePolicy{
+		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}}, nil
+		},
+		SigningAlgorithms: []jose.SignatureAlgorithm{jose.ES256, jose.HS256, jose.SignatureAlgorithm("none")},
+	}
+	w, _ := newAcceptanceWallet(t, profile.Final, policy)
+
+	accepted := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder})
+	_, _, err := w.VerifyCredentialForAcceptance(t.Context(), []byte(accepted), credential.SDJwtVC, &holder)
+	require.NoError(t, err)
+
+	// HS256 is a MAC: the wallet holds no shared secret and registers no
+	// plugin for it, so listing it in the policy cannot make it acceptable.
+	_, _, err = w.VerifyCredentialForAcceptance(t.Context(), []byte(unsignedAcceptanceWire(t, "HS256")), credential.SDJwtVC, &holder)
+	require.ErrorIs(t, err, ErrCredentialAlgUnsupported)
+	require.ErrorContains(t, err, "is not supported by the verifier")
+
+	// "none" is refused before the policy is consulted at all.
+	_, _, err = w.VerifyCredentialForAcceptance(t.Context(), []byte(unsignedAcceptanceWire(t, "none")), credential.SDJwtVC, &holder)
+	require.ErrorIs(t, err, ErrCredentialAlgUnsupported)
+	require.ErrorContains(t, err, "alg header is missing or none")
+}
+
+// unsignedAcceptanceWire assembles an SD-JWT VC whose protected header names
+// algorithm and whose signature segment is meaningless. It exists because a
+// signing library will not produce "none" or a MAC over a public key, and the
+// wallet must still refuse such a credential.
+func unsignedAcceptanceWire(t *testing.T, algorithm string) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]any{"alg": algorithm, "typ": "dc+sd-jwt"})
+	require.NoError(t, err)
+	claims, err := json.Marshal(map[string]any{
+		"iss": "https://issuer.example.test",
+		"vct": "urn:test:acceptance",
+		"iat": time.Now().Unix(),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	return strings.Join([]string{
+		base64.RawURLEncoding.EncodeToString(header),
+		base64.RawURLEncoding.EncodeToString(claims),
+		base64.RawURLEncoding.EncodeToString([]byte("not-a-signature")),
+	}, ".") + "~"
+}
+
+// leafOnlyX5C is the chain HAIP §6.1.1 asks for: the issuer's signing
+// certificate without the trust anchor the wallet already holds.
+func (c testIssuerChain) leafOnlyX5C() []string {
+	return []string{base64.StdEncoding.EncodeToString(c.leafCert.Raw)}
+}
+
+// TestVerifyCredentialForAcceptance_TypedFailures walks every acceptance
+// failure the library names with a sentinel. Each case runs the same wallet
+// twice: once on a credential it must accept, so the rejection cannot come from
+// a misconfigured fixture, and once on the input that triggers the condition.
+func TestVerifyCredentialForAcceptance_TypedFailures(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	otherHolder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
+
+	// resolvingPolicy authenticates the issuer through a resolution hook that
+	// knows one kid, which is all most cases need.
+	resolvingPolicy := func() *CredentialAcceptancePolicy {
+		return &CredentialAcceptancePolicy{ResolveIssuerKeys: func(_ string, header map[string]any) ([]jose.JSONWebKey, error) {
+			if kid, _ := header["kid"].(string); kid != "issuer-key-1" {
+				return nil, nil
+			}
+			return []jose.JSONWebKey{issuerJWK}, nil
+		}}
+	}
+	x509Policy := func(mutate func(*IssuerX509TrustOptions)) *CredentialAcceptancePolicy {
+		options := &IssuerX509TrustOptions{TrustAnchors: chain.anchors(), AllowUnadvertisedRevocation: true}
+		if mutate != nil {
+			mutate(options)
+		}
+		return &CredentialAcceptancePolicy{IssuerX509: options}
+	}
+	signed := func(spec acceptanceWire) string {
+		if spec.signingKey == nil && spec.signer == nil {
+			spec.signingKey = issuerKey
+			spec.kid = "issuer-key-1"
+		}
+		if spec.cnfRaw == nil && spec.cnf == nil {
+			spec.cnf = &holder
+		}
+		return buildAcceptanceWire(t, spec)
+	}
+	x5cSigned := func(spec acceptanceWire) string {
+		spec.signingKey = chain.leafKey
+		if spec.x5c == nil {
+			spec.x5c = chain.leafOnlyX5C()
+		}
+		spec.cnf = &holder
+		return buildAcceptanceWire(t, spec)
+	}
+	disclosed := map[string]string{"given_name": "Erika"}
+
+	cases := []struct {
+		name     string
+		profile  profile.Profile
+		policy   *CredentialAcceptancePolicy
+		accepted string
+		rejected string
+		sentinel error
+	}{
+		{
+			name:     "parse",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: "this-is-not-a-credential",
+			sentinel: ErrCredentialParse,
+		},
+		{
+			name:     "typ",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{typ: "vc+sd-jwt"}),
+			rejected: signed(acceptanceWire{typ: "JWT"}),
+			sentinel: ErrCredentialTypInvalid,
+		},
+		{
+			name:     "alg",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: unsignedAcceptanceWire(t, "none"),
+			sentinel: ErrCredentialAlgUnsupported,
+		},
+		{
+			name: "holder binding missing",
+			policy: func() *CredentialAcceptancePolicy {
+				policy := resolvingPolicy()
+				policy.RequireHolderBinding = true
+				return policy
+			}(),
+			accepted: signed(acceptanceWire{}),
+			// No cnf claim at all, which is what RequireHolderBinding refuses.
+			rejected: buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1"}),
+			sentinel: ErrHolderBindingMissing,
+		},
+		{
+			name:     "holder binding mismatch",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: signed(acceptanceWire{cnf: &otherHolder}),
+			sentinel: ErrHolderBindingMismatch,
+		},
+		{
+			name:     "issuer key unresolved",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: signed(acceptanceWire{signingKey: issuerKey, kid: "another-key"}),
+			sentinel: ErrIssuerKeyUnresolved,
+		},
+		{
+			name:     "issuer signature invalid",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: signed(acceptanceWire{tamperSignature: true}),
+			sentinel: ErrIssuerSignatureInvalid,
+		},
+		{
+			name:     "expired",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: signed(acceptanceWire{exp: time.Now().Add(-time.Hour)}),
+			sentinel: ErrCredentialExpired,
+		},
+		{
+			name:     "not yet valid",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{}),
+			rejected: signed(acceptanceWire{nbf: ptr(time.Now().Add(time.Hour))}),
+			sentinel: ErrCredentialNotYetValid,
+		},
+		{
+			name:     "disclosure integrity",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{disclosures: disclosed}),
+			rejected: signed(acceptanceWire{disclosures: disclosed, extraDisclosure: true}),
+			sentinel: ErrDisclosureIntegrity,
+		},
+		{
+			name:     "sd_alg",
+			policy:   resolvingPolicy(),
+			accepted: signed(acceptanceWire{disclosures: disclosed}),
+			rejected: signed(acceptanceWire{disclosures: disclosed, sdAlg: "sha-1"}),
+			sentinel: ErrSDAlgUnsupported,
+		},
+		{
+			name:     "issuer DNS binding",
+			policy:   x509Policy(func(options *IssuerX509TrustOptions) { options.RequireIssuerDNSBinding = true }),
+			accepted: x5cSigned(acceptanceWire{}),
+			rejected: x5cSigned(acceptanceWire{issuer: "https://other.example.test"}),
+			sentinel: ErrIssuerDNSBindingFailed,
+		},
+		{
+			name:     "HAIP x5c required",
+			profile:  profile.HAIP,
+			policy:   x509Policy(nil),
+			accepted: x5cSigned(acceptanceWire{}),
+			rejected: signed(acceptanceWire{}),
+			sentinel: ErrHAIPX5CRequired,
+		},
+		{
+			name:     "HAIP trust anchor in x5c",
+			profile:  profile.HAIP,
+			policy:   x509Policy(nil),
+			accepted: x5cSigned(acceptanceWire{}),
+			rejected: x5cSigned(acceptanceWire{x5c: chain.x5c()}),
+			sentinel: ErrHAIPTrustAnchorInX5C,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			walletProfile := testCase.profile
+			if walletProfile == "" {
+				walletProfile = profile.Final
+			}
+			w, store := newAcceptanceWallet(t, walletProfile, testCase.policy)
+
+			parsed, verification, err := w.VerifyCredentialForAcceptance(t.Context(), []byte(testCase.accepted), credential.SDJwtVC, &holder)
+			require.NoError(t, err, "the control credential must be accepted")
+			require.NotNil(t, parsed)
+			require.NotNil(t, verification)
+
+			_, _, err = w.VerifyCredentialForAcceptance(t.Context(), []byte(testCase.rejected), credential.SDJwtVC, &holder)
+			require.ErrorIs(t, err, testCase.sentinel)
+			// Acceptance never stores: both runs leave the store untouched.
+			require.Equal(t, 0, acceptanceEntryCount(t, store))
+		})
+	}
+
+	t.Run("policy required", func(t *testing.T) {
+		w, _ := newAcceptanceWallet(t, profile.Final, nil)
+		_, _, err := w.VerifyCredentialForAcceptance(t.Context(), []byte(signed(acceptanceWire{})), credential.SDJwtVC, &holder)
+		require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	})
+}
+
+// TestVerifyCredentialWithPolicy covers the per-call form: the same wallet
+// judges one credential under two policies, and a nil policy runs the minimum
+// rules without authenticating an issuer.
+func TestVerifyCredentialWithPolicy(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	otherHolder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder})
+
+	// The wallet itself is configured with a policy that resolves nothing, so
+	// the outcome below can only come from the policy passed per call.
+	w, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{})
+
+	trusting := &CredentialAcceptancePolicy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+		return []jose.JSONWebKey{issuerJWK}, nil
+	}}
+	_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, trusting)
+	require.NoError(t, err)
+	require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
+	require.True(t, verification.HolderBound)
+
+	_, _, err = w.VerifyCredentialForAcceptance(t.Context(), []byte(wire), credential.SDJwtVC, &holder)
+	require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+
+	expiring := &CredentialAcceptancePolicy{
+		ResolveIssuerKeys: trusting.ResolveIssuerKeys,
+		Now:               func() time.Time { return time.Now().Add(2 * time.Hour) },
+	}
+	_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, expiring)
+	require.ErrorIs(t, err, ErrCredentialExpired)
+
+	t.Run("a nil policy authenticates no issuer and still binds the holder", func(t *testing.T) {
+		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, nil)
+		require.NoError(t, err)
+		require.Empty(t, verification.IssuerKeyID)
+		require.True(t, verification.HolderBound)
+
+		_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &otherHolder, nil)
+		require.ErrorIs(t, err, ErrHolderBindingMismatch)
+	})
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }

@@ -44,8 +44,42 @@ type CredentialAcceptancePolicy struct {
 	// issuers says so in one greppable place instead of expressing it as an
 	// absent policy.
 	UnverifiedIssuer bool
-	Now              func() time.Time
-	ClockSkew        time.Duration
+	// SigningAlgorithms lists the JWS "alg" values an issuer may sign a
+	// credential with. An empty list means DefaultCredentialSigningAlgorithms.
+	//
+	// It is a separate decision from which algorithms the verification
+	// dispatcher can compute: a registered plugin makes an algorithm
+	// verifiable, this list makes it acceptable. Keeping them apart means that
+	// adding a plugin — including the ones NewVerificationDispatcher registers
+	// by default — never widens what a deployment accepts on its own, and that
+	// a caller can narrow acceptance without rebuilding the dispatcher. An
+	// algorithm listed here that no plugin implements is still rejected.
+	SigningAlgorithms []jose.SignatureAlgorithm
+	Now               func() time.Time
+	ClockSkew         time.Duration
+}
+
+// DefaultCredentialSigningAlgorithms is the issuer signature algorithm policy
+// applied when a CredentialAcceptancePolicy leaves SigningAlgorithms empty, and
+// when no policy is configured at all.
+//
+// It holds ES256 alone. HAIP Section "Requirements for Digital Signatures"
+// states that "Issuers, Verifiers, and Wallets MUST, at a minimum, support
+// ECDSA with P-256 and SHA-256 (JOSE algorithm identifier ES256 ...)" and that
+// "ecosystem-specific profiles of this specification MAY mandate additional
+// cryptographic suites": the floor is interoperable everywhere, anything above
+// it is an ecosystem decision, so a deployment that accepts more says so in its
+// policy. The wallet never modifies the slice; callers may read it and must not
+// modify it either.
+var DefaultCredentialSigningAlgorithms = []jose.SignatureAlgorithm{jose.ES256}
+
+// acceptedSigningAlgorithms resolves the issuer signature algorithms one
+// acceptance run allows.
+func acceptedSigningAlgorithms(policy *CredentialAcceptancePolicy) []jose.SignatureAlgorithm {
+	if policy == nil || len(policy.SigningAlgorithms) == 0 {
+		return DefaultCredentialSigningAlgorithms
+	}
+	return policy.SigningAlgorithms
 }
 
 // IssuerX509TrustOptions is relying-party trust configuration for issuer x5c chains.
@@ -84,44 +118,83 @@ type CredentialVerification struct {
 // ctx bounds the network work the policy performs, which today is CRL retrieval
 // while the issuer certificate chain is verified.
 func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
-	if requirePolicy && w.credentialAcceptance == nil {
-		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
-	}
+	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, w.credentialAcceptance, requirePolicy)
+}
 
-	parsedCredential, err := w.serializer.DeserializeCredential(flavor, raw)
-	if err != nil {
-		return nil, nil, fmt.Errorf("credential could not be parsed: %w", err)
+// VerifyCredentialForAcceptance authenticates a raw credential under the
+// wallet's configured Config.CredentialAcceptance and reports what it verified,
+// without storing anything. It is the check the OpenID4VCI Final and HAIP
+// issuance paths run before a credential is persisted, exposed so that an
+// integrator can run it on a credential it already holds — one received out of
+// band, re-checked after a policy change, or inspected before it is offered to
+// a user.
+//
+// A nil Config.CredentialAcceptance is a fail-closed error
+// (ErrCredentialAcceptancePolicyRequired): a caller that means to accept
+// unauthenticated issuers says so with CredentialAcceptancePolicy.UnverifiedIssuer.
+// Every other failure wraps one of the sentinels declared in errors_final.go,
+// so errors.Is decides what went wrong.
+//
+// It is unrelated to VerifyCredential, which checks one already parsed
+// credential against one public key the caller supplies.
+func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*credential.Credential, *CredentialVerification, error) {
+	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, w.credentialAcceptance, true)
+}
+
+// VerifyCredentialWithPolicy is VerifyCredentialForAcceptance with the policy
+// supplied per call instead of taken from the wallet configuration, for an
+// integrator that decides the trust rules per credential — a different trust
+// anchor set, a different issuer key resolution, a different clock — without
+// building a wallet for each. Nothing is written to the wallet's credential
+// store on this path, by either entrypoint.
+//
+// A nil policy runs the minimum rules only: the credential must parse, its typ
+// and alg must be acceptable, and a cnf that does not match holderKey is
+// rejected. No issuer is authenticated and no validity period is checked, which
+// is what the Draft-13 entrypoints do when Config.CredentialAcceptance is
+// absent. Pass a policy, or use VerifyCredentialForAcceptance, to fail closed
+// instead.
+func (w *Wallet) VerifyCredentialWithPolicy(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy) (*credential.Credential, *CredentialVerification, error) {
+	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, policy, false)
+}
+
+// verifyCredentialForAcceptanceWithPolicy is the acceptance check itself, run
+// against an explicit policy so that the wallet-configured and the per-call
+// entrypoints share one implementation.
+func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
+	if requirePolicy && policy == nil {
+		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 
 	issuerJWT := issuerSignedJWT(flavor, raw)
 	jwtParts := strings.Split(issuerJWT, ".")
 	if len(jwtParts) != 3 {
-		return nil, nil, fmt.Errorf("issuer JWT must have exactly three parts")
+		return nil, nil, fmt.Errorf("%w: issuer JWT must have exactly three parts", ErrCredentialParse)
 	}
 	headerBytes, err := base64.RawURLEncoding.DecodeString(jwtParts[0])
 	if err != nil {
-		return nil, nil, fmt.Errorf("issuer JWT header is not base64url: %w", err)
+		return nil, nil, fmt.Errorf("%w: issuer JWT header is not base64url: %w", ErrCredentialParse, err)
 	}
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(jwtParts[1])
 	if err != nil {
-		return nil, nil, fmt.Errorf("issuer JWT payload is not base64url: %w", err)
+		return nil, nil, fmt.Errorf("%w: issuer JWT payload is not base64url: %w", ErrCredentialParse, err)
 	}
 
 	var header map[string]any
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, nil, fmt.Errorf("issuer JWT header is not JSON: %w", err)
+		return nil, nil, fmt.Errorf("%w: issuer JWT header is not JSON: %w", ErrCredentialParse, err)
 	}
 	payload := map[string]any{}
 	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, nil, fmt.Errorf("issuer JWT payload is not JSON: %w", err)
+		return nil, nil, fmt.Errorf("%w: issuer JWT payload is not JSON: %w", ErrCredentialParse, err)
 	}
 
 	if flavor == credential.SDJwtVC {
 		typ, _ := header["typ"].(string)
 		if !strings.EqualFold(typ, "dc+sd-jwt") && !strings.EqualFold(typ, "vc+sd-jwt") {
-			return nil, nil, fmt.Errorf("SD-JWT VC typ header must be dc+sd-jwt or vc+sd-jwt")
+			return nil, nil, fmt.Errorf("%w: SD-JWT VC typ header must be dc+sd-jwt or vc+sd-jwt, got %q", ErrCredentialTypInvalid, typ)
 		}
 	}
 
@@ -130,30 +203,38 @@ func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw [
 			// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's
 			// signing certificate along with a trust chain in the x5c JOSE
 			// header".
-			return nil, nil, fmt.Errorf("HAIP requires the issuer signing certificate in the x5c header")
+			return nil, nil, ErrHAIPX5CRequired
 		}
 	}
 
 	algorithm, _ := header["alg"].(string)
+	// RFC 7515 Section 3.6's unsigned JWS is refused before anything else is
+	// read: there is no signature to verify, so no issuer could be
+	// authenticated whatever the rest of the policy says.
 	if algorithm == "" || strings.EqualFold(algorithm, "none") {
-		return nil, nil, fmt.Errorf("issuer JWT alg header is missing or none")
+		return nil, nil, fmt.Errorf("%w: issuer JWT alg header is missing or none", ErrCredentialAlgUnsupported)
 	}
-	supported := false
-	for _, candidate := range w.verifier.GetSupportedAlgorithms() {
-		if string(candidate) == algorithm {
-			supported = true
-			break
-		}
+	if !slices.Contains(acceptedSigningAlgorithms(policy), jose.SignatureAlgorithm(algorithm)) {
+		return nil, nil, fmt.Errorf("%w: issuer JWT alg %q is not listed by the credential acceptance policy", ErrCredentialAlgUnsupported, algorithm)
 	}
-	if !supported {
-		return nil, nil, fmt.Errorf("issuer JWT alg %q is not supported by the verifier", algorithm)
+	if !slices.Contains(w.verifier.GetSupportedAlgorithms(), jose.SignatureAlgorithm(algorithm)) {
+		return nil, nil, fmt.Errorf("%w: issuer JWT alg %q is not supported by the verifier", ErrCredentialAlgUnsupported, algorithm)
+	}
+
+	// The JOSE header decides the credential's fate before its body is read:
+	// an algorithm the wallet will not accept, or a typ it did not ask for,
+	// must be reported as such rather than as whatever the deserializer makes
+	// of the credential.
+	parsedCredential, err := w.serializer.DeserializeCredential(flavor, raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrCredentialParse, err)
 	}
 
 	verification := &CredentialVerification{}
 	if cnfRaw, cnfPresent := payload["cnf"]; cnfPresent {
 		cnf, ok := cnfRaw.(map[string]any)
 		if !ok {
-			return nil, nil, fmt.Errorf("cnf claim must be a JSON object")
+			return nil, nil, fmt.Errorf("%w: cnf claim must be a JSON object", ErrCredentialParse)
 		}
 		jwkRaw, jwkPresent := cnf["jwk"]
 		if !jwkPresent {
@@ -167,29 +248,28 @@ func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw [
 		if holderKey != nil {
 			claimedKey, err := jsonWebKeyFromValue(jwkRaw)
 			if err != nil {
-				return nil, nil, fmt.Errorf("cnf jwk is invalid: %w", err)
+				return nil, nil, fmt.Errorf("%w: cnf jwk is invalid: %w", ErrCredentialParse, err)
 			}
 			claimedThumbprint, err := claimedKey.Thumbprint(crypto.SHA256)
 			if err != nil {
-				return nil, nil, fmt.Errorf("cnf jwk thumbprint failed: %w", err)
+				return nil, nil, fmt.Errorf("%w: cnf jwk thumbprint failed: %w", ErrCredentialParse, err)
 			}
 			holderThumbprint, err := holderKey.Thumbprint(crypto.SHA256)
 			if err != nil {
 				return nil, nil, fmt.Errorf("holder key thumbprint failed: %w", err)
 			}
 			if !bytes.Equal(claimedThumbprint, holderThumbprint) {
-				return nil, nil, fmt.Errorf("credential is bound to a different holder key")
+				return nil, nil, ErrHolderBindingMismatch
 			}
 			verification.HolderBound = true
 		}
-	} else if w.credentialAcceptance != nil && w.credentialAcceptance.RequireHolderBinding {
-		return nil, nil, fmt.Errorf("credential does not contain a cnf holder binding")
+	} else if policy != nil && policy.RequireHolderBinding {
+		return nil, nil, ErrHolderBindingMissing
 	}
 
-	if w.credentialAcceptance == nil {
+	if policy == nil {
 		return parsedCredential, verification, nil
 	}
-	policy := w.credentialAcceptance
 
 	now := time.Now()
 	if policy.Now != nil {
@@ -197,7 +277,7 @@ func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw [
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := w.resolveAndVerifyIssuerKey(ctx, parsedCredential, header, payload, issuer, now, verification); err != nil {
+	if err := w.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, issuer, now, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -217,8 +297,7 @@ func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw [
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
 // bounds the CRL retrieval the trust path may perform.
-func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, header, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
-	policy := w.credentialAcceptance
+func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
 	var candidateKeys []jose.JSONWebKey
 
 	// An x5c header is trust evidence only when the caller configured X.509
@@ -236,9 +315,9 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 			return nil
 		}
 		if x5cPresent {
-			return fmt.Errorf("x5c issuer authentication is not configured")
+			return fmt.Errorf("%w: x5c issuer authentication is not configured", ErrIssuerKeyUnresolved)
 		}
-		return fmt.Errorf("issuer key resolution is not configured")
+		return fmt.Errorf("%w: issuer key resolution is not configured", ErrIssuerKeyUnresolved)
 	}
 	if x5cPresent && policy.IssuerX509 != nil {
 		certificates, err := commonX509.DecodeX5CChain(x5cRaw)
@@ -255,7 +334,7 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 				return err
 			}
 			if containsAnchor {
-				return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header")
+				return ErrHAIPTrustAnchorInX5C
 			}
 		}
 		crlOptions := policy.IssuerX509.CRL
@@ -297,14 +376,14 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 		}
 	} else {
 		if policy.ResolveIssuerKeys == nil {
-			return fmt.Errorf("issuer key resolution is not configured")
+			return fmt.Errorf("%w: issuer key resolution is not configured", ErrIssuerKeyUnresolved)
 		}
 		keys, err := policy.ResolveIssuerKeys(issuer, header)
 		if err != nil {
-			return fmt.Errorf("issuer key resolution failed: %w", err)
+			return fmt.Errorf("%w: issuer key resolution failed: %w", ErrIssuerKeyUnresolved, err)
 		}
 		if len(keys) == 0 {
-			return fmt.Errorf("no issuer key could be resolved")
+			return fmt.Errorf("%w: no issuer key could be resolved", ErrIssuerKeyUnresolved)
 		}
 		headerKeyID, _ := header["kid"].(string)
 		if headerKeyID != "" {
@@ -329,7 +408,7 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 		}
 	}
 	if verifiedKey < 0 {
-		return fmt.Errorf("issuer signature could not be verified")
+		return ErrIssuerSignatureInvalid
 	}
 	if verification.IssuerKeyID == "" {
 		verification.IssuerKeyID = candidateKeys[verifiedKey].KeyID
@@ -342,12 +421,12 @@ func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.D
 	if exp, present, err := numericDateClaim(payload, "exp"); err != nil {
 		return err
 	} else if present && exp <= nowUnix-skew.Seconds() {
-		return fmt.Errorf("credential has expired")
+		return ErrCredentialExpired
 	}
 	if nbf, present, err := numericDateClaim(payload, "nbf"); err != nil {
 		return err
 	} else if present && nbf > nowUnix+skew.Seconds() {
-		return fmt.Errorf("credential is not yet valid")
+		return ErrCredentialNotYetValid
 	}
 	return nil
 }
@@ -361,15 +440,15 @@ func numericDateClaim(payload map[string]any, name string) (float64, bool, error
 	case json.Number:
 		parsed, err := value.Float64()
 		if err != nil {
-			return 0, false, fmt.Errorf("%s claim is not a numeric date: %w", name, err)
+			return 0, false, fmt.Errorf("%w: %s claim is not a numeric date: %w", ErrCredentialParse, name, err)
 		}
 		return parsed, true, nil
 	case float64:
 		return value, true, nil
 	case string:
-		return 0, false, fmt.Errorf("%s claim must be a numeric date, not a string", name)
+		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date, not a string", ErrCredentialParse, name)
 	default:
-		return 0, false, fmt.Errorf("%s claim must be a numeric date", name)
+		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date", ErrCredentialParse, name)
 	}
 }
 
@@ -407,7 +486,7 @@ func requireIssuerDNSBinding(leaf *x509.Certificate, issuer string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("issuer certificate is not bound to issuer host %q", host)
+	return fmt.Errorf("%w: issuer certificate is not bound to issuer host %q", ErrIssuerDNSBindingFailed, host)
 }
 
 func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte) string {
@@ -433,11 +512,11 @@ func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *cr
 	if raw, present := payload["_sd_alg"]; present {
 		text, ok := raw.(string)
 		if !ok {
-			return fmt.Errorf("_sd_alg must be a string")
+			return fmt.Errorf("%w: _sd_alg must be a string", ErrSDAlgUnsupported)
 		}
 		sdAlg = strings.ToLower(text)
 		if !slices.Contains(AcceptedSDAlgorithms, sdAlg) {
-			return fmt.Errorf("unsupported _sd_alg %q", text)
+			return fmt.Errorf("%w: unsupported _sd_alg %q", ErrSDAlgUnsupported, text)
 		}
 	}
 	if parsedCredential.SDJwt == nil || len(parsedCredential.SDJwt.Disclosures) == 0 {
@@ -455,9 +534,9 @@ func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *cr
 		}
 		switch {
 		case references[digest] == 0:
-			return fmt.Errorf("disclosure is not referenced by any digest")
+			return fmt.Errorf("%w: disclosure is not referenced by any digest", ErrDisclosureIntegrity)
 		case references[digest] > 1:
-			return fmt.Errorf("disclosure digest is referenced more than once")
+			return fmt.Errorf("%w: disclosure digest is referenced more than once", ErrDisclosureIntegrity)
 		}
 	}
 	return nil
@@ -496,7 +575,7 @@ func disclosureDigest(encodedDisclosure, algorithm string) (string, error) {
 	case "sha-512":
 		hasher = sha512.New()
 	default:
-		return "", fmt.Errorf("unsupported disclosure hash algorithm %q", algorithm)
+		return "", fmt.Errorf("%w: unsupported disclosure hash algorithm %q", ErrSDAlgUnsupported, algorithm)
 	}
 	hasher.Write([]byte(encodedDisclosure))
 	return base64.RawURLEncoding.EncodeToString(hasher.Sum(nil)), nil

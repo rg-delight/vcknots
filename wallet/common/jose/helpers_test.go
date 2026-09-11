@@ -46,8 +46,50 @@ func TestParseAlgorithm(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			name:     "RS384",
+			algStr:   "RS384",
+			expected: jose.RS384,
+			wantErr:  false,
+		},
+		{
+			name:     "RS512",
+			algStr:   "RS512",
+			expected: jose.RS512,
+			wantErr:  false,
+		},
+		{
+			name:     "PS256",
+			algStr:   "PS256",
+			expected: jose.PS256,
+			wantErr:  false,
+		},
+		{
+			name:     "PS384",
+			algStr:   "PS384",
+			expected: jose.PS384,
+			wantErr:  false,
+		},
+		{
+			name:     "PS512",
+			algStr:   "PS512",
+			expected: jose.PS512,
+			wantErr:  false,
+		},
+		{
 			name:     "unsupported algorithm",
 			algStr:   "HS256",
+			expected: "",
+			wantErr:  true,
+		},
+		{
+			name:     "none is never an algorithm",
+			algStr:   "none",
+			expected: "",
+			wantErr:  true,
+		},
+		{
+			name:     "the comparison is case sensitive",
+			algStr:   "es256",
 			expected: "",
 			wantErr:  true,
 		},
@@ -97,6 +139,31 @@ func TestNewHashFromAlgorithm(t *testing.T) {
 		{
 			name:         "ES512",
 			alg:          jose.ES512,
+			expectedSize: 64, // SHA-512
+		},
+		{
+			name:         "RS384",
+			alg:          jose.RS384,
+			expectedSize: 48, // SHA-384
+		},
+		{
+			name:         "RS512",
+			alg:          jose.RS512,
+			expectedSize: 64, // SHA-512
+		},
+		{
+			name:         "PS256",
+			alg:          jose.PS256,
+			expectedSize: 32, // SHA-256
+		},
+		{
+			name:         "PS384",
+			alg:          jose.PS384,
+			expectedSize: 48, // SHA-384
+		},
+		{
+			name:         "PS512",
+			alg:          jose.PS512,
 			expectedSize: 64, // SHA-512
 		},
 		{
