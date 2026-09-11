@@ -278,17 +278,17 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	}
 	parsed, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
-		return fmt.Errorf("failed to parse request object JWT: %w", err)
+		return fmt.Errorf("failed to parse request object JWT: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	if len(parsed.Headers) != 1 {
-		return errors.New("request object JWT must have one protected header")
+		return fmt.Errorf("request object JWT must have one protected header: %w", ErrRequestObjectTypInvalid)
 	}
 	typ, exists := parsed.Headers[0].ExtraHeaders["typ"]
 	if !exists {
-		return errors.New("request object JWT must include 'typ' header parameter")
+		return fmt.Errorf("request object JWT must include 'typ' header parameter: %w", ErrRequestObjectTypInvalid)
 	}
 	if typ != "oauth-authz-req+jwt" {
-		return errors.New("request object JWT 'typ' header must be 'oauth-authz-req+jwt'")
+		return fmt.Errorf("request object JWT 'typ' header must be 'oauth-authz-req+jwt': %w", ErrRequestObjectTypInvalid)
 	}
 	claims := make(commonJOSE.Claims)
 	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
@@ -340,7 +340,7 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 	}
 	verified := make(commonJOSE.Claims)
 	if err := parsed.Claims(certificates[0].PublicKey, &verified); err != nil {
-		return fmt.Errorf("failed to verify request object with x5c certificate: %w", err)
+		return fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	// OID4VP 1.0 §5.10.1: "if the Wallet passed a wallet_nonce in the POST
 	// request, the Wallet MUST validate whether the request object contains the
@@ -383,10 +383,13 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request *CredentialPresentationRequest) error {
 	if clientID.prefix == OID4VPClientIDPrefixX509Hash {
 		// Final 5.9.3 and HAIP 5: x509_hash does not imply a DNS binding.
-		return commonX509.RequireLeafThumbprint(leaf, clientID.original)
+		if err := commonX509.RequireLeafThumbprint(leaf, clientID.original); err != nil {
+			return fmt.Errorf("%w: %w", err, ErrX509HashMismatch)
+		}
+		return nil
 	}
 	if err := commonX509.RequireLeafDNSName(leaf, clientID.original, false); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", err, ErrRequestObjectClientIDMismatch)
 	}
 	boundURI := request.RedirectURI
 	if request.ResponseMode == OAuthAuthzReqResponseModeDirectPost || request.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
@@ -394,7 +397,7 @@ func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request 
 	}
 	uri, err := url.Parse(boundURI)
 	if err != nil || !strings.EqualFold(uri.Hostname(), clientID.original) {
-		return errors.New("redirect_uri/response_uri and client_id (origin) must be same")
+		return fmt.Errorf("redirect_uri/response_uri and client_id (origin) must be same: %w", ErrRequestObjectClientIDMismatch)
 	}
 	return nil
 }
@@ -419,14 +422,14 @@ func validateRequestObjectClaims(claims commonJOSE.Claims, policy requestObjectC
 		}
 	}
 	if dates["exp"] == nil && policy.RequireExpiry {
-		return errors.New("request object is missing exp")
+		return fmt.Errorf("request object is missing exp: %w", ErrRequestObjectExpired)
 	}
 	// NumericDate permits fractions; compare exactly, without truncating or
 	// losing precision through float64. iat imposes no maximum token age of its
 	// own; MaxAge is the policy that bounds the distance between iat and exp.
 	if expiry := dates["exp"]; expiry != nil {
 		if requestObjectInstant(policy.Now.Add(-policy.ClockSkew)).Cmp(expiry) >= 0 {
-			return errors.New("request object is outside its exp validity")
+			return fmt.Errorf("request object is outside its exp validity: %w", ErrRequestObjectExpired)
 		}
 		if err := validateRequestObjectMaxAge(expiry, dates["iat"], policy); err != nil {
 			return err
@@ -434,7 +437,7 @@ func validateRequestObjectClaims(claims commonJOSE.Claims, policy requestObjectC
 	}
 	if notBefore := dates["nbf"]; notBefore != nil {
 		if requestObjectInstant(policy.Now.Add(policy.ClockSkew)).Cmp(notBefore) < 0 {
-			return errors.New("request object is outside its nbf validity")
+			return fmt.Errorf("request object is outside its nbf validity: %w", ErrRequestObjectExpired)
 		}
 	}
 	// iss is ignored, including its type, as required by Final section 5.
@@ -460,12 +463,12 @@ func validateRequestObjectAudience(claims commonJOSE.Claims, policy requestObjec
 		for _, value := range aud {
 			text, ok := value.(string)
 			if !ok || text == "" {
-				return errors.New("invalid audience claim")
+				return fmt.Errorf("invalid audience claim: %w", ErrRequestObjectAudienceMismatch)
 			}
 			actual = append(actual, text)
 		}
 	default:
-		return errors.New("request object audience is required")
+		return fmt.Errorf("request object audience is required: %w", ErrRequestObjectAudienceMismatch)
 	}
 	for _, expected := range audiences {
 		for _, value := range actual {
@@ -474,7 +477,7 @@ func validateRequestObjectAudience(claims commonJOSE.Claims, policy requestObjec
 			}
 		}
 	}
-	return errors.New("request object audience does not identify this Wallet")
+	return fmt.Errorf("request object audience does not identify this Wallet: %w", ErrRequestObjectAudienceMismatch)
 }
 
 // validateRequestObjectMaxAge bounds the lifetime a Request Object claims for
@@ -493,8 +496,8 @@ func validateRequestObjectMaxAge(expiry, issuedAt *big.Rat, policy requestObject
 		return nil
 	}
 	seconds, _ := lifetime.Float64()
-	return fmt.Errorf("request object exp is %s in the future, exceeding the configured maximum of %s",
-		(time.Duration(seconds * float64(time.Second))).Round(time.Second), policy.MaxAge)
+	return fmt.Errorf("request object exp is %s in the future, exceeding the configured maximum of %s: %w",
+		(time.Duration(seconds * float64(time.Second))).Round(time.Second), policy.MaxAge, ErrRequestObjectExpired)
 }
 
 // requestObjectNumericDate reads one optional NumericDate claim exactly,

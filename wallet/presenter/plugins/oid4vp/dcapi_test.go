@@ -7,12 +7,14 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -430,4 +432,84 @@ func TestParseRequestRejectsWebOriginClientIDFromTheWire(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "web-origin")
 	})
+}
+
+// TestParseDCAPIRequestRequestObjectSentinels drives the DC API Request Object
+// authentication sentinels through ParseDCAPIRequest, so each is proven
+// reachable with errors.Is from the innermost return in dcapi.go rather than
+// through a message-fragment classification.
+func TestParseDCAPIRequestRequestObjectSentinels(t *testing.T) {
+	tests := []struct {
+		name     string
+		sentinel error
+		object   func(*testing.T, *requestObjectFixture) string
+	}{
+		{
+			name:     "typ invalid",
+			sentinel: ErrRequestObjectTypInvalid,
+			object: func(t *testing.T, f *requestObjectFixture) string {
+				options := (&jose.SignerOptions{}).
+					WithType("JWT").
+					WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)})
+				return f.sign(t, signedDCAPIClaims(f), options)
+			},
+		},
+		{
+			name:     "signature invalid",
+			sentinel: ErrRequestObjectSignatureInvalid,
+			object: func(t *testing.T, f *requestObjectFixture) string {
+				// Present f's certificate in x5c so the client_id binding
+				// passes, but sign with another key so verification fails.
+				other := newRequestObjectFixture(t)
+				options := (&jose.SignerOptions{}).
+					WithType("oauth-authz-req+jwt").
+					WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)})
+				signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: other.key}, options)
+				require.NoError(t, err)
+				token, err := jwt.Signed(signer).Claims(signedDCAPIClaims(f)).Serialize()
+				require.NoError(t, err)
+				return token
+			},
+		},
+		{
+			name:     "audience mismatch",
+			sentinel: ErrRequestObjectAudienceMismatch,
+			object: func(t *testing.T, f *requestObjectFixture) string {
+				claims := signedDCAPIClaims(f)
+				claims["aud"] = "another-wallet"
+				return f.sign(t, claims, nil)
+			},
+		},
+		{
+			name:     "expired",
+			sentinel: ErrRequestObjectExpired,
+			object: func(t *testing.T, f *requestObjectFixture) string {
+				claims := signedDCAPIClaims(f)
+				claims["exp"] = f.now.Add(-time.Second).Unix()
+				return f.sign(t, claims, nil)
+			},
+		},
+		{
+			name:     "x509_hash mismatch",
+			sentinel: ErrX509HashMismatch,
+			object: func(t *testing.T, f *requestObjectFixture) string {
+				claims := signedDCAPIClaims(f)
+				claims["client_id"] = "x509_hash:" + base64.RawURLEncoding.EncodeToString([]byte("wrong-leaf-hash"))
+				return f.sign(t, claims, nil)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRequestObjectFixture(t)
+			invocation := DCAPIInvocation{
+				Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": tt.object(t, f)})},
+				Origin:  "https://verifier.example",
+			}
+			_, err := f.presenter().ParseDCAPIRequest(invocation)
+			if !errors.Is(err, tt.sentinel) {
+				t.Fatalf("ParseDCAPIRequest did not return %v: %v", tt.sentinel, err)
+			}
+		})
+	}
 }

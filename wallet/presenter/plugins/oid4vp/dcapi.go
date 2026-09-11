@@ -147,14 +147,14 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 	}
 	parsed, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse DC API request object JWT: %w", err)
+		return nil, fmt.Errorf("failed to parse DC API request object JWT: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	if len(parsed.Headers) != 1 {
-		return nil, errors.New("DC API request object JWT must have one protected header")
+		return nil, fmt.Errorf("DC API request object JWT must have one protected header: %w", ErrRequestObjectTypInvalid)
 	}
 	typ, _ := parsed.Headers[0].ExtraHeaders["typ"].(string)
 	if typ != "oauth-authz-req+jwt" {
-		return nil, errors.New("DC API request object JWT 'typ' header must be 'oauth-authz-req+jwt'")
+		return nil, fmt.Errorf("DC API request object JWT 'typ' header must be 'oauth-authz-req+jwt': %w", ErrRequestObjectTypInvalid)
 	}
 	header, err := decodeDCAPIProtectedHeader(compactProtectedSegment(obj))
 	if err != nil {
@@ -180,7 +180,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 	verify := func(publicKey any) (map[string]any, error) {
 		verified := commonJOSE.Claims{}
 		if err := parsed.Claims(publicKey, &verified); err != nil {
-			return nil, fmt.Errorf("failed to verify DC API request object signature: %w", err)
+			return nil, fmt.Errorf("failed to verify DC API request object signature: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		}
 		return map[string]any(verified), nil
 	}
@@ -263,7 +263,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 		verify := func(publicKey any) (map[string]any, error) {
 			verifiedIndex, _, payload, verifyErr := parsed.VerifyMulti(publicKey)
 			if verifyErr != nil {
-				return nil, fmt.Errorf("failed to verify DC API multi-signed request: %w", verifyErr)
+				return nil, fmt.Errorf("failed to verify DC API multi-signed request: %w: %w", verifyErr, ErrRequestObjectSignatureInvalid)
 			}
 			if verifiedIndex != index {
 				return nil, errors.New("verified DC API signature does not match the authenticated Client Identifier")
@@ -304,7 +304,8 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 		return nil, err
 	}
 	if payloadClientID, ok := verified["client_id"].(string); ok && payloadClientID != "" && payloadClientID != clientID {
-		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API signature client_id does not match the request object client_id")
+		authzErr := newAuthorizationRequestError(InvalidRequestError, "DC API signature client_id does not match the request object client_id")
+		return nil, fmt.Errorf("%w: %w", authzErr, ErrRequestObjectClientIDMismatch)
 	}
 	verified["client_id"] = clientID
 	parsedClientID, err := parseOID4VPClientID(clientID)
@@ -392,9 +393,15 @@ func (p *Oid4vpPresenter) BuildDCAPIResponse(request *CredentialPresentationRequ
 func bindDCAPIX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate) error {
 	switch clientID.prefix {
 	case OID4VPClientIDPrefixX509Hash:
-		return commonX509.RequireLeafThumbprint(leaf, clientID.original)
+		if err := commonX509.RequireLeafThumbprint(leaf, clientID.original); err != nil {
+			return fmt.Errorf("%w: %w", err, ErrX509HashMismatch)
+		}
+		return nil
 	case OID4VPClientIDPrefixX509SanDNS:
-		return commonX509.RequireLeafDNSName(leaf, clientID.original, false)
+		if err := commonX509.RequireLeafDNSName(leaf, clientID.original, false); err != nil {
+			return fmt.Errorf("%w: %w", err, ErrRequestObjectClientIDMismatch)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported DC API client_id prefix: %s", clientID.prefix)
 	}

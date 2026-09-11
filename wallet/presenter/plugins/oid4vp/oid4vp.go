@@ -209,11 +209,6 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 
 	req, err := builder.Build()
 	if err != nil {
-		// Attach the sentinel that names the Request Object authentication
-		// failure (or leave the error unchanged) so a caller can branch with
-		// errors.Is instead of matching the library's message text. The
-		// message and the *AuthorizationRequestError chain are preserved.
-		err = classifyRequestObjectFailure(err)
 		// OID4VP: when the Authorization Request is rejected with an OAuth
 		// error code and response_mode=direct_post, deliver the error
 		// authorization response to the Verifier's response_uri. Requests
@@ -1069,7 +1064,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	b.req.ResponseType = getParam("response_type", true)
 	b.req.ClientID = strings.TrimSpace(getParam("client_id", true))
 	if b.expectedClientID != "" && b.req.ClientID != b.expectedClientID {
-		b.errValidation = fmt.Errorf("outer client_id does not match request object client_id: %s != %s", b.expectedClientID, b.req.ClientID)
+		b.errValidation = fmt.Errorf("outer client_id does not match request object client_id: %s != %s: %w", b.expectedClientID, b.req.ClientID, ErrRequestObjectClientIDMismatch)
 		return
 	}
 
@@ -1702,7 +1697,9 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	if b.requestSource != "reference" && !deliveryAttested {
 		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
 		// JAR with the request_uri parameter".
-		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri")
+		return fmt.Errorf("%w: %w",
+			newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri"),
+			ErrHAIPRequestURIRequired)
 	}
 	switch b.req.ResponseMode {
 	case OAuthAuthzReqResponseModeDirectPostJWT:

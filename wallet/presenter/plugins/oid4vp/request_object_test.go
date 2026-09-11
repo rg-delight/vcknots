@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -413,4 +414,116 @@ func TestFinalRequestObjectURIResponseIsBounded(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "request_uri response exceeds 1 MiB") {
 		t.Fatalf("oversized request_uri response must be rejected: %v", err)
 	}
+}
+
+// TestParsePresentationRequestRequestObjectSentinels drives every Request
+// Object authentication sentinel through ParsePresentationRequest, so each is
+// proven reachable with errors.Is from the innermost return rather than through
+// a message-fragment classification.
+func TestParsePresentationRequestRequestObjectSentinels(t *testing.T) {
+	tests := []struct {
+		name      string
+		sentinel  error
+		presenter func(*requestObjectFixture) *Oid4vpPresenter
+		uri       func(*testing.T, *requestObjectFixture) string
+	}{
+		{
+			name:     "typ invalid",
+			sentinel: ErrRequestObjectTypInvalid,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				options := (&jose.SignerOptions{}).
+					WithType("JWT").
+					WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)})
+				return signedRequestURI(f.clientID(), f.sign(t, f.claims(), options))
+			},
+		},
+		{
+			name:     "signature invalid",
+			sentinel: ErrRequestObjectSignatureInvalid,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				// Present f's certificate in x5c so the client_id binding
+				// passes, but sign with another key so verification fails.
+				other := newRequestObjectFixture(t)
+				options := (&jose.SignerOptions{}).
+					WithType("oauth-authz-req+jwt").
+					WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)})
+				signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: other.key}, options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, err := jwt.Signed(signer).Claims(f.claims()).Serialize()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return signedRequestURI(f.clientID(), token)
+			},
+		},
+		{
+			name:     "audience mismatch",
+			sentinel: ErrRequestObjectAudienceMismatch,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				claims := f.claims()
+				claims["aud"] = "another-wallet"
+				return signedRequestURI(f.clientID(), f.sign(t, claims, nil))
+			},
+		},
+		{
+			name:     "expired",
+			sentinel: ErrRequestObjectExpired,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				claims := f.claims()
+				claims["exp"] = f.now.Add(-time.Second).Unix()
+				return signedRequestURI(f.clientID(), f.sign(t, claims, nil))
+			},
+		},
+		{
+			name:     "outer client_id mismatch",
+			sentinel: ErrRequestObjectClientIDMismatch,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				return signedRequestURI("x509_hash:not-the-object-client-id", f.sign(t, f.claims(), nil))
+			},
+		},
+		{
+			name:     "x509_hash mismatch",
+			sentinel: ErrX509HashMismatch,
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				wrong := "x509_hash:" + base64.RawURLEncoding.EncodeToString([]byte("wrong-leaf-hash"))
+				claims := f.claims()
+				claims["client_id"] = wrong
+				return signedRequestURI(wrong, f.sign(t, claims, nil))
+			},
+		},
+		{
+			name:     "haip request_uri required",
+			sentinel: ErrHAIPRequestURIRequired,
+			presenter: func(f *requestObjectFixture) *Oid4vpPresenter {
+				return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByValue})
+			},
+			uri: func(t *testing.T, f *requestObjectFixture) string {
+				return signedRequestURI(f.clientID(), f.sign(t, f.claims(), nil))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRequestObjectFixture(t)
+			presenter := f.presenter()
+			if tt.presenter != nil {
+				presenter = tt.presenter(f)
+			}
+			_, err := presenter.ParsePresentationRequest(tt.uri(t, f))
+			if !errors.Is(err, tt.sentinel) {
+				t.Fatalf("ParsePresentationRequest did not return %v: %v", tt.sentinel, err)
+			}
+		})
+	}
+}
+
+// signedRequestURI assembles the by-value Authorization Request a Final
+// Request Object arrives in.
+func signedRequestURI(clientID, token string) string {
+	return "openid4vp://authorize?" + url.Values{
+		"client_id": {clientID},
+		"request":   {token},
+	}.Encode()
 }

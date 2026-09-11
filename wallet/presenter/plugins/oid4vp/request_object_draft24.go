@@ -37,26 +37,26 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 
 	parsedJWT, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
-		b.errValidation = fmt.Errorf("failed to parse request object JWT: %w", err)
+		b.errValidation = fmt.Errorf("failed to parse request object JWT: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		return b
 	}
 
 	// Validate 'typ' header as per OID4VP specification
 	// Request Objects MUST include typ Header Parameter with value "oauth-authz-req+jwt"
 	if len(parsedJWT.Headers) == 0 {
-		b.errValidation = fmt.Errorf("request object JWT must have headers")
+		b.errValidation = fmt.Errorf("request object JWT must have headers: %w", ErrRequestObjectTypInvalid)
 		return b
 	}
 
 	typHeader, exists := parsedJWT.Headers[0].ExtraHeaders["typ"]
 	if !exists {
-		b.errValidation = fmt.Errorf("request object JWT must include 'typ' header parameter")
+		b.errValidation = fmt.Errorf("request object JWT must include 'typ' header parameter: %w", ErrRequestObjectTypInvalid)
 		return b
 	}
 
 	typStr, ok := typHeader.(string)
 	if !ok || typStr != "oauth-authz-req+jwt" {
-		b.errValidation = fmt.Errorf("request object JWT 'typ' header must be 'oauth-authz-req+jwt', got: %v", typHeader)
+		b.errValidation = fmt.Errorf("request object JWT 'typ' header must be 'oauth-authz-req+jwt', got: %v: %w", typHeader, ErrRequestObjectTypInvalid)
 		return b
 	}
 
@@ -100,13 +100,13 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		thumbprint := sha256.Sum256(certificates[0].Raw)
 		actualHash := base64.RawURLEncoding.EncodeToString(thumbprint[:])
 		if actualHash != clientID.original {
-			b.errValidation = fmt.Errorf("x509_hash client_id mismatch: expected %s, got %s", clientID.original, actualHash)
+			b.errValidation = fmt.Errorf("x509_hash client_id mismatch: expected %s, got %s: %w", clientID.original, actualHash, ErrX509HashMismatch)
 			return b
 		}
 
 		claims := jwt.Claims{}
 		if err := parsedJWT.Claims(certificates[0].PublicKey, &claims); err != nil {
-			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %v", err)
+			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
 			return b
 		}
 		return b
@@ -155,7 +155,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		// Request object must be verified with the leaf certificate in the x5c array (RFC 7515).
 		claims := jwt.Claims{}
 		if err := parsedJWT.Claims(certificates[0].PublicKey, &claims); err != nil {
-			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %v", err)
+			b.errValidation = fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
 			return b
 		}
 
@@ -168,7 +168,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			}
 		}
 		if !matched {
-			b.errValidation = fmt.Errorf("SAN of the certificate and client_id did not match")
+			b.errValidation = fmt.Errorf("SAN of the certificate and client_id did not match: %w", ErrRequestObjectClientIDMismatch)
 			return b
 		}
 
@@ -188,7 +188,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			}
 		}
 		if hostname := uri.Hostname(); hostname != clientID.original {
-			b.errValidation = fmt.Errorf("redirect_uri/response_uri and client_id (origin) must be same")
+			b.errValidation = fmt.Errorf("redirect_uri/response_uri and client_id (origin) must be same: %w", ErrRequestObjectClientIDMismatch)
 			return b
 		}
 
@@ -211,7 +211,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	// verify the JWT signature and extract standard claims for validation
 	standardClaims := jwt.Claims{}
 	if err := parsedJWT.Claims(&k, &standardClaims); err != nil {
-		b.errValidation = fmt.Errorf("failed to verify JWT signature: %w", err)
+		b.errValidation = fmt.Errorf("failed to verify JWT signature: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		return b
 	}
 

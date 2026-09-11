@@ -17,53 +17,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// TestClassifyRequestObjectFailureSentinels pins each authentication failure
-// this package can emit to the sentinel a caller branches on, and that the
-// classification never rewrites the original message.
-func TestClassifyRequestObjectFailureSentinels(t *testing.T) {
-	tests := []struct {
-		name     string
-		message  string
-		sentinel error
-	}{
-		{"typ missing", "request object JWT must include 'typ' header parameter", ErrRequestObjectTypInvalid},
-		{"typ wrong", "request object JWT 'typ' header must be 'oauth-authz-req+jwt'", ErrRequestObjectTypInvalid},
-		{"protected header", "request object JWT must have one protected header", ErrRequestObjectTypInvalid},
-		{"x509 hash mismatch", "x509_hash client_id mismatch", ErrX509HashMismatch},
-		{"signature invalid", "failed to verify request object with x5c certificate: bad signature", ErrRequestObjectSignatureInvalid},
-		{"jwt parse", "failed to parse request object JWT: malformed", ErrRequestObjectSignatureInvalid},
-		{"audience absent", "request object audience is required", ErrRequestObjectAudienceMismatch},
-		{"audience wrong", "request object audience does not identify this Wallet", ErrRequestObjectAudienceMismatch},
-		{"audience malformed", "invalid audience claim", ErrRequestObjectAudienceMismatch},
-		{"expired", "request object is outside its exp validity", ErrRequestObjectExpired},
-		{"not yet valid", "request object is outside its nbf validity", ErrRequestObjectExpired},
-		{"missing exp", "request object is missing exp", ErrRequestObjectExpired},
-		{"max age", "request object exp is 1h0m0s in the future, exceeding the configured maximum of 10m0s", ErrRequestObjectExpired},
-		{"outer client_id", "outer client_id does not match request object client_id", ErrRequestObjectClientIDMismatch},
-		{"san mismatch", "SAN of the certificate and client_id did not match", ErrRequestObjectClientIDMismatch},
-		{"origin mismatch", "redirect_uri/response_uri and client_id (origin) must be same", ErrRequestObjectClientIDMismatch},
-		{"haip request_uri", "HAIP profile requires a signed Authorization Request delivered by request_uri", ErrHAIPRequestURIRequired},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := classifyRequestObjectFailure(errors.New(tt.message))
-			if !errors.Is(err, tt.sentinel) {
-				t.Fatalf("classify(%q) does not wrap %v", tt.message, tt.sentinel)
-			}
-			if got := err.Error(); got != tt.message {
-				t.Fatalf("classify changed the message: %q", got)
-			}
-		})
-	}
-
-	t.Run("unrelated error is unchanged", func(t *testing.T) {
-		original := errors.New("dcql_query is required")
-		if got := classifyRequestObjectFailure(original); got != original {
-			t.Fatalf("unrelated error was rewritten: %v", got)
-		}
-	})
-}
-
 // TestParsePresentationRequestReturnsRequestObjectSentinels drives four of the
 // authentication failures through the public API, so the sentinels are proven
 // reachable end to end and not only by classifyRequestObjectFailure.
