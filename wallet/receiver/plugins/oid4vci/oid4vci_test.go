@@ -12,9 +12,11 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1622,7 +1624,7 @@ func TestOid4vciReceiver_FetchAccessToken_DoesNotFollowRedirects(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Nil(t, token)
-	assert.Contains(t, err.Error(), "redirects are not followed for token requests")
+	assert.ErrorIs(t, err, ErrHTTPRedirectNotAllowed)
 	assert.Zero(t, relayedRequests, "the client_assertion must not reach the redirect target")
 }
 
@@ -2290,4 +2292,166 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(
 		assert.Equal(t, types.ClientAssertionTypeJWTBearer, form.Get("client_assertion_type"))
 	}
 	assert.NotEqual(t, captured[0].Get("client_assertion"), captured[1].Get("client_assertion"))
+}
+
+// newRedirectingOID4VCIEndpoint starts an endpoint that answers every request
+// with a 307 to a second server, and reports how many requests that second
+// server received. A 307 preserves the method and the body, so following it
+// would replay a DPoP-bound body and its Authorization header at an origin the
+// response chose, which is the reason A2 refuses every OID4VCI redirect.
+func newRedirectingOID4VCIEndpoint(t *testing.T) (redirectingURL string, relayedRequests func() int) {
+	t.Helper()
+	var relayed atomic.Int64
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		relayed.Add(1)
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"credential_issuer": "https://relay.example"})
+	}))
+	t.Cleanup(relay.Close)
+
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, relay.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+
+	return redirecting.URL, func() int { return int(relayed.Load()) }
+}
+
+func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
+	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	response, err := receiver.PushAuthorizationRequest(
+		mustURIField(t, redirectingURL+"/par"),
+		types.PushedAuthorizationRequest{ResponseType: "code", ClientID: "wallet", RedirectURI: "https://wallet.example/cb"},
+		types.OAuthClientAttestationHeaders{ClientAttestation: "attestation", ClientAttestationPop: "pop"},
+	)
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.ErrorIs(t, err, ErrHTTPRedirectNotAllowed)
+	assert.Zero(t, relayedRequests(), "the pushed request must not reach the redirect target")
+}
+
+func TestPostCredentialEndpointRefusesRedirect(t *testing.T) {
+	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	response, err := receiver.PostCredentialEndpointWithDpopRetry(
+		mustURIField(t, redirectingURL+"/credential"),
+		"access-1",
+		[]byte(`{"credential_configuration_id":"cfg"}`),
+		"application/json",
+		noopProofFactory,
+	)
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.ErrorIs(t, err, ErrHTTPRedirectNotAllowed)
+	assert.Zero(t, relayedRequests(), "the credential request must not reach the redirect target")
+}
+
+func TestFetchIssuerMetadataRefusesRedirect(t *testing.T) {
+	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	// Metadata gets no same-origin exemption: Section 12.2.2 fixes the metadata
+	// path inside the Credential Issuer Identifier, so a redirect can only serve
+	// the document from an origin the identifier does not name.
+	metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, redirectingURL), types.Oid4vci)
+
+	require.Error(t, err)
+	assert.Nil(t, metadata)
+	assert.ErrorIs(t, err, ErrHTTPRedirectNotAllowed)
+	assert.Zero(t, relayedRequests(), "the metadata request must not reach the redirect target")
+}
+
+func TestFetchNonceResponseRefusesRedirect(t *testing.T) {
+	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	response, err := receiver.FetchNonceResponse(mustURIField(t, redirectingURL+"/nonce"))
+
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.ErrorIs(t, err, ErrHTTPRedirectNotAllowed)
+	assert.Zero(t, relayedRequests(), "the nonce request must not reach the redirect target")
+}
+
+func TestNoRedirectClientDoesNotMutateCallerClient(t *testing.T) {
+	transport := &http.Transport{}
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	caller := &http.Client{Transport: transport, Timeout: 7 * time.Second, Jar: jar}
+
+	wrapped := NoRedirectClient(caller)
+
+	require.NotSame(t, caller, wrapped)
+	assert.Nil(t, caller.CheckRedirect, "the caller's client keeps following redirects")
+	assert.Same(t, transport, wrapped.Transport, "the caller's transport, and so its connection pool, is reused")
+	assert.Equal(t, 7*time.Second, wrapped.Timeout)
+	assert.Same(t, jar, wrapped.Jar)
+
+	require.NotNil(t, wrapped.CheckRedirect)
+	redirected, err := http.NewRequest(http.MethodGet, "https://issuer.example/elsewhere", nil)
+	require.NoError(t, err)
+	assert.ErrorIs(t, wrapped.CheckRedirect(redirected, nil), ErrHTTPRedirectNotAllowed)
+
+	// A caller with no client of its own gets the package default, which refuses
+	// redirects as well.
+	fallback := NoRedirectClient(nil)
+	require.NotNil(t, fallback.CheckRedirect)
+	assert.ErrorIs(t, fallback.CheckRedirect(redirected, nil), ErrHTTPRedirectNotAllowed)
+}
+
+func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
+	issuer := mockserver.NewOID4VCIIssuerServer(nil)
+	defer issuer.Close()
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	response, cNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
+		mustURIField(t, issuer.URL()+"/credential"),
+		types.CredentialIssuanceAccessToken{Token: "bearer-access-token", TokenType: "Bearer"},
+		nil,
+		"c-nonce-1",
+		func(nonce string) ([]byte, string, error) {
+			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
+		},
+		noopProofFactory,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, "c-nonce-1", cNonce)
+
+	requests := issuer.CredentialRequests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, "Bearer bearer-access-token", requests[0].Authorization)
+	assert.Empty(t, requests[0].DPoP, "a bearer token is not key-bound, so no DPoP proof is sent with it")
+}
+
+func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
+	issuer := mockserver.NewOID4VCIIssuerServer(nil)
+	defer issuer.Close()
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+
+	response, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
+		mustURIField(t, issuer.URL()+"/credential"),
+		types.CredentialIssuanceAccessToken{Token: "dpop-access-token", TokenType: "dpop"},
+		nil,
+		"c-nonce-1",
+		func(nonce string) ([]byte, string, error) {
+			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
+		},
+		noopProofFactory,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	requests := issuer.CredentialRequests()
+	require.Len(t, requests, 1)
+	// token_type is case insensitive (RFC 6749 Section 7.1) but the scheme is
+	// spelled as RFC 9449 Section 7.1 defines it.
+	assert.Equal(t, "DPoP dpop-access-token", requests[0].Authorization)
+	assert.Equal(t, "dpop-proof", requests[0].DPoP)
 }

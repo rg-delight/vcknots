@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -394,5 +396,186 @@ func TestOid4vciReceiver_DecodeCredentialResponseZip(t *testing.T) {
 	}
 	if decoded.Credential != "credential-jwt" || decoded.Interval != 5 {
 		t.Fatalf("decoded response = %#v", decoded)
+	}
+}
+
+// §8.2: "Credential Request encryption MUST be used if the
+// `credential_response_encryption` parameter is included, to prevent it being
+// substituted by an attacker." An issuer that advertises no
+// credential_request_encryption leaves the wallet no way to satisfy that, so the
+// request must fail rather than travel in the clear with the wallet's response
+// encryption key exposed to substitution.
+func TestEncodeCredentialRequestFailsWhenRequestEncryptionUnavailable(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	request := map[string]any{
+		"credential_configuration_id": "cfg",
+		"credential_response_encryption": map[string]any{
+			"jwk": map[string]any{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"},
+			"enc": "A128GCM",
+		},
+	}
+
+	for _, tt := range []struct {
+		name     string
+		metadata *types.CredentialIssuerMetadata
+	}{
+		{name: "no metadata", metadata: nil},
+		{name: "metadata without credential_request_encryption", metadata: &types.CredentialIssuerMetadata{CredentialIssuer: "https://issuer.example"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType, err := receiver.EncodeCredentialRequest(request, tt.metadata)
+			if err == nil {
+				t.Fatalf("EncodeCredentialRequest() = %s (%s), want an error", body, contentType)
+			}
+			if !strings.Contains(err.Error(), "credential_response_encryption was requested but the issuer does not advertise credential_request_encryption") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+
+	t.Run("a request without response encryption is still sent as plain JSON", func(t *testing.T) {
+		body, contentType, err := receiver.EncodeCredentialRequest(map[string]any{"credential_configuration_id": "cfg"}, nil)
+		if err != nil {
+			t.Fatalf("EncodeCredentialRequest() error = %v", err)
+		}
+		if contentType != "application/json" || !strings.Contains(string(body), "credential_configuration_id") {
+			t.Fatalf("body = %s, contentType = %q", body, contentType)
+		}
+	})
+
+	t.Run("an issuer advertising request encryption encrypts the same request", func(t *testing.T) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := &types.CredentialIssuerMetadata{
+			CredentialRequestEncryption: &types.CredentialRequestEncryption{
+				Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+					Key: key.Public(), KeyID: "issuer-enc-1", Use: "enc", Algorithm: "ECDH-ES",
+				}}},
+				EncValuesSupported: []string{"A128GCM"},
+			},
+		}
+		body, contentType, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err != nil {
+			t.Fatalf("EncodeCredentialRequest() error = %v", err)
+		}
+		if contentType != "application/jwt" {
+			t.Fatalf("contentType = %q, want application/jwt", contentType)
+		}
+		decrypted, err := decryptCompactJWE(t, string(body), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(decrypted), "credential_response_encryption") {
+			t.Fatalf("decrypted request = %s", decrypted)
+		}
+	})
+}
+
+func decryptCompactJWE(t *testing.T, compact string, key *ecdsa.PrivateKey) ([]byte, error) {
+	t.Helper()
+	jwe, err := jose.ParseEncrypted(compact, supportedJWEKeyAlgorithms(), supportedJWEContentEncryptions())
+	if err != nil {
+		return nil, err
+	}
+	return jwe.Decrypt(key)
+}
+
+// §12.2.4.1 makes proof_signing_alg_values_supported "REQUIRED ... The Wallet
+// uses one of them to sign the proof", and §8.2.1.1 requires the proof's alg
+// header to match one of the listed values.
+func TestCredentialProofUsesIssuerAdvertisedAlgorithm(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The key states no alg of its own, which is where the previous ES256
+	// default produced a proof this key cannot even sign.
+	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Use: "sig"}
+
+	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{
+		Audience:         "https://issuer.example",
+		Nonce:            "c-nonce-1",
+		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES384},
+	})
+	if err != nil {
+		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
+	}
+
+	parsed, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES384})
+	if err != nil {
+		t.Fatalf("failed to parse proof: %v", err)
+	}
+	if parsed.Headers[0].Algorithm != string(jose.ES384) {
+		t.Fatalf("proof alg = %q, want ES384", parsed.Headers[0].Algorithm)
+	}
+	if parsed.Headers[0].JSONWebKey == nil || parsed.Headers[0].JSONWebKey.Algorithm != string(jose.ES384) {
+		t.Fatalf("proof jwk header = %#v", parsed.Headers[0].JSONWebKey)
+	}
+	var claims map[string]any
+	if err := parsed.Claims(privateKey.Public(), &claims); err != nil {
+		t.Fatalf("failed to verify proof: %v", err)
+	}
+	if claims["aud"] != "https://issuer.example" || claims["nonce"] != "c-nonce-1" {
+		t.Fatalf("proof claims = %#v", claims)
+	}
+}
+
+func TestCredentialProofFailsWhenNoSharedAlgorithm(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Algorithm: string(jose.ES256), Use: "sig"}
+
+	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{
+		Audience:         "https://issuer.example",
+		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES384, jose.EdDSA},
+	})
+	if err == nil {
+		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() = %q, want an error", proof)
+	}
+	if !errors.Is(err, ErrProofAlgorithmNotSupported) {
+		t.Fatalf("errors.Is(ErrProofAlgorithmNotSupported) = false, err = %v", err)
+	}
+
+	if _, err := SelectProofSigningAlgorithm(key, []jose.SignatureAlgorithm{jose.ES256, jose.ES384}); err != nil {
+		t.Fatalf("a listed key algorithm must be kept: %v", err)
+	}
+}
+
+// An issuer that publishes no proof_signing_alg_values_supported states no
+// constraint, and the key's own algorithm is used.
+func TestCredentialProofUnconstrainedWhenIssuerListsNone(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Algorithm: string(jose.ES256), Use: "sig"}
+
+	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{Audience: "https://issuer.example"})
+	if err != nil {
+		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
+	}
+	parsed, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("failed to parse proof: %v", err)
+	}
+	if parsed.Headers[0].Algorithm != string(jose.ES256) {
+		t.Fatalf("proof alg = %q, want ES256", parsed.Headers[0].Algorithm)
+	}
+
+	// The established entry points delegate here with no constraint, so they
+	// keep producing the same proof.
+	legacy, err := receiver.CreateCredentialRequestJWTProof(key, "https://issuer.example", "")
+	if err != nil {
+		t.Fatalf("CreateCredentialRequestJWTProof() error = %v", err)
+	}
+	if _, err := jwt.ParseSigned(legacy, []jose.SignatureAlgorithm{jose.ES256}); err != nil {
+		t.Fatalf("failed to parse proof from the legacy entry point: %v", err)
 	}
 }
