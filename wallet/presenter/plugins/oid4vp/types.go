@@ -2,6 +2,7 @@ package oid4vp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/go-jose/go-jose/v4"
@@ -193,6 +194,43 @@ func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) 
 	}
 	return jose.JSONWebKey{}, fmt.Errorf("key with kid %s not found", kid)
 }
+
+// ErrPreRegisteredClientUnknown reports that an Authorization Request used a
+// pre-registered Client Identifier that this wallet's registry does not hold.
+// OpenID4VP 1.0 Section 5.9.2 requires such a Client Identifier to be "known to
+// the Wallet in advance of the Authorization Request", so an unresolvable one
+// is refused rather than accepted unauthenticated.
+//
+// The root wallet package declares a sentinel of the same name; this package
+// cannot import it (the root imports this plugin), so the root value is
+// intended to become an alias of this one.
+var ErrPreRegisteredClientUnknown = errors.New("pre-registered client_id is not in the wallet registry")
+
+// PreRegisteredClient is a Verifier this wallet knows before an Authorization
+// Request arrives. OpenID4VP 1.0 Section 5.9.2: "If a `:` character is not
+// present in the Client Identifier, the Wallet MUST treat the Client Identifier
+// as referencing a pre-registered client" and "the Client Identifier needs to
+// be known to the Wallet in advance of the Authorization Request."
+type PreRegisteredClient struct {
+	// ClientID is the registered Client Identifier exactly as it appears in the
+	// Authorization Request, without a Client Identifier Prefix. It may be left
+	// empty in a map registration, where the map key is authoritative.
+	ClientID string
+	// Metadata is the Verifier metadata registered out of band (RFC 7591 or a
+	// manual registration). When present it is authoritative for this client:
+	// it replaces any client_metadata carried by the request, which nothing
+	// authenticates for a pre-registered Client Identifier.
+	Metadata *VerifierMetadata
+	// JWKS holds the keys that sign this client's Request Objects. A nil value
+	// registers a client for unsigned requests only.
+	JWKS *jose.JSONWebKeySet
+}
+
+// PreRegisteredClientResolver looks up a pre-registered Client Identifier in a
+// caller-owned registry, for example a database of manually registered
+// Verifiers. It returns nil, nil when the client is unknown, and an error only
+// when the lookup itself failed.
+type PreRegisteredClientResolver func(clientID string) (*PreRegisteredClient, error)
 
 // GrantTypes supported by the OID4VP plugin
 type GrantTypes string

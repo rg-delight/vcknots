@@ -789,7 +789,9 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 
 // Additional validations for query params and builder flows
 func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testing.T) {
-	p := &Oid4vpPresenter{}
+	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
+		"registered-client": {},
+	}}
 
 	p.AllowHTTP = false
 
@@ -811,15 +813,18 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 			wantErr: true,
 			errSub:  "multiple values provided for parameter: response_type",
 		},
+		// A redirect_uri Client Identifier supplies the Response URI itself
+		// (OID4VP 1.0 §5.9.3), so the parameter is only required for a Client
+		// Identifier that carries none: here a registered pre-registered one.
 		{
 			name:    "response_mode=direct_post requires response_uri",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post",
+			uri:     "openid4vp://present?client_id=registered-client&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post",
 			wantErr: true,
 			errSub:  "missing required parameters: response_uri",
 		},
 		{
 			name:    "response_mode=direct_post rejects non-https response_uri",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response",
+			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response",
 			wantErr: true,
 			errSub:  "response_uri must use https scheme",
 		},
@@ -903,7 +908,10 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 	}
 
 	baseURI := func(responseURI, extraParams string) string {
-		return "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&state=err-state&response_mode=direct_post&response_uri=" +
+		// OID4VP 1.0 §5.9.3 binds the Response URI of a direct_post request to
+		// the redirect_uri Client Identifier, so both name the test server.
+		return "openid4vp://present?client_id=" + url.QueryEscape("redirect_uri:"+responseURI) +
+			"&response_type=vp_token&nonce=n&state=err-state&response_mode=direct_post&response_uri=" +
 			url.QueryEscape(responseURI) + extraParams
 	}
 
@@ -1034,7 +1042,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_When
 
 	p.AllowHTTP = true
 
-	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response"
+	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response"
 	req, err := p.ParsePresentationRequest(uri)
 	if err != nil {
 		t.Fatalf("expected no error when HTTPS validation is disabled, got: %v", err)
@@ -1098,13 +1106,13 @@ func TestOid4vpPresenter_ClientIDParsingAndRedirectMismatch(t *testing.T) {
 
 	t.Run("client_id with trailing whitespace", func(t *testing.T) {
 		// Trailing whitespace should be trimmed
-		uri := "openid4vp://present?client_id=redirect_uri:http://example.com/cb%20&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/cb"
+		uri := "openid4vp://present?client_id=redirect_uri:https://example.com/cb%20&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/cb"
 		req, err := p.ParsePresentationRequest(uri)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// Should successfully parse after trimming
-		if req.ClientID != "redirect_uri:http://example.com/cb" {
+		if req.ClientID != "redirect_uri:https://example.com/cb" {
 			t.Fatalf("expected trimmed client_id, got: %s", req.ClientID)
 		}
 	})

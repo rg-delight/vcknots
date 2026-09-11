@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -49,6 +50,20 @@ type Oid4vpPresenter struct {
 	// transaction_data type, so any request carrying transaction_data is
 	// rejected with invalid_transaction_data (OID4VP 1.0 §5.1, §8.4).
 	SupportedTransactionDataTypes []string
+	// PreRegisteredClients is the wallet's registry of Verifiers registered out
+	// of band, keyed by Client Identifier. OID4VP 1.0 §5.9.2: a Client
+	// Identifier without a ":" references a pre-registered client, and "the
+	// Client Identifier needs to be known to the Wallet in advance of the
+	// Authorization Request". A Final request whose client_id resolves neither
+	// here nor through ResolvePreRegisteredClient is rejected with
+	// ErrPreRegisteredClientUnknown. The Draft24 entrypoints keep refusing
+	// every pre-registered Client Identifier.
+	PreRegisteredClients map[string]PreRegisteredClient
+	// ResolvePreRegisteredClient is consulted when PreRegisteredClients holds no
+	// entry for the Client Identifier, so a wallet can keep its registry in a
+	// database instead of a map. A nil resolver means the map is the whole
+	// registry.
+	ResolvePreRegisteredClient PreRegisteredClientResolver
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -127,9 +142,11 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 		}
 	}
 
-	builder := NewRequestBuilder()
+	builder, err := NewRequestBuilderForProfile(normalizedProfile)
+	if err != nil {
+		return nil, err
+	}
 	builder.draft24 = draft24
-	builder.profile = normalizedProfile
 	builder.httpClient = p.httpClient()
 	builder.allowHTTP = p.AllowHTTP
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
@@ -138,6 +155,8 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	builder.walletMetadata = p.WalletMetadata
 	builder.requestURINonce = p.RequestURINonce
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
+	builder.preRegisteredClients = p.PreRegisteredClients
+	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
 	if p.RequestObjectValidation != nil {
 		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
 	}
@@ -476,6 +495,18 @@ var (
 		"A128GCM": jose.A128GCM,
 		"A256GCM": jose.A256GCM,
 	}
+	// walletContentEncryptionPreference is this wallet's own order of
+	// preference for the content encryption of an Authorization Response.
+	// HAIP §5, which governs both the redirect profile of §5.1 and the DC API
+	// profile of §5.2: "Wallets MUST support `A128GCM` or `A256GCM`, or both.
+	// If both are supported, the Wallet SHOULD use `A256GCM` for the JWE
+	// `enc`." The strongest AEAD therefore comes first, and the AES-CBC-HMAC
+	// variants trail behind the AEADs; under HAIP they are filtered out by
+	// haipJWEOnlyContentEncryptions.
+	walletContentEncryptionPreference = []string{
+		"A256GCM", "A192GCM", "A128GCM",
+		"A256CBC-HS512", "A192CBC-HS384", "A128CBC-HS256",
+	}
 )
 
 // selectResponseEncryption applies OID4VP 1.0 §8.3 and RFC 7517 §5 key
@@ -515,11 +546,20 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 
 	var enc jose.ContentEncryption
 	if len(metadata.EncryptedResponseEncValuesSupported) > 0 {
+		offered := make(map[string]bool, len(metadata.EncryptedResponseEncValuesSupported))
 		for _, candidate := range metadata.EncryptedResponseEncValuesSupported {
-			if value, ok := allowedEncryptions[candidate]; ok {
-				enc = value
-				break
+			offered[candidate] = true
+		}
+		// The wallet's own preference order decides, not the verifier's list
+		// order (HAIP §5: "If both are supported, the Wallet SHOULD use
+		// `A256GCM`"; §5 also requires Verifiers to list both).
+		for _, preferred := range walletContentEncryptionPreference {
+			value, supported := allowedEncryptions[preferred]
+			if !supported || !offered[preferred] {
+				continue
 			}
+			enc = value
+			break
 		}
 		if enc == "" {
 			// §8.3 default does not rescue an explicit list with no usable
@@ -769,6 +809,15 @@ type requestBuilder struct {
 	// supportedTransactionDataTypes is copied from the presenter for the Final
 	// transaction_data validation.
 	supportedTransactionDataTypes []string
+	// preRegisteredClients and resolvePreRegisteredClient are copied from the
+	// presenter so a pre-registered Client Identifier can be resolved during
+	// parameter validation (OID4VP 1.0 §5.9.2).
+	preRegisteredClients       map[string]PreRegisteredClient
+	resolvePreRegisteredClient PreRegisteredClientResolver
+	// preRegisteredClient is the registry entry that authenticated the Client
+	// Identifier of this request, when its prefix is the pre-registered one. It
+	// is nil for every other Client Identifier Prefix.
+	preRegisteredClient *PreRegisteredClient
 	// sentWalletNonce records the wallet_nonce sent with a Final request_uri
 	// POST so the returned Request Object can be required to echo it
 	// (OID4VP 1.0 §5.10.1). It is empty for GET and when no nonce was sent.
@@ -787,22 +836,100 @@ type requestBuilder struct {
 	errorResponseAllowed bool
 }
 
+// NewRequestBuilder creates a builder for OpenID4VP 1.0 Final Authorization
+// Requests. It initializes profile.Final explicitly, so a builder obtained here
+// never applies HAIP rules by accident: the zero Profile value would leave every
+// HAIP checkpoint inert without saying so.
+//
+// Deprecated: use NewRequestBuilderForProfile, which makes the enforced
+// protocol policy part of the call.
 func NewRequestBuilder() *requestBuilder {
 	return &requestBuilder{
 		req: &CredentialPresentationRequest{
 			OAuthAuthzRequest: &OAuthAuthzRequest{},
 			ClientMetadata:    &VerifierMetadata{},
 		},
+		profile:                profile.Final,
 		x509TrustChainRoots:    nil,
 		insecureSkipX509Verify: false,
 	}
 }
 
 // NewDraft24RequestBuilder creates a builder for Presentation Exchange requests.
+// The Draft24 path ignores the protocol profile entirely.
+//
+// Deprecated: new integrations use NewRequestBuilderForProfile and the Final
+// entrypoints.
 func NewDraft24RequestBuilder() *requestBuilder {
 	b := NewRequestBuilder()
 	b.draft24 = true
 	return b
+}
+
+// NewRequestBuilderForProfile creates a builder that enforces p. The profile is
+// normalized first, so an unknown value fails here rather than silently
+// disabling the HAIP checkpoints.
+func NewRequestBuilderForProfile(p profile.Profile) (*requestBuilder, error) {
+	normalized, err := p.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
+	}
+	b := NewRequestBuilder()
+	b.profile = normalized
+	return b, nil
+}
+
+// WithProfile selects the protocol policy of an existing builder, for fluent
+// call sites that cannot use NewRequestBuilderForProfile. An unknown profile is
+// recorded as a validation error and surfaces from Build.
+func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
+	normalized, err := p.Normalize()
+	if err != nil {
+		b.errValidation = fmt.Errorf("invalid OID4VP profile: %w", err)
+		return b
+	}
+	b.profile = normalized
+	return b
+}
+
+// lookupPreRegisteredClient resolves a pre-registered Client Identifier against
+// the wallet's registry: the in-memory map first, then the caller's resolver.
+// OID4VP 1.0 §5.9.2: "the Client Identifier needs to be known to the Wallet in
+// advance of the Authorization Request", so an unresolved identifier is an
+// error rather than an unauthenticated Verifier.
+func (b *requestBuilder) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
+	if registered, exists := b.preRegisteredClients[clientID]; exists {
+		return preRegisteredClientWithID(&registered, clientID), nil
+	}
+	if b.resolvePreRegisteredClient != nil {
+		resolved, err := b.resolvePreRegisteredClient(clientID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve pre-registered client_id %q: %w", clientID, err)
+		}
+		if resolved != nil {
+			copied := *resolved
+			return preRegisteredClientWithID(&copied, clientID), nil
+		}
+	}
+	return nil, fmt.Errorf("pre-registered client_id %q is not known to this wallet: %w", clientID, ErrPreRegisteredClientUnknown)
+}
+
+// preRegisteredClientWithID fills in the registration's ClientID from the
+// request when a map registration left it empty, so consumers never have to
+// consult the map key.
+func preRegisteredClientWithID(client *PreRegisteredClient, clientID string) *PreRegisteredClient {
+	if client.ClientID == "" {
+		client.ClientID = clientID
+	}
+	return client
+}
+
+// isDirectPostMode reports whether the Response Mode delivers the Authorization
+// Response to the Verifier's Response URI (OID4VP 1.0 §8.2), which is what
+// binds response_uri to the Client Identifier in §5.9.3 and makes redirect_uri
+// and response_uri mutually exclusive.
+func isDirectPostMode(mode OAuthAuthzReqResponseMode) bool {
+	return mode == OAuthAuthzReqResponseModeDirectPost || mode == OAuthAuthzReqResponseModeDirectPostJWT
 }
 
 // WithHTTPAllowed enables HTTP response endpoints for local tests only.
@@ -854,7 +981,7 @@ func (b *requestBuilder) validate() error {
 		return newAuthorizationRequestError(InvalidRequestError, "nonce is required")
 	}
 
-	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
+	if isDirectPostMode(b.req.ResponseMode) {
 		if _, err := parseResponseURI(b.req.ResponseURI, b.allowHTTP); err != nil {
 			return newAuthorizationRequestError(InvalidRequestError, "%v", err)
 		}
@@ -945,14 +1072,22 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			case OID4VPClientIDPrefixPreRegistered:
 				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
 				// Client Identifier, the Wallet MUST treat the Client Identifier
-				// as referencing a pre-registered client." No Verifier
-				// authentication is performed. A signed pre-registered Request
-				// Object would need a caller-resolved key; that is left
-				// unsupported and refused on the Request Object path.
+				// as referencing a pre-registered client", and "the Client
+				// Identifier needs to be known to the Wallet in advance of the
+				// Authorization Request". The wallet's registry is therefore the
+				// only source of Verifier metadata and request-signature keys
+				// for this prefix; an unregistered identifier is refused instead
+				// of accepted unauthenticated.
 				if b.draft24 {
 					b.errValidation = fmt.Errorf("invalid client_id format")
 					return
 				}
+				registered, lookupErr := b.lookupPreRegisteredClient(parsedCID.original)
+				if lookupErr != nil {
+					b.errValidation = lookupErr
+					return
+				}
+				b.preRegisteredClient = registered
 			default: // unimplemented: other client_id prefixes
 				b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
 			}
@@ -979,11 +1114,22 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	b.req.ResponseMode = OAuthAuthzReqResponseMode(getParam("response_mode", true))
 
-	responseURIFromParam := getParam("response_uri", b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT)
+	// OID4VP 1.0 §5.9.3: with the redirect_uri Client Identifier Prefix "the
+	// original Client Identifier part (without the prefix redirect_uri:) is the
+	// Verifier's Redirect URI (or Response URI when Response Mode direct_post is
+	// used)", and "The Verifier MAY omit the redirect_uri Authorization Request
+	// parameter (or response_uri when Response Mode direct_post is used)". The
+	// Client Identifier already carries the Response URI, so the parameter is
+	// not required on the Final path.
+	responseURIRequired := isDirectPostMode(b.req.ResponseMode)
+	if !b.draft24 && redirectURIFromClientID != "" {
+		responseURIRequired = false
+	}
+	responseURIFromParam := getParam("response_uri", responseURIRequired)
 
 	// OID4VP 1.0 §8.2: redirect_uri and response_uri are mutually exclusive
 	// when response_mode is direct_post (or direct_post.jwt).
-	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
+	if isDirectPostMode(b.req.ResponseMode) {
 		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
 			b.errValidation = err
 			return
@@ -991,6 +1137,30 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.ResponseURI = responseURIFromParam
+
+	// OID4VP 1.0 §5.9.3 binds the Response URI to the redirect_uri Client
+	// Identifier the same way it binds the Redirect URI: the value after the
+	// prefix "is the Verifier's Redirect URI (or Response URI when Response Mode
+	// direct_post is used)". Without this, a request carrying
+	// client_id=redirect_uri:https://verifier.example/cb together with
+	// response_mode=direct_post and a foreign response_uri would send the VP
+	// Token to an endpoint the Client Identifier does not authenticate.
+	if !b.draft24 && redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
+		if responseURIFromParam == "" {
+			b.req.ResponseURI = redirectURIFromClientID
+		} else if responseURIFromParam != redirectURIFromClientID {
+			// The rejected response_uri is not the Verifier's, so the error
+			// authorization response goes to the URI the Client Identifier
+			// authenticates, never to the one the request chose.
+			b.req.ResponseURI = redirectURIFromClientID
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError,
+				"response_uri does not match the redirect_uri Client Identifier")
+			return
+		}
+		// §8.2: the response goes to the Response URI, so no Redirect URI is
+		// used for this request.
+		b.req.RedirectURI = ""
+	}
 
 	// OID4VP 1.0 Appendix A.2: the response is returned through the DC API, so
 	// response_uri and redirect_uri MUST be absent from the request. This is
@@ -1079,6 +1249,15 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			return
 		}
 		b.req.ClientMetadata = &clientMeta
+	}
+
+	// OID4VP 1.0 §5.9.2: a pre-registered Verifier's metadata "needs to be known
+	// to the Wallet in advance of the Authorization Request", so the registered
+	// metadata wins over a client_metadata parameter, which nothing
+	// authenticates for this Client Identifier Prefix.
+	if b.preRegisteredClient != nil && b.preRegisteredClient.Metadata != nil {
+		registeredMetadata := *b.preRegisteredClient.Metadata
+		b.req.ClientMetadata = &registeredMetadata
 	}
 
 	if rawDcqlQuery, exists := params["dcql_query"]; exists {
@@ -1418,41 +1597,16 @@ func defaultRequestURINonce() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
+// parseX5CCertificatesFromJWT decodes the x5c chain of a compact JWS protected
+// header.
+//
+// Deprecated: it delegates to commonX509.DecodeX5CFromJWTHeader, the single
+// decoder shared with the credential, attestation and DC API paths. Call that
+// function directly; this wrapper only keeps the remaining call sites in
+// request_object.go, request_object_draft24.go and dcapi.go compiling until they
+// migrate.
 func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {
-	parts := strings.Split(obj, ".")
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid JWT format")
-	}
-
-	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode JWT header: %w", err)
-	}
-
-	var header struct {
-		X5C []string `json:"x5c"`
-	}
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return nil, fmt.Errorf("failed to parse JWT header: %w", err)
-	}
-	if len(header.X5C) == 0 {
-		return nil, fmt.Errorf("x5c header is empty")
-	}
-
-	certificates := make([]*x509.Certificate, 0, len(header.X5C))
-	for i, certB64 := range header.X5C {
-		certDER, err := base64.StdEncoding.DecodeString(certB64)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode x5c certificate at index %d: %w", i, err)
-		}
-		cert, err := x509.ParseCertificate(certDER)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse x5c certificate at index %d: %w", i, err)
-		}
-		certificates = append(certificates, cert)
-	}
-
-	return certificates, nil
+	return commonX509.DecodeX5CFromJWTHeader(obj)
 }
 
 // AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority
@@ -1465,7 +1619,7 @@ func AuthorityKeyIdentifiersFromCredential(rawCredential string) []string {
 	if separator := strings.IndexByte(issuerJWT, '~'); separator >= 0 {
 		issuerJWT = issuerJWT[:separator]
 	}
-	certificates, err := parseX5CCertificatesFromJWT(issuerJWT)
+	certificates, err := commonX509.DecodeX5CFromJWTHeader(issuerJWT)
 	if err != nil {
 		return nil
 	}
@@ -1514,10 +1668,10 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	// defined in Appendices A.3.1 and A.3.2". The request_uri encryption rule
 	// of §5.1 is therefore relaxed for DC API modes.
 	if b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed" {
-		switch b.req.ResponseMode {
-		case OAuthAuthzReqResponseModeDCAPI, OAuthAuthzReqResponseModeDCAPIJWT:
-		default:
-			return newAuthorizationRequestError(InvalidRequestError, "HAIP DC API requires response_mode dc_api or dc_api.jwt")
+		// HAIP §5.2: "The Verifier MUST use the Response Mode dc_api.jwt."
+		// The unencrypted dc_api mode stays available to non-HAIP Final.
+		if b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
+			return newAuthorizationRequestError(InvalidRequestError, "HAIP requires the response_mode dc_api.jwt for Digital Credentials API requests")
 		}
 		if b.requestSource == "dcapi-unsigned" {
 			// An unsigned request has no Verifier client_id to authenticate.

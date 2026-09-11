@@ -432,3 +432,173 @@ func TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 		t.Fatalf("JWE kid = %q", jwe.Header.KeyID)
 	}
 }
+
+// dcapiUnsignedInvocation builds an unsigned Digital Credentials API invocation
+// with the given Response Mode (OID4VP 1.0 Appendix A.3.1).
+func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"response_type": "vp_token", "response_mode": responseMode, "nonce": "n-1",
+		"dcql_query": map[string]any{"credentials": []any{map[string]any{
+			"id": "pid", "format": "dc+sd-jwt",
+			"meta": map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return DCAPIInvocation{
+		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
+		Origin:  "https://verifier.example",
+	}
+}
+
+// HAIP §5.2: "The Wallet MUST support the Response Mode dc_api.jwt. The Verifier
+// MUST use the Response Mode dc_api.jwt." An unencrypted dc_api response is not
+// acceptable under HAIP.
+func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	_, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	if err == nil {
+		t.Fatal("HAIP must reject the unencrypted dc_api response mode")
+	}
+	if !strings.Contains(err.Error(), "HAIP requires the response_mode dc_api.jwt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api.jwt"))
+	if err != nil {
+		t.Fatalf("HAIP must accept dc_api.jwt: %v", err)
+	}
+	if request.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
+		t.Fatalf("response_mode = %q", request.ResponseMode)
+	}
+}
+
+// OID4VP 1.0 Appendix A.2 keeps the unencrypted dc_api Response Mode available
+// outside HAIP.
+func TestFinalDCAPIStillAcceptsDCAPI(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.Final}
+	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	if err != nil {
+		t.Fatalf("Final must accept dc_api: %v", err)
+	}
+	if request.ResponseMode != OAuthAuthzReqResponseModeDCAPI {
+		t.Fatalf("response_mode = %q", request.ResponseMode)
+	}
+}
+
+// finalQueryBuilderParams is a plain-query Final Authorization Request: legal
+// under Final, and refused by HAIP §5.1, which requires a signed Request Object
+// delivered by request_uri.
+func finalQueryBuilderParams(responseType string) map[string][]string {
+	return map[string][]string{
+		"client_id":     {"redirect_uri:https://verifier.example/cb"},
+		"redirect_uri":  {"https://verifier.example/cb"},
+		"response_type": {responseType},
+		"response_mode": {"fragment"},
+		"nonce":         {"n"},
+		"dcql_query":    {`{"credentials":[{"id":"cred","format":"dc+sd-jwt","meta":{"vct_values":["urn:test"]}}]}`},
+	}
+}
+
+// The exported constructor must not produce a builder whose profile is the zero
+// value, because every HAIP checkpoint would then be inert without saying so.
+func TestNewRequestBuilderDefaultsToFinalProfile(t *testing.T) {
+	b := NewRequestBuilder()
+	if b.profile != profile.Final {
+		t.Fatalf("profile = %q, want %q", b.profile, profile.Final)
+	}
+	// A HAIP-only rule (§5.1 delivery by request_uri) is not applied.
+	if _, err := b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build(); err != nil {
+		t.Fatalf("Final must accept a plain query request: %v", err)
+	}
+	// A Final rule (§5.6 response_type vp_token) is applied.
+	_, err := NewRequestBuilder().WithQueryParams(finalQueryBuilderParams("code")).Build()
+	if err == nil || !strings.Contains(err.Error(), "response_type must be vp_token") {
+		t.Fatalf("Final response_type rule not applied: %v", err)
+	}
+}
+
+func TestNewRequestBuilderForProfileEnforcesHAIP(t *testing.T) {
+	b, err := NewRequestBuilderForProfile(profile.HAIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.profile != profile.HAIP {
+		t.Fatalf("profile = %q, want %q", b.profile, profile.HAIP)
+	}
+	_, err = b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
+	if err == nil || !strings.Contains(err.Error(), "request_uri") {
+		t.Fatalf("HAIP must reject an unsigned query request: %v", err)
+	}
+	// WithProfile reaches the same policy on an existing builder.
+	_, err = NewRequestBuilder().WithProfile(profile.HAIP).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
+	if err == nil || !strings.Contains(err.Error(), "request_uri") {
+		t.Fatalf("WithProfile must apply HAIP: %v", err)
+	}
+}
+
+func TestNewRequestBuilderForProfileRejectsUnknownProfile(t *testing.T) {
+	for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
+		if _, err := NewRequestBuilderForProfile(unknown); err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
+			t.Fatalf("profile %q: want unknown profile error, got %v", unknown, err)
+		}
+		_, err := NewRequestBuilder().WithProfile(unknown).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
+		if err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
+			t.Fatalf("WithProfile(%q): want unknown profile error, got %v", unknown, err)
+		}
+	}
+}
+
+// responseEncryptionFor returns the content encryption the wallet selected for
+// an authorization response, as observed on the wire.
+func responseEncryptionFor(t *testing.T, encValues []string, enc jose.ContentEncryption) {
+	t.Helper()
+	recipient := newP256Recipient(t)
+	s := newEncryptionServer(t)
+	p := &Oid4vpPresenter{HTTPClient: s.server.Client()}
+	request := &types.PresentationRequest{
+		ResponseMode: string(OAuthAuthzReqResponseModeDirectPostJWT),
+		ClientMetadata: &VerifierMetadata{
+			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+				Key: &recipient.PublicKey, KeyID: "enc-key", Use: "enc", Algorithm: "ECDH-ES",
+			}}},
+			EncryptedResponseEncValuesSupported: encValues,
+		},
+	}
+	if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request); err != nil {
+		t.Fatal(err)
+	}
+	token := (<-s.forms).Get("response")
+	if token == "" {
+		t.Fatal("expected an encrypted response form field")
+	}
+	jwe, err := jose.ParseEncrypted(token, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{enc})
+	if err != nil {
+		t.Fatalf("response is not encrypted with %s: %v", enc, err)
+	}
+	if got := jwe.Header.ExtraHeaders[jose.HeaderKey("enc")]; got != string(enc) {
+		t.Fatalf("JWE enc = %#v, want %s", got, enc)
+	}
+}
+
+// HAIP §5.1: "Wallets MUST support A128GCM or A256GCM, or both. If both are
+// supported, the Wallet SHOULD use A256GCM." The verifier's list order must not
+// decide it.
+func TestResponseEncryptionPrefersA256GCMWhenOffered(t *testing.T) {
+	responseEncryptionFor(t, []string{"A128GCM", "A256GCM"}, jose.A256GCM)
+}
+
+func TestResponseEncryptionFallsBackToA128GCMWhenOnlyOneOffered(t *testing.T) {
+	responseEncryptionFor(t, []string{"A128GCM"}, jose.A128GCM)
+}
+
+// OID4VP 1.0 §8.3: an absent encrypted_response_enc_values_supported defaults
+// to A128GCM.
+func TestResponseEncryptionDefaultsToA128GCMWhenListAbsent(t *testing.T) {
+	responseEncryptionFor(t, nil, jose.A128GCM)
+}

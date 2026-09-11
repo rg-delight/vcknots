@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
@@ -43,6 +44,10 @@ func TestFinalResponseTypeMustBeVPToken(t *testing.T) {
 
 // Fix 2: OID4VP 1.0 §5.9.2 pre-registered fallback for a colon-less client_id.
 func TestFinalPreRegisteredClientID(t *testing.T) {
+	// §5.9.2 also requires the Client Identifier to be "known to the Wallet in
+	// advance of the Authorization Request", so these cases register it.
+	registry := map[string]PreRegisteredClient{"example-client": {}}
+
 	t.Run("accepted on the Final path", func(t *testing.T) {
 		uri := finalQueryURI(url.Values{
 			"client_id":     {"example-client"},
@@ -52,7 +57,7 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 			"nonce":         {"n"},
 			"dcql_query":    {finalDcqlParam},
 		})
-		req, err := (&Oid4vpPresenter{}).ParsePresentationRequest(uri)
+		req, err := (&Oid4vpPresenter{PreRegisteredClients: registry}).ParsePresentationRequest(uri)
 		require.NoError(t, err)
 		require.Equal(t, "example-client", req.ClientID)
 	})
@@ -65,7 +70,9 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 			"client_id": {"example-client"},
 			"request":   {f.sign(t, claims, nil)},
 		}.Encode()
-		_, err := f.presenter().ParsePresentationRequest(uri)
+		p := f.presenter()
+		p.PreRegisteredClients = registry
+		_, err := p.ParsePresentationRequest(uri)
 		require.ErrorContains(t, err, "no configured authentication method")
 	})
 }
@@ -257,7 +264,9 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 		raw, err := json.Marshal(md)
 		require.NoError(t, err)
 		return finalQueryURI(url.Values{
-			"client_id":       {"redirect_uri:" + serverURL + "/cb"},
+			// §5.9.3: the redirect_uri Client Identifier is the Response URI of
+			// a direct_post.jwt request, so both name the same endpoint.
+			"client_id":       {"redirect_uri:" + serverURL + "/response"},
 			"response_type":   {"vp_token"},
 			"response_mode":   {"direct_post.jwt"},
 			"response_uri":    {serverURL + "/response"},
@@ -338,4 +347,199 @@ func TestPresentDCQLRejectsEncryptionKeyWithoutAlg(t *testing.T) {
 	_, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request)
 	require.ErrorContains(t, err, "no usable verifier encryption key")
 	require.Equal(t, int32(0), s.calls.Load())
+}
+
+// Fix 11: OID4VP 1.0 §5.9.3 — "the original Client Identifier part (without the
+// prefix redirect_uri:) is the Verifier's Redirect URI (or Response URI when
+// Response Mode direct_post is used)". The Response URI of a direct_post
+// request is therefore bound to the Client Identifier.
+func TestRedirectURIClientIDBindsResponseURI(t *testing.T) {
+	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
+		t.Run(mode, func(t *testing.T) {
+			uri := finalQueryURI(url.Values{
+				"client_id":     {"redirect_uri:https://verifier.example/response"},
+				"response_type": {"vp_token"},
+				"response_mode": {mode},
+				"response_uri":  {"https://verifier.example/response"},
+				"nonce":         {"n"},
+				"dcql_query":    {finalDcqlParam},
+			})
+			req, err := (&Oid4vpPresenter{}).ParsePresentationRequest(uri)
+			require.NoError(t, err)
+			require.Equal(t, "https://verifier.example/response", req.ResponseURI)
+			// §8.2: the response goes to the Response URI, so no Redirect URI
+			// is carried by the parsed request.
+			require.Empty(t, req.RedirectURI)
+		})
+	}
+}
+
+// Fix 11 (continued): §5.9.3 lets the Client Identifier itself be the Response
+// URI, so response_uri may be omitted.
+func TestRedirectURIClientIDDefaultsResponseURI(t *testing.T) {
+	uri := finalQueryURI(url.Values{
+		"client_id":     {"redirect_uri:https://verifier.example/response"},
+		"response_type": {"vp_token"},
+		"response_mode": {"direct_post"},
+		"nonce":         {"n"},
+		"dcql_query":    {finalDcqlParam},
+	})
+	req, err := (&Oid4vpPresenter{}).ParsePresentationRequest(uri)
+	require.NoError(t, err)
+	require.Equal(t, "https://verifier.example/response", req.ResponseURI)
+	require.Empty(t, req.RedirectURI)
+}
+
+// Fix 11 (continued): a response_uri the Client Identifier does not
+// authenticate must not receive the VP Token, nor the error response.
+func TestRedirectURIClientIDRejectsForeignResponseURI(t *testing.T) {
+	attacker := newCountingResponseServer(t)
+	verifier := newCountingResponseServer(t)
+	uri := finalQueryURI(url.Values{
+		"client_id":     {"redirect_uri:" + verifier.server.URL + "/response"},
+		"response_type": {"vp_token"},
+		"response_mode": {"direct_post"},
+		"response_uri":  {attacker.server.URL + "/post"},
+		"nonce":         {"n"},
+		"dcql_query":    {finalDcqlParam},
+	})
+	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+	_, err := p.ParsePresentationRequest(uri)
+	assertAuthzErrorCode(t, err, InvalidRequestError)
+	require.ErrorContains(t, err, "response_uri does not match the redirect_uri Client Identifier")
+	require.Equal(t, int32(0), attacker.calls.Load(), "the foreign response_uri must receive nothing")
+	require.Equal(t, int32(1), verifier.calls.Load(), "the authenticated Client Identifier receives the error response")
+}
+
+// Fix 11 (regression): the Draft24 entrypoint keeps its previous behavior, where
+// response_uri is independent of the redirect_uri Client Identifier.
+func TestDraft24RedirectURIClientIDUnchanged(t *testing.T) {
+	values := url.Values{
+		"client_id":               {"redirect_uri:https://verifier.example/cb"},
+		"response_type":           {"vp_token"},
+		"response_mode":           {"direct_post"},
+		"response_uri":            {"https://verifier.example/elsewhere"},
+		"nonce":                   {"n"},
+		"presentation_definition": {`{"id":"definition"}`},
+	}
+	req, err := (&Oid4vpPresenter{}).ParseDraft24PresentationRequest(finalQueryURI(values))
+	require.NoError(t, err)
+	require.Equal(t, "https://verifier.example/elsewhere", req.ResponseURI)
+	require.Equal(t, "https://verifier.example/cb", req.RedirectURI)
+
+	// Draft24 also keeps requiring the response_uri parameter for direct_post.
+	values.Del("response_uri")
+	_, err = (&Oid4vpPresenter{}).ParseDraft24PresentationRequest(finalQueryURI(values))
+	require.ErrorContains(t, err, "response_uri")
+}
+
+// countingResponseServer records how many authorization (error) responses an
+// endpoint received.
+type countingResponseServer struct {
+	server *httptest.Server
+	calls  *atomic.Int32
+}
+
+func newCountingResponseServer(t *testing.T) *countingResponseServer {
+	t.Helper()
+	calls := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	return &countingResponseServer{server: server, calls: calls}
+}
+
+// Fix 12: OID4VP 1.0 §5.9.2 — "the Client Identifier needs to be known to the
+// Wallet in advance of the Authorization Request".
+func TestPreRegisteredClientIDRejectedWithoutRegistry(t *testing.T) {
+	uri := finalQueryURI(url.Values{
+		"client_id":     {"example-client"},
+		"redirect_uri":  {"https://verifier.example/cb"},
+		"response_type": {"vp_token"},
+		"response_mode": {"fragment"},
+		"nonce":         {"n"},
+		"dcql_query":    {finalDcqlParam},
+	})
+	_, err := (&Oid4vpPresenter{}).ParsePresentationRequest(uri)
+	require.ErrorIs(t, err, ErrPreRegisteredClientUnknown)
+	require.ErrorContains(t, err, `"example-client"`)
+}
+
+func TestPreRegisteredClientIDAcceptedFromRegistry(t *testing.T) {
+	uri := finalQueryURI(url.Values{
+		"client_id":     {"example-client"},
+		"redirect_uri":  {"https://verifier.example/cb"},
+		"response_type": {"vp_token"},
+		"response_mode": {"fragment"},
+		"nonce":         {"n"},
+		"dcql_query":    {finalDcqlParam},
+	})
+	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
+		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
+	}}
+	req, err := p.ParsePresentationRequest(uri)
+	require.NoError(t, err)
+	require.Equal(t, "example-client", req.ClientID)
+	require.NotNil(t, req.ClientMetadata)
+	require.Equal(t, "Registered Verifier", req.ClientMetadata.ClientName)
+}
+
+func TestPreRegisteredClientIDResolverConsultedWhenMapMisses(t *testing.T) {
+	newURI := func(clientID string) string {
+		return finalQueryURI(url.Values{
+			"client_id":     {clientID},
+			"redirect_uri":  {"https://verifier.example/cb"},
+			"response_type": {"vp_token"},
+			"response_mode": {"fragment"},
+			"nonce":         {"n"},
+			"dcql_query":    {finalDcqlParam},
+		})
+	}
+	var asked []string
+	p := &Oid4vpPresenter{
+		PreRegisteredClients: map[string]PreRegisteredClient{
+			"mapped-client": {Metadata: &VerifierMetadata{ClientName: "From map"}},
+		},
+		ResolvePreRegisteredClient: func(clientID string) (*PreRegisteredClient, error) {
+			asked = append(asked, clientID)
+			if clientID == "resolved-client" {
+				return &PreRegisteredClient{Metadata: &VerifierMetadata{ClientName: "From resolver"}}, nil
+			}
+			return nil, nil
+		},
+	}
+
+	req, err := p.ParsePresentationRequest(newURI("mapped-client"))
+	require.NoError(t, err)
+	require.Equal(t, "From map", req.ClientMetadata.ClientName)
+	require.Empty(t, asked, "the map is consulted before the resolver")
+
+	req, err = p.ParsePresentationRequest(newURI("resolved-client"))
+	require.NoError(t, err)
+	require.Equal(t, "From resolver", req.ClientMetadata.ClientName)
+	require.Equal(t, []string{"resolved-client"}, asked)
+
+	_, err = p.ParsePresentationRequest(newURI("unknown-client"))
+	require.ErrorIs(t, err, ErrPreRegisteredClientUnknown)
+}
+
+// Fix 12 (regression): Draft24 refuses a pre-registered Client Identifier even
+// when the wallet has a registry, because it never authenticated one.
+func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
+	uri := finalQueryURI(url.Values{
+		"client_id":               {"example-client"},
+		"redirect_uri":            {"https://verifier.example/cb"},
+		"response_type":           {"vp_token"},
+		"response_mode":           {"fragment"},
+		"nonce":                   {"n"},
+		"presentation_definition": {`{"id":"definition"}`},
+	})
+	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
+		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
+	}}
+	_, err := p.ParseDraft24PresentationRequest(uri)
+	require.ErrorContains(t, err, "invalid client_id format")
+	require.NotErrorIs(t, err, ErrPreRegisteredClientUnknown)
 }
