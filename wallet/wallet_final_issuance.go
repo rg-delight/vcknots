@@ -1,7 +1,9 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -1110,13 +1112,16 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(response *receiverType
 	}
 
 	saved := make([]*SavedCredential, 0, len(values))
-	for index, value := range values {
-		var holderKey *jose.JSONWebKey
-		if index < len(holderKeys) {
-			publicKey := holderKeys[index].Public()
-			holderKey = &publicKey
-		}
+	usedKeys := make([]bool, len(holderKeys))
+	for _, value := range values {
 		raw, err := rawCredentialBytes(value)
+		if err != nil {
+			return nil, err
+		}
+		// OpenID4VCI 1.0 §8.3 does not promise that the credentials array
+		// follows the order of the proofs, so each credential is matched to the
+		// holder key its cnf names; every supplied key may be used at most once.
+		holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, usedKeys)
 		if err != nil {
 			return nil, err
 		}
@@ -1143,6 +1148,79 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(response *receiverType
 		}
 	}
 	return saved, nil
+}
+
+// matchBatchHolderKey selects the holder key whose RFC 7638 thumbprint equals
+// the credential's cnf.jwk. A credential without cnf takes the first unused key
+// (the acceptance rules then decide whether that is allowed); a cnf that names
+// none of the supplied keys, or a key that was already consumed, is an error.
+func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFlavor, holderKeys []jose.JSONWebKey, usedKeys []bool) (*jose.JSONWebKey, error) {
+	if len(holderKeys) == 0 {
+		return nil, nil
+	}
+	claimed, err := credentialConfirmationKey(raw, flavor)
+	if err != nil {
+		return nil, err
+	}
+	if claimed == nil {
+		for index := range holderKeys {
+			if !usedKeys[index] {
+				usedKeys[index] = true
+				publicKey := holderKeys[index].Public()
+				return &publicKey, nil
+			}
+		}
+		return nil, fmt.Errorf("credential response returned more credentials than holder keys")
+	}
+	claimedThumbprint, err := claimed.Thumbprint(crypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("cnf jwk thumbprint failed: %w", err)
+	}
+	for index := range holderKeys {
+		publicKey := holderKeys[index].Public()
+		thumbprint, err := publicKey.Thumbprint(crypto.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("holder key thumbprint failed: %w", err)
+		}
+		if !bytes.Equal(thumbprint, claimedThumbprint) {
+			continue
+		}
+		if usedKeys[index] {
+			return nil, fmt.Errorf("credential response bound two credentials to the same holder key")
+		}
+		usedKeys[index] = true
+		return &publicKey, nil
+	}
+	return nil, fmt.Errorf("credential is bound to a holder key that was not part of the request")
+}
+
+// credentialConfirmationKey reads cnf.jwk from the issuer-signed JWT payload
+// without verifying anything; nil when the credential carries no cnf.
+func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializationFlavor) (*jose.JSONWebKey, error) {
+	parts := strings.Split(issuerSignedJWT(flavor, raw), ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("issuer JWT must have exactly three parts")
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("issuer JWT payload is not base64url: %w", err)
+	}
+	var payload struct {
+		Cnf *struct {
+			JWK json.RawMessage `json:"jwk"`
+		} `json:"cnf"`
+	}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return nil, fmt.Errorf("issuer JWT payload is not JSON: %w", err)
+	}
+	if payload.Cnf == nil || len(payload.Cnf.JWK) == 0 {
+		return nil, nil
+	}
+	var key jose.JSONWebKey
+	if err := key.UnmarshalJSON(payload.Cnf.JWK); err != nil {
+		return nil, fmt.Errorf("cnf jwk is invalid: %w", err)
+	}
+	return &key, nil
 }
 
 func rawCredentialBytes(value any) ([]byte, error) {

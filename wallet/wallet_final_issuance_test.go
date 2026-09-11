@@ -734,3 +734,46 @@ func TestRawCredentialBytesUnwrapsFinalCredentialsEnvelope(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"credential":"x","other":1}`, string(raw))
 }
+
+// OpenID4VCI 1.0 §8.3 does not fix the order of the credentials array; the
+// official batch module returns them reversed. Each credential is matched to
+// the holder key its cnf names.
+func TestReceiveOID4VCIFinalCredential_BatchCredentialsMayArriveOutOfOrder(t *testing.T) {
+	var secondCredential string
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.batchSize = 3
+		secondCredential = buildTestSDJWTVC(t, f.additionalKey, map[string]string{"given_name": "Hanako"})
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials": []map[string]any{{"credential": secondCredential}, {"credential": f.issuedCredential}},
+			})
+		}
+	})
+	req := fixture.request()
+	req.AdditionalHolderKeys = []jose.JSONWebKey{fixture.additionalKey}
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 2)
+	require.Equal(t, []byte(secondCredential), result.SavedCredentials[0].Entry.Raw)
+	require.Equal(t, []byte(fixture.issuedCredential), result.SavedCredentials[1].Entry.Raw)
+	require.True(t, result.SavedCredentials[0].Verification.HolderBound)
+	require.True(t, result.SavedCredentials[1].Verification.HolderBound)
+
+	// A credential bound to a key that was not part of the request is rejected
+	// and nothing is stored.
+	stranger := newPrivateJWKForFinalVCITest(t, "stranger")
+	strangerCredential := buildTestSDJWTVC(t, stranger, map[string]string{"given_name": "X"})
+	fixture2 := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.batchSize = 3
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials": []map[string]any{{"credential": f.issuedCredential}, {"credential": strangerCredential}},
+			})
+		}
+	})
+	req2 := fixture2.request()
+	req2.AdditionalHolderKeys = []jose.JSONWebKey{fixture2.additionalKey}
+	_, err = fixture2.wallet.ReceiveOID4VCIFinalCredential(req2)
+	require.ErrorContains(t, err, "not part of the request")
+}
