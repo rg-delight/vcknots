@@ -3,6 +3,9 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -39,6 +42,27 @@ type configuration struct {
 	ClientKeyFile   string   `json:"clientKeyFile"`
 	ClientID        string   `json:"clientId"`
 
+	// RedirectURI is the wallet's registered redirect URI for the OpenID4VCI
+	// authorization code flow (receive-code).
+	RedirectURI string `json:"redirectUri"`
+	// AttesterKeyFile/AttesterIssuer configure a test-only StaticClientAttester.
+	// AttesterKeyFile is a private JWK whose x5c chain (when present) becomes the
+	// attestation header chain.
+	AttesterKeyFile string `json:"attesterKeyFile"`
+	AttesterIssuer  string `json:"attesterIssuer"`
+	// KeyAttesterKeyFile/KeyAttesterIssuer likewise configure a StaticKeyAttester.
+	KeyAttesterKeyFile string `json:"keyAttesterKeyFile"`
+	KeyAttesterIssuer  string `json:"keyAttesterIssuer"`
+	// IncludeKeyAttestation requests a key attestation even when the issuer does
+	// not require one.
+	IncludeKeyAttestation bool `json:"includeKeyAttestation"`
+	// DeferredPollAttempts is the number of deferred credential endpoint polls;
+	// zero or negative selects the default of 10.
+	DeferredPollAttempts int `json:"deferredPollAttempts"`
+	// CredentialResponseEncryption generates an ephemeral P-256 key per run so
+	// the issuer encrypts the credential response.
+	CredentialResponseEncryption bool `json:"credentialResponseEncryption"`
+
 	Profile                             string   `json:"profile"`
 	VerifierAllowUnadvertisedRevocation bool     `json:"verifierAllowUnadvertisedRevocation"`
 	WalletAudience                      []string `json:"walletAudience"`
@@ -55,6 +79,15 @@ type configuration struct {
 // as the same-device browser unless the operator explicitly disables it.
 func (c configuration) followsRedirect() bool {
 	return c.FollowRedirect == nil || *c.FollowRedirect
+}
+
+// deferredPollAttempts applies the documented default of ten polls when the
+// operator did not configure a positive count.
+func (c configuration) deferredPollAttempts() int {
+	if c.DeferredPollAttempts <= 0 {
+		return 10
+	}
+	return c.DeferredPollAttempts
 }
 
 type operation struct {
@@ -85,6 +118,27 @@ func readKey(path string) (keystore.KeyEntry, error) {
 		return nil, err
 	}
 	return keystore.NewKeyEntryFromJWKBytes(raw)
+}
+
+// readPrivateJWK parses a private JWK file directly so the full key survives,
+// including the x5c Certificates chain that keystore.KeyEntry discards. The key
+// is still validated through the keystore's EC-private-key rules.
+func readPrivateJWK(path string) (jose.JSONWebKey, error) {
+	if path == "" {
+		return jose.JSONWebKey{}, fmt.Errorf("key file is required")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return jose.JSONWebKey{}, err
+	}
+	var jwk jose.JSONWebKey
+	if err := json.Unmarshal(raw, &jwk); err != nil {
+		return jose.JSONWebKey{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if _, err := keystore.NewKeyEntryFromJWK(jwk); err != nil {
+		return jose.JSONWebKey{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return jwk, nil
 }
 
 func addRoots(pool *x509.CertPool, paths []string) error {
@@ -207,9 +261,18 @@ func followRedirect(client *http.Client, redirectURI string) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func compose(config configuration, dpop, client keystore.KeyEntry, httpClient *http.Client) (*wallet.Wallet, error) {
+func compose(config configuration, operationName string, dpop, client keystore.KeyEntry, httpClient *http.Client) (*wallet.Wallet, error) {
 	if config.StateDirectory == "" || config.ClientID == "" {
 		return nil, fmt.Errorf("stateDirectory and clientId are required")
+	}
+	if (config.AttesterKeyFile == "") != (config.AttesterIssuer == "") {
+		return nil, fmt.Errorf("attesterKeyFile and attesterIssuer must be set together")
+	}
+	if (config.KeyAttesterKeyFile == "") != (config.KeyAttesterIssuer == "") {
+		return nil, fmt.Errorf("keyAttesterKeyFile and keyAttesterIssuer must be set together")
+	}
+	if operationName == "receive-code" && config.RedirectURI == "" {
+		return nil, fmt.Errorf("receive-code requires redirectUri")
 	}
 	selectedProfile, err := profile.Profile(config.Profile).Normalize()
 	if err != nil {
@@ -288,6 +351,26 @@ func compose(config configuration, dpop, client keystore.KeyEntry, httpClient *h
 	if err != nil {
 		return nil, err
 	}
+
+	// Static attesters are test-only evidence (see README and ADR-0074): the
+	// wallet must not hold an attester private key in production.
+	var clientAttestation wallet.ClientAttestationProvider
+	if config.AttesterKeyFile != "" {
+		key, err := readPrivateJWK(config.AttesterKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		clientAttestation = &wallet.StaticClientAttester{Key: key, Issuer: config.AttesterIssuer}
+	}
+	var keyAttestation wallet.KeyAttestationProvider
+	if config.KeyAttesterKeyFile != "" {
+		key, err := readPrivateJWK(config.KeyAttesterKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		keyAttestation = &wallet.StaticKeyAttester{Key: key, Issuer: config.KeyAttesterIssuer}
+	}
+
 	return wallet.NewWalletWithConfig(wallet.Config{
 		CredStore:            store,
 		Receiver:             receiving,
@@ -296,11 +379,15 @@ func compose(config configuration, dpop, client keystore.KeyEntry, httpClient *h
 		CredentialAcceptance: acceptance,
 		DPoP:                 wallet.DPoPConfig{Enabled: true, Key: dpop},
 		ClientAuth:           wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: config.ClientID, Key: client},
+		ClientAttestation:    clientAttestation,
+		KeyAttestation:       keyAttestation,
 	})
 }
 
 func run(config configuration, request operation) (any, error) {
-	if request.Name != "public-keys" && request.Name != "receive-preauth" && request.Name != "present" && request.Name != "list" {
+	switch request.Name {
+	case "public-keys", "receive-preauth", "receive-code", "present", "list":
+	default:
 		return nil, fmt.Errorf("unsupported operation: %s", request.Name)
 	}
 	holder, err := readKey(config.HolderKeyFile)
@@ -322,11 +409,71 @@ func run(config configuration, request operation) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	w, err := compose(config, dpop, client, httpClient)
+	w, err := compose(config, request.Name, dpop, client, httpClient)
 	if err != nil {
 		return nil, err
 	}
 	switch request.Name {
+	case "receive-code":
+		offer, err := w.ResolveCredentialOffer(request.URI)
+		if err != nil {
+			return nil, err
+		}
+		holderKey, err := readPrivateJWK(config.HolderKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		clientKey, err := readPrivateJWK(config.ClientKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		var encryptionKey *jose.JSONWebKey
+		if config.CredentialResponseEncryption {
+			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate credential response encryption key: %w", err)
+			}
+			generated := jose.JSONWebKey{Key: privateKey}
+			encryptionKey = &generated
+		}
+		result, receiveErr := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
+			CredentialOffer:                 offer,
+			Type:                            receiverTypes.Oid4vci,
+			ClientID:                        config.ClientID,
+			RedirectURI:                     config.RedirectURI,
+			HolderKey:                       holderKey,
+			ClientKey:                       clientKey,
+			CredentialResponseEncryptionKey: encryptionKey,
+			HTTPClient:                      httpClient,
+			DeferredPollAttempts:            config.deferredPollAttempts(),
+			IncludeKeyAttestation:           config.IncludeKeyAttestation,
+		})
+		if result == nil {
+			return nil, receiveErr
+		}
+		credentialIds := make([]string, 0, len(result.SavedCredentials))
+		verification := make([]*wallet.CredentialVerification, 0, len(result.SavedCredentials))
+		for _, saved := range result.SavedCredentials {
+			if saved == nil || saved.Entry == nil {
+				continue
+			}
+			credentialIds = append(credentialIds, saved.Entry.Id)
+			verification = append(verification, saved.Verification)
+		}
+		output := map[string]any{
+			"credentialIds":  credentialIds,
+			"verification":   verification,
+			"notificationId": result.NotificationID,
+			"transactionId":  result.TransactionID,
+		}
+		if receiveErr != nil {
+			if errors.Is(receiveErr, receiverTypes.ErrIssuancePending) {
+				output["pending"] = true
+				return output, nil
+			}
+			return nil, receiveErr
+		}
+		return output, nil
 	case "receive-preauth":
 		offer, err := wallet.ParseCredentialOfferURL(request.URI)
 		if err != nil {
