@@ -13,6 +13,7 @@ import (
 	"hash"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,8 +34,18 @@ type CredentialAcceptancePolicy struct {
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
 	// RequireHolderBinding rejects credentials without a cnf claim.
 	RequireHolderBinding bool
-	Now                  func() time.Time
-	ClockSkew            time.Duration
+	// UnverifiedIssuer stores credentials without authenticating the issuer
+	// key, which is what a nil policy does implicitly. It only takes effect
+	// when neither IssuerX509 nor ResolveIssuerKeys is configured: with either
+	// of them present the issuer signature is still verified. Everything else
+	// the policy checks — holder binding, exp/nbf and SD-JWT disclosure
+	// integrity — keeps applying, so this opts out of issuer authentication
+	// alone. It exists so that a deployment which accepts unauthenticated
+	// issuers says so in one greppable place instead of expressing it as an
+	// absent policy.
+	UnverifiedIssuer bool
+	Now              func() time.Time
+	ClockSkew        time.Duration
 }
 
 // IssuerX509TrustOptions is relying-party trust configuration for issuer x5c chains.
@@ -59,9 +70,24 @@ type CredentialVerification struct {
 	HolderBound            bool // cnf present and matched the holder key
 }
 
-// verifyCredentialForAcceptance authenticates a raw credential before it is
-// persisted. Any returned error means nothing may be stored.
-func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*credential.Credential, *CredentialVerification, error) {
+// verifyCredentialForAcceptanceContext authenticates a raw credential before it
+// is persisted. Any returned error means nothing may be stored.
+//
+// requirePolicy makes Config.CredentialAcceptance mandatory: with it set, a nil
+// policy is a fail-closed error rather than the permissive parse the Draft-13
+// entrypoints keep. The OpenID4VCI Final and HAIP issuance paths pass true,
+// because a credential arriving there has an issuer identity that the flow can
+// and must check. Draft-13 passes false: Config.CredentialAcceptance is
+// optional by design there, and SD-JWT VC Section 3.5 leaves issuer key
+// resolution to ecosystem policy.
+//
+// ctx bounds the network work the policy performs, which today is CRL retrieval
+// while the issuer certificate chain is verified.
+func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
+	if requirePolicy && w.credentialAcceptance == nil {
+		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
+	}
+
 	parsedCredential, err := w.serializer.DeserializeCredential(flavor, raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("credential could not be parsed: %w", err)
@@ -131,7 +157,12 @@ func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.Sup
 		}
 		jwkRaw, jwkPresent := cnf["jwk"]
 		if !jwkPresent {
-			return nil, nil, fmt.Errorf("cnf claim must contain a jwk")
+			// RFC 7800 defines several confirmation members, but only cnf.jwk
+			// hands the wallet the key itself. A cnf.kid or cnf."x5t#S256"
+			// names a key the wallet would have to resolve out of band before
+			// it could sign a Key Binding JWT, so the credential is refused
+			// rather than stored with a binding it cannot exercise.
+			return nil, nil, fmt.Errorf("%w (cnf members: %s)", ErrHolderBindingConfirmationUnsupported, strings.Join(sortedMemberNames(cnf), ", "))
 		}
 		if holderKey != nil {
 			claimedKey, err := jsonWebKeyFromValue(jwkRaw)
@@ -166,7 +197,7 @@ func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.Sup
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := w.resolveAndVerifyIssuerKey(parsedCredential, header, payload, issuer, now, verification); err != nil {
+	if err := w.resolveAndVerifyIssuerKey(ctx, parsedCredential, header, payload, issuer, now, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -183,9 +214,23 @@ func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.Sup
 	return parsedCredential, verification, nil
 }
 
+// verifyCredentialForAcceptance is the pre-context call shape, kept so the
+// callers that have not been threaded through yet keep compiling. It is
+// deliberately the permissive combination — a background context and no
+// required policy — because that is exactly what those call sites do today.
+//
+// TODO(S4/S5): remove once wallet.go's storeAndParseCredential and
+// wallet_final_issuance.go's storeOID4VCIFinalCredentialResponse call
+// verifyCredentialForAcceptanceContext with their own context and the
+// requirePolicy value their path warrants.
+func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*credential.Credential, *CredentialVerification, error) {
+	return w.verifyCredentialForAcceptanceContext(context.Background(), raw, flavor, holderKey, false)
+}
+
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
-// issuer signature, recording the authentication outcome in verification.
-func (w *Wallet) resolveAndVerifyIssuerKey(parsedCredential *credential.Credential, header, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
+// issuer signature, recording the authentication outcome in verification. ctx
+// bounds the CRL retrieval the trust path may perform.
+func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, header, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
 	policy := w.credentialAcceptance
 	var candidateKeys []jose.JSONWebKey
 
@@ -193,25 +238,37 @@ func (w *Wallet) resolveAndVerifyIssuerKey(parsedCredential *credential.Credenti
 	// issuer trust. A caller that resolves issuer keys itself (JWKS, DID or a
 	// static registry, SD-JWT VC §3.5 leaves the mechanism to ecosystem policy)
 	// keeps that mechanism even when the credential also carries x5c; the chain
-	// is then not consulted. Neither configured is a fail-closed error.
+	// is then not consulted. Neither configured is a fail-closed error unless
+	// the policy opts out of issuer authentication in writing.
 	x5cRaw, x5cPresent := header["x5c"]
-	if x5cPresent && policy.IssuerX509 == nil && policy.ResolveIssuerKeys == nil {
-		return fmt.Errorf("x5c issuer authentication is not configured")
+	if policy.IssuerX509 == nil && policy.ResolveIssuerKeys == nil {
+		if policy.UnverifiedIssuer {
+			// verification keeps no issuer key and no certificate
+			// fingerprints, so a caller can still tell an authenticated
+			// issuer from one accepted under this opt-out.
+			return nil
+		}
+		if x5cPresent {
+			return fmt.Errorf("x5c issuer authentication is not configured")
+		}
+		return fmt.Errorf("issuer key resolution is not configured")
 	}
 	if x5cPresent && policy.IssuerX509 != nil {
-		certificates, err := decodeX5CCertificates(x5cRaw)
+		certificates, err := commonX509.DecodeX5CChain(x5cRaw)
 		if err != nil {
 			return err
 		}
 		if w.profile.IsHAIP() {
-			for _, certificate := range certificates {
-				for _, anchor := range policy.IssuerX509.TrustAnchors {
-					if bytes.Equal(certificate.Raw, anchor.Raw) {
-						// HAIP §6.1.1: "The X.509 certificate of the trust anchor
-						// MUST NOT be included" in the x5c header.
-						return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header")
-					}
-				}
+			// HAIP §6.1.1: "The X.509 certificate of the trust anchor MUST NOT
+			// be included" in the x5c header. Both anchor forms are consulted,
+			// so configuring trust as a *x509.CertPool does not silently
+			// exempt a deployment from the rule.
+			containsAnchor, err := commonX509.ContainsTrustAnchor(certificates, policy.IssuerX509.TrustAnchors, policy.IssuerX509.RootCAs)
+			if err != nil {
+				return err
+			}
+			if containsAnchor {
+				return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header")
 			}
 		}
 		crlOptions := policy.IssuerX509.CRL
@@ -229,7 +286,7 @@ func (w *Wallet) resolveAndVerifyIssuerKey(parsedCredential *credential.Credenti
 		if err != nil {
 			return fmt.Errorf("failed to create issuer revocation checker: %w", err)
 		}
-		result, err := commonX509.VerifySigningCertificateChain(context.Background(), certificates, commonX509.SigningChainOptions{
+		result, err := commonX509.VerifySigningCertificateChain(ctx, certificates, commonX509.SigningChainOptions{
 			TrustAnchors: policy.IssuerX509.TrustAnchors,
 			Roots:        policy.IssuerX509.RootCAs,
 			CurrentTime:  now,
@@ -341,31 +398,15 @@ func jsonWebKeyFromValue(value any) (jose.JSONWebKey, error) {
 	return key, nil
 }
 
-func decodeX5CCertificates(raw any) ([]*x509.Certificate, error) {
-	entries, ok := raw.([]any)
-	if !ok {
-		return nil, fmt.Errorf("x5c header must be an array")
+// sortedMemberNames lists an object's members in a stable order, so an error
+// naming them reads the same way on every run.
+func sortedMemberNames(object map[string]any) []string {
+	names := make([]string, 0, len(object))
+	for name := range object {
+		names = append(names, name)
 	}
-	if len(entries) == 0 || len(entries) > 16 {
-		return nil, fmt.Errorf("x5c header must contain between 1 and 16 certificates")
-	}
-	certificates := make([]*x509.Certificate, 0, len(entries))
-	for _, entry := range entries {
-		encoded, ok := entry.(string)
-		if !ok {
-			return nil, fmt.Errorf("x5c header entries must be strings")
-		}
-		der, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return nil, fmt.Errorf("x5c header entry is not valid base64: %w", err)
-		}
-		certificate, err := x509.ParseCertificate(der)
-		if err != nil {
-			return nil, fmt.Errorf("x5c header entry is not a valid certificate: %w", err)
-		}
-		certificates = append(certificates, certificate)
-	}
-	return certificates, nil
+	slices.Sort(names)
+	return names
 }
 
 func requireIssuerDNSBinding(leaf *x509.Certificate, issuer string) error {
@@ -391,6 +432,15 @@ func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte)
 	return string(raw)
 }
 
+// AcceptedSDAlgorithms lists the _sd_alg values this wallet accepts on an
+// SD-JWT VC, written as the lowercase IANA "Named Information Hash Algorithm"
+// names that SD-JWT (draft-ietf-oauth-selective-disclosure-jwt) Section 4.1.1
+// requires. A credential naming anything else is rejected rather than verified
+// under a substituted hash, and "sha-256" is the default when _sd_alg is
+// absent. The wallet never modifies the slice; callers may read it to report
+// what they support and must not modify it either.
+var AcceptedSDAlgorithms = []string{"sha-256", "sha-384", "sha-512"}
+
 func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *credential.Credential) error {
 	sdAlg := "sha-256"
 	if raw, present := payload["_sd_alg"]; present {
@@ -399,9 +449,7 @@ func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *cr
 			return fmt.Errorf("_sd_alg must be a string")
 		}
 		sdAlg = strings.ToLower(text)
-		switch sdAlg {
-		case "sha-256", "sha-384", "sha-512":
-		default:
+		if !slices.Contains(AcceptedSDAlgorithms, sdAlg) {
 			return fmt.Errorf("unsupported _sd_alg %q", text)
 		}
 	}

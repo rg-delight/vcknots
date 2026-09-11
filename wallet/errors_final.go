@@ -26,3 +26,10 @@ var (
 	// was presented which the wallet's client registry does not hold.
 	ErrPreRegisteredClientUnknown = errors.New("pre-registered client_id is not in the wallet registry")
 )
+
+// ErrHolderBindingConfirmationUnsupported reports that a credential's cnf
+// claim names a confirmation method other than cnf.jwk, such as cnf.kid or
+// cnf."x5t#S256". Only a confirmation carrying the key itself lets the wallet
+// prove possession of it in a Key Binding JWT, so such a credential is
+// rejected instead of stored with a binding the wallet cannot exercise.
+var ErrHolderBindingConfirmationUnsupported = errors.New("credential cnf confirmation method is not supported; only cnf.jwk is accepted")
