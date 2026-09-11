@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -600,4 +601,66 @@ func TestJwtVcPresentationOptions_SetNonce(t *testing.T) {
 			require.Equal(t, tt.nonce, o.Nonce, "Failed to set nonce")
 		})
 	}
+}
+
+// signJwtVc builds a JWT VC signed with the given algorithm and private key,
+// carrying the minimum vc claim the serializer needs to produce a Credential.
+func signJwtVc(t *testing.T, alg jose.SignatureAlgorithm, key any) string {
+	t.Helper()
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, nil)
+	require.NoError(t, err)
+
+	claims := map[string]any{
+		"vc": map[string]any{
+			"id":                "https://issuer.example.com/credentials/1",
+			"type":              []any{"VerifiableCredential"},
+			"issuer":            "https://issuer.example.com",
+			"credentialSubject": map[string]any{"id": "did:example:subject"},
+		},
+	}
+
+	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+	require.NoError(t, err)
+	return raw
+}
+
+func TestDeserializeCredential_PS256Signed(t *testing.T) {
+	serializer, err := NewJwtVcSerializer()
+	require.NoError(t, err)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	cred, err := serializer.DeserializeCredential(credential.JwtVc, []byte(signJwtVc(t, jose.PS256, key)))
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.NotNil(t, cred.Proof)
+	require.Equal(t, jose.PS256, cred.Proof.Algorithm)
+}
+
+func TestDeserializeCredential_ES384Signed(t *testing.T) {
+	serializer, err := NewJwtVcSerializer()
+	require.NoError(t, err)
+
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+
+	cred, err := serializer.DeserializeCredential(credential.JwtVc, []byte(signJwtVc(t, jose.ES384, key)))
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.NotNil(t, cred.Proof)
+	require.Equal(t, jose.ES384, cred.Proof.Algorithm)
+}
+
+func TestDeserializeCredential_RejectsAlgNone(t *testing.T) {
+	serializer, err := NewJwtVcSerializer()
+	require.NoError(t, err)
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"vc":{"type":["VerifiableCredential"],"issuer":"https://issuer.example.com","credentialSubject":{"id":"did:example:subject"}}}`))
+	unsigned := header + "." + payload + "."
+
+	_, err = serializer.DeserializeCredential(credential.JwtVc, []byte(unsigned))
+	require.Error(t, err)
 }

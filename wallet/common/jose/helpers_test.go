@@ -3,6 +3,7 @@ package jose
 import (
 	"crypto/sha256"
 	"crypto/sha512"
+	"slices"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
@@ -112,6 +113,40 @@ func TestParseAlgorithm(t *testing.T) {
 				t.Errorf("ParseAlgorithm() = %v, expected %v", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestAcceptedSignatureAlgorithms(t *testing.T) {
+	expected := []jose.SignatureAlgorithm{
+		jose.ES256, jose.ES384, jose.ES512,
+		jose.RS256, jose.RS384, jose.RS512,
+		jose.PS256, jose.PS384, jose.PS512,
+		jose.EdDSA,
+	}
+
+	got := AcceptedSignatureAlgorithms()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %d algorithms, got %d: %v", len(expected), len(got), got)
+	}
+	for _, alg := range expected {
+		if !slices.Contains(got, alg) {
+			t.Errorf("expected %v to be accepted", alg)
+		}
+	}
+
+	for _, rejected := range []jose.SignatureAlgorithm{"none", jose.HS256, jose.HS384, jose.HS512} {
+		if slices.Contains(got, rejected) {
+			t.Errorf("algorithm %v must never be accepted", rejected)
+		}
+		if _, err := ParseAlgorithm(string(rejected)); err == nil {
+			t.Errorf("ParseAlgorithm(%q) unexpectedly succeeded", rejected)
+		}
+	}
+
+	// The returned slice is a copy: mutating it must not affect the canonical list.
+	got[0] = jose.HS256
+	if slices.Contains(AcceptedSignatureAlgorithms(), jose.HS256) {
+		t.Error("mutating the returned slice changed the canonical list")
 	}
 }
 
