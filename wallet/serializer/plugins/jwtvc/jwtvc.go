@@ -64,10 +64,10 @@ func (s *JwtVcSerializer) DeserializeCredential(flavor credential.SupportedSeria
 		return nil, types.NewFormatError(flavor, types.ErrUnsupportedFormat, "expected JWT VC format")
 	}
 
-	// Parse JWT using go-jose (automatic structure validation)
-	jws, err := jose.ParseSigned(string(data), []jose.SignatureAlgorithm{
-		jose.ES256, jose.ES384, jose.ES512, jose.EdDSA, jose.RS256,
-	})
+	// Parse JWT using go-jose (automatic structure validation).
+	// The accepted set is shared with the SD-JWT VC serializer through
+	// joseutil.ParseAlgorithm; it excludes "none" and the HS* MAC algorithms.
+	jws, err := jose.ParseSigned(string(data), joseutil.AcceptedSignatureAlgorithms())
 	if err != nil {
 		return nil, types.NewInvalidJWTError("failed to parse JWT", err)
 	}
@@ -186,7 +186,7 @@ func (s *JwtVcSerializer) SerializePresentation(flavor credential.SupportedSeria
 
 	// Set Nonce, Audience
 	if opts, ok := options.(*JwtVcPresentationOptions); ok && opts != nil {
-		if len(opts.Nonce) >= 1  {
+		if len(opts.Nonce) >= 1 {
 			customClaims["nonce"] = opts.Nonce
 		}
 		if len(opts.Audience) >= 1 {
@@ -362,6 +362,12 @@ func (s *JwtVcSerializer) convertVCDataToCredential(vcData map[string]any) (*cre
 			From: validFrom,
 			To:   validUntil,
 		}
+	}
+
+	// A JWT VC that carries no vc.id has no credential identifier to store;
+	// returning a typed error keeps the caller out of the nil *url.URL panic.
+	if id == nil {
+		return nil, types.NewInvalidCredentialError("jwt vc payload has no vc.id", nil)
 	}
 
 	return &credential.Credential{
