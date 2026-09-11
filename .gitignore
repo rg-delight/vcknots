@@ -70,3 +70,6 @@ CLAUDE.md
 /server/core/test/
 /server/multi/test/
 wallet/examples/official_driver/official_driver
+wallet/examples/custom_dispatcher/custom_dispatcher
+wallet/examples/custom_plugin/custom_plugin
+wallet/examples/server_integration_sdjwt/server_integration_sdjwt

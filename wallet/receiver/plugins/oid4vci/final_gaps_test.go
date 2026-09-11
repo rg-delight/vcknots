@@ -571,6 +571,7 @@ func TestCredentialProofUnconstrainedWhenIssuerListsNone(t *testing.T) {
 
 	// The established entry points delegate here with no constraint, so they
 	// keep producing the same proof.
+	//lint:ignore SA1019 the legacy entry point is exactly what this case pins
 	legacy, err := receiver.CreateCredentialRequestJWTProof(key, "https://issuer.example", "")
 	if err != nil {
 		t.Fatalf("CreateCredentialRequestJWTProof() error = %v", err)

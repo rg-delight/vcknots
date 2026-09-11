@@ -58,9 +58,8 @@ func TestContainsTrustAnchorWithRootCAsPool(t *testing.T) {
 		t.Fatal("an empty pool configures no anchor")
 	}
 
-	// The pool branch a caller reaches through Subjects cannot be produced by
-	// a non-system pool, so the certificate probe behind it is exercised
-	// directly: only a member of the pool verifies at depth 0.
+	// The certificate probe behind the pool branch is exercised directly:
+	// only a member of the pool verifies at depth 0.
 	if !verifiesAsPoolAnchor(anchor.certificate, pool) {
 		t.Fatal("the pool member must verify as its own path")
 	}

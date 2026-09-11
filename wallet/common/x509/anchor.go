@@ -17,14 +17,12 @@ import (
 // ones are consulted, and a caller with neither configured gets false.
 //
 // anchors are compared by raw DER equality. roots is an *x509.CertPool, which
-// cannot be enumerated as certificates: where the pool exposes its DER
-// subjects they are compared, and where it does not, each chain certificate is
-// verified against the pool as a leaf with an empty intermediate set, a
-// certificate that verifies at depth 0 being the anchor itself. Subject
-// comparison cannot tell a pool anchor apart from a different certificate
-// carrying the same subject DN, such as a re-keyed CA of the same name, and so
-// errs towards rejecting the chain. Callers that need exact anchor identity
-// configure anchors rather than a pool.
+// cannot be enumerated as certificates, so each chain certificate is verified
+// against the pool as a leaf with an empty intermediate set; a certificate that
+// verifies at depth 0 is the anchor itself. That probe identifies the exact
+// pool member, unlike a subject-DN comparison, which cannot tell a pool anchor
+// apart from a different certificate carrying the same subject DN, such as a
+// re-keyed CA of the same name.
 func ContainsTrustAnchor(chain []*x509.Certificate, anchors []*x509.Certificate, roots *x509.CertPool) (bool, error) {
 	for index, certificate := range chain {
 		if certificate == nil || len(certificate.Raw) == 0 {
@@ -42,19 +40,6 @@ func ContainsTrustAnchor(chain []*x509.Certificate, anchors []*x509.Certificate,
 		}
 	}
 	if roots == nil {
-		return false, nil
-	}
-	// Subjects is deprecated because it omits the lazily loaded platform roots
-	// of a system pool. That is exactly the case its emptiness signals here,
-	// and the certificate probe below covers it.
-	if subjects := roots.Subjects(); len(subjects) > 0 {
-		for _, certificate := range chain {
-			for _, subject := range subjects {
-				if bytes.Equal(certificate.RawSubject, subject) {
-					return true, nil
-				}
-			}
-		}
 		return false, nil
 	}
 	for _, certificate := range chain {

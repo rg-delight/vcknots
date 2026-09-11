@@ -1264,9 +1264,12 @@ func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
 		t.Fatalf("ath = %#v", dpopClaims["ath"])
 	}
 
-	proof, err := receiver.CreateCredentialRequestJWTProof(key, "https://issuer.example", "credential-nonce")
+	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
+		Audience: "https://issuer.example",
+		Nonce:    "credential-nonce",
+	})
 	if err != nil {
-		t.Fatalf("CreateCredentialRequestJWTProof() error = %v", err)
+		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
 	}
 	parsedProof, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
 	if err != nil {
@@ -2475,10 +2478,10 @@ func TestOid4vciReceiverSatisfiesTransportAndSigner(t *testing.T) {
 
 	var transport types.OID4VCIFinalTransport = receiver
 	var signer types.OID4VCIFinalSigner = receiver
-	var compound types.OID4VCIFinalReceiver = receiver
-	if compound == nil {
-		t.Fatal("compound interface is nil")
-	}
+	// The bundled plugin also satisfies the deprecated compound interface; the
+	// assignment pins that backward compatibility at compile time.
+	//lint:ignore SA1019 compatibility assertion
+	var _ types.OID4VCIFinalReceiver = receiver
 
 	if _, ok := any(&transportOnlyReceiver{OID4VCIFinalTransport: receiver}).(types.OID4VCIFinalSigner); ok {
 		t.Fatal("a transport-only plugin must not satisfy OID4VCIFinalSigner")

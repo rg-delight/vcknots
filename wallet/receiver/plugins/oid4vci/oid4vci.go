@@ -52,7 +52,6 @@ type Oid4vciReceiver struct {
 var (
 	_ types.OID4VCIFinalTransport = (*Oid4vciReceiver)(nil)
 	_ types.OID4VCIFinalSigner    = (*Oid4vciReceiver)(nil)
-	_ types.OID4VCIFinalReceiver  = (*Oid4vciReceiver)(nil)
 	_ profile.Carrier             = (*Oid4vciReceiver)(nil)
 )
 
