@@ -152,7 +152,7 @@ Fail-closed defaults:
 
 **What the application must keep.** Trust-anchor selection and distribution (`RequestObjectValidation.TrustAnchors` / `RootCAs`, `IssuerX509TrustOptions`); the inputs to the revocation policy (reachable CRLs, `AllowUnadvertisedRevocation`). The shared signing-chain path consults CRLs only and does not implement OCSP (`common/x509.NewCRLChecker` never follows OCSP). It also keeps consent and any ecosystem policy above the protocol; persistence and resumption of the protocol state the migration guide describes (deferred token and transaction identifiers, notification identifiers); and the platform-authenticated origin for DC API.
 
-**Explicit escapes, for local development and tests only.** `AllowHTTP` (and the `VCKNOTS_WALLET_HTTP_ALLOWED` / `VCKNOTS_WALLET_DEBUG` environment variables) permits plain HTTP endpoints and is rejected under HAIP. `InsecureSkipX509Verify` applies to the Draft24 entry points only; the Final path rejects it. `AllowUnadvertisedRevocation` keeps certificates without published CRL / OCSP information on the trust path and reports them separately, never as positively checked. `DeliveredByReference` is a caller attestation that a `request=` Request Object was originally fetched through `request_uri`, letting the request satisfy the HAIP §5.1 delivery check; set it only when the application's own admission path recorded the fetch.
+**Explicit escapes, for local development and tests only.** `AllowHTTP` (and the `VCKNOTS_WALLET_HTTP_ALLOWED` environment variable) permits plain HTTP endpoints and is rejected under HAIP. `InsecureSkipX509Verify` applies to the Draft24 entry points only; the Final path rejects it. `AllowUnadvertisedRevocation` keeps certificates without published CRL / OCSP information on the trust path and reports them separately, never as positively checked. `DeliveredByReference` is a caller attestation that a `request=` Request Object was originally fetched through `request_uri`, letting the request satisfy the HAIP §5.1 delivery check; set it only when the application's own admission path recorded the fetch.
 
 See the [API migration guide](../API-MIGRATION.md) for the integrated API changes and the [public Wallet API driver](official_driver/README.md) for a complete configuration.
 
@@ -506,18 +506,17 @@ In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by
 | Variable | Default | Description |
 | :---- | :---- | :---- |
 | `VCKNOTS_WALLET_HTTP_ALLOWED` | `false` (unset/empty) | When set to `true`, HTTP endpoints are allowed for wallet HTTP calls (for local development/testing). A client assertion is the exception: it is sent over plain HTTP only to a loopback host, so `private_key_jwt` against a remote `http://` endpoint is refused even with this set. |
-| `VCKNOTS_WALLET_DEBUG` | `false` (unset/empty) | Enables debug mode. Debug mode also enables HTTP allowance behavior. |
+| `VCKNOTS_WALLET_DEBUG` | `false` (unset/empty) | Enables debug logging only. It does not relax the HTTPS requirement. |
 
 Behavior summary:
-- `IsHTTPAllowed()` becomes `true` when either `VCKNOTS_WALLET_HTTP_ALLOWED=true` or `VCKNOTS_WALLET_DEBUG=true`.
-- If both are unset (or not equal to `true`), `IsHTTPAllowed()` is `false`, and HTTPS-only validation remains active.
+- `IsHTTPAllowed()` becomes `true` only when `VCKNOTS_WALLET_HTTP_ALLOWED=true`.
+- `VCKNOTS_WALLET_DEBUG=true` does not enable HTTP allowance; to use a local `http://` endpoint, set `VCKNOTS_WALLET_HTTP_ALLOWED=true` as well.
+- If `VCKNOTS_WALLET_HTTP_ALLOWED` is unset (or not equal to `true`), `IsHTTPAllowed()` is `false`, and HTTPS-only validation remains active.
 
 Example (local development only):
 
 ```bash
 export VCKNOTS_WALLET_HTTP_ALLOWED=true
-# or
-export VCKNOTS_WALLET_DEBUG=true
 ```
 
 > ⚠️ **Security warning**: Do not enable `VCKNOTS_WALLET_HTTP_ALLOWED` in production. Keep HTTPS-only validation enabled.

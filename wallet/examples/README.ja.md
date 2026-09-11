@@ -150,7 +150,7 @@ fail-closed の既定値:
 
 **アプリケーションが保持するもの。** trust anchor の選択と配布（`RequestObjectValidation.TrustAnchors` / `RootCAs`、`IssuerX509TrustOptions`）、失効 policy への入力（到達可能な CRL、`AllowUnadvertisedRevocation`）。共通の署名チェーン経路は CRL のみを参照し、OCSP は実装していません（`common/x509.NewCRLChecker` は OCSP を参照しません）。さらに同意とプロトコルより上位の ecosystem policy、migration guide が述べるプロトコル状態の永続化と再開（deferred の token / transaction identifier、notification identifier）、DC API の platform 認証済み origin です。
 
-**明示的な escape（ローカル開発とテスト専用）。** `AllowHTTP`（および環境変数 `VCKNOTS_WALLET_HTTP_ALLOWED` / `VCKNOTS_WALLET_DEBUG`）は平文 HTTP endpoint を許可し、HAIP では拒否されます。`InsecureSkipX509Verify` は Draft24 の入口だけに適用され、Final 経路は拒否します。`AllowUnadvertisedRevocation` は CRL / OCSP が公開されていない証明書を trust path に残し、検証済みではなく別枠として報告します。`DeliveredByReference` は `request=` の Request Object が元は `request_uri` で取得されたことを呼出し側が証明するもので、HAIP §5.1 の配送要件を満たします。アプリ自身の admission 経路が取得を記録した場合にだけ設定してください。
+**明示的な escape（ローカル開発とテスト専用）。** `AllowHTTP`（および環境変数 `VCKNOTS_WALLET_HTTP_ALLOWED`）は平文 HTTP endpoint を許可し、HAIP では拒否されます。`InsecureSkipX509Verify` は Draft24 の入口だけに適用され、Final 経路は拒否します。`AllowUnadvertisedRevocation` は CRL / OCSP が公開されていない証明書を trust path に残し、検証済みではなく別枠として報告します。`DeliveredByReference` は `request=` の Request Object が元は `request_uri` で取得されたことを呼出し側が証明するもので、HAIP §5.1 の配送要件を満たします。アプリ自身の admission 経路が取得を記録した場合にだけ設定してください。
 
 統合された API の変更は [API migration guide](../API-MIGRATION.md)、完全な構成は[公開 Wallet API driver](official_driver/README.md)を参照してください。
 
@@ -502,18 +502,17 @@ caller が明示した `SelectedClaims` を上限とし、その範囲外の要�
 | 環境変数 | 既定値 | 説明 |
 | :---- | :---- | :---- |
 | `VCKNOTS_WALLET_HTTP_ALLOWED` | `false`（未設定/空） | `true` を設定すると、Wallet の HTTP 通信で HTTP エンドポイントを許可します（ローカル開発/テスト用途）。ただし client assertion だけは例外で、平文 HTTP で送るのはループバックホスト宛てに限られます。リモートの `http://` エンドポイントへの `private_key_jwt` は、この設定を有効にしても拒否されます。 |
-| `VCKNOTS_WALLET_DEBUG` | `false`（未設定/空） | デバッグモードを有効化します。デバッグモード時は HTTP 許可動作も有効になります。 |
+| `VCKNOTS_WALLET_DEBUG` | `false`（未設定/空） | デバッグログのみを有効化します。HTTPS 必須要件は緩和されません。 |
 
 挙動の要点:
-- `VCKNOTS_WALLET_HTTP_ALLOWED=true` または `VCKNOTS_WALLET_DEBUG=true` のいずれかで、`IsHTTPAllowed()` は `true` になります。
-- 両方とも未設定（または `true` 以外）の場合、`IsHTTPAllowed()` は `false` となり、HTTPS 必須の検証が有効のままになります。
+- `IsHTTPAllowed()` が `true` になるのは `VCKNOTS_WALLET_HTTP_ALLOWED=true` の場合だけです。
+- `VCKNOTS_WALLET_DEBUG=true` だけでは HTTP 許可は有効になりません。ローカルの `http://` エンドポイントを使うには `VCKNOTS_WALLET_HTTP_ALLOWED=true` も設定してください。
+- `VCKNOTS_WALLET_HTTP_ALLOWED` が未設定（または `true` 以外）の場合、`IsHTTPAllowed()` は `false` となり、HTTPS 必須の検証が有効のままになります。
 
 設定例（ローカル開発のみ）:
 
 ```bash
 export VCKNOTS_WALLET_HTTP_ALLOWED=true
-# または
-export VCKNOTS_WALLET_DEBUG=true
 ```
 
 > ⚠️ **セキュリティ警告**: 本番環境では `VCKNOTS_WALLET_HTTP_ALLOWED` を有効化しないでください。HTTPS 必須検証を維持してください。
