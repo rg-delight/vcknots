@@ -46,6 +46,15 @@ type configuration struct {
 	IssuerAllowUnadvertisedRevocation   bool     `json:"issuerAllowUnadvertisedRevocation"`
 	IssuerJWKSFiles                     []string `json:"issuerJWKSFiles"`
 	RequireHolderBinding                bool     `json:"requireHolderBinding"`
+	// FollowRedirect controls whether present opens a verifier-returned
+	// redirect_uri in the driver's own TLS-configured client. Absent means true.
+	FollowRedirect *bool `json:"followRedirect"`
+}
+
+// followsRedirect reports the effective followRedirect policy: the driver acts
+// as the same-device browser unless the operator explicitly disables it.
+func (c configuration) followsRedirect() bool {
+	return c.FollowRedirect == nil || *c.FollowRedirect
 }
 
 type operation struct {
@@ -151,7 +160,54 @@ func readIssuerKeys(paths []string) ([]jose.JSONWebKey, error) {
 	return keys, nil
 }
 
-func compose(config configuration, dpop, client keystore.KeyEntry) (*wallet.Wallet, error) {
+// newHTTPClient builds the driver's single TLS-configured client, used for both
+// plugin traffic and same-device redirect following.
+func newHTTPClient(config configuration) (*http.Client, error) {
+	tlsRoots, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, err
+	}
+	if err := addRoots(tlsRoots, config.TLSCAFiles); err != nil {
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: tlsRoots}
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}, nil
+}
+
+// followRedirect opens a verifier-returned redirect URI as a same-device
+// browser would (HAIP §5.1, OpenID4VP §8.2), following up to five redirects.
+// The URI fragment is never sent on the wire: net/http derives the
+// request-target from URL.RequestURI, which omits it.
+func followRedirect(client *http.Client, redirectURI string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, redirectURI, nil)
+	if err != nil {
+		return 0, fmt.Errorf("invalid redirect_uri: %w", err)
+	}
+	req.Header.Set("Accept", "text/html,*/*")
+	req.Header.Set("User-Agent", "official_driver")
+
+	followClient := *client
+	followClient.Timeout = 15 * time.Second
+	followClient.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			// Stop after five redirects; surface the last 3xx as the final status.
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	resp, err := followClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to follow redirect_uri: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return resp.StatusCode, fmt.Errorf("redirect_uri returned status %d", resp.StatusCode)
+	}
+	return resp.StatusCode, nil
+}
+
+func compose(config configuration, dpop, client keystore.KeyEntry, httpClient *http.Client) (*wallet.Wallet, error) {
 	if config.StateDirectory == "" || config.ClientID == "" {
 		return nil, fmt.Errorf("stateDirectory and clientId are required")
 	}
@@ -168,17 +224,6 @@ func compose(config configuration, dpop, client keystore.KeyEntry) (*wallet.Wall
 	if config.IssuerAllowUnadvertisedRevocation && len(config.IssuerCAFiles) == 0 {
 		return nil, fmt.Errorf("issuerAllowUnadvertisedRevocation requires issuerCAFiles")
 	}
-
-	tlsRoots, err := x509.SystemCertPool()
-	if err != nil {
-		return nil, err
-	}
-	if err := addRoots(tlsRoots, config.TLSCAFiles); err != nil {
-		return nil, err
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: tlsRoots}
-	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 
 	// Trust anchors for signed Request Objects. No verifierCAFiles means no
 	// validation options at all: the library then has no anchors and rejects
@@ -273,7 +318,11 @@ func run(config configuration, request operation) (any, error) {
 	if request.Name == "public-keys" {
 		return map[string]any{"holder": holder.PublicKey(), "dpop": dpop.PublicKey(), "client": client.PublicKey()}, nil
 	}
-	w, err := compose(config, dpop, client)
+	httpClient, err := newHTTPClient(config)
+	if err != nil {
+		return nil, err
+	}
+	w, err := compose(config, dpop, client, httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +342,16 @@ func run(config configuration, request operation) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"redirectUri": redirectURI}, nil
+		result := map[string]any{"redirectUri": redirectURI, "redirectFollowed": false, "redirectStatus": 0}
+		if redirectURI != "" && config.followsRedirect() {
+			status, err := followRedirect(httpClient, redirectURI)
+			if err != nil {
+				return nil, err
+			}
+			result["redirectFollowed"] = true
+			result["redirectStatus"] = status
+		}
+		return result, nil
 	case "list":
 		entries, total, err := w.GetCredentialEntries(wallet.GetCredentialEntriesRequest{})
 		if err != nil {

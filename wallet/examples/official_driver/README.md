@@ -40,6 +40,7 @@ absolute paths in the configuration.
 | `issuerAllowUnadvertisedRevocation` | bool | `false` | → `IssuerX509TrustOptions.AllowUnadvertisedRevocation`. Requires `issuerCAFiles`. |
 | `issuerJWKSFiles` | []string | `[]` | JWKS files (`{"keys":[...]}`) of public issuer keys for credentials without an `x5c` header. Non-empty sets `CredentialAcceptancePolicy.ResolveIssuerKeys`, which returns all operator-chosen keys; the library matches `kid`. Private keys are rejected. |
 | `requireHolderBinding` | bool | `false` | → `CredentialAcceptancePolicy.RequireHolderBinding`; credentials without `cnf` are rejected. |
+| `followRedirect` | bool | `true` | When true (or absent), `present` opens a returned `redirect_uri` like a same-device browser: HTTP GET with the TLS-configured client, `Accept: text/html,*/*`, `User-Agent: official_driver`, a 15 s timeout, and at most 5 followed redirects. Set `false` to return the URI without opening it. |
 
 `wallet.Config.CredentialAcceptance` is built only when at least one of
 `issuerCAFiles`, `issuerJWKSFiles` or `requireHolderBinding` is set. When all are
@@ -96,15 +97,18 @@ JSON
 ```
 
 `receive-preauth` returns the saved `credentialId` plus the library's
-`verification` record for that credential. `present` returns only the
-`redirectUri`. `list` returns `credentialIds` and `total`. Existing fields keep
-their names.
+`verification` record for that credential. `present` returns `redirectUri` plus
+`redirectFollowed` (whether the driver opened it) and `redirectStatus` (the final
+HTTP status, `0` when not opened). `list` returns `credentialIds` and `total`.
+Existing fields keep their names.
 
 Each invocation is a new process, so listing and presenting use the persisted
 credential. Use the issuer/verifier's complete launch URI unchanged. The driver
 does not repair queries, issue its own credentials, retry protocol failures, or
-construct presentation responses. A returned redirect URI is handed to the
-orchestrating browser; this command does not create a substitute browser session.
+construct presentation responses. When `followRedirect` is enabled and the
+verifier returns a `redirect_uri`, the driver opens it as the same-device browser
+would (HAIP §5.1, OpenID4VP §8.2); the fragment is never transmitted. A non-2xx/3xx
+final status is reported as an error naming the status.
 
 ## 日本語
 
@@ -116,5 +120,7 @@ orchestrating browser; this command does not create a substitute browser session
 発行者鍵の指定をすべて省略するとlibrary最小限の受理規則だけが適用されます。
 `public-keys`で登録用公開鍵を取得し、`receive-preauth`で受領後、別プロセスの`list`で保存を確認できます。
 `present`は保存済みcredentialを使う公開APIの動作をそのまま返します。
+`followRedirect`が有効（既定は有効）で`redirect_uri`が返ると、same-deviceブラウザと同様に
+TLS設定済みclientでGETし最大5回のリダイレクトを追跡します（fragmentは送信しません）。
 URIの補正、独自の再試行、認証の補完、提示専用seedは行いません。
 software JWKの試験設定を実attestationやハードウェア保護の実証とは扱いません。

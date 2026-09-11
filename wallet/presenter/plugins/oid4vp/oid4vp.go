@@ -3,6 +3,7 @@ package oid4vp
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -35,6 +36,13 @@ type Oid4vpPresenter struct {
 	// profile.Final, which applies no HAIP constraints. Set it to profile.HAIP to
 	// enforce HAIP 1.0 on the Final path; the Draft24 entrypoints ignore it.
 	Profile profile.Profile
+	// WalletMetadata, when non-nil, is serialized as the wallet_metadata form
+	// parameter of a Final request_uri POST (OID4VP 1.0 §5.10). When nil the
+	// parameter is omitted.
+	WalletMetadata map[string]any
+	// RequestURINonce generates the wallet_nonce sent with a Final request_uri
+	// POST. A nil value uses 32 random bytes, base64url-encoded without padding.
+	RequestURINonce func() (string, error)
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -115,6 +123,8 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	builder.x509TrustChainRoots = p.X509TrustChainRoots
 	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
 	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
+	builder.walletMetadata = p.WalletMetadata
+	builder.requestURINonce = p.RequestURINonce
 	if p.RequestObjectValidation != nil {
 		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
 	}
@@ -678,7 +688,13 @@ type requestBuilder struct {
 	insecureSkipX509Verify  bool
 	requestObjectValidation *RequestObjectValidationOptions
 	expectedClientID        string
-	errValidation           error
+	walletMetadata          map[string]any
+	requestURINonce         func() (string, error)
+	// sentWalletNonce records the wallet_nonce sent with a Final request_uri
+	// POST so the returned Request Object can be required to echo it
+	// (OID4VP 1.0 §5.10.1). It is empty for GET and when no nonce was sent.
+	sentWalletNonce string
+	errValidation   error
 	// requestSource records how the Authorization Request parameters arrived:
 	// "query" for plain query parameters, "value" for a Request Object supplied
 	// with the request= parameter, and "reference" for a Request Object fetched
@@ -1043,11 +1059,30 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	case RequestURIMethodGET:
 		req, err = http.NewRequest(http.MethodGet, parsedURI.String(), nil)
 	case RequestURIMethodPOST:
-		var body io.Reader
+		formData := url.Values{}
 		if b.draft24 {
-			body = strings.NewReader(url.Values{"wallet_metadata": []string{"{}"}}.Encode())
+			formData.Set("wallet_metadata", "{}")
+		} else {
+			// OID4VP 1.0 §5.10: the Final POST always carries a fresh
+			// wallet_nonce and includes wallet_metadata only when the Wallet has
+			// metadata to convey.
+			nonce, nonceErr := b.newRequestURINonce()
+			if nonceErr != nil {
+				b.errValidation = fmt.Errorf("failed to generate wallet_nonce: %w", nonceErr)
+				return b
+			}
+			b.sentWalletNonce = nonce
+			formData.Set("wallet_nonce", nonce)
+			if b.walletMetadata != nil {
+				metadataJSON, marshalErr := json.Marshal(b.walletMetadata)
+				if marshalErr != nil {
+					b.errValidation = fmt.Errorf("failed to marshal wallet_metadata: %w", marshalErr)
+					return b
+				}
+				formData.Set("wallet_metadata", string(metadataJSON))
+			}
 		}
-		req, err = http.NewRequest(http.MethodPost, parsedURI.String(), body)
+		req, err = http.NewRequest(http.MethodPost, parsedURI.String(), strings.NewReader(formData.Encode()))
 	default:
 		b.errValidation = fmt.Errorf("unsupported request_uri_method: %s", method)
 		return b
@@ -1097,6 +1132,25 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	// a Request Object supplied by value in the request= parameter.
 	b.requestSource = "reference"
 	return b
+}
+
+// newRequestURINonce returns the wallet_nonce for a Final request_uri POST. It
+// delegates to the presenter-supplied generator when present and otherwise
+// generates 32 cryptographically random bytes, base64url-encoded without
+// padding (OID4VP 1.0 §5.10).
+func (b *requestBuilder) newRequestURINonce() (string, error) {
+	if b.requestURINonce != nil {
+		return b.requestURINonce()
+	}
+	return defaultRequestURINonce()
+}
+
+func defaultRequestURINonce() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
 func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {

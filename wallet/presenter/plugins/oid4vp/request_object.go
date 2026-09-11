@@ -52,6 +52,10 @@ type RequestObjectVerification struct {
 	CertificateSHA256      []string
 	RevocationChecked      int
 	RevocationUnadvertised int
+	// WalletNonce is the wallet_nonce sent with a Final request_uri POST and
+	// echoed by the authenticated Request Object. It is empty for GET and when
+	// no nonce was sent (OID4VP 1.0 §5.10.1).
+	WalletNonce string
 }
 
 // WithRequestObjectValidation configures the public builder before loading a
@@ -182,6 +186,17 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err := parsed.Claims(certificates[0].PublicKey, &verified); err != nil {
 		return fmt.Errorf("failed to verify request object with x5c certificate: %w", err)
 	}
+	// OID4VP 1.0 §5.10.1: "if the Wallet passed a wallet_nonce in the POST
+	// request, the Wallet MUST validate whether the request object contains the
+	// respective nonce value in a wallet_nonce claim. If it does not, the Wallet
+	// MUST terminate request processing." GET never sends a nonce, so a present
+	// wallet_nonce claim is ignored in that case.
+	if b.sentWalletNonce != "" {
+		claimedNonce, ok := verified["wallet_nonce"].(string)
+		if !ok || claimedNonce != b.sentWalletNonce {
+			return newAuthorizationRequestError(InvalidRequestError, "Request Object wallet_nonce does not match")
+		}
+	}
 	now := time.Now()
 	if options.Now != nil {
 		now = options.Now()
@@ -215,6 +230,7 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 		ClientID: b.req.ClientID, CertificateSHA256: result.Fingerprints,
 		RevocationChecked:      result.Revocation.CheckedCertificates,
 		RevocationUnadvertised: result.Revocation.NoMechanismCertificates,
+		WalletNonce:            b.sentWalletNonce,
 	}
 	return nil
 }

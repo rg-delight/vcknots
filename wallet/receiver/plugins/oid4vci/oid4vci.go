@@ -88,6 +88,8 @@ type OAuthClientAttestationHeadersFactory = types.OAuthClientAttestationHeadersF
 
 type CredentialEndpointHTTPResponse = types.CredentialEndpointHTTPResponse
 
+type CredentialRequestBodyFactory = types.CredentialRequestBodyFactory
+
 func (o *Oid4vciReceiver) httpClient() *http.Client {
 	if o.HTTPClient != nil {
 		return o.HTTPClient
@@ -629,6 +631,51 @@ func (o *Oid4vciReceiver) PostCredentialEndpointWithDpopRetry(endpoint common.UR
 	}, nil
 }
 
+// PostCredentialEndpointWithNonceRetry posts the credential request body built
+// for the current c_nonce. OpenID4VCI 1.0 §8.3.1 requires the wallet to include
+// the latest c_nonce in the proof, and §8.3.1.2 defines the "invalid_nonce"
+// error an issuer returns when the proof carries a stale one; the wallet SHOULD
+// obtain a fresh c_nonce from the nonce endpoint and retry. Exactly one such
+// retry is performed so a misbehaving issuer cannot keep the wallet in a loop.
+// DPoP challenges are still handled by PostCredentialEndpointWithDpopRetry
+// underneath. It returns the response and the c_nonce actually used; when
+// nonceEndpoint is nil the invalid_nonce error is returned without a retry.
+func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetry(endpoint common.URIField, accessToken string, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
+	if build == nil {
+		return nil, initialCNonce, fmt.Errorf("credential request body factory is required")
+	}
+
+	body, contentType, err := build(initialCNonce)
+	if err != nil {
+		return nil, initialCNonce, err
+	}
+
+	response, err := o.PostCredentialEndpointWithDpopRetry(endpoint, accessToken, body, contentType, proofFactory)
+	if err == nil {
+		return response, initialCNonce, nil
+	}
+	if !errors.Is(err, types.ErrInvalidNonce) || nonceEndpoint == nil {
+		return nil, initialCNonce, err
+	}
+
+	nonceResponse, err := o.FetchNonceResponse(*nonceEndpoint)
+	if err != nil {
+		return nil, initialCNonce, fmt.Errorf("failed to refresh c_nonce after invalid_nonce: %w", err)
+	}
+	freshCNonce := nonceResponse.CNonce
+
+	body, contentType, err = build(freshCNonce)
+	if err != nil {
+		return nil, freshCNonce, err
+	}
+
+	response, err = o.PostCredentialEndpointWithDpopRetry(endpoint, accessToken, body, contentType, proofFactory)
+	if err != nil {
+		return nil, freshCNonce, err
+	}
+	return response, freshCNonce, nil
+}
+
 func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
 	var response types.CredentialResponse
 	if err := o.doBearerJSONRequest(endpoint, accessToken, deferredRequest, dpopProof, &response); err != nil {
@@ -710,6 +757,63 @@ func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *t
 	return []byte(serialized), "application/jwt", nil
 }
 
+// CredentialResponseEncryptionParameters builds the OpenID4VCI 1.0 §8.2
+// "credential_response_encryption" request parameter from the §12.2.4 issuer
+// metadata and the wallet's public encryption key. Final §8.2 defines exactly
+// jwk, enc and zip (there is no top-level alg, unlike earlier drafts). enc is
+// the first advertised value this library can decrypt; zip is included only when
+// zip_values_supported lists DEF, matching the §10 encrypted-messages rules. A
+// missing key is an error when the issuer marks
+// credential_response_encryption.encryption_required true.
+func CredentialResponseEncryptionParameters(metadata *types.CredentialIssuerMetadata, key *jose.JSONWebKey) (map[string]any, error) {
+	if metadata == nil || metadata.CredentialResponseEncryption == nil {
+		return nil, nil
+	}
+	encryption := metadata.CredentialResponseEncryption
+	required := encryption.EncryptionRequired != nil && *encryption.EncryptionRequired
+	if key == nil {
+		if required {
+			return nil, fmt.Errorf("credential response encryption is required but no encryption key was provided")
+		}
+		return nil, nil
+	}
+
+	enc, err := selectSupportedResponseEncryption(encryption.EncValuesSupported)
+	if err != nil {
+		return nil, err
+	}
+
+	parameters := map[string]any{
+		"jwk": key.Public(),
+		"enc": enc,
+	}
+	if containsZipDeflate(encryption.ZipValuesSupported) {
+		parameters["zip"] = "DEF"
+	}
+	return parameters, nil
+}
+
+func selectSupportedResponseEncryption(encValues []string) (string, error) {
+	for _, enc := range encValues {
+		if enc == "" {
+			continue
+		}
+		if _, err := parseJWEContentEncryption(enc); err == nil {
+			return enc, nil
+		}
+	}
+	return "", fmt.Errorf("credential response encryption: issuer advertises no supported enc value in %v", encValues)
+}
+
+func containsZipDeflate(zipValues []string) bool {
+	for _, value := range zipValues {
+		if strings.EqualFold(strings.TrimSpace(value), "DEF") {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*types.CredentialResponse, error) {
 	payload := body
 	if strings.Contains(strings.ToLower(contentType), "application/jwt") {
@@ -720,6 +824,11 @@ func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType stri
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse credential response JWE: %w", err)
 		}
+		// OpenID4VCI 1.0 §8.2 / §10 (Encrypted Credential Requests and Responses)
+		// permits the issuer to signal DEFLATE with the JWE protected "zip":"DEF"
+		// header. go-jose v4 (>= 4.1.4) inflates the plaintext inside Decrypt when
+		// that header is present, so no manual flate step is required here;
+		// TestOid4vciReceiver_DecodeCredentialResponseZip pins that behavior.
 		payload, err = jwe.Decrypt(decryptionKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt credential response JWE: %w", err)
@@ -872,6 +981,10 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField,
 	}
 
 	var dpopNonce string
+	var lastStatus int
+	var lastContentType string
+	var lastBody []byte
+	var lastNonce string
 	for attempt := 0; attempt < 2; attempt++ {
 		dpopProof, err := proofFactory(dpopNonce)
 		if err != nil {
@@ -906,12 +1019,44 @@ func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(endpoint common.URIField,
 		nonce := resp.Header.Get("DPoP-Nonce")
 		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) && nonce != "" {
 			dpopNonce = nonce
+			lastStatus, lastContentType, lastBody, lastNonce = resp.StatusCode, resp.Header.Get("Content-Type"), respBody, nonce
 			continue
 		}
-		return nil, "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBody))
+		return nil, "", newCredentialEndpointError(resp.StatusCode, resp.Header.Get("Content-Type"), respBody, nonce)
 	}
 
+	if lastStatus != 0 {
+		return nil, "", newCredentialEndpointError(lastStatus, lastContentType, lastBody, lastNonce)
+	}
 	return nil, "", fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+}
+
+// newCredentialEndpointError converts a non-2xx credential, deferred credential
+// or notification response into the OpenID4VCI 1.0 §8.3.1.2 typed error (see
+// also §9.2 and §11.3 for the deferred and notification error responses). The
+// HTTP status is always retained. For 4xx responses served as JSON, the
+// "error", "error_description" and "interval" members are parsed so callers can
+// use errors.Is; any other content type (or unparseable body) leaves Code empty.
+func newCredentialEndpointError(statusCode int, contentType string, body []byte, dpopNonce string) *types.CredentialEndpointError {
+	credentialErr := &types.CredentialEndpointError{
+		StatusCode: statusCode,
+		DPoPNonce:  strings.TrimSpace(dpopNonce),
+	}
+	if statusCode < 400 || statusCode >= 500 || !strings.Contains(strings.ToLower(contentType), "json") {
+		return credentialErr
+	}
+	var payload struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+		Interval    int    `json:"interval"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return credentialErr
+	}
+	credentialErr.Code = payload.Error
+	credentialErr.Description = payload.Description
+	credentialErr.Interval = payload.Interval
+	return credentialErr
 }
 
 func (o *Oid4vciReceiver) doFormRequestWithDpopAndAttestationRetry(endpoint common.URIField, body io.Reader, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {

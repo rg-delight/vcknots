@@ -211,8 +211,19 @@ func TestFinalRequestObjectByReference(t *testing.T) {
 				if strings.ToLower(r.Method) != method {
 					t.Errorf("wrong request URI method: %s", r.Method)
 				}
+				body := token
+				if method == "post" {
+					// OID4VP 1.0 §5.10.1: the Request Object must echo the
+					// wallet_nonce the Wallet sent in the POST body.
+					if err := r.ParseForm(); err != nil {
+						t.Errorf("failed to parse POST form: %v", err)
+					}
+					claims := f.claims()
+					claims["wallet_nonce"] = r.Form.Get("wallet_nonce")
+					body = f.sign(t, claims, nil)
+				}
 				w.Header().Set("Content-Type", "application/oauth-authz-req+jwt")
-				_, _ = w.Write([]byte(token))
+				_, _ = w.Write([]byte(body))
 			}))
 			defer server.Close()
 			uri := "openid4vp://authorize?" + url.Values{

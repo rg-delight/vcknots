@@ -99,6 +99,75 @@ func DPoPNonceFromError(err error) (string, bool) {
 	return "", false
 }
 
+// CredentialEndpointError is an OpenID4VCI 1.0 §8.3.1.2 error response. The
+// credential, deferred credential and notification endpoints return a JSON body
+// with "error" and optional "error_description"/"interval" members on failure
+// (§9.2 deferred credential error response, §11.3 notification error response);
+// the DPoP-Nonce response header is also retained because a caller may still
+// need it to build a corrected request. §9.2 defines "interval" as the number of
+// seconds the wallet must wait before polling the deferred credential endpoint
+// again when error is "issuance_pending".
+type CredentialEndpointError struct {
+	StatusCode  int
+	Code        string // error
+	Description string // error_description
+	DPoPNonce   string // DPoP-Nonce header, if any
+	Interval    int    // §9.2: seconds to wait when Code == "issuance_pending"
+}
+
+// Sentinel errors for the OpenID4VCI 1.0 §8.3.1.2 credential endpoint error
+// codes. The sentinel's message is exactly the wire value so that Error's Is
+// method can match it.
+var (
+	ErrInvalidNonce                = errors.New("invalid_nonce")
+	ErrInvalidProof                = errors.New("invalid_proof")
+	ErrIssuancePending             = errors.New("issuance_pending")
+	ErrInvalidTransactionID        = errors.New("invalid_transaction_id")
+	ErrUnknownCredentialIdentifier = errors.New("unknown_credential_identifier")
+	ErrCredentialRequestDenied     = errors.New("credential_request_denied")
+)
+
+func (e *CredentialEndpointError) Error() string {
+	if e == nil {
+		return "credential endpoint error"
+	}
+	message := fmt.Sprintf("unexpected status code: %d", e.StatusCode)
+	if e.Code != "" {
+		message += fmt.Sprintf(", error: %s", e.Code)
+	}
+	if e.Description != "" {
+		message += fmt.Sprintf(", error_description: %s", e.Description)
+	}
+	if e.Interval > 0 {
+		message += fmt.Sprintf(", interval: %d", e.Interval)
+	}
+	return message
+}
+
+// Is lets callers use errors.Is(err, ErrInvalidNonce) to branch on the §8.3.1.2
+// "error" code without inspecting the response body themselves.
+func (e *CredentialEndpointError) Is(target error) bool {
+	if e == nil {
+		return false
+	}
+	switch target {
+	case ErrInvalidNonce:
+		return e.Code == "invalid_nonce"
+	case ErrInvalidProof:
+		return e.Code == "invalid_proof"
+	case ErrIssuancePending:
+		return e.Code == "issuance_pending"
+	case ErrInvalidTransactionID:
+		return e.Code == "invalid_transaction_id"
+	case ErrUnknownCredentialIdentifier:
+		return e.Code == "unknown_credential_identifier"
+	case ErrCredentialRequestDenied:
+		return e.Code == "credential_request_denied"
+	default:
+		return false
+	}
+}
+
 type SupportedReceivingTypes int
 type SignatureAlgorithm jose.SignatureAlgorithm
 
@@ -115,9 +184,20 @@ type CredentialIssuerMetadata struct {
 	NotificationEndpoint             *common.URIField                   `json:"notification_endpoint,omitempty"`
 	CredentialRequestEncryption      *CredentialRequestEncryption       `json:"credential_request_encryption,omitempty"`
 	CredentialResponseEncryption     *CredentialResponseEncryption      `json:"credential_response_encryption,omitempty"`
+	BatchCredentialIssuance          *BatchCredentialIssuance           `json:"batch_credential_issuance,omitempty"`
 	AuthorizationServers             []common.URIField                  `json:"authorization_servers,omitempty"`
 	Display                          []CredentialIssuerMetadataDisplay  `json:"display,omitempty"`
 	CredentialConfigurationSupported map[string]CredentialConfiguration `json:"credential_configurations_supported,omitempty"`
+}
+
+// BatchSize reports the issuer's §14.6 batch_size, defaulting to one when the
+// metadata member is absent or advertises a non-positive value. A wallet must
+// never request more credentials than the issuer declared.
+func (m *CredentialIssuerMetadata) BatchSize() int {
+	if m == nil || m.BatchCredentialIssuance == nil || m.BatchCredentialIssuance.BatchSize < 1 {
+		return 1
+	}
+	return m.BatchCredentialIssuance.BatchSize
 }
 
 type CredentialRequestEncryption struct {
@@ -127,10 +207,22 @@ type CredentialRequestEncryption struct {
 	EncryptionRequired *bool              `json:"encryption_required,omitempty"`
 }
 
+// CredentialResponseEncryption mirrors the §12.2.4
+// credential_response_encryption metadata member. zip_values_supported lists
+// the compression algorithms the issuer accepts for encrypted responses (see
+// §10 Encrypted Credential Requests and Responses).
 type CredentialResponseEncryption struct {
 	AlgValuesSupported []string `json:"alg_values_supported,omitempty"`
 	EncValuesSupported []string `json:"enc_values_supported,omitempty"`
+	ZipValuesSupported []string `json:"zip_values_supported,omitempty"`
 	EncryptionRequired *bool    `json:"encryption_required,omitempty"`
+}
+
+// BatchCredentialIssuance carries the OpenID4VCI 1.0 §14.6
+// batch_credential_issuance metadata member. batch_size is the maximum number of
+// Credential Responses the wallet can request in one credential request.
+type BatchCredentialIssuance struct {
+	BatchSize int `json:"batch_size"`
 }
 
 type CredentialConfiguration struct {
@@ -446,6 +538,9 @@ type CredentialResponse struct {
 	TransactionID  string  `json:"transaction_id,omitempty"`
 	NotificationID string  `json:"notification_id,omitempty"`
 	CNonce         *string `json:"c_nonce,omitempty"`
+	// Interval is the §9.1/§9.2 polling interval in seconds the issuer returns
+	// alongside a deferred transaction_id. Zero when absent.
+	Interval int `json:"interval,omitempty"`
 }
 
 type DeferredCredentialRequest struct {
@@ -486,6 +581,13 @@ type Receiver interface {
 
 type DPoPProofFactory func(nonce string) (string, error)
 
+// CredentialRequestBodyFactory builds the credential request body (already
+// encoded, including any JWE wrapping) for a given c_nonce. OpenID4VCI 1.0
+// §8.3.1 / §8.3.1.2 requires the wallet to embed the current c_nonce in the
+// proof when the issuer supplied one; on "invalid_nonce" the wallet SHOULD
+// rebuild the proof with a fresh c_nonce from the nonce endpoint.
+type CredentialRequestBodyFactory func(cNonce string) (body []byte, contentType string, err error)
+
 type OAuthClientAttestationHeadersFactory func() (OAuthClientAttestationHeaders, error)
 
 type CredentialEndpointHTTPResponse struct {
@@ -505,6 +607,7 @@ type OID4VCIFinalReceiver interface {
 	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
 	FetchNonceResponse(endpoint common.URIField) (*NonceResponse, error)
 	PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
+	PostCredentialEndpointWithNonceRetry(endpoint common.URIField, accessToken string, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
 	SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification NotificationRequest, proofFactory DPoPProofFactory) error
 	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
 	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)

@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/go-jose/go-jose/v4"
@@ -148,4 +149,39 @@ type CredentialPresentationRequestBuilder interface {
 	WithRequestObject(obj string) *CredentialPresentationRequestBuilder
 	WithRequestObjectURI(uri string, method RequestURIMethod) *CredentialPresentationRequestBuilder
 	Build() (*CredentialPresentationRequest, error)
+}
+
+// UnmarshalJSON decodes verifier metadata while tolerating JWKS entries this
+// library cannot represent (unknown kty, post-quantum key types, malformed
+// members). RFC 7517 §5 and OpenID4VP 1.0 §8.3 require the Wallet to ignore
+// unusable keys instead of rejecting the whole request; only the parseable
+// keys are kept, in their original order.
+func (v *VerifierMetadata) UnmarshalJSON(data []byte) error {
+	type verifierMetadataAlias VerifierMetadata
+	var decoded struct {
+		verifierMetadataAlias
+		Jwks json.RawMessage `json:"jwks,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*v = VerifierMetadata(decoded.verifierMetadataAlias)
+	v.Jwks = jose.JSONWebKeySet{}
+	if len(decoded.Jwks) == 0 || string(decoded.Jwks) == "null" {
+		return nil
+	}
+	var set struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(decoded.Jwks, &set); err != nil {
+		return fmt.Errorf("client_metadata.jwks must be a JWK Set: %w", err)
+	}
+	for _, raw := range set.Keys {
+		var key jose.JSONWebKey
+		if err := key.UnmarshalJSON(raw); err != nil {
+			continue
+		}
+		v.Jwks.Keys = append(v.Jwks.Keys, key)
+	}
+	return nil
 }

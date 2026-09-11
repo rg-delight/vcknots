@@ -31,6 +31,10 @@ type requestObjectFixture struct {
 	crl           []byte
 	crlRequests   int
 	requestObject []byte
+	// requestObjectHandler, when set, serves /request-object instead of the
+	// static requestObject. It lets a test sign a Request Object from the
+	// received request_uri POST form (for example to echo wallet_nonce).
+	requestObjectHandler http.HandlerFunc
 }
 
 func newRequestObjectFixture(t *testing.T, dnsNames ...string) *requestObjectFixture {
@@ -64,6 +68,7 @@ func newRequestObjectFixture(t *testing.T, dnsNames ...string) *requestObjectFix
 		f.mu.RLock()
 		crl := f.crl
 		requestObject := f.requestObject
+		requestObjectHandler := f.requestObjectHandler
 		f.mu.RUnlock()
 		switch r.URL.Path {
 		case "/root.crl":
@@ -73,6 +78,10 @@ func newRequestObjectFixture(t *testing.T, dnsNames ...string) *requestObjectFix
 			w.Header().Set("Content-Type", "application/pkix-crl")
 			_, _ = w.Write(crl)
 		case "/request-object":
+			if requestObjectHandler != nil {
+				requestObjectHandler(w, r)
+				return
+			}
 			w.Header().Set("Content-Type", "application/oauth-authz-req+jwt")
 			_, _ = w.Write(requestObject)
 		default:
@@ -109,6 +118,12 @@ func (f *requestObjectFixture) setCRL(t *testing.T, revoked bool) {
 	}
 	f.mu.Lock()
 	f.crl = der
+	f.mu.Unlock()
+}
+
+func (f *requestObjectFixture) setRequestObjectHandler(handler http.HandlerFunc) {
+	f.mu.Lock()
+	f.requestObjectHandler = handler
 	f.mu.Unlock()
 }
 
