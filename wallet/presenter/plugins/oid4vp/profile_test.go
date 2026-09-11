@@ -433,6 +433,67 @@ func TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 	}
 }
 
+// dcapiUnsignedInvocation builds an unsigned Digital Credentials API invocation
+// with the given Response Mode (OID4VP 1.0 Appendix A.3.1).
+func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"response_type": "vp_token", "response_mode": responseMode, "nonce": "n-1",
+		"dcql_query": map[string]any{"credentials": []any{map[string]any{
+			"id": "pid", "format": "dc+sd-jwt",
+			"meta": map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return DCAPIInvocation{
+		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
+		Origin:  "https://verifier.example",
+	}
+}
+
+// HAIP §5.2: "The Wallet MUST support the Response Mode dc_api.jwt. The Verifier
+// MUST use the Response Mode dc_api.jwt." An unencrypted dc_api response is not
+// acceptable under HAIP.
+func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	_, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	if err == nil {
+		t.Fatal("HAIP must reject the unencrypted dc_api response mode")
+	}
+	if !strings.Contains(err.Error(), "HAIP requires the response_mode dc_api.jwt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api.jwt"))
+	if err != nil {
+		t.Fatalf("HAIP must accept dc_api.jwt: %v", err)
+	}
+	if request.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
+		t.Fatalf("response_mode = %q", request.ResponseMode)
+	}
+}
+
+// OID4VP 1.0 Appendix A.2 keeps the unencrypted dc_api Response Mode available
+// outside HAIP.
+func TestFinalDCAPIStillAcceptsDCAPI(t *testing.T) {
+	p := &Oid4vpPresenter{Profile: profile.Final}
+	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	if err != nil {
+		t.Fatalf("Final must accept dc_api: %v", err)
+	}
+	if request.ResponseMode != OAuthAuthzReqResponseModeDCAPI {
+		t.Fatalf("response_mode = %q", request.ResponseMode)
+	}
+}
+
+// finalQueryBuilderParams is a plain-query Final Authorization Request: legal
+// under Final, and refused by HAIP §5.1, which requires a signed Request Object
+// delivered by request_uri.
 func finalQueryBuilderParams(responseType string) map[string][]string {
 	return map[string][]string{
 		"client_id":     {"redirect_uri:https://verifier.example/cb"},
