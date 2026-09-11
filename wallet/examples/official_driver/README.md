@@ -71,8 +71,9 @@ be set together, and `receive-code` without `redirectUri` is rejected.
 locally held attester key. They exist for tests and single-operator deployments
 only: a static attester is test-only evidence and must not be treated as a
 production attestation, because the wallet holds the attester's private key
-instead of obtaining attestations from a remote attester. ADR-0074 in the NICE
-repository explains the production split between the wallet and the attester.
+instead of obtaining attestations from a remote attester. A production
+deployment splits the wallet and the attester so the wallet never holds the
+attester's private key.
 
 Example configuration:
 
@@ -179,27 +180,6 @@ construct presentation responses. When `followRedirect` is enabled and the
 verifier returns a `redirect_uri`, the driver opens it as the same-device browser
 would (HAIP §5.1, OpenID4VP §8.2); the fragment is never transmitted. A non-2xx/3xx
 final status is reported as an error naming the status.
-
-## 日本語
-
-この独立moduleは公開Wallet APIへ操作を委譲します。
-設定に鍵・信頼する証明書・保存先を明示し、上記のJSONを標準入力から渡してください。
-`profile`でFinal/HAIPの方針を選び、`verifierCAFiles`と`issuerCAFiles`で検証者・発行者の信頼基点、
-`issuerJWKSFiles`でx5cの無いcredential向け公開鍵を指定します。
-`verifierCAFiles`を省略するとX.509 Request Objectは検証されず拒否され（fail-closed）、
-発行者鍵の指定をすべて省略するとlibrary最小限の受理規則だけが適用されます。
-`public-keys`で登録用公開鍵を取得し、`receive-preauth`で受領後、別プロセスの`list`で保存を確認できます。
-`receive-code`は`redirectUri`を使うauthorization codeフローを実行し、`credentialIds`・`verification`・`notificationId`・`transactionId`を返します（pending時は`pending`）。
-`receive-code-wallet-initiated`はCredential Offer無しで同じフローを実行し、`credentialIssuer`と`credentialConfigurationId`を入力に取ります（issuer_stateは送信しません）。
-`attesterKeyFile`と`keyAttesterKeyFile`で設定する静的attesterはテスト専用のevidenceであり、本番ではwalletがattester秘密鍵を持たない分割（NICEリポジトリのADR-0074）に従います。
-`present`は保存済みcredentialを使う公開APIの動作をそのまま返します。
-`present-dcapi`はW3C Digital Credentials APIのinvocationを入力に取り（`dcapiRequest`と、platformが認証した`origin`）、
-runnerがverifierへ提出する`DCAPIResponse`（`dc_api`は`vp_token`、`dc_api.jwt`は`response`のJWE）をHTTP呼出しなしで返します。
-unsigned/signed/multisignedの3種を受け付け、KB-JWTの`aud`は`origin:<origin>`です（OID4VP 1.0 Appendix A.4）。
-`followRedirect`が有効（既定は有効）で`redirect_uri`が返ると、same-deviceブラウザと同様に
-TLS設定済みclientでGETし最大5回のリダイレクトを追跡します（fragmentは送信しません）。
-URIの補正、独自の再試行、認証の補完、提示専用seedは行いません。
-software JWKの試験設定を実attestationやハードウェア保護の実証とは扱いません。
 
 ### additionalHolderKeys
 

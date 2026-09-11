@@ -383,7 +383,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		return nil, err
 	}
 
-	// Static attesters are test-only evidence (see README and ADR-0074): the
+	// Static attesters are test-only evidence: the
 	// wallet must not hold an attester private key in production.
 	var clientAttestation wallet.ClientAttestationProvider
 	if config.AttesterKeyFile != "" {

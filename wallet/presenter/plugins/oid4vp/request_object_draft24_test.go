@@ -39,7 +39,7 @@ func draft24RequestURI(t *testing.T, f *requestObjectFixture, claims map[string]
 }
 
 // TestDraft24X509SanDNSRequestObjectWithPresentationDefinition is the
-// regression the NICE sidecar routing defect exposed: a Draft24 request that
+// regression for an integrator that routed every signed Request Object to the Final parser: a Draft24 request that
 // combines client_id_scheme=x509_san_dns with presentation_definition and a
 // signed Request Object must parse on the Draft24 entrypoint, authenticated
 // against the caller's RequestObjectValidationOptions trust anchors rather
