@@ -4411,3 +4411,15 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 		})
 	}
 }
+
+func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return jose.JSONWebKey{
+		Key:       privateKey,
+		KeyID:     keyID,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
+}
