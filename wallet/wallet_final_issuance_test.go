@@ -17,6 +17,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -78,18 +79,19 @@ type finalIssuanceFixture struct {
 	credentialHandler        http.HandlerFunc
 	deferredHandler          http.HandlerFunc
 
-	parCalls           int
-	authorizeCalls     int
-	tokenCalls         int
-	nonceCalls         int
-	credentialCalls    int
-	deferredCalls      int
-	notificationEvents []string
-	pushedState        string
-	lastCredentialBody map[string]any
-	parForm            url.Values
-	parHeaders         http.Header
-	tokenForms         []url.Values
+	issuerMetadataCalls int
+	parCalls            int
+	authorizeCalls      int
+	tokenCalls          int
+	nonceCalls          int
+	credentialCalls     int
+	deferredCalls       int
+	notificationEvents  []string
+	pushedState         string
+	lastCredentialBody  map[string]any
+	parForm             url.Values
+	parHeaders          http.Header
+	tokenForms          []url.Values
 }
 
 func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) *finalIssuanceFixture {
@@ -168,6 +170,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 	base := f.server.URL
 	switch r.URL.Path {
 	case "/.well-known/openid-credential-issuer":
+		f.issuerMetadataCalls++
 		credentialConfiguration := map[string]any{"format": "dc+sd-jwt"}
 		if !f.omitScope {
 			credentialConfiguration["scope"] = "pid-scope"
@@ -309,6 +312,22 @@ func (f *finalIssuanceFixture) request() OID4VCIFinalReceiveRequest {
 		RedirectURI: "openid-credential-offer://callback",
 		HolderKey:   f.holderKey,
 		ClientKey:   f.clientKey,
+	}
+}
+
+// walletInitiatedRequest starts the flow from issuer metadata alone, with no
+// Credential Offer (OpenID4VCI 1.0 §5).
+func (f *finalIssuanceFixture) walletInitiatedRequest() OID4VCIFinalReceiveRequest {
+	issuerURL, err := url.Parse(f.server.URL)
+	require.NoError(f.t, err)
+	return OID4VCIFinalReceiveRequest{
+		CredentialIssuer:          issuerURL,
+		CredentialConfigurationID: "pid",
+		Type:                      receiverTypes.Oid4vci,
+		ClientID:                  "client-1",
+		RedirectURI:               "openid-credential-offer://callback",
+		HolderKey:                 f.holderKey,
+		ClientKey:                 f.clientKey,
 	}
 }
 
@@ -1037,4 +1056,74 @@ func TestReceiveOID4VCIFinalCredential_AttestationSupersedesPrivateKeyJwt(t *tes
 	require.NoError(t, err)
 	require.Empty(t, fixture.parForm.Get("client_assertion"))
 	require.NotEmpty(t, fixture.parHeaders.Get("OAuth-Client-Attestation"))
+}
+
+// OpenID4VCI 1.0 §5: "The Wallet can also start the issuance without a
+// Credential Offer." The wallet names the Credential Configuration itself, so
+// PAR carries no issuer_state and requests that configuration's scope.
+func TestReceiveOID4VCIFinalCredential_WalletInitiatedUsesRequestedConfiguration(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.walletInitiatedRequest())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	require.Empty(t, fixture.parForm.Get("issuer_state"))
+	require.Equal(t, "pid-scope", fixture.parForm.Get("scope"))
+	require.Empty(t, fixture.parForm.Get("authorization_details"))
+}
+
+// With authorization_details the wallet sends the Credential Configuration id
+// it selected from the issuer metadata (OpenID4VCI 1.0 §5.1.1).
+func TestReceiveOID4VCIFinalCredential_WalletInitiatedSendsConfigurationID(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.walletInitiatedRequest()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+	require.Empty(t, fixture.parForm.Get("issuer_state"))
+	details := decodeAuthorizationDetails(t, fixture.parForm.Get("authorization_details"))
+	require.Len(t, details, 1)
+	require.Equal(t, "pid", details[0]["credential_configuration_id"])
+}
+
+func TestReceiveOID4VCIFinalCredential_WalletInitiatedRequiresIssuerAndConfiguration(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+
+	req := fixture.walletInitiatedRequest()
+	req.CredentialIssuer = nil
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorContains(t, err, "credential issuer is required")
+	require.Equal(t, 0, fixture.issuerMetadataCalls)
+
+	req = fixture.walletInitiatedRequest()
+	req.CredentialConfigurationID = ""
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorContains(t, err, "credential configuration ID is required")
+	require.Equal(t, 0, fixture.issuerMetadataCalls)
+}
+
+func TestReceiveOID4VCIFinalCredential_OfferAndWalletInitiatedFieldsAreExclusive(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	issuerURL, err := url.Parse(fixture.server.URL)
+	require.NoError(t, err)
+
+	req := fixture.request()
+	req.CredentialIssuer = issuerURL
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorContains(t, err, "must be empty when a credential offer is provided")
+
+	req = fixture.request()
+	req.CredentialConfigurationID = "pid"
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorContains(t, err, "must be empty when a credential offer is provided")
+	require.Equal(t, 0, fixture.issuerMetadataCalls)
+}
+
+// HAIP §4.4.1 applies unchanged to wallet-initiated issuance: client
+// authentication is required before any issuer request.
+func TestReceiveOID4VCIFinalCredential_WalletInitiatedHAIPRequiresClientAuthentication(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	fixture.wallet.profile = profile.HAIP
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.walletInitiatedRequest())
+	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.Equal(t, 0, fixture.issuerMetadataCalls)
 }

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -103,6 +104,11 @@ type operation struct {
 	Name   string `json:"operation"`
 	URI    string `json:"uri"`
 	TxCode string `json:"txCode"`
+	// CredentialIssuer and CredentialConfigurationID carry a wallet-initiated
+	// OpenID4VCI 1.0 §5 authorization code issuance that starts without a
+	// Credential Offer; they are only read by receive-code-wallet-initiated.
+	CredentialIssuer          string `json:"credentialIssuer"`
+	CredentialConfigurationID string `json:"credentialConfigurationId"`
 	// DCAPIRequest and Origin carry a W3C Digital Credentials API invocation
 	// for the present-dcapi operation.
 	DCAPIRequest *dcapiRequestInput `json:"dcapiRequest"`
@@ -291,8 +297,8 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 	if (config.KeyAttesterKeyFile == "") != (config.KeyAttesterIssuer == "") {
 		return nil, fmt.Errorf("keyAttesterKeyFile and keyAttesterIssuer must be set together")
 	}
-	if operationName == "receive-code" && config.RedirectURI == "" {
-		return nil, fmt.Errorf("receive-code requires redirectUri")
+	if (operationName == "receive-code" || operationName == "receive-code-wallet-initiated") && config.RedirectURI == "" {
+		return nil, fmt.Errorf("%s requires redirectUri", operationName)
 	}
 	selectedProfile, err := profile.Profile(config.Profile).Normalize()
 	if err != nil {
@@ -406,7 +412,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 
 func run(config configuration, request operation) (any, error) {
 	switch request.Name {
-	case "public-keys", "receive-preauth", "receive-code", "present", "present-dcapi", "list":
+	case "public-keys", "receive-preauth", "receive-code", "receive-code-wallet-initiated", "present", "present-dcapi", "list":
 	default:
 		return nil, fmt.Errorf("unsupported operation: %s", request.Name)
 	}
@@ -434,11 +440,7 @@ func run(config configuration, request operation) (any, error) {
 		return nil, err
 	}
 	switch request.Name {
-	case "receive-code":
-		offer, err := w.ResolveCredentialOffer(request.URI)
-		if err != nil {
-			return nil, err
-		}
+	case "receive-code", "receive-code-wallet-initiated":
 		holderKey, err := readPrivateJWK(config.HolderKeyFile)
 		if err != nil {
 			return nil, err
@@ -464,8 +466,7 @@ func run(config configuration, request operation) (any, error) {
 			}
 			additionalHolderKeys = append(additionalHolderKeys, jose.JSONWebKey{Key: privateKey})
 		}
-		result, receiveErr := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
-			CredentialOffer:                 offer,
+		receiveRequest := wallet.OID4VCIFinalReceiveRequest{
 			AdditionalHolderKeys:            additionalHolderKeys,
 			Type:                            receiverTypes.Oid4vci,
 			ClientID:                        config.ClientID,
@@ -477,7 +478,28 @@ func run(config configuration, request operation) (any, error) {
 			HTTPClient:                      httpClient,
 			DeferredPollAttempts:            config.deferredPollAttempts(),
 			IncludeKeyAttestation:           config.IncludeKeyAttestation,
-		})
+		}
+		if request.Name == "receive-code" {
+			offer, err := w.ResolveCredentialOffer(request.URI)
+			if err != nil {
+				return nil, err
+			}
+			receiveRequest.CredentialOffer = offer
+		} else {
+			if request.CredentialIssuer == "" {
+				return nil, fmt.Errorf("receive-code-wallet-initiated requires credentialIssuer")
+			}
+			if request.CredentialConfigurationID == "" {
+				return nil, fmt.Errorf("receive-code-wallet-initiated requires credentialConfigurationId")
+			}
+			issuerURL, err := url.Parse(request.CredentialIssuer)
+			if err != nil {
+				return nil, fmt.Errorf("invalid credentialIssuer: %w", err)
+			}
+			receiveRequest.CredentialIssuer = issuerURL
+			receiveRequest.CredentialConfigurationID = request.CredentialConfigurationID
+		}
+		result, receiveErr := w.ReceiveOID4VCIFinalCredential(receiveRequest)
 		if result == nil {
 			return nil, receiveErr
 		}

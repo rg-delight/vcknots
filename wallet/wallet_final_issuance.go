@@ -199,9 +199,29 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
 		return nil, err
 	}
-	authCodeGrant := req.CredentialOffer.Grants["authorization_code"]
-	if authCodeGrant == nil {
-		return nil, fmt.Errorf("authorization_code grant is not included in the offer")
+
+	// OpenID4VCI 1.0 §5: "The Wallet can also start the issuance without a
+	// Credential Offer". With an offer the authorization_code grant supplies
+	// the configuration list, the issuer_state and the authorization_server
+	// hint; wallet-initiated issuance has none of them and takes the
+	// configuration and issuer from the request.
+	var (
+		credentialConfigurationID string
+		issuerIdentifier          string
+		issuerState               string
+		authCodeGrant             *CredentialOfferGrant
+	)
+	if req.CredentialOffer != nil {
+		authCodeGrant = req.CredentialOffer.Grants["authorization_code"]
+		if authCodeGrant == nil {
+			return nil, fmt.Errorf("authorization_code grant is not included in the offer")
+		}
+		credentialConfigurationID = req.CredentialOffer.CredentialConfigurationIDs[0]
+		issuerIdentifier = req.CredentialOffer.CredentialIssuer.String()
+		issuerState = authCodeGrant.IssuerState
+	} else {
+		credentialConfigurationID = strings.TrimSpace(req.CredentialConfigurationID)
+		issuerIdentifier = req.CredentialIssuer.String()
 	}
 
 	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
@@ -215,13 +235,12 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
 
-	credentialConfigurationID := req.CredentialOffer.CredentialConfigurationIDs[0]
 	holderKeys, err := resolveOID4VCIFinalHolderKeys(req)
 	if err != nil {
 		return nil, err
 	}
 
-	issuerEndpoint, err := common.ParseURIField(req.CredentialOffer.CredentialIssuer.String())
+	issuerEndpoint, err := common.ParseURIField(issuerIdentifier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
 	}
@@ -230,12 +249,17 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
 	// §12.2.2/§12.2.4: the credential_issuer value in the metadata MUST match
-	// the credential_issuer from the offer exactly; the wallet performs no
-	// normalization.
-	if issuerMetadata.CredentialIssuer != req.CredentialOffer.CredentialIssuer.String() {
+	// the credential issuer the wallet requested exactly; the wallet performs
+	// no normalization.
+	if issuerMetadata.CredentialIssuer != issuerIdentifier {
+		if req.CredentialOffer != nil {
+			return nil, fmt.Errorf(
+				"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
+				issuerMetadata.CredentialIssuer, issuerIdentifier)
+		}
 		return nil, fmt.Errorf(
-			"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
-			issuerMetadata.CredentialIssuer, req.CredentialOffer.CredentialIssuer.String())
+			"credential issuer metadata identifier %q does not match the requested credential issuer %q",
+			issuerMetadata.CredentialIssuer, issuerIdentifier)
 	}
 
 	// HAIP §4.1 constraints on the issuer metadata and the selected credential
@@ -374,7 +398,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		State:                state,
 		CodeChallenge:        base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
 		CodeChallengeMethod:  "S256",
-		IssuerState:          authCodeGrant.IssuerState,
+		IssuerState:          issuerState,
 	}
 	if usePrivateKeyJwt {
 		assertion, err := generateClientAssertion()
@@ -953,9 +977,6 @@ func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {
 	if req.Type != receiverTypes.Oid4vci {
 		return fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
 	}
-	if req.CredentialOffer == nil {
-		return fmt.Errorf("credential offer is required")
-	}
 	if req.ClientID == "" {
 		return fmt.Errorf("client ID is required")
 	}
@@ -967,6 +988,21 @@ func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {
 	}
 	if req.ClientKey.Key == nil {
 		return fmt.Errorf("client key is required")
+	}
+	if req.CredentialOffer == nil {
+		// OpenID4VCI 1.0 §5 wallet-initiated issuance: the caller must name
+		// the credential issuer and the Credential Configuration because no
+		// offer carries them.
+		if req.CredentialIssuer == nil {
+			return fmt.Errorf("credential issuer is required")
+		}
+		if strings.TrimSpace(req.CredentialConfigurationID) == "" {
+			return fmt.Errorf("credential configuration ID is required")
+		}
+		return nil
+	}
+	if req.CredentialIssuer != nil || strings.TrimSpace(req.CredentialConfigurationID) != "" {
+		return fmt.Errorf("credential issuer and credential configuration ID must be empty when a credential offer is provided")
 	}
 	if len(req.CredentialOffer.CredentialConfigurationIDs) == 0 {
 		return fmt.Errorf("credential configuration IDs are empty")
@@ -981,7 +1017,13 @@ func selectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIs
 	if issuerMetadata == nil {
 		return common.URIField{}, fmt.Errorf("issuer metadata is required")
 	}
-	hint := strings.TrimSpace(grant.AuthorizationServer)
+	// A wallet-initiated issuance has no grant and therefore no
+	// authorization_server hint; §12.3 then falls back to the first listed
+	// authorization server or the credential issuer.
+	hint := ""
+	if grant != nil {
+		hint = strings.TrimSpace(grant.AuthorizationServer)
+	}
 	if hint != "" {
 		for _, server := range issuerMetadata.AuthorizationServers {
 			if server.String() == hint {

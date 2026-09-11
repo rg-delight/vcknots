@@ -399,3 +399,22 @@ attestation has no effect on the Final profile. The verification result
 `Delivery` (`"reference"`, `"value"`, or `"query"`, what the library observed)
 and `DeliveryAttested` (true when the caller attestation was accepted for the
 HAIP check).
+
+## Wallet-initiated OpenID4VCI authorization code issuance
+
+`OID4VCIFinalReceiveRequest` gained `CredentialIssuer *url.URL` and
+`CredentialConfigurationID string`. OpenID4VCI 1.0 §5: "The Wallet can also
+start the issuance without a Credential Offer." When `CredentialOffer` is nil
+the caller names the Credential Issuer and the Credential Configuration; both
+are required. The flow fetches the issuer metadata, checks it against the
+requested issuer, selects the authorization server from
+`authorization_servers[0]` (falling back to the credential issuer) because no
+grant carries an `authorization_server` hint, sends no `issuer_state`, and
+requests the configuration with `scope` or `authorization_details`
+(§5.1.1/§5.1.2). Supplying `CredentialIssuer` or `CredentialConfigurationID`
+together with a `CredentialOffer` is rejected before any HTTP request. The HAIP
+client-authentication and profile validators apply unchanged.
+
+The `official_driver` adds `receive-code-wallet-initiated` with input
+`{"operation":"receive-code-wallet-initiated","credentialIssuer":"https://issuer.example/","credentialConfigurationId":"eudi_pid"}`
+(no `uri`); its output is identical to `receive-code`.

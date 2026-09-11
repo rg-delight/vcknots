@@ -41,15 +41,15 @@ absolute paths in the configuration.
 | `issuerAllowUnadvertisedRevocation` | bool | `false` | → `IssuerX509TrustOptions.AllowUnadvertisedRevocation`. Requires `issuerCAFiles`. |
 | `issuerJWKSFiles` | []string | `[]` | JWKS files (`{"keys":[...]}`) of public issuer keys for credentials without an `x5c` header. Non-empty sets `CredentialAcceptancePolicy.ResolveIssuerKeys`, which returns all operator-chosen keys; the library matches `kid`. Private keys are rejected. |
 | `requireHolderBinding` | bool | `false` | → `CredentialAcceptancePolicy.RequireHolderBinding`; credentials without `cnf` are rejected. |
-| `redirectUri` | string | `""` | Wallet's registered redirect URI for the authorization code flow. Required by `receive-code`. |
-| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`. Selects how `receive-code` requests the Credential Configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2): `""` uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope (error before PAR otherwise); `"authorization_details"` sends `[{"type":"openid_credential","credential_configuration_id":...}]` and no scope. HAIP defaults to `scope` because HAIP §4.2 requires it; an explicit `"authorization_details"` is allowed. |
+| `redirectUri` | string | `""` | Wallet's registered redirect URI for the authorization code flow. Required by `receive-code` and `receive-code-wallet-initiated`. |
+| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`. Selects how `receive-code`/`receive-code-wallet-initiated` request the Credential Configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2): `""` uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope (error before PAR otherwise); `"authorization_details"` sends `[{"type":"openid_credential","credential_configuration_id":...}]` and no scope. HAIP defaults to `scope` because HAIP §4.2 requires it; an explicit `"authorization_details"` is allowed. |
 | `attesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticClientAttester` → `wallet.Config.ClientAttestation`. Must be set together with `attesterIssuer`. The JWK's `x5c` chain, when present, becomes the client attestation header chain. |
 | `attesterIssuer` | string | `""` | `iss` of the static client attester. Must be set together with `attesterKeyFile`. |
 | `keyAttesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticKeyAttester` → `wallet.Config.KeyAttestation`. Must be set together with `keyAttesterIssuer`. |
 | `keyAttesterIssuer` | string | `""` | `iss` of the static key attester. Must be set together with `keyAttesterKeyFile`. |
 | `includeKeyAttestation` | bool | `false` | → `OID4VCIFinalReceiveRequest.IncludeKeyAttestation`; requests an OpenID4VCI Appendix D key attestation even when the issuer does not require one. |
 | `deferredPollAttempts` | int | `10` | → `OID4VCIFinalReceiveRequest.DeferredPollAttempts`. Zero or negative selects the default of 10. |
-| `credentialResponseEncryption` | bool | `false` | When true, `receive-code` generates an ephemeral P-256 key per run and passes it as `CredentialResponseEncryptionKey`, so the issuer encrypts the credential response. |
+| `credentialResponseEncryption` | bool | `false` | When true, the authorization code operations generate an ephemeral P-256 key per run and pass it as `CredentialResponseEncryptionKey`, so the issuer encrypts the credential response. |
 | `followRedirect` | bool | `true` | When true (or absent), `present` opens a returned `redirect_uri` like a same-device browser: HTTP GET with the TLS-configured client, `Accept: text/html,*/*`, `User-Agent: official_driver`, a 15 s timeout, and at most 5 followed redirects. Set `false` to return the URI without opening it. |
 
 `wallet.Config.CredentialAcceptance` is built only when at least one of
@@ -120,6 +120,9 @@ JSON
 {"operation":"receive-code","uri":"openid-credential-offer://?credential_offer_uri=..."}
 JSON
 ./official_driver -config /path/to/config.json <<'JSON'
+{"operation":"receive-code-wallet-initiated","credentialIssuer":"https://issuer.example/","credentialConfigurationId":"eudi_pid"}
+JSON
+./official_driver -config /path/to/config.json <<'JSON'
 {"operation":"list"}
 JSON
 ./official_driver -config /path/to/config.json <<'JSON'
@@ -144,6 +147,14 @@ emulation is added here. `present` returns `redirectUri` plus `redirectFollowed`
 when not opened). `list` returns `credentialIds` and `total`. Existing fields
 keep their names. Protocol errors from `receive-code` propagate unchanged; the
 driver never retries or repairs them.
+
+`receive-code-wallet-initiated` runs the same OpenID4VCI 1.0 authorization code
+flow without a Credential Offer (OpenID4VCI 1.0 §5: "The Wallet can also start
+the issuance without a Credential Offer"). It takes `credentialIssuer` and
+`credentialConfigurationId` instead of `uri`, obtains the Credential Issuer
+metadata itself, requests that Credential Configuration with `scope` or
+`authorization_details` (§5.1.1/§5.1.2), and sends no `issuer_state`. The output
+is identical to `receive-code`, including `pending`.
 
 `present-dcapi` answers a W3C Digital Credentials API invocation instead of a
 launch URI. `dcapiRequest` is the platform request entry (`protocol` plus the
@@ -174,6 +185,7 @@ final status is reported as an error naming the status.
 発行者鍵の指定をすべて省略するとlibrary最小限の受理規則だけが適用されます。
 `public-keys`で登録用公開鍵を取得し、`receive-preauth`で受領後、別プロセスの`list`で保存を確認できます。
 `receive-code`は`redirectUri`を使うauthorization codeフローを実行し、`credentialIds`・`verification`・`notificationId`・`transactionId`を返します（pending時は`pending`）。
+`receive-code-wallet-initiated`はCredential Offer無しで同じフローを実行し、`credentialIssuer`と`credentialConfigurationId`を入力に取ります（issuer_stateは送信しません）。
 `attesterKeyFile`と`keyAttesterKeyFile`で設定する静的attesterはテスト専用のevidenceであり、本番ではwalletがattester秘密鍵を持たない分割（NICEリポジトリのADR-0074）に従います。
 `present`は保存済みcredentialを使う公開APIの動作をそのまま返します。
 `present-dcapi`はW3C Digital Credentials APIのinvocationを入力に取り（`dcapiRequest`と、platformが認証した`origin`）、
@@ -186,7 +198,8 @@ software JWKの試験設定を実attestationやハードウェア保護の実証
 
 ### additionalHolderKeys
 
-`additionalHolderKeys` (integer, default 0) makes `receive-code` send that many
+`additionalHolderKeys` (integer, default 0) makes the authorization code
+operations send that many
 extra proofs with ephemeral P-256 keys so an issuer that advertises
 `batch_credential_issuance` returns several credentials (OpenID4VCI 1.0 §14.6).
 The ephemeral keys are discarded after the run; the resulting credentials are

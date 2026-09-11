@@ -576,9 +576,17 @@ type TransactionCode struct {
 // offer or issuer metadata.
 type OID4VCIFinalReceiveRequest struct {
 	CredentialOffer *CredentialOffer
-	Type            receiverTypes.SupportedReceivingTypes
-	ClientID        string
-	RedirectURI     string
+	// CredentialIssuer and CredentialConfigurationID drive a wallet-initiated
+	// issuance (OpenID4VCI 1.0 §5: "The Wallet can also start the issuance
+	// without a Credential Offer"): the wallet obtained the Credential Issuer
+	// metadata itself and picked the Credential Configuration it wants. Both
+	// are required when CredentialOffer is nil, and must be empty when a
+	// Credential Offer is supplied.
+	CredentialIssuer          *url.URL
+	CredentialConfigurationID string
+	Type                      receiverTypes.SupportedReceivingTypes
+	ClientID                  string
+	RedirectURI               string
 	// AuthorizationRequestType selects how the selected Credential
 	// Configuration is requested at the authorization endpoint. The empty
 	// value uses scope when the configuration advertises one and
