@@ -71,7 +71,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 			Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
 		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
-		_, err := haip.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+		_, err := haip.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
 			bearer,
 			request,
 			func() (types.OAuthClientAttestationHeaders, error) {

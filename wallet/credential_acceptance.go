@@ -32,7 +32,11 @@ type CredentialAcceptancePolicy struct {
 	// no x5c header (JWKS, DID or a static registry chosen by the caller). header is
 	// the issuer JWT's protected header. Never called when x5c is present.
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
-	// RequireHolderBinding rejects credentials without a cnf claim.
+	// RequireHolderBinding rejects a credential whose holder binding this
+	// wallet cannot establish: one that carries no cnf claim at all, and one
+	// that carries a cnf confirmation key while the acceptance call supplies no
+	// holder key to compare it against. Both are refused with
+	// ErrHolderBindingMissing rather than stored with an unproven binding.
 	RequireHolderBinding bool
 	// UnverifiedIssuer stores credentials without authenticating the issuer
 	// key, which is what a nil policy does implicitly. It only takes effect
@@ -245,7 +249,18 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 			// rather than stored with a binding it cannot exercise.
 			return nil, nil, fmt.Errorf("%w (cnf members: %s)", ErrHolderBindingConfirmationUnsupported, strings.Join(sortedMemberNames(cnf), ", "))
 		}
-		if holderKey != nil {
+		if holderKey == nil {
+			// The credential names a confirmation key but this call supplied no
+			// holder key to compare it with, so the binding cannot be
+			// established. A policy that requires holder binding must not
+			// accept the credential on the strength of an unchecked cnf: that
+			// would store, as bound, a credential issued to somebody else's
+			// key. Without the requirement the credential is still accepted,
+			// with HolderBound left false.
+			if policy != nil && policy.RequireHolderBinding {
+				return nil, nil, fmt.Errorf("%w: the credential carries a cnf confirmation key but no holder key was supplied to prove the binding", ErrHolderBindingMissing)
+			}
+		} else {
 			claimedKey, err := jsonWebKeyFromValue(jwkRaw)
 			if err != nil {
 				return nil, nil, fmt.Errorf("%w: cnf jwk is invalid: %w", ErrCredentialParse, err)
@@ -475,18 +490,23 @@ func sortedMemberNames(object map[string]any) []string {
 	return names
 }
 
+// requireIssuerDNSBinding binds an https issuer identifier to a dNSName SAN of
+// the credential's signing certificate. The match is the exact,
+// case-insensitive one commonX509.RequireLeafDNSName performs for every
+// identifier in this library: a wildcard SAN authenticates a TLS server, not
+// the issuer named by iss, so it must not let one certificate speak for every
+// subdomain. A non-https iss names no host to bind and is left to the rest of
+// the policy.
 func requireIssuerDNSBinding(leaf *x509.Certificate, issuer string) error {
 	parsed, err := url.Parse(issuer)
 	if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 		return nil
 	}
 	host := parsed.Hostname()
-	for _, name := range leaf.DNSNames {
-		if strings.EqualFold(name, host) {
-			return nil
-		}
+	if err := commonX509.RequireLeafDNSName(leaf, host, false); err != nil {
+		return fmt.Errorf("%w: issuer certificate is not bound to issuer host %q", ErrIssuerDNSBindingFailed, host)
 	}
-	return fmt.Errorf("%w: issuer certificate is not bound to issuer host %q", ErrIssuerDNSBindingFailed, host)
+	return nil
 }
 
 func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte) string {

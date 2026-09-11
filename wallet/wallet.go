@@ -92,6 +92,12 @@ type Wallet struct {
 	clientAttestation ClientAttestationProvider
 	keyAttestation    KeyAttestationProvider
 
+	// attestationTrust authenticates what those providers return. The zero
+	// value carries no trust material, which is enough for the bundled static
+	// attesters (the wallet holds their key) and for an attester that ships its
+	// certificate chain in x5c.
+	attestationTrust AttestationTrustPolicy
+
 	// oid4vciSigner is the caller-selected OpenID4VCI Final signer. A nil value
 	// means "ask the receiver plugin, then fall back to oid4vcisign.Default",
 	// which is resolved per issuance by oid4vciFinalSigner.
@@ -141,6 +147,18 @@ type Config struct {
 	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
 	// the issuer requires them or the caller opts in.
 	KeyAttestation KeyAttestationProvider
+
+	// AttestationTrust authenticates the attestation JWTs those providers
+	// return, before any request carrying one leaves the wallet: which key
+	// signed it and, when trust anchors are configured, whether its x5c chain
+	// is trusted. Its RequireX5C is raised by the HAIP profile on its own, so a
+	// deployment only sets this to configure trust anchors, a key resolver for
+	// a provider that does not use x5c, or a revocation policy.
+	//
+	// A remote provider that returns an attestation without an x5c chain needs
+	// a ResolveKey here: an attestation this wallet cannot authenticate is
+	// refused rather than forwarded.
+	AttestationTrust AttestationTrustPolicy
 
 	// OID4VCISigner builds the private-key operations of an OpenID4VCI 1.0
 	// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt"
@@ -386,6 +404,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 
 		clientAttestation: config.ClientAttestation,
 		keyAttestation:    config.KeyAttestation,
+		attestationTrust:  config.AttestationTrust,
 		oid4vciSigner:     config.OID4VCISigner,
 
 		credentialAcceptance: config.CredentialAcceptance,

@@ -337,10 +337,15 @@ func (w *Wallet) ResumeOID4VCIFinalAuthorization(ctx context.Context, req OID4VC
 }
 
 // requireOID4VCIContext reports a cancelled context at an issuance step
-// boundary. The OID4VCIFinalTransport interface carries no context, so the flow
-// checks between steps rather than inside a request; that is enough for a
-// caller that abandons an issuance to stop it before the next request leaves
-// the wallet.
+// boundary, naming the step that was about to start.
+//
+// It is not what stops a request in flight: every OID4VCIFinalTransport method
+// that performs I/O now takes the flow context and binds its HTTP requests to
+// it, so cancelling ctx aborts the request that is running. This check adds the
+// part a bound request cannot give: it stops the flow between steps, before any
+// key proof, DPoP proof, client assertion or key attestation is signed for a
+// request that would be abandoned anyway, and it names the step in the error
+// instead of surfacing a bare transport failure.
 func requireOID4VCIContext(ctx context.Context, step string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("OpenID4VCI issuance cancelled before %s: %w", step, err)
@@ -524,7 +529,7 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 			parRequest.ClientAssertion = assertion
 			parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
 		}
-		parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
+		parResponse, err := finalReceiver.PushAuthorizationRequest(ctx, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to push authorization request: %w", err)
 		}
@@ -708,6 +713,7 @@ func (w *Wallet) resumeOID4VCIFinalAuthorization(
 		tokenRequest.ClientAssertionFactory = flow.generateClientAssertion
 	}
 	token, err := flow.receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+		ctx,
 		*flow.authorizationServerMetadata.TokenEndpoint,
 		tokenRequest,
 		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
@@ -763,7 +769,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 	nonceEndpoint := issuerMetadata.NonceEndpoint
 	initialNonce := ""
 	if nonceEndpoint != nil {
-		nonceResponse, err := flow.receiver.FetchNonceResponse(*nonceEndpoint)
+		nonceResponse, err := flow.receiver.FetchNonceResponse(ctx, *nonceEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch credential nonce: %w", err)
 		}
@@ -775,6 +781,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 	}
 	credentialEndpoint := issuerMetadata.CredentialEndpoint
 	rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
+		ctx,
 		credentialEndpoint,
 		*token,
 		nonceEndpoint,
@@ -980,6 +987,7 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 			return nil, fmt.Errorf("failed to encode deferred credential request: %w", err)
 		}
 		rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
+			ctx,
 			endpoint,
 			*token,
 			nil,
@@ -1083,7 +1091,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	if storeErr != nil {
 		// §11: a credential that failed verification/storage is reported with
 		// credential_failure (best effort); the original failure is returned.
-		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
 			return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
 		}
 		return nil, storeErr
@@ -1092,7 +1100,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	// §11: credential_accepted MUST only be sent after the credential was
 	// successfully stored.
 	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil {
-		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
 			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
 		}
 	}
@@ -1128,10 +1136,11 @@ func (w *Wallet) NotifyOID4VCIFinalCredentialDeletedContext(ctx context.Context,
 	if err != nil {
 		return fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	return notifyOID4VCIFinalCredential(finalReceiver, w.oid4vciFinalSigner(finalReceiver), req.IssuerMetadata, req.AccessToken, req.ClientKey, req.NotificationID, "credential_deleted")
+	return notifyOID4VCIFinalCredential(ctx, finalReceiver, w.oid4vciFinalSigner(finalReceiver), req.IssuerMetadata, req.AccessToken, req.ClientKey, req.NotificationID, "credential_deleted")
 }
 
 func notifyOID4VCIFinalCredential(
+	ctx context.Context,
 	finalReceiver receiverTypes.OID4VCIFinalTransport,
 	signer receiverTypes.OID4VCIFinalSigner,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
@@ -1145,6 +1154,7 @@ func notifyOID4VCIFinalCredential(
 	}
 	endpoint := *issuerMetadata.NotificationEndpoint
 	return finalReceiver.SendCredentialNotificationWithDpopRetryForToken(
+		ctx,
 		endpoint,
 		*token,
 		receiverTypes.NotificationRequest{NotificationID: notificationID, Event: event},
@@ -1171,7 +1181,7 @@ func oid4vciFinalCredentialRequestBodyFactory(
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to obtain key attestation: %w", err)
 			}
-			if err := validateKeyAttestation(attestation, request, flow.keyAttestation.requireX5C, time.Now()); err != nil {
+			if err := ValidateKeyAttestation(ctx, attestation, request, flow.keyAttestation.policy); err != nil {
 				return nil, "", err
 			}
 			keyAttestationJWT = attestation.JWT
@@ -1422,8 +1432,10 @@ func selectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIs
 // oid4vciKeyAttestationPlan records that a key attestation must be attached to
 // every credential request proof for this issuance.
 type oid4vciKeyAttestationPlan struct {
-	provider   KeyAttestationProvider
-	requireX5C bool
+	provider KeyAttestationProvider
+	// policy authenticates what the provider returns: the attester signature
+	// and, when anchors are configured, the x5c chain.
+	policy AttestationTrustPolicy
 }
 
 // planOID4VCIKeyAttestation decides whether a key attestation is needed. It
@@ -1440,7 +1452,7 @@ func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIss
 	if w.keyAttestation == nil || (!required && !include) {
 		return nil, nil
 	}
-	return &oid4vciKeyAttestationPlan{provider: w.keyAttestation, requireX5C: w.profile.IsHAIP()}, nil
+	return &oid4vciKeyAttestationPlan{provider: w.keyAttestation, policy: w.attestationPolicyFor(w.keyAttestation)}, nil
 }
 
 // issuerRequiresKeyAttestation reports whether the selected credential
@@ -1495,20 +1507,22 @@ func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver r
 		ClientKey:           req.ClientKey,
 		AuthorizationServer: authorizationServerIssuer,
 	}
-	// HAIP §4.4.1: verify the provider result before any request carrying the
-	// attestation leaves the wallet; the attester signature is not verified
-	// because the wallet does not hold the attester key.
+	// HAIP §4.4.1: authenticate the provider result before any request carrying
+	// the attestation leaves the wallet. ValidateClientAttestation is the one
+	// path the wallet uses: it establishes who signed the attestation (the x5c
+	// leaf, the configured resolver, or the bundled attester's own key) and
+	// only then checks the binding to this wallet instance.
 	attestation, err := provider.ClientAttestation(ctx, attestationRequest)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("failed to obtain client attestation: %w", err)
 	}
-	if err := validateClientAttestation(attestation, attestationRequest, w.profile.IsHAIP(), time.Now()); err != nil {
+	if err := ValidateClientAttestation(ctx, attestation, attestationRequest, w.attestationPolicyFor(provider)); err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
 	}
 
 	attestationChallenge := ""
 	if authMetadata.ChallengeEndpoint != nil {
-		challenge, err := receiver.FetchClientAttestationChallenge(*authMetadata.ChallengeEndpoint)
+		challenge, err := receiver.FetchClientAttestationChallenge(ctx, *authMetadata.ChallengeEndpoint)
 		if err != nil {
 			return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("failed to fetch client attestation challenge: %w", err)
 		}

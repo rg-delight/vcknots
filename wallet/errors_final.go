@@ -71,7 +71,9 @@ var (
 	// registered verifier plugin implements.
 	ErrCredentialAlgUnsupported = errors.New("credential signing algorithm is not accepted")
 	// ErrHolderBindingMissing reports that the policy requires holder binding
-	// and the credential carries no cnf claim.
+	// and the wallet cannot establish one: the credential carries no cnf claim,
+	// or it carries a cnf confirmation key while the acceptance call supplied
+	// no holder key to compare it against.
 	ErrHolderBindingMissing = errors.New("credential does not contain a cnf holder binding")
 	// ErrHolderBindingMismatch reports that the credential's cnf.jwk is not
 	// the holder key the flow used, compared by RFC 7638 thumbprint.

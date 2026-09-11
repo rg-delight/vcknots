@@ -109,6 +109,14 @@ referenced exactly once by an `_sd` or `...` digest) are also checked.
 revocation counters. `VerifyCredential` previously returned true only when
 verification errored; it now returns true only on success.
 
+`RequireHolderBinding` is fail-closed in both directions. It used to reject only
+a credential with no `cnf` claim at all: a credential that carried `cnf` while
+the acceptance call supplied no holder key skipped the comparison entirely and
+was stored with `Verification.HolderBound` false. Such a call now returns
+`ErrHolderBindingMissing`, because a binding nothing compared is not a binding.
+An acceptance call that supplies no holder key and does not require holder
+binding is unchanged.
+
 ## Explicit Final / HAIP profile
 
 Package `profile` defines `profile.Final` (default) and `profile.HAIP`.
@@ -172,7 +180,7 @@ without also owning the wallet's keys. It is now split:
 
 | Interface | What it covers |
 | --- | --- |
-| `OID4VCIFinalTransport` | the Draft 13 `Receiver`, plus `PushAuthorizationRequest`, `ExchangeAuthorizationCodeWithDpopAndAttestationRetry`, `FetchClientAttestationChallenge`, `FetchNonceResponse`, `PostCredentialEndpointWithNonceRetryForToken`, `SendCredentialNotificationWithDpopRetryForToken`, `EncodeCredentialRequest`, `DecodeCredentialResponse` |
+| `OID4VCIFinalTransport` | the Draft 13 `Receiver`, plus `PushAuthorizationRequest`, `ExchangeAuthorizationCodeWithDpopAndAttestationRetry`, `FetchClientAttestationChallenge`, `FetchNonceResponse`, `PostCredentialEndpointWithNonceRetryForToken`, `SendCredentialNotificationWithDpopRetryForToken` (each taking `ctx context.Context` first), `EncodeCredentialRequest`, `DecodeCredentialResponse` |
 | `OID4VCIFinalSigner` | `CreateDpopProof`, `CreateCredentialRequestJWTProofWithOptions`, `CreateClientAttestationPop` |
 | `OID4VCIFinalReceiver` | both of the above; **deprecated**, kept so existing implementations and callers still compile |
 
@@ -209,6 +217,45 @@ not hold the attester's private key. The method remains on
 `oid4vcisign.Default` and on the bundled plugin for tests, examples and
 single-operator deployments that act as their own attester.
 
+## Context on the Final transport
+
+Every I/O method of `OID4VCIFinalTransport` takes `ctx context.Context` as its
+first parameter and must bind every HTTP request it makes, retries included, to
+it. `Wallet.ReceiveOID4VCIFinalCredentialContext` and the other `…Context`
+entrypoints therefore cancel a request that is already in flight, not only the
+step boundaries. `EncodeCredentialRequest` and `DecodeCredentialResponse` take
+none: they are pure codecs.
+
+| Previous API | Current API |
+| --- | --- |
+| `PushAuthorizationRequest(endpoint, request, headers)` | `PushAuthorizationRequest(ctx, endpoint, request, headers)` |
+| `ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint, …)` | `ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx, endpoint, …)` |
+| `FetchClientAttestationChallenge(endpoint)` | `FetchClientAttestationChallenge(ctx, endpoint)` |
+| `FetchNonceResponse(endpoint)` | `FetchNonceResponse(ctx, endpoint)` |
+| `PostCredentialEndpointWithNonceRetryForToken(endpoint, …)` | `PostCredentialEndpointWithNonceRetryForToken(ctx, endpoint, …)` |
+| `SendCredentialNotificationWithDpopRetryForToken(endpoint, …)` | `SendCredentialNotificationWithDpopRetryForToken(ctx, endpoint, …)` |
+
+The Draft 13 `Receiver` method set is unchanged, and the deprecated compound
+`OID4VCIFinalReceiver` inherits the new signatures. The method names still
+encode the retry policy the implementation owns (RFC 9449 §8 DPoP nonce,
+OpenID4VCI §8.3.1.2 `invalid_nonce`); the interface godoc states that contract.
+
+`oid4vci.Oid4vciReceiver` now holds a mutex for the RFC 9449 §8.2 per-server
+DPoP nonce store, so it must not be copied after first use.
+
+## Metadata and request encryption
+
+| Previous API | Current API |
+| --- | --- |
+| `types.CredentialRequestEncryption.AlgValuesSupported` | removed: §12.2.4 defines `alg_values_supported` on `credential_response_encryption` only, and §10 fixes the request JWE `alg` from the chosen JWK |
+| — | `types.NonceResponse.DPoPNonce` carries the §7.2 `DPoP-Nonce` response header |
+
+An RSA request-encryption key is now encrypted to with `RSA-OAEP-256` instead of
+`ECDH-ES`, a `jwks` of only `use: "sig"` keys is an error, and signed issuer
+metadata whose `sub` differs from the Credential Issuer Identifier by a trailing
+slash is now rejected (§12.2.4 requires "a simple string comparison with no
+normalization").
+
 ## Attestation providers
 
 `Config.ClientAttestation` (`ClientAttestationProvider`) and
@@ -221,11 +268,43 @@ instance key; `KeyAttestationProvider` is called with the holder keys and
 `c_nonce` and must return a `key-attestation+jwt` whose `attested_keys` contain
 every holder key.
 
-Before use the wallet validates the provider result without verifying the
-attester signature: typ, `sub`, RFC 7638 `cnf.jwk` thumbprint, and future `exp`
-(respecting an earlier `ClientAttestation.ExpiresAt`). Under HAIP the header
-must also carry a non-self-signed `x5c` leaf (client attestation §4.4.1, key
-attestation §4.5.1). Failures are returned before PAR.
+Before use the wallet authenticates the provider result and then validates it:
+who signed the attestation (the `x5c` leaf key, or `AttestationTrustPolicy.ResolveKey`),
+its `x5c` chain against the configured trust anchors, and then typ, `sub`,
+RFC 7638 `cnf.jwk` thumbprint, `aud` and future `exp` (respecting an earlier
+`ClientAttestation.ExpiresAt`). Under HAIP the header must also carry a
+non-self-signed `x5c` leaf and must not carry the trust anchor
+(HAIP §4.4.1 for the Wallet Attestation, §4.4.2 for the key attestation).
+Failures are returned before PAR.
+
+`ValidateClientAttestation(ctx, attestation, request, policy)` and
+`ValidateKeyAttestation(ctx, attestation, request, policy)` are the exported
+form and the only path the wallet itself uses. Both take an
+`AttestationTrustPolicy` instead of the previous `requireX5C bool, now time.Time`
+pair:
+
+| Previous API | Current API |
+| --- | --- |
+| `ValidateClientAttestation(attestation, request, requireX5C, now)` | `ValidateClientAttestation(ctx, attestation, request, AttestationTrustPolicy{RequireX5C: …, Now: …})` |
+
+`Config.AttestationTrust` configures that policy for the wallet:
+`TrustAnchors`/`RootCAs` (with `CRL.HTTPClient`, which is required whenever
+anchors are configured so no revocation fetch falls back to an unguarded
+client), `KeyUsages`, `AllowUnadvertisedRevocation` and `ResolveKey`.
+`RequireX5C` is raised by the HAIP profile on its own.
+
+There is deliberately no equivalent of `CredentialAcceptancePolicy.UnverifiedIssuer`
+for attestations: an attestation is issued to this wallet by its own provider,
+so an attestation that carries no `x5c` chain and matches no configured
+`ResolveKey` is refused rather than forwarded. The bundled `StaticClientAttester`
+and `StaticKeyAttester` need no configuration — the wallet verifies a
+self-issued attestation against the attester key it holds — but a remote
+provider that returns an attestation without `x5c` now needs a `ResolveKey`.
+
+`StaticClientAttester` now emits `aud` = the authorization server identifier the
+attestation was requested for, so HAIP §4.4.1 ("Wallet Attestations MUST NOT be
+reused across different Issuers") is checkable. `oid4vcisign.Default.CreateClientAttestation`
+still emits none: its signature carries no authorization server to bind to.
 
 `OID4VCIFinalReceiveRequest.AttesterKey` / `AttesterIssuer` remain as a
 deprecated fallback: when set and no `ClientAttestationProvider` is configured
@@ -376,7 +455,37 @@ redirect_uri Authorization Request parameter is present when the Response Mode
 is direct_post, the Wallet MUST return an invalid_request Authorization
 Response error."
 
+## Shared X.509 leaf identity helpers
+
+`common/x509` exports the leaf-identity and CRL-cache primitives the protocol
+boundaries share, so an integrator no longer copies them:
+
+| Helper | What it fixes |
+| --- | --- |
+| `LeafThumbprintB64u`, `RequireLeafThumbprint` | the OID4VP §5.9.3 `x509_hash` comparison, previously open-coded at each boundary |
+| `RequireLeafDNSName(leaf, host, wildcard)` | one answer to §5.9.3 `x509_san_dns`: every in-library caller passes `wildcard=false`, so a wildcard SAN never authenticates a Client Identifier or a credential issuer host |
+| `MaxCRLCacheAge`, `NewCRLCacheEntry`, `CRLCacheEntryCurrent` | a durable `CRLCache` implementation derives the retention and freshness rule from the library instead of copying the unexported constants |
+
 ## OpenID4VP 1.0 over the W3C Digital Credentials API (Appendix A)
+
+### `web-origin:` is Wallet-minted, never accepted from a request
+
+`web-origin:<origin>` is the effective Client Identifier the Wallet assigns to
+an unsigned DC API request (Appendix A.2: "The `client_id` parameter MUST be
+omitted in unsigned requests … The Wallet MUST ignore any `client_id` parameter
+that is present in an unsigned request"). It used to be accepted from any
+delivery, so an ordinary Authorization Request could name itself
+`client_id=web-origin:https://verifier.example` and derive no response-endpoint
+binding. Every wire delivery — query parameters, `request=`, `request_uri`, and
+the Draft24 paths — now rejects it, exactly as §5.9.3 requires for the
+companion `origin:` prefix: "The Wallet MUST NOT accept this Client Identifier
+Prefix in requests." `ParseDCAPIRequest` still synthesises and accepts it
+internally for unsigned DC API invocations.
+
+An unknown prefix now reports `client_id prefix "https" is not a supported
+Client Identifier Prefix` instead of `unsupported client_id prefix: https`,
+which read as if `https` were a prefix the wallet merely had not implemented.
+
 
 The presenter now parses and answers OpenID4VP 1.0 requests delivered through
 the W3C Digital Credentials API (OID4VP 1.0 Appendix A). New public surface in

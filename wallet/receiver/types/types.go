@@ -2,6 +2,7 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -230,11 +231,38 @@ func (m *CredentialIssuerMetadata) BatchSize() int {
 	return m.BatchCredentialIssuance.BatchSize
 }
 
+// CredentialRequestEncryption mirrors the OpenID4VCI 1.0 §12.2.4
+// credential_request_encryption metadata member, which is defined with exactly
+// four members: jwks ("REQUIRED. A JSON Web Key Set ... that contains one or
+// more public keys, to be used by the Wallet as an input to a key agreement for
+// encryption of the Credential Request. Each JWK in the set MUST have a kid
+// (Key ID) parameter that uniquely identifies the key"), enc_values_supported
+// ("REQUIRED. A non-empty array containing a list of the JWE encryption
+// algorithms (`enc` values) supported by the Credential Endpoint to decode the
+// Credential Request from a JWT"), zip_values_supported (OPTIONAL) and
+// encryption_required ("REQUIRED. Boolean value specifying whether the
+// Credential Issuer requires the additional encryption on top of TLS for the
+// Credential Requests").
+//
+// There is deliberately no alg_values_supported member: §12.2.4 defines that
+// one on credential_response_encryption only, and §10 fixes the request's JWE
+// alg from the chosen key instead — "The `alg` parameter MUST be present. The
+// JWE `alg` algorithm used MUST be equal to the `alg` value of the chosen JWK."
+//
+// zip_values_supported is not modelled either, because §10 makes compression
+// the Wallet's own option ("If a `zip` (Compression Algorithm) value is
+// specified, then compression is performed before encryption ... If absent, no
+// compression is performed") and this wallet never compresses a Credential
+// Request, so the issuer's list would change nothing.
 type CredentialRequestEncryption struct {
-	Jwks               jose.JSONWebKeySet `json:"jwks"`
-	AlgValuesSupported []string           `json:"alg_values_supported,omitempty"`
-	EncValuesSupported []string           `json:"enc_values_supported,omitempty"`
-	EncryptionRequired *bool              `json:"encryption_required,omitempty"`
+	// Jwks carries the issuer's request encryption keys.
+	Jwks jose.JSONWebKeySet `json:"jwks"`
+	// EncValuesSupported lists the JWE content encryption algorithms the
+	// Credential Endpoint can decrypt.
+	EncValuesSupported []string `json:"enc_values_supported,omitempty"`
+	// EncryptionRequired is true when every Credential Request must be
+	// encrypted on top of TLS.
+	EncryptionRequired *bool `json:"encryption_required,omitempty"`
 }
 
 // CredentialResponseEncryption mirrors the §12.2.4
@@ -597,9 +625,21 @@ type OAuthClientAttestationHeaders struct {
 	ClientAttestationPop string
 }
 
+// NonceResponse is the OpenID4VCI 1.0 §7.2 Nonce Response.
 type NonceResponse struct {
-	CNonce          string `json:"c_nonce"`
-	CNonceExpiresIn *int   `json:"c_nonce_expires_in,omitempty"`
+	// CNonce is the §7.2 c_nonce: "REQUIRED. String containing a challenge to
+	// be used when creating a proof of possession of the key".
+	CNonce string `json:"c_nonce"`
+	// CNonceExpiresIn is the lifetime in seconds an issuer may advertise
+	// alongside c_nonce.
+	CNonceExpiresIn *int `json:"c_nonce_expires_in,omitempty"`
+	// DPoPNonce is the RFC 9449 §8.2 DPoP-Nonce response header value, not a
+	// body member, hence json:"-". §7.2 Nonce Response: "The Credential Issuer
+	// MAY provide a DPoP nonce in an HTTP header as defined in Section 8.2 of
+	// [@!RFC9449]. In this case, the Wallet uses the new nonce value in the
+	// DPoP proof when presenting an access token at the Credential Endpoint."
+	// It is empty when the Nonce Endpoint sent no such header.
+	DPoPNonce string `json:"-"`
 }
 
 type CredentialRequest struct {
@@ -713,26 +753,62 @@ type ProofOptions struct {
 // Attestation PoPs are built by an OID4VCIFinalSigner, so a transport plugin
 // can be implemented outside this repository without access to the wallet's
 // private keys.
+//
+// # Context
+//
+// Every method that performs I/O takes a context.Context as its first
+// parameter and MUST bind every HTTP request it makes — retries included — to
+// it, so that cancelling the issuance stops a request that is already in
+// flight. EncodeCredentialRequest and DecodeCredentialResponse take none: they
+// are pure codecs (JSON plus JWE) that never reach the network.
+//
+// # The retry policy the method names encode
+//
+// The "…WithDpopAndAttestationRetry" and "…WithNonceRetryForToken" suffixes
+// name a retry policy the implementation owns, not a convenience wrapper
+// around a single request. A plugin that implements this interface implements
+// that policy:
+//
+//   - RFC 9449 §8: an authorization server or resource server that answers
+//     with "use_dpop_nonce" and a DPoP-Nonce header has rejected the proof
+//     only because it lacks its nonce. The implementation retries once with a
+//     proof built for that nonce. Every attempt calls the DPoPProofFactory and
+//     the OAuthClientAttestationHeadersFactory again and rebuilds the request
+//     body, because RFC 9449 §4.2 gives every DPoP proof a unique jti and
+//     RFC 7523 §3 a unique jti to every client_assertion: nothing signed for a
+//     previous attempt is ever replayed.
+//   - OpenID4VCI 1.0 §8.3.1.2: an issuer that answers the Credential Endpoint
+//     with "invalid_nonce" has rejected the key proof's c_nonce. The
+//     implementation fetches a fresh c_nonce from the Nonce Endpoint, calls the
+//     CredentialRequestBodyFactory again for it, and posts once more.
+//
+// At most one retry is performed for each of the two conditions, so a
+// misbehaving server cannot hold the wallet in a loop.
 type OID4VCIFinalTransport interface {
 	Receiver
 
 	// PushAuthorizationRequest sends the RFC 9126 Pushed Authorization Request
 	// that OpenID4VCI 1.0 Section 5.1 and HAIP Section 4.3 use to move the
 	// authorization request off the front channel.
-	PushAuthorizationRequest(endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
+	PushAuthorizationRequest(ctx context.Context, endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
 	// ExchangeAuthorizationCodeWithDpopAndAttestationRetry exchanges the
 	// authorization code at the Token Endpoint (Section 6.1). Both factories are
 	// invoked once per HTTP attempt, so an RFC 9449 Section 8 "use_dpop_nonce"
 	// retry re-signs the DPoP proof and rebuilds the Client Attestation headers
 	// instead of replaying the first ones.
-	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
 	// FetchClientAttestationChallenge fetches a challenge from the
 	// authorization server's challenge endpoint so the Client Attestation PoP
 	// can be bound to it.
-	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
+	FetchClientAttestationChallenge(ctx context.Context, endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
 	// FetchNonceResponse fetches the Section 7 Nonce Endpoint response,
-	// including the optional c_nonce_expires_in member.
-	FetchNonceResponse(endpoint common.URIField) (*NonceResponse, error)
+	// including the optional c_nonce_expires_in member and the RFC 9449
+	// Section 8.2 DPoP-Nonce response header. Section 7.2: "The Credential
+	// Issuer MAY provide a DPoP nonce in an HTTP header as defined in Section
+	// 8.2 of [@!RFC9449]. In this case, the Wallet uses the new nonce value in
+	// the DPoP proof when presenting an access token at the Credential
+	// Endpoint."
+	FetchNonceResponse(ctx context.Context, endpoint common.URIField) (*NonceResponse, error)
 	// PostCredentialEndpointWithNonceRetryForToken posts the Credential Request
 	// and, on the Section 8.3.1.2 "invalid_nonce" error, rebuilds the body with
 	// a fresh c_nonce from the Nonce Endpoint and posts it once more. It takes
@@ -741,19 +817,21 @@ type OID4VCIFinalTransport interface {
 	// RFC 6750 Section 2.1 defines the Bearer scheme and RFC 9449 Section 7.1
 	// the DPoP scheme. It returns the raw HTTP response and the c_nonce the
 	// accepted request was built with.
-	PostCredentialEndpointWithNonceRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
+	PostCredentialEndpointWithNonceRetryForToken(ctx context.Context, endpoint common.URIField, accessToken CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
 	// SendCredentialNotificationWithDpopRetryForToken sends the Section 11
 	// notification, taking the parsed token response for the same reason as
 	// PostCredentialEndpointWithNonceRetryForToken.
-	SendCredentialNotificationWithDpopRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, notification NotificationRequest, proofFactory DPoPProofFactory) error
+	SendCredentialNotificationWithDpopRetryForToken(ctx context.Context, endpoint common.URIField, accessToken CredentialIssuanceAccessToken, notification NotificationRequest, proofFactory DPoPProofFactory) error
 	// EncodeCredentialRequest serialises a Credential Request, applying the
 	// Section 8.1 Credential Request encryption when the issuer metadata
 	// advertises credential_request_encryption. It returns the body and the
-	// Content-Type to send it with.
+	// Content-Type to send it with. It is a pure codec and takes no context:
+	// it performs no I/O.
 	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
 	// DecodeCredentialResponse parses a Credential Response, decrypting the
 	// Section 8.2 encrypted response with decryptionKey when the Content-Type
-	// says the issuer encrypted it.
+	// says the issuer encrypted it. It is a pure codec and takes no context:
+	// it performs no I/O.
 	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
 }
 

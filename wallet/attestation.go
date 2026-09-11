@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"crypto"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,14 @@ func (a *StaticClientAttester) ClientAttestation(_ context.Context, request Clie
 		"exp": now.Add(lifetime).Unix(),
 		"cnf": map[string]any{"jwk": publicHolderJWK(request.ClientKey)},
 	}
+	// HAIP Section 4.4.1: "Wallet Attestations MUST NOT be reused across
+	// different Issuers." An audience-restricted attestation is what lets the
+	// authorization server, and ValidateClientAttestation here, detect the
+	// reuse; an attestation issued without an audience asserts nothing about
+	// which server it was minted for.
+	if server := strings.TrimSpace(request.AuthorizationServer); server != "" {
+		payload["aud"] = server
+	}
 	token, err := signAttestationJWT(a.Key, clientAttestationJWTType, payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client attestation: %w", err)
@@ -167,17 +176,45 @@ func (a *StaticKeyAttester) KeyAttestation(_ context.Context, request KeyAttesta
 	return &KeyAttestation{JWT: token}, nil
 }
 
-// validateClientAttestation checks a provider result before the wallet sends it
-// to an authorization server. The attester signature is intentionally not
-// verified because the wallet does not hold the attester key; only the shape
-// and the binding to this wallet instance are checked. A present aud claim must
-// identify the authorization server, because HAIP §4.3.1 forbids reusing a
-// Wallet Attestation across Issuers. Under HAIP the x5c chain must be present
-// and its leaf must not be self-signed (HAIP §4.4.1).
-func validateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
+// ValidateClientAttestation authenticates a provider result before the wallet
+// sends it to an authorization server, and is the only path the wallet itself
+// uses. It verifies the attester's signature (policy.ResolveKey, else the x5c
+// leaf key), validates the x5c chain against the policy's trust anchors when
+// any are configured, and then checks the binding to this wallet instance: typ,
+// sub against the client_id, cnf.jwk against the wallet key, aud against the
+// authorization server and exp.
+//
+// There is no opt-out: an attestation whose signature this wallet cannot check
+// is refused rather than forwarded, because a Wallet Attestation is the
+// wallet's own client credential and a provider that returns an unverifiable
+// one has failed.
+//
+// A present aud claim must identify the authorization server, because HAIP
+// Section 4.4.1 states that "Wallet Attestations MUST NOT be reused across
+// different Issuers". With policy.RequireX5C the x5c chain must be present and
+// its leaf must not be self-signed: HAIP Section 4.4.1 requires that "the
+// public key certificate, and optionally a trust certificate chain excluding
+// the trust anchor, used to validate the signature on the Wallet Attestation
+// MUST be included in the x5c JOSE header of the Client Attestation JWT".
+func ValidateClientAttestation(ctx context.Context, attestation *ClientAttestation, request ClientAttestationRequest, policy AttestationTrustPolicy) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("client attestation provider returned an empty attestation")
 	}
+	header, _, err := parseAttestationJWT(attestation.JWT)
+	if err != nil {
+		return fmt.Errorf("client attestation is malformed: %w", err)
+	}
+	if err := authenticateAttestationJWT(ctx, attestation.JWT, header, policy, "client attestation", policy.now()); err != nil {
+		return err
+	}
+	return validateClientAttestation(attestation, request, policy.RequireX5C, policy.now())
+}
+
+// validateClientAttestation checks the claims of an already authenticated
+// Wallet Attestation against the request it was obtained for. It is the second
+// half of ValidateClientAttestation, which is the only entry point that also
+// establishes who signed the attestation.
+func validateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
 	header, claims, err := parseAttestationJWT(attestation.JWT)
 	if err != nil {
 		return fmt.Errorf("client attestation is malformed: %w", err)
@@ -223,15 +260,39 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 	return nil
 }
 
-// validateKeyAttestation checks a provider result before it is embedded in a
-// credential request proof. Every requested holder key must appear in
-// attested_keys, the nonce must echo the c_nonce when one was given, a present
-// aud claim must identify the request audience, exp must be in the future, and
-// under HAIP the x5c leaf must not be self-signed.
-func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationRequest, requireX5C bool, now time.Time) error {
+// ValidateKeyAttestation authenticates a provider result before it is embedded
+// in a credential request proof, the same way ValidateClientAttestation does:
+// the attester signature is verified (policy.ResolveKey, else the x5c leaf key)
+// and the chain is validated against the configured trust anchors. Then every
+// requested holder key must appear in attested_keys, the nonce must echo the
+// c_nonce when one was given, a present aud claim must identify the request
+// audience, and exp must be in the future.
+//
+// With policy.RequireX5C the chain must be present and its leaf must not be
+// self-signed, which is HAIP Section 4.4.2: "The public key used to validate
+// the signature on the key attestation MUST be included in the x5c JOSE header
+// of the key attestation. The X.509 certificate of the trust anchor MUST NOT be
+// included in the x5c JOSE header of the key attestation. The X.509 certificate
+// signing the key attestation MUST NOT be self-signed."
+func ValidateKeyAttestation(ctx context.Context, attestation *KeyAttestation, request KeyAttestationRequest, policy AttestationTrustPolicy) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("key attestation provider returned an empty attestation")
 	}
+	header, _, err := parseAttestationJWT(attestation.JWT)
+	if err != nil {
+		return fmt.Errorf("key attestation is malformed: %w", err)
+	}
+	if err := authenticateAttestationJWT(ctx, attestation.JWT, header, policy, "key attestation", policy.now()); err != nil {
+		return err
+	}
+	return validateKeyAttestation(attestation, request, policy.RequireX5C, policy.now())
+}
+
+// validateKeyAttestation checks the claims of an already authenticated key
+// attestation against the request it was obtained for. It is the second half of
+// ValidateKeyAttestation, which is the only entry point that also establishes
+// who signed the attestation.
+func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationRequest, requireX5C bool, now time.Time) error {
 	header, claims, err := parseAttestationJWT(attestation.JWT)
 	if err != nil {
 		return fmt.Errorf("key attestation is malformed: %w", err)
@@ -282,8 +343,10 @@ func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationR
 }
 
 type attestationJWTHeader struct {
-	Type string   `json:"typ"`
-	X5C  []string `json:"x5c"`
+	Type      string   `json:"typ"`
+	Algorithm string   `json:"alg"`
+	KeyID     string   `json:"kid"`
+	X5C       []string `json:"x5c"`
 }
 
 type attestationJWTClaims struct {
@@ -429,11 +492,254 @@ func signAttestationJWT(key jose.JSONWebKey, typ string, payload map[string]any)
 	return jwt.Signed(signer).Claims(payload).Serialize()
 }
 
-// ValidateClientAttestation is the exported form of the check the wallet
-// performs on a provider result before using it: typ, sub, cnf.jwk thumbprint,
-// aud against the authorization server, exp (and a non-self-signed x5c leaf when
-// requireX5C is set). Applications that receive a pre-issued attestation from
-// their Wallet Provider can reject an unusable one before starting an issuance.
-func ValidateClientAttestation(attestation *ClientAttestation, request ClientAttestationRequest, requireX5C bool, now time.Time) error {
-	return validateClientAttestation(attestation, request, requireX5C, now)
+// AttestationJOSEHeader is the protected header of an attestation JWT, as much
+// of it as a key resolver needs to choose the verification key. X5C holds the
+// header entries unchanged, as base64 (not base64url) DER strings.
+type AttestationJOSEHeader struct {
+	// Type is the typ header: oauth-client-attestation+jwt for a Wallet
+	// Attestation, key-attestation+jwt for a key attestation.
+	Type string
+	// Algorithm is the alg header.
+	Algorithm string
+	// KeyID is the kid header, empty when the attester sent none.
+	KeyID string
+	// X5C holds the x5c header entries, empty when the attester sent none.
+	X5C []string
+}
+
+// AttestationKeyResolver returns the public key that verifies an attestation
+// JWT, for an attester that does not carry its certificate in x5c: a Wallet
+// Provider JWKS looked up by kid, or the locally held key of a self-issued
+// attestation. Returning an error refuses the attestation.
+//
+// The returned value is passed to go-jose, so it may be a crypto.PublicKey, a
+// jose.JSONWebKey or a *jose.JSONWebKey.
+type AttestationKeyResolver func(header AttestationJOSEHeader) (any, error)
+
+// AttestationTrustPolicy is how the wallet authenticates the attestation JWTs
+// its providers return. It replaces the bare requireX5C flag the validators
+// used to take, because checking the shape of an attestation without checking
+// who signed it establishes nothing.
+//
+// There is deliberately no flag that accepts an unverified attestation: unlike
+// a credential, which arrives from an issuer the wallet may know nothing about,
+// an attestation is issued to this wallet by its own provider, so a resolver or
+// an x5c chain is always available to whoever configured that provider.
+type AttestationTrustPolicy struct {
+	// RequireX5C enforces the HAIP rules that the attestation carries its
+	// certificate chain in x5c and that the leaf is not self-signed. The wallet
+	// sets it from the selected protocol profile.
+	RequireX5C bool
+	// TrustAnchors and RootCAs are the Wallet Provider anchors an x5c chain is
+	// validated against. Supply at most one of them; RootCAs preserves
+	// *x509.CertPool integrations. When neither is configured the chain is not
+	// validated and only the attester's signature is checked, so a deployment
+	// that wants the chain verified configures its anchors here.
+	TrustAnchors []*x509.Certificate
+	RootCAs      *x509.CertPool
+	// KeyUsages constrains the extended key usage of the attester certificate.
+	// Empty means no additional EKU policy, not TLS server authentication.
+	KeyUsages []x509.ExtKeyUsage
+	// AllowUnadvertisedRevocation keeps certificates that advertise no CRL
+	// distribution point on the trust path, matching the issuer, Request Object
+	// and signed issuer metadata trust policies.
+	AllowUnadvertisedRevocation bool
+	// CRL tunes the revocation retrieval the trust path performs. Its
+	// RequireStatus is derived from AllowUnadvertisedRevocation and must not be
+	// set here as well, and its HTTPClient is required whenever anchors are
+	// configured: the wallet never falls back to an unguarded default client
+	// for an outbound fetch a certificate chose.
+	CRL commonX509.CRLCheckerOptions
+	// ResolveKey supplies the verification key for an attester that does not
+	// use x5c. It takes precedence over the x5c leaf.
+	ResolveKey AttestationKeyResolver
+	// Now supplies the verification time, for tests and for callers with their
+	// own clock. Nil means time.Now.
+	Now func() time.Time
+}
+
+// now resolves the verification time of one validation run.
+func (p AttestationTrustPolicy) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+// attestationSignatureAlgorithms lists the signature algorithms an attestation
+// JWT may be signed with. OpenID4VCI 1.0 Appendix D requires of the alg header
+// that "It MUST NOT be `none` or an identifier for a symmetric algorithm
+// (MAC)", which this allowlist enforces by construction; the Wallet Attestation
+// of Appendix E follows Section 5.1 of
+// draft-ietf-oauth-attestation-based-client-auth, which states the same.
+func attestationSignatureAlgorithms() []jose.SignatureAlgorithm {
+	return []jose.SignatureAlgorithm{
+		jose.ES256, jose.ES384, jose.ES512,
+		jose.PS256, jose.PS384, jose.PS512,
+		jose.RS256, jose.RS384, jose.RS512,
+		jose.EdDSA,
+	}
+}
+
+// authenticateAttestationJWT verifies who signed an attestation before any of
+// its claims are believed. The verification key is the caller's resolver when
+// one is configured and the x5c leaf otherwise; an attestation offering
+// neither is refused, because nothing about it could be checked. label names
+// the artifact in the error ("client attestation" or "key attestation").
+func authenticateAttestationJWT(ctx context.Context, token string, header attestationJWTHeader, policy AttestationTrustPolicy, label string, now time.Time) error {
+	var chain []*x509.Certificate
+	if len(header.X5C) > 0 {
+		decoded, err := commonX509.DecodeX5CChain(header.X5C)
+		if err != nil {
+			return fmt.Errorf("%s x5c header is invalid: %w", label, err)
+		}
+		chain = decoded
+	}
+	if policy.RequireX5C {
+		// HAIP Sections 4.4.1 and 4.4.2 require the signing certificate in the
+		// x5c header and forbid a self-signed one.
+		if err := commonX509.RequireNonSelfSignedLeaf(chain, label); err != nil {
+			return err
+		}
+	}
+	if len(chain) > 0 {
+		if err := verifyAttestationChain(ctx, chain, policy, label, now); err != nil {
+			return err
+		}
+	}
+
+	key, err := attestationVerificationKey(header, chain, policy, label)
+	if err != nil {
+		return err
+	}
+	signed, err := jose.ParseSigned(token, attestationSignatureAlgorithms())
+	if err != nil {
+		return fmt.Errorf("%s is not a verifiable JWS: %w", label, err)
+	}
+	if len(signed.Signatures) != 1 {
+		return fmt.Errorf("%s must carry exactly one signature", label)
+	}
+	if _, err := signed.Verify(key); err != nil {
+		return fmt.Errorf("%s signature could not be verified: %w", label, err)
+	}
+	return nil
+}
+
+// attestationVerificationKey chooses the key the attestation signature is
+// verified with: the caller's resolver first, then the x5c leaf.
+func attestationVerificationKey(header attestationJWTHeader, chain []*x509.Certificate, policy AttestationTrustPolicy, label string) (any, error) {
+	if policy.ResolveKey != nil {
+		// attestationJWTHeader and AttestationJOSEHeader hold the same fields
+		// and differ only in their JSON tags, so the conversion is exact.
+		key, err := policy.ResolveKey(AttestationJOSEHeader(header))
+		if err != nil {
+			return nil, fmt.Errorf("%s signing key could not be resolved: %w", label, err)
+		}
+		if key == nil {
+			return nil, fmt.Errorf("%s signing key could not be resolved: the resolver returned no key", label)
+		}
+		return key, nil
+	}
+	if len(chain) > 0 {
+		return chain[0].PublicKey, nil
+	}
+	return nil, fmt.Errorf("%s cannot be authenticated: it carries no x5c chain and the attestation trust policy configures no key resolver", label)
+}
+
+// verifyAttestationChain validates an attestation's x5c chain against the
+// configured anchors. Without anchors there is nothing to validate against, so
+// only the signature is checked and the chain is left untrusted; the HAIP rule
+// that the trust anchor is not carried inside x5c is enforced wherever anchors
+// are configured and the profile asks for x5c.
+func verifyAttestationChain(ctx context.Context, chain []*x509.Certificate, policy AttestationTrustPolicy, label string, now time.Time) error {
+	if len(policy.TrustAnchors) == 0 && policy.RootCAs == nil {
+		return nil
+	}
+	if policy.RequireX5C {
+		// HAIP Sections 4.4.1 and 4.4.2: "The X.509 certificate of the trust
+		// anchor MUST NOT be included in the x5c JOSE header of the key
+		// attestation", and the Wallet Attestation chain is "optionally a trust
+		// certificate chain excluding the trust anchor".
+		containsAnchor, err := commonX509.ContainsTrustAnchor(chain, policy.TrustAnchors, policy.RootCAs)
+		if err != nil {
+			return fmt.Errorf("%s x5c header is invalid: %w", label, err)
+		}
+		if containsAnchor {
+			return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header of the %s", label)
+		}
+	}
+	crlOptions := policy.CRL
+	if crlOptions.RequireStatus && policy.AllowUnadvertisedRevocation {
+		return fmt.Errorf("conflicting %s revocation policies", label)
+	}
+	crlOptions.RequireStatus = !policy.AllowUnadvertisedRevocation
+	if crlOptions.HTTPClient == nil {
+		return fmt.Errorf("%s trust anchors are configured but the policy supplies no CRL HTTP client", label)
+	}
+	checker, err := commonX509.NewCRLChecker(crlOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create %s revocation checker: %w", label, err)
+	}
+	if _, err := commonX509.VerifySigningCertificateChain(ctx, chain, commonX509.SigningChainOptions{
+		TrustAnchors: policy.TrustAnchors,
+		Roots:        policy.RootCAs,
+		CurrentTime:  now,
+		KeyUsages:    policy.KeyUsages,
+		Revocation:   checker,
+	}); err != nil {
+		return fmt.Errorf("%s certificate chain is not trusted: %w", label, err)
+	}
+	return nil
+}
+
+// staticAttesterKeyResolver verifies a self-issued attestation against the
+// attester key the wallet itself holds. The bundled StaticClientAttester and
+// StaticKeyAttester sign with a local key, so the wallet needs no resolver
+// configuration to authenticate what they return; a remote provider has no such
+// key here and its attestation must carry x5c or be given a resolver.
+func staticAttesterKeyResolver(key jose.JSONWebKey) AttestationKeyResolver {
+	if key.Key == nil {
+		return nil
+	}
+	public := key.Public()
+	return func(AttestationJOSEHeader) (any, error) {
+		return public.Key, nil
+	}
+}
+
+// attestationProviderKeyResolver returns the resolver for a provider whose
+// signing key this process holds. It is the bundled static attesters only;
+// every other provider resolves its key through the caller's policy.
+func attestationProviderKeyResolver(provider any) AttestationKeyResolver {
+	switch attester := provider.(type) {
+	case *StaticClientAttester:
+		if attester == nil {
+			return nil
+		}
+		return staticAttesterKeyResolver(attester.Key)
+	case *StaticKeyAttester:
+		if attester == nil {
+			return nil
+		}
+		return staticAttesterKeyResolver(attester.Key)
+	default:
+		return nil
+	}
+}
+
+// attestationPolicyFor resolves the trust policy one attestation is validated
+// under: the wallet's configured policy, with RequireX5C raised by the HAIP
+// profile (HAIP Sections 4.4.1 and 4.4.2 require the signing certificate in the
+// x5c header) and with the bundled static attesters' own key filled in as the
+// resolver, so a self-issued attestation is verified against the key this
+// process signed it with without any extra configuration.
+func (w *Wallet) attestationPolicyFor(provider any) AttestationTrustPolicy {
+	policy := w.attestationTrust
+	if w.profile.IsHAIP() {
+		policy.RequireX5C = true
+	}
+	if policy.ResolveKey == nil {
+		policy.ResolveKey = attestationProviderKeyResolver(provider)
+	}
+	return policy
 }

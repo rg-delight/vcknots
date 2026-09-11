@@ -290,3 +290,59 @@ func TestCRLCacheErrorsDoNotBypassVerification(t *testing.T) {
 		t.Fatal("verified DER was not offered to cache")
 	}
 }
+
+// TestExportedCRLCacheEntryHelpersMatchTheCheckersOwnRule pins the seeding
+// contract an integrator depends on: an entry built by NewCRLCacheEntry is
+// accepted by CRLCacheEntryCurrent under exactly the rule the checker applies
+// to its own cache reads, so a durable cache seeded outside this process is
+// never silently discarded.
+func TestExportedCRLCacheEntryHelpersMatchTheCheckersOwnRule(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	location := "https://ca.example/crl"
+	der := []byte{1, 2, 3}
+
+	entry := NewCRLCacheEntry(location, der, now.Add(-time.Hour), now.Add(time.Hour), now)
+	if !entry.ExpiresAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("ExpiresAt = %s, want the CRL nextUpdate", entry.ExpiresAt)
+	}
+	der[0] = 9
+	if entry.DER[0] == 9 {
+		t.Fatal("NewCRLCacheEntry kept an alias of the caller's DER")
+	}
+	if !CRLCacheEntryCurrent(entry, location, now) {
+		t.Fatal("a freshly built entry is not current")
+	}
+	if !cacheEntryCurrent(&entry, location, now) {
+		t.Fatal("the checker's own rule disagrees with CRLCacheEntryCurrent")
+	}
+
+	// A CRL that outlives the retention cap expires at MaxCRLCacheAge.
+	long := NewCRLCacheEntry(location, der, now.Add(-time.Hour), now.Add(48*time.Hour), now)
+	if !long.ExpiresAt.Equal(now.Add(MaxCRLCacheAge)) {
+		t.Fatalf("ExpiresAt = %s, want fetchedAt plus MaxCRLCacheAge", long.ExpiresAt)
+	}
+	if CRLCacheEntryCurrent(long, location, now.Add(MaxCRLCacheAge+time.Second)) {
+		t.Fatal("an entry past MaxCRLCacheAge is still current")
+	}
+
+	for name, check := range map[string]struct {
+		entry CRLCacheEntry
+		url   string
+		now   time.Time
+	}{
+		"another URL":        {entry, "https://other.example/crl", now},
+		"before the fetch":   {entry, location, now.Add(-time.Minute)},
+		"past nextUpdate":    {entry, location, now.Add(2 * time.Hour)},
+		"never fetched":      {CRLCacheEntry{URL: location, NextUpdate: now.Add(time.Hour), ExpiresAt: now.Add(time.Hour)}, location, now},
+		"no recorded expiry": {CRLCacheEntry{URL: location, FetchedAt: now, NextUpdate: now.Add(time.Hour)}, location, now},
+		"no CRL nextUpdate":  {CRLCacheEntry{URL: location, FetchedAt: now, ExpiresAt: now.Add(time.Hour)}, location, now},
+		"zero value":         {CRLCacheEntry{}, location, now},
+	} {
+		if CRLCacheEntryCurrent(check.entry, check.url, check.now) {
+			t.Fatalf("%s: entry was reported current", name)
+		}
+	}
+	if cacheEntryCurrent(nil, location, now) {
+		t.Fatal("a nil entry was reported current")
+	}
+}

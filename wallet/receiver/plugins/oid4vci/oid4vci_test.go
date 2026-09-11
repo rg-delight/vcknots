@@ -652,7 +652,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		return common.URIField(*parsed)
 	}
 
-	challenge, err := receiver.FetchClientAttestationChallenge(endpoint("/challenge"))
+	challenge, err := receiver.FetchClientAttestationChallenge(t.Context(), endpoint("/challenge"))
 	if err != nil {
 		t.Fatalf("FetchClientAttestationChallenge() error = %v", err)
 	}
@@ -660,7 +660,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("challenge = %#v", challenge)
 	}
 
-	par, err := receiver.PushAuthorizationRequest(endpoint("/par"), types.PushedAuthorizationRequest{
+	par, err := receiver.PushAuthorizationRequest(t.Context(), endpoint("/par"), types.PushedAuthorizationRequest{
 		ResponseType:        "code",
 		ClientID:            "client-1",
 		RedirectURI:         "https://wallet.example/callback",
@@ -693,7 +693,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("token response = %#v", token)
 	}
 
-	nonce, err := receiver.FetchNonceResponse(endpoint("/nonce"))
+	nonce, err := receiver.FetchNonceResponse(t.Context(), endpoint("/nonce"))
 	if err != nil {
 		t.Fatalf("FetchNonce() error = %v", err)
 	}
@@ -984,7 +984,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 
 	headerFactoryCalls := 0
 	var proofNonces []string
-	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
 		common.URIField(*parsed),
 		types.AuthorizationCodeTokenRequest{
 			Code:         "code-1",
@@ -1370,7 +1370,12 @@ func TestOid4vciReceiver_CreateClientAttestationJWTs(t *testing.T) {
 	if popClaims["iss"] != "client-1" || popClaims["aud"] != "https://issuer.example" || popClaims["challenge"] != "challenge-1" {
 		t.Fatalf("PoP claims = %#v", popClaims)
 	}
-	if popClaims["jti"] == "" {
+	// popClaims is a map[string]any, so comparing the value to "" is false for
+	// every string it can hold and false again when the claim is absent: the
+	// assertion never fired. draft-ietf-oauth-attestation-based-client-auth §4
+	// makes jti "REQUIRED. A unique identifier for the token", so the claim
+	// must be present and a non-empty string.
+	if jti, ok := popClaims["jti"].(string); !ok || jti == "" {
 		t.Fatalf("PoP jti missing: %#v", popClaims)
 	}
 }
@@ -1633,11 +1638,12 @@ func TestOid4vciReceiver_FetchAccessToken_DoesNotFollowRedirects(t *testing.T) {
 }
 
 func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
-	accessToken := types.CredentialIssuanceAccessToken{Token: "test_token", TokenType: "bearer"}
-
 	// Create mock OID4VCI issuer server (which serves credential endpoint)
 	issuer := mockserver.NewOID4VCIIssuerServer(nil)
 	defer issuer.Close()
+
+	// The issuer only accepts the token it issued, as a real one does.
+	accessToken := types.CredentialIssuanceAccessToken{Token: issuer.AccessToken(), TokenType: issuer.TokenType()}
 
 	serverURL, _ := url.Parse(issuer.URL() + "/credential")
 	endpoint := common.URIField(*serverURL)
@@ -2157,7 +2163,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 		parsed, err := url.Parse(server.URL)
 		require.NoError(t, err)
 		receiver := &Oid4vciReceiver{AllowHTTP: true}
-		_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+		_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 			ResponseType:        "code",
 			ClientID:            "client-1",
 			RedirectURI:         "https://wallet.example/callback",
@@ -2181,7 +2187,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 		parsed, err := url.Parse(server.URL)
 		require.NoError(t, err)
 		receiver := &Oid4vciReceiver{AllowHTTP: true}
-		_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+		_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 			ResponseType: "code",
 			ClientID:     "client-1",
 			RedirectURI:  "https://wallet.example/callback",
@@ -2204,7 +2210,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestAuthorizationDetails(t *testing
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
-	_, err = receiver.PushAuthorizationRequest(common.URIField(*parsed), types.PushedAuthorizationRequest{
+	_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 		ResponseType: "code",
 		ClientID:     "client-1",
 		RedirectURI:  "https://wallet.example/callback",
@@ -2272,7 +2278,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
 	factoryCalls := 0
-	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
 		common.URIField(*parsed),
 		types.AuthorizationCodeTokenRequest{
 			Code:                "code-1",
@@ -2324,7 +2330,7 @@ func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, err := receiver.PushAuthorizationRequest(
+	response, err := receiver.PushAuthorizationRequest(t.Context(),
 		mustURIField(t, redirectingURL+"/par"),
 		types.PushedAuthorizationRequest{ResponseType: "code", ClientID: "wallet", RedirectURI: "https://wallet.example/cb"},
 		types.OAuthClientAttestationHeaders{ClientAttestation: "attestation", ClientAttestationPop: "pop"},
@@ -2373,7 +2379,7 @@ func TestFetchNonceResponseRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, err := receiver.FetchNonceResponse(mustURIField(t, redirectingURL+"/nonce"))
+	response, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, redirectingURL+"/nonce"))
 
 	require.Error(t, err)
 	assert.Nil(t, response)
@@ -2412,9 +2418,9 @@ func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 	defer issuer.Close()
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, cNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
+	response, cNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
-		types.CredentialIssuanceAccessToken{Token: "bearer-access-token", TokenType: "Bearer"},
+		types.CredentialIssuanceAccessToken{Token: issuer.AccessToken(), TokenType: "Bearer"},
 		nil,
 		"c-nonce-1",
 		func(nonce string) ([]byte, string, error) {
@@ -2429,18 +2435,23 @@ func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 
 	requests := issuer.CredentialRequests()
 	require.Len(t, requests, 1)
-	assert.Equal(t, "Bearer bearer-access-token", requests[0].Authorization)
+	assert.Equal(t, "Bearer "+issuer.AccessToken(), requests[0].Authorization)
 	assert.Empty(t, requests[0].DPoP, "a bearer token is not key-bound, so no DPoP proof is sent with it")
 }
 
 func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
-	issuer := mockserver.NewOID4VCIIssuerServer(nil)
+	// The issuer states a DPoP-bound token, so it accepts the DPoP scheme and
+	// no other; the wallet must present the token the way the token response
+	// named it.
+	config := mockserver.DefaultOID4VCIIssuerConfig()
+	config.TokenResponse["token_type"] = "DPoP"
+	issuer := mockserver.NewOID4VCIIssuerServer(config)
 	defer issuer.Close()
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
+	response, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
-		types.CredentialIssuanceAccessToken{Token: "dpop-access-token", TokenType: "dpop"},
+		types.CredentialIssuanceAccessToken{Token: issuer.AccessToken(), TokenType: "dpop"},
 		nil,
 		"c-nonce-1",
 		func(nonce string) ([]byte, string, error) {
@@ -2456,7 +2467,7 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 	require.Len(t, requests, 1)
 	// token_type is case insensitive (RFC 6749 Section 7.1) but the scheme is
 	// spelled as RFC 9449 Section 7.1 defines it.
-	assert.Equal(t, "DPoP dpop-access-token", requests[0].Authorization)
+	assert.Equal(t, "DPoP "+issuer.AccessToken(), requests[0].Authorization)
 	assert.Equal(t, "dpop-proof", requests[0].DPoP)
 }
 

@@ -2,6 +2,7 @@ package x509
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -209,5 +210,86 @@ func TestRequireNonSelfSignedLeafAcceptsIssuedLeaf(t *testing.T) {
 	}
 	if err := RequireNonSelfSignedLeaf([]*x509.Certificate{nil}, "key attestation"); err == nil {
 		t.Fatal("an empty leaf must be rejected")
+	}
+}
+
+// TestRequireLeafThumbprintMatchesTheX509HashClientID pins the OpenID4VP 1.0
+// Section 5.9.3 x509_hash value: the base64url-encoded SHA-256 of the DER.
+func TestRequireLeafThumbprintMatchesTheX509HashClientID(t *testing.T) {
+	leaf, _, _ := x5cTestChain(t)
+	digest := sha256.Sum256(leaf.certificate.Raw)
+	expected := base64.RawURLEncoding.EncodeToString(digest[:])
+
+	if got := LeafThumbprintB64u(leaf.certificate); got != expected {
+		t.Fatalf("LeafThumbprintB64u = %q, want %q", got, expected)
+	}
+	if err := RequireLeafThumbprint(leaf.certificate, expected); err != nil {
+		t.Fatalf("matching thumbprint: %v", err)
+	}
+	// Standard base64 of the same digest, which a wallet must not accept in
+	// place of the base64url encoding the section defines.
+	if err := RequireLeafThumbprint(leaf.certificate, base64.StdEncoding.EncodeToString(digest[:])); err == nil {
+		t.Fatal("standard base64 thumbprint was accepted")
+	}
+	if err := RequireLeafThumbprint(leaf.certificate, ""); err == nil {
+		t.Fatal("empty x509_hash was accepted")
+	}
+	if err := RequireLeafThumbprint(nil, expected); !errors.Is(err, ErrX5CInvalid) {
+		t.Fatalf("nil leaf error = %v, want ErrX5CInvalid", err)
+	}
+	if got := LeafThumbprintB64u(nil); got != "" {
+		t.Fatalf("LeafThumbprintB64u(nil) = %q, want the empty string", got)
+	}
+}
+
+// TestRequireLeafDNSNameMatchesSANsExactly pins the Client Identifier rule of
+// OpenID4VP 1.0 Section 5.9.3: the DNS name must match a dNSName SAN entry of
+// the leaf. Matching is case-insensitive (RFC 4343) and, with wildcard false,
+// never widened by a wildcard SAN.
+func TestRequireLeafDNSNameMatchesSANsExactly(t *testing.T) {
+	leaf := newSigningTestCertificate(t, "dns leaf", nil, false, func(template *x509.Certificate) {
+		template.DNSNames = []string{"Client.Example.Org", "*.wild.example"}
+	})
+
+	if err := RequireLeafDNSName(leaf.certificate, "client.example.org", false); err != nil {
+		t.Fatalf("case-insensitive exact match: %v", err)
+	}
+	if err := RequireLeafDNSName(leaf.certificate, "client.example.org.", false); err != nil {
+		t.Fatalf("absolute name with a trailing dot: %v", err)
+	}
+	for _, host := range []string{"other.example.org", "sub.client.example.org", "a.wild.example", "", "wild.example"} {
+		if err := RequireLeafDNSName(leaf.certificate, host, false); err == nil {
+			t.Fatalf("host %q matched without a dNSName SAN entry", host)
+		}
+	}
+	if err := RequireLeafDNSName(nil, "client.example.org", false); !errors.Is(err, ErrX5CInvalid) {
+		t.Fatalf("nil leaf error = %v, want ErrX5CInvalid", err)
+	}
+}
+
+// TestRequireLeafDNSNameWildcardCoversOneLabel documents the opt-in RFC 6125
+// Section 6.4.3 rule, which authenticates a TLS server name rather than a
+// protocol identifier: the wildcard is the whole left-most label and matches
+// exactly one label.
+func TestRequireLeafDNSNameWildcardCoversOneLabel(t *testing.T) {
+	leaf := newSigningTestCertificate(t, "wildcard leaf", nil, false, func(template *x509.Certificate) {
+		template.DNSNames = []string{"*.wild.example"}
+	})
+
+	if err := RequireLeafDNSName(leaf.certificate, "a.wild.example", true); err != nil {
+		t.Fatalf("single-label wildcard match: %v", err)
+	}
+	for _, host := range []string{"wild.example", "a.b.wild.example", "wild.example.org"} {
+		if err := RequireLeafDNSName(leaf.certificate, host, true); err == nil {
+			t.Fatalf("host %q matched the wildcard SAN", host)
+		}
+	}
+	partial := newSigningTestCertificate(t, "partial wildcard leaf", nil, false, func(template *x509.Certificate) {
+		template.DNSNames = []string{"a*.wild.example", "*"}
+	})
+	for _, host := range []string{"abc.wild.example", "example"} {
+		if err := RequireLeafDNSName(partial.certificate, host, true); err == nil {
+			t.Fatalf("host %q matched a partial or bare wildcard SAN", host)
+		}
 	}
 }

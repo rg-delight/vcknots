@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -579,4 +580,207 @@ func TestCredentialProofUnconstrainedWhenIssuerListsNone(t *testing.T) {
 	if _, err := jwt.ParseSigned(legacy, []jose.SignatureAlgorithm{jose.ES256}); err != nil {
 		t.Fatalf("failed to parse proof from the legacy entry point: %v", err)
 	}
+}
+
+// TestEncodeCredentialRequestTakesTheJWEAlgFromTheChosenKey covers Section 10
+// (Encrypted Credential Requests and Responses): "The `alg` parameter MUST be
+// present. The JWE `alg` algorithm used MUST be equal to the `alg` value of the
+// chosen JWK. If the selected public key contains a `kid` parameter, the JWE
+// MUST include the same value in the `kid` JWE Header Parameter."
+//
+// Section 12.2.4 defines credential_request_encryption with jwks,
+// enc_values_supported, zip_values_supported and encryption_required only:
+// there is no alg_values_supported member to read the algorithm from.
+func TestEncodeCredentialRequestTakesTheJWEAlgFromTheChosenKey(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	request := map[string]any{"credential_configuration_id": "pid"}
+
+	requestEncryption := func(key jose.JSONWebKey) *types.CredentialIssuerMetadata {
+		return &types.CredentialIssuerMetadata{
+			CredentialRequestEncryption: &types.CredentialRequestEncryption{
+				Jwks:               jose.JSONWebKeySet{Keys: []jose.JSONWebKey{key}},
+				EncValuesSupported: []string{"A128GCM"},
+			},
+		}
+	}
+
+	t.Run("an EC key without alg is encrypted with ECDH-ES", func(t *testing.T) {
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := requestEncryption(jose.JSONWebKey{Key: privateKey.Public(), KeyID: "issuer-ec-1", Use: "enc"})
+		body, contentType, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err != nil {
+			t.Fatalf("EncodeCredentialRequest() error = %v", err)
+		}
+		if contentType != "application/jwt" {
+			t.Fatalf("contentType = %q, want application/jwt", contentType)
+		}
+		header := parseCompactJWEHeader(t, string(body))
+		if header.Algorithm != string(jose.ECDH_ES) {
+			t.Fatalf("JWE alg = %q, want ECDH-ES", header.Algorithm)
+		}
+		if header.KeyID != "issuer-ec-1" {
+			t.Fatalf("JWE kid = %q, want the chosen JWK kid", header.KeyID)
+		}
+	})
+
+	// An RSA JWK used to be handed to jose.NewEncrypter with ECDH-ES, which is
+	// simply the wrong algorithm for the key type.
+	t.Run("an RSA key without alg is encrypted with RSA-OAEP-256", func(t *testing.T) {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := requestEncryption(jose.JSONWebKey{Key: privateKey.Public(), KeyID: "issuer-rsa-1", Use: "enc"})
+		body, contentType, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err != nil {
+			t.Fatalf("EncodeCredentialRequest() error = %v", err)
+		}
+		if contentType != "application/jwt" {
+			t.Fatalf("contentType = %q, want application/jwt", contentType)
+		}
+		header := parseCompactJWEHeader(t, string(body))
+		if header.Algorithm != string(jose.RSA_OAEP_256) {
+			t.Fatalf("JWE alg = %q, want RSA-OAEP-256", header.Algorithm)
+		}
+		if header.KeyID != "issuer-rsa-1" {
+			t.Fatalf("JWE kid = %q, want the chosen JWK kid", header.KeyID)
+		}
+		// The issuer must be able to decrypt what the wallet sent.
+		jwe, err := jose.ParseEncrypted(string(body), []jose.KeyAlgorithm{jose.RSA_OAEP_256}, supportedJWEContentEncryptions())
+		if err != nil {
+			t.Fatalf("failed to parse the request JWE: %v", err)
+		}
+		plaintext, err := jwe.Decrypt(privateKey)
+		if err != nil {
+			t.Fatalf("failed to decrypt the request JWE: %v", err)
+		}
+		if !strings.Contains(string(plaintext), "credential_configuration_id") {
+			t.Fatalf("decrypted request = %s", plaintext)
+		}
+	})
+
+	t.Run("the JWK alg wins over the key type default", func(t *testing.T) {
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := requestEncryption(jose.JSONWebKey{
+			Key: privateKey.Public(), KeyID: "issuer-ec-2", Use: "enc", Algorithm: "ECDH-ES+A256KW",
+		})
+		body, _, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err != nil {
+			t.Fatalf("EncodeCredentialRequest() error = %v", err)
+		}
+		if header := parseCompactJWEHeader(t, string(body)); header.Algorithm != string(jose.ECDH_ES_A256KW) {
+			t.Fatalf("JWE alg = %q, want ECDH-ES+A256KW", header.Algorithm)
+		}
+	})
+
+	// RFC 8017 RSAES-PKCS1-v1_5 is the Bleichenbacher-attackable scheme this
+	// wallet must never be talked into using, whoever asks.
+	t.Run("RSA1_5 is rejected", func(t *testing.T) {
+		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata := requestEncryption(jose.JSONWebKey{
+			Key: privateKey.Public(), KeyID: "issuer-rsa-2", Use: "enc", Algorithm: "RSA1_5",
+		})
+		body, contentType, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err == nil {
+			t.Fatalf("EncodeCredentialRequest() = %s (%s), want an error", body, contentType)
+		}
+		if !strings.Contains(err.Error(), "unsupported encryption algorithm: RSA1_5") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	// A key type that admits no key agreement or key encryption algorithm is an
+	// error rather than a silent ECDH-ES fallback.
+	t.Run("a key type with no encryption algorithm is rejected", func(t *testing.T) {
+		metadata := requestEncryption(jose.JSONWebKey{Key: []byte("symmetric-secret"), KeyID: "issuer-oct-1", Use: "enc"})
+		body, contentType, err := receiver.EncodeCredentialRequest(request, metadata)
+		if err == nil {
+			t.Fatalf("EncodeCredentialRequest() = %s (%s), want an error", body, contentType)
+		}
+		if !strings.Contains(err.Error(), "omits the required alg parameter") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+// TestSelectEncryptionKeyHonoursTheJWKParameters covers the Section 10 key
+// selection rule: "In the case where multiple public keys are available, any may
+// be selected based on the information about each key, such as the `kty` (Key
+// Type), `use` (Public Key Use), `alg` (Algorithm), and other JWK parameters."
+func TestSelectEncryptionKeyHonoursTheJWKParameters(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("a signature key is never selected for encryption", func(t *testing.T) {
+		jwks := &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: ecKey.Public(), KeyID: "issuer-sig-1", Use: "sig"},
+			{Key: rsaKey.Public(), KeyID: "issuer-enc-1", Use: "enc"},
+		}}
+		selected, err := selectEncryptionKey(jwks)
+		if err != nil {
+			t.Fatalf("selectEncryptionKey() error = %v", err)
+		}
+		if selected.KeyID != "issuer-enc-1" {
+			t.Fatalf("selected kid = %q, want issuer-enc-1", selected.KeyID)
+		}
+	})
+
+	t.Run("a key whose alg this wallet cannot use is skipped", func(t *testing.T) {
+		jwks := &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: rsaKey.Public(), KeyID: "issuer-rsa15", Use: "enc", Algorithm: "RSA1_5"},
+			{Key: ecKey.Public(), KeyID: "issuer-ecdh", Use: "enc", Algorithm: "ECDH-ES"},
+		}}
+		selected, err := selectEncryptionKey(jwks)
+		if err != nil {
+			t.Fatalf("selectEncryptionKey() error = %v", err)
+		}
+		if selected.KeyID != "issuer-ecdh" {
+			t.Fatalf("selected kid = %q, want issuer-ecdh", selected.KeyID)
+		}
+	})
+
+	t.Run("a JWKS of signature keys only is an error", func(t *testing.T) {
+		jwks := &jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: ecKey.Public(), KeyID: "issuer-sig-1", Use: "sig"},
+		}}
+		if selected, err := selectEncryptionKey(jwks); err == nil {
+			t.Fatalf("selectEncryptionKey() = %#v, want an error", selected)
+		}
+	})
+
+	t.Run("an empty JWKS is an error", func(t *testing.T) {
+		if selected, err := selectEncryptionKey(&jose.JSONWebKeySet{}); err == nil {
+			t.Fatalf("selectEncryptionKey() = %#v, want an error", selected)
+		}
+	})
+}
+
+// parseCompactJWEHeader reads the protected header of a compact JWE without
+// decrypting it, so a test can assert the alg and kid Section 10 requires.
+func parseCompactJWEHeader(t *testing.T, compact string) jose.Header {
+	t.Helper()
+	jwe, err := jose.ParseEncrypted(
+		compact,
+		[]jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW, jose.RSA_OAEP_256},
+		supportedJWEContentEncryptions(),
+	)
+	if err != nil {
+		t.Fatalf("failed to parse the request JWE: %v", err)
+	}
+	return jwe.Header
 }

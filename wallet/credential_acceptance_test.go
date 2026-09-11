@@ -1159,3 +1159,37 @@ func TestVerifyCredentialWithPolicy(t *testing.T) {
 func ptr[T any](value T) *T {
 	return &value
 }
+
+// TestVerifyCredentialWithPolicyRequiresAProvableHolderBinding pins the
+// fail-closed reading of RequireHolderBinding: a credential that carries a cnf
+// confirmation key is only holder-bound once the wallet has compared it with a
+// holder key, so an acceptance call that supplies none must be refused instead
+// of stored with HolderBound left false.
+func TestVerifyCredentialWithPolicyRequiresAProvableHolderBinding(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := newTestECKey(t)
+	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
+	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
+	resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) { return []jose.JSONWebKey{issuerJWK}, nil }
+
+	w, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{})
+	requiring := &CredentialAcceptancePolicy{ResolveIssuerKeys: resolve, RequireHolderBinding: true}
+
+	t.Run("a cnf compared with the holder key is accepted", func(t *testing.T) {
+		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), wire, credential.SDJwtVC, &holder, requiring)
+		require.NoError(t, err)
+		require.True(t, verification.HolderBound)
+	})
+
+	t.Run("a cnf with no holder key to compare is refused", func(t *testing.T) {
+		_, _, err := w.VerifyCredentialWithPolicy(t.Context(), wire, credential.SDJwtVC, nil, requiring)
+		require.ErrorIs(t, err, ErrHolderBindingMissing)
+	})
+
+	t.Run("without the requirement the same credential is accepted unbound", func(t *testing.T) {
+		optional := &CredentialAcceptancePolicy{ResolveIssuerKeys: resolve}
+		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), wire, credential.SDJwtVC, nil, optional)
+		require.NoError(t, err)
+		require.False(t, verification.HolderBound)
+	})
+}

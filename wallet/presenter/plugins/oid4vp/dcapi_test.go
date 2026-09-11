@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -341,4 +342,92 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 // profile without changing the shared fixture file.
 func (f *requestObjectFixture) presenterWithHAIP() *Oid4vpPresenter {
 	return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP})
+}
+
+// TestParseRequestRejectsWebOriginClientIDFromTheWire pins that "web-origin" is
+// an identifier the Wallet mints for itself, not one a Verifier may claim.
+//
+// OID4VP 1.0 Appendix A.2: "The `client_id` parameter MUST be omitted in
+// unsigned requests defined in (#unsigned_request). The Wallet MUST ignore any
+// `client_id` parameter that is present in an unsigned request." Accepting the
+// prefix off the wire would reintroduce, under a different spelling, what
+// Section 5.9.3 forbids for the companion prefix: "This reserved Client
+// Identifier Prefix is defined in (#dc_api_request). The Wallet MUST NOT accept
+// this Client Identifier Prefix in requests." Such a request derives no
+// response endpoint binding from its Client Identifier, so a direct_post.jwt
+// response_uri would be unauthenticated.
+func TestParseRequestRejectsWebOriginClientIDFromTheWire(t *testing.T) {
+	const webOriginClientID = "web-origin:https://verifier.example"
+
+	t.Run("query parameters", func(t *testing.T) {
+		p := &Oid4vpPresenter{}
+		uri := "openid4vp://present?" + url.Values{
+			"client_id":     {webOriginClientID},
+			"response_type": {"vp_token"},
+			"nonce":         {"n-1"},
+			"response_mode": {"direct_post.jwt"},
+			"response_uri":  {"https://attacker.example/cb"},
+			"dcql_query":    {string(dcapiRaw(t, dcapiDCQL()))},
+		}.Encode()
+		_, err := p.ParsePresentationRequest(uri)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "web-origin")
+	})
+
+	t.Run("signed Request Object by value with an outer client_id", func(t *testing.T) {
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		claims["client_id"] = webOriginClientID
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id": {webOriginClientID},
+			"request":   {f.sign(t, claims, nil)},
+		}.Encode()
+		_, err := f.presenter().ParsePresentationRequest(uri)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "web-origin")
+	})
+
+	t.Run("signed Request Object by reference", func(t *testing.T) {
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		claims["client_id"] = webOriginClientID
+		f.requestObject = []byte(f.sign(t, claims, nil))
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id":   {webOriginClientID},
+			"request_uri": {f.server.URL + "/request-object"},
+		}.Encode()
+		_, err := f.presenter().ParsePresentationRequest(uri)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "web-origin")
+	})
+
+	t.Run("Draft24 query parameters", func(t *testing.T) {
+		p := &Oid4vpPresenter{}
+		uri := "openid4vp://present?" + url.Values{
+			"client_id":               {webOriginClientID},
+			"response_type":           {"vp_token"},
+			"nonce":                   {"n-1"},
+			"response_mode":           {"direct_post"},
+			"response_uri":            {"https://attacker.example/cb"},
+			"presentation_definition": {`{"id":"pd","input_descriptors":[]}`},
+		}.Encode()
+		_, err := p.ParseDraft24PresentationRequest(uri)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "web-origin")
+	})
+
+	t.Run("Draft24 Request Object claim", func(t *testing.T) {
+		// Draft24 accepts a Request Object without an outer client_id, so the
+		// rejection here comes from the parameter assembly that reads the
+		// Request Object's own client_id claim, not from the early outer check.
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		claims["client_id"] = webOriginClientID
+		claims["response_mode"] = "direct_post"
+		claims["response_uri"] = "https://attacker.example/cb"
+		uri := "openid4vp://authorize?" + url.Values{"request": {f.sign(t, claims, nil)}}.Encode()
+		_, err := f.presenter().ParseDraft24PresentationRequest(uri)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "web-origin")
+	})
 }

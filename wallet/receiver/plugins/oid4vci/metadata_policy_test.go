@@ -320,6 +320,44 @@ func TestFetchIssuerMetadataRejectsIssuerMismatchInSignedMetadata(t *testing.T) 
 	}
 }
 
+// TestFetchIssuerMetadataRejectsTrailingSlashInSignedMetadataSub pins that the
+// sub comparison is exact. §12.2.4 states the rule for a Credential Issuer's
+// identity: "The value MUST be identical to the Credential Issuer's identifier
+// value into which the well-known URI string was inserted to create the URL used
+// to retrieve the metadata. If these values are not identical (when compared
+// using a simple string comparison with no normalization), the data contained in
+// the response MUST NOT be used." A sub that differs only by a trailing slash is
+// therefore a different identifier, not the same one written differently.
+func TestFetchIssuerMetadataRejectsTrailingSlashInSignedMetadataSub(t *testing.T) {
+	fixture := newSignedMetadataFixture(t)
+	serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+		return "application/jwt", fixture.sign(t, map[string]any{
+			"sub":                 identifier + "/",
+			"iat":                 time.Now().Unix(),
+			"credential_issuer":   identifier,
+			"credential_endpoint": identifier + "/credential",
+		}, []*x509.Certificate{fixture.leaf})
+	})
+
+	receiver := &Oid4vciReceiver{
+		HTTPClient: client,
+		AllowHTTP:  true,
+		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
+			Request:                     true,
+			TrustAnchors:                []*x509.Certificate{fixture.caCert},
+			AllowUnadvertisedRevocation: true,
+		},
+	}
+
+	metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+	if err == nil {
+		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
+	}
+	if !strings.Contains(err.Error(), `does not match the credential issuer "`+serverURL+`"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 // HAIP §4.1: "the X.509 certificate of the trust anchor MUST NOT be included in
 // the `x5c` JOSE header of the signed request."
 func TestFetchIssuerMetadataRejectsAnchorInSignedMetadataX5C(t *testing.T) {

@@ -1064,7 +1064,7 @@ func TestOid4vpPresenter_ClientIDParsingAndRedirectMismatch(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unsupported client_id prefix")
 		}
-		if !strings.Contains(err.Error(), "unsupported client_id prefix") {
+		if !strings.Contains(err.Error(), `client_id prefix "openid_federationx" is not a supported Client Identifier Prefix`) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

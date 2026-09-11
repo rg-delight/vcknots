@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,6 +219,95 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	parsed, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return parsed
+}
+
+// serverObservations records what a test's httptest handler observed about the
+// requests the wallet sent. The testing package requires t.FailNow — which
+// every require.* helper calls — to run on the goroutine running the test, so a
+// handler must never assert directly: on a server goroutine require.* only ends
+// that goroutine, and the wallet sees a truncated response instead of the real
+// reason. A handler therefore asserts against the recorder (every assert.*
+// helper accepts it and reports whether the expectation held) and answers the
+// request with the status a real server would return. check reports the verdict
+// from the test goroutine.
+type serverObservations struct {
+	mu       sync.Mutex
+	failures []string
+	calls    map[string]int
+	captured map[string]any
+	expected []string
+}
+
+// newServerObservations registers a recorder whose verdict is reported when the
+// test finishes. expectedEndpoints names the endpoints the test requires the
+// wallet to exercise, so an in-handler expectation that never ran fails the
+// test instead of proving nothing in silence.
+func newServerObservations(t *testing.T, expectedEndpoints ...string) *serverObservations {
+	t.Helper()
+	obs := &serverObservations{
+		calls:    make(map[string]int),
+		captured: make(map[string]any),
+		expected: expectedEndpoints,
+	}
+	t.Cleanup(func() { obs.check(t) })
+	return obs
+}
+
+// Errorf records a failed expectation, which makes *serverObservations an
+// assert.TestingT: a handler can use the same assert.* helpers as the test body
+// and branch on their bool result instead of calling t.FailNow off-goroutine.
+func (o *serverObservations) Errorf(format string, args ...any) {
+	message := strings.TrimSpace(fmt.Sprintf(format, args...))
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.failures = append(o.failures, message)
+}
+
+// called records that a request reached endpoint and returns how many requests
+// that endpoint has served, including this one.
+func (o *serverObservations) called(endpoint string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls[endpoint]++
+	return o.calls[endpoint]
+}
+
+// callCount reports how many requests reached endpoint.
+func (o *serverObservations) callCount(endpoint string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls[endpoint]
+}
+
+// set stores a value a handler captured from a request so the test body, or a
+// later request, can read it back under the same lock.
+func (o *serverObservations) set(key string, value any) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.captured[key] = value
+}
+
+// get returns a value stored by set.
+func (o *serverObservations) get(key string) any {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.captured[key]
+}
+
+// check fails t with every recorded failure and with every expected endpoint
+// that no request ever reached. It must run on the goroutine running the test.
+func (o *serverObservations) check(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, failure := range o.failures {
+		t.Errorf("server observed: %s", failure)
+	}
+	for _, endpoint := range o.expected {
+		if o.calls[endpoint] == 0 {
+			t.Errorf("server observed no request for expected endpoint %q", endpoint)
+		}
+	}
 }
 
 func newReceiveCredentialTestServer(t *testing.T) (*url.URL, <-chan url.Values, func()) {
@@ -927,18 +1017,39 @@ func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
 	encryptionPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
-	var decryptedPayload map[string]any
+	obs := newServerObservations(t, "response_uri")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.NoError(t, r.ParseForm())
+		obs.called("response_uri")
+		if !assert.Equal(obs, http.MethodPost, r.Method) {
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		if !assert.NoError(obs, r.ParseForm()) {
+			http.Error(w, "malformed authorization response form", http.StatusBadRequest)
+			return
+		}
 		encryptedResponse := r.Form.Get("response")
-		require.NotEmpty(t, encryptedResponse)
+		if !assert.NotEmpty(obs, encryptedResponse) {
+			http.Error(w, "missing response parameter", http.StatusBadRequest)
+			return
+		}
 
 		jwe, err := jose.ParseEncrypted(encryptedResponse, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A128GCM})
-		require.NoError(t, err)
+		if !assert.NoError(obs, err) {
+			http.Error(w, "response is not a JWE the verifier accepts", http.StatusBadRequest)
+			return
+		}
 		plaintext, err := jwe.Decrypt(encryptionPrivateKey)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(plaintext, &decryptedPayload))
+		if !assert.NoError(obs, err) {
+			http.Error(w, "response cannot be decrypted", http.StatusBadRequest)
+			return
+		}
+		var payload map[string]any
+		if !assert.NoError(obs, json.Unmarshal(plaintext, &payload)) {
+			http.Error(w, "response payload is not JSON", http.StatusBadRequest)
+			return
+		}
+		obs.set("decrypted_payload", payload)
 		_, _ = w.Write([]byte(`{"redirect_uri":"https://example.com/done"}`))
 	}))
 	defer server.Close()
@@ -968,6 +1079,7 @@ func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
 	body, err := controller.SubmitOID4VPFinalAuthorizationResponse(uri, holderKey)
 	require.NoError(t, err)
 	assert.Contains(t, body, "redirect_uri")
+	decryptedPayload, _ := obs.get("decrypted_payload").(map[string]any)
 	assert.Equal(t, "state-1", decryptedPayload["state"])
 	vpToken, ok := decryptedPayload["vp_token"].(map[string]any)
 	require.True(t, ok)
@@ -1047,13 +1159,22 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	issuedCredential := buildTestSDJWTVCWithIssuerKey(t, issuerKey, holderKey, map[string]string{"given_name": "Taro"})
 
 	var server *httptest.Server
-	pushedState := ""
-	tokenAttempts := 0
-	credentialAttempts := 0
-	notificationAttempts := 0
+	obs := newServerObservations(t,
+		"issuer-metadata",
+		"as-metadata",
+		"challenge",
+		"par",
+		"authorize",
+		"token",
+		"nonce",
+		"credential",
+		"deferred",
+		"notification",
+	)
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-credential-issuer":
+			obs.called("issuer-metadata")
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
 				"credential_issuer":            server.URL,
 				"credential_endpoint":          server.URL + "/credential",
@@ -1080,6 +1201,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				},
 			})
 		case "/.well-known/oauth-authorization-server":
+			obs.called("as-metadata")
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
 				"issuer":                                server.URL,
 				"authorization_endpoint":                server.URL + "/authorize",
@@ -1090,33 +1212,92 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				"response_types_supported":                        []string{"code"},
 			})
 		case "/challenge":
+			obs.called("challenge")
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"attestation_challenge": "challenge-1"})
 		case "/par":
-			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation"))
-			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation-PoP"))
-			require.NoError(t, r.ParseForm())
-			require.Equal(t, "code", r.Form.Get("response_type"))
-			require.Equal(t, "client-1", r.Form.Get("client_id"))
-			require.Equal(t, "openid-credential-offer://callback", r.Form.Get("redirect_uri"))
-			require.Equal(t, "pid-scope", r.Form.Get("scope"))
-			require.Equal(t, "S256", r.Form.Get("code_challenge_method"))
-			require.Equal(t, "issuer-state-1", r.Form.Get("issuer_state"))
-			pushedState = r.Form.Get("state")
-			require.NotEmpty(t, pushedState)
+			obs.called("par")
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation")) {
+				http.Error(w, "missing OAuth-Client-Attestation", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation-PoP")) {
+				http.Error(w, "missing OAuth-Client-Attestation-PoP", http.StatusBadRequest)
+				return
+			}
+			if !assert.NoError(obs, r.ParseForm()) {
+				http.Error(w, "malformed pushed authorization request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "code", r.Form.Get("response_type")) {
+				http.Error(w, "unsupported_response_type", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "client-1", r.Form.Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "openid-credential-offer://callback", r.Form.Get("redirect_uri")) {
+				http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "pid-scope", r.Form.Get("scope")) {
+				http.Error(w, "invalid_scope", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "S256", r.Form.Get("code_challenge_method")) {
+				http.Error(w, "invalid code_challenge_method", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "issuer-state-1", r.Form.Get("issuer_state")) {
+				http.Error(w, "invalid issuer_state", http.StatusBadRequest)
+				return
+			}
+			pushedState := r.Form.Get("state")
+			if !assert.NotEmpty(obs, pushedState) {
+				http.Error(w, "missing state", http.StatusBadRequest)
+				return
+			}
+			obs.set("pushed_state", pushedState)
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
 		case "/authorize":
-			require.Equal(t, "client-1", r.URL.Query().Get("client_id"))
-			require.Equal(t, "urn:request:1", r.URL.Query().Get("request_uri"))
+			obs.called("authorize")
+			if !assert.Equal(obs, "client-1", r.URL.Query().Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "urn:request:1", r.URL.Query().Get("request_uri")) {
+				http.Error(w, "invalid_request_uri", http.StatusBadRequest)
+				return
+			}
+			pushedState, _ := obs.get("pushed_state").(string)
 			w.Header().Set("Location", "openid-credential-offer://callback?code=code-1&state="+url.QueryEscape(pushedState))
 			w.WriteHeader(http.StatusFound)
 		case "/token":
-			tokenAttempts++
-			require.NotEmpty(t, r.Header.Get("DPoP"))
-			require.NotEmpty(t, r.Header.Get("OAuth-Client-Attestation"))
-			require.NoError(t, r.ParseForm())
-			require.Equal(t, "authorization_code", r.Form.Get("grant_type"))
-			require.Equal(t, "code-1", r.Form.Get("code"))
-			require.Equal(t, "client-1", r.Form.Get("client_id"))
+			tokenAttempts := obs.called("token")
+			if !assert.NotEmpty(obs, r.Header.Get("DPoP")) {
+				http.Error(w, "missing DPoP proof", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation")) {
+				http.Error(w, "missing OAuth-Client-Attestation", http.StatusBadRequest)
+				return
+			}
+			if !assert.NoError(obs, r.ParseForm()) {
+				http.Error(w, "malformed token request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "authorization_code", r.Form.Get("grant_type")) {
+				http.Error(w, "unsupported_grant_type", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "code-1", r.Form.Get("code")) {
+				http.Error(w, "invalid_grant", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "client-1", r.Form.Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
 			if tokenAttempts == 1 {
 				w.Header().Set("DPoP-Nonce", "token-nonce-1")
 				http.Error(w, "use nonce", http.StatusUnauthorized)
@@ -1124,51 +1305,115 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			}
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
 		case "/nonce":
+			obs.called("nonce")
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "credential-nonce-1"})
 		case "/credential":
-			credentialAttempts++
-			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
-			require.NotEmpty(t, r.Header.Get("DPoP"))
+			credentialAttempts := obs.called("credential")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("DPoP")) {
+				http.Error(w, "missing DPoP proof", http.StatusBadRequest)
+				return
+			}
 			if credentialAttempts == 1 {
 				w.Header().Set("DPoP-Nonce", "credential-nonce-1")
 				http.Error(w, "use nonce", http.StatusUnauthorized)
 				return
 			}
-			body := decodeEncryptedCredentialRequest(t, r, requestEncryptionKey)
-			require.Equal(t, "pid", body["credential_configuration_id"])
+			body, decoded := decodeObservedCredentialRequest(obs, r, requestEncryptionKey)
+			if !decoded {
+				http.Error(w, "malformed credential request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "pid", body["credential_configuration_id"]) {
+				http.Error(w, "invalid credential_configuration_id", http.StatusBadRequest)
+				return
+			}
 			proofs, ok := body["proofs"].(map[string]any)
-			require.True(t, ok)
-			require.NotEmpty(t, proofs["jwt"])
+			if !assert.True(obs, ok) {
+				http.Error(w, "invalid_proof", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, proofs["jwt"]) {
+				http.Error(w, "invalid_proof", http.StatusBadRequest)
+				return
+			}
 			responseEncryption, ok := body["credential_response_encryption"].(map[string]any)
-			require.True(t, ok)
+			if !assert.True(obs, ok) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
 			// OID4VCI Final §8.2: credential_response_encryption carries jwk+enc,
 			// with no top-level alg.
 			_, hasAlg := responseEncryption["alg"]
-			require.False(t, hasAlg)
-			require.NotNil(t, responseEncryption["jwk"])
-			require.Equal(t, "A128GCM", responseEncryption["enc"])
-			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{"transaction_id": "tx-1"})
+			if !assert.False(obs, hasAlg) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotNil(obs, responseEncryption["jwk"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "A128GCM", responseEncryption["enc"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]string{"transaction_id": "tx-1"})
 		case "/deferred":
-			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
+			obs.called("deferred")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
 			// §9.1: "Deferred Credential Request encryption MUST be used if
 			// the credential_response_encryption parameter is included."
-			body := decodeEncryptedCredentialRequest(t, r, requestEncryptionKey)
-			require.Equal(t, "tx-1", body["transaction_id"])
+			body, decoded := decodeObservedCredentialRequest(obs, r, requestEncryptionKey)
+			if !decoded {
+				http.Error(w, "malformed deferred credential request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "tx-1", body["transaction_id"]) {
+				http.Error(w, "invalid_transaction_id", http.StatusBadRequest)
+				return
+			}
 			deferredEncryption, ok := body["credential_response_encryption"].(map[string]any)
-			require.True(t, ok, "deferred request is missing credential_response_encryption: %#v", body)
-			require.NotNil(t, deferredEncryption["jwk"])
-			require.Equal(t, "A128GCM", deferredEncryption["enc"])
-			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{
+			if !assert.True(obs, ok, "deferred request is missing credential_response_encryption: %#v", body) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotNil(obs, deferredEncryption["jwk"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "A128GCM", deferredEncryption["enc"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]string{
 				"credential":      issuedCredential,
 				"notification_id": "notification-1",
 			})
 		case "/notification":
-			notificationAttempts++
-			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
+			obs.called("notification")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
 			var body receiverTypes.NotificationRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-			require.Equal(t, "notification-1", body.NotificationID)
-			require.Equal(t, "credential_accepted", body.Event)
+			if !assert.NoError(obs, json.NewDecoder(r.Body).Decode(&body)) {
+				http.Error(w, "malformed notification request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "notification-1", body.NotificationID) {
+				http.Error(w, "invalid_notification_id", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "credential_accepted", body.Event) {
+				http.Error(w, "invalid_notification_request", http.StatusBadRequest)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -1203,19 +1448,22 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	require.Len(t, result.SavedCredentials, 1)
 	require.Equal(t, []byte(issuedCredential), result.SavedCredentials[0].Entry.Raw)
 	require.Equal(t, string(credential.SDJwtVC), result.SavedCredentials[0].Entry.MimeType)
-	require.Equal(t, 2, tokenAttempts)
-	require.Equal(t, 2, credentialAttempts)
-	require.Equal(t, 1, notificationAttempts)
+	require.Equal(t, 2, obs.callCount("token"))
+	require.Equal(t, 2, obs.callCount("credential"))
+	require.Equal(t, 1, obs.callCount("notification"))
 }
 
-// decodeEncryptedCredentialRequest decodes a Credential Request body that the
+// decodeObservedCredentialRequest decodes a Credential Request body that the
 // wallet encrypted to the issuer's credential_request_encryption key
 // (OpenID4VCI Final §8.1), or a plain JSON body when the issuer advertises no
-// request encryption.
-func decodeEncryptedCredentialRequest(t *testing.T, r *http.Request, key jose.JSONWebKey) map[string]any {
-	t.Helper()
+// request encryption. It records every decoding failure instead of asserting,
+// so it is safe to call from an httptest handler goroutine, and reports whether
+// the body decoded.
+func decodeObservedCredentialRequest(obs *serverObservations, r *http.Request, key jose.JSONWebKey) (map[string]any, bool) {
 	raw, err := io.ReadAll(r.Body)
-	require.NoError(t, err)
+	if !assert.NoError(obs, err) {
+		return nil, false
+	}
 	plaintext := raw
 	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/jwt") {
 		encrypted, err := jose.ParseEncryptedCompact(
@@ -1223,13 +1471,52 @@ func decodeEncryptedCredentialRequest(t *testing.T, r *http.Request, key jose.JS
 			[]jose.KeyAlgorithm{jose.ECDH_ES},
 			[]jose.ContentEncryption{jose.A128GCM, jose.A256GCM},
 		)
-		require.NoError(t, err)
+		if !assert.NoError(obs, err) {
+			return nil, false
+		}
 		plaintext, err = encrypted.Decrypt(key.Key)
-		require.NoError(t, err)
+		if !assert.NoError(obs, err) {
+			return nil, false
+		}
 	}
 	var body map[string]any
-	require.NoError(t, json.Unmarshal(plaintext, &body))
-	return body
+	if !assert.NoError(obs, json.Unmarshal(plaintext, &body)) {
+		return nil, false
+	}
+	return body, true
+}
+
+// writeObservedFinalCredentialResponse writes an encrypted Credential Response
+// (OpenID4VCI Final §8.2) from a handler goroutine, recording an encryption
+// failure instead of asserting on it.
+func writeObservedFinalCredentialResponse(obs *serverObservations, w http.ResponseWriter, key jose.JSONWebKey, payload any) {
+	plaintext, err := json.Marshal(payload)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot serialize credential response", http.StatusInternalServerError)
+		return
+	}
+	encrypter, err := jose.NewEncrypter(
+		jose.A128GCM,
+		jose.Recipient{Algorithm: jose.ECDH_ES, Key: key.Public().Key, KeyID: key.KeyID},
+		(&jose.EncrypterOptions{}).WithContentType("json"),
+	)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot encrypt credential response", http.StatusInternalServerError)
+		return
+	}
+	encrypted, err := encrypter.Encrypt(plaintext)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot encrypt credential response", http.StatusInternalServerError)
+		return
+	}
+	serialized, err := encrypted.CompactSerialize()
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot serialize encrypted credential response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/jwt")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(serialized))
 }
 
 func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
@@ -1550,13 +1837,13 @@ func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.
 		accessTokenValue = "dpop-access-token"
 	)
 
-	var tokenRequests int
+	obs := newServerObservations(t, "token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
 			return
 		}
-		tokenRequests++
+		tokenRequests := obs.called("token")
 		dpopProof := r.Header.Get("DPoP")
 		if dpopProof == "" {
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
@@ -1618,7 +1905,7 @@ func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, token)
 	assert.Equal(t, accessTokenValue, token.Token)
-	assert.Equal(t, 2, tokenRequests)
+	assert.Equal(t, 2, obs.callCount("token"))
 }
 
 func extractPayloadField(t *testing.T, compactJWT string, field string) any {
@@ -1634,17 +1921,27 @@ func extractPayloadField(t *testing.T, compactJWT string, field string) any {
 	return value
 }
 
-func extractHeaderField(t *testing.T, compactJWT string, field string) any {
-	t.Helper()
+// observedHeaderField reads a compact JWT header field on behalf of an httptest
+// handler, recording a malformed proof instead of asserting on the server
+// goroutine, and reports whether the field was found.
+func observedHeaderField(obs *serverObservations, compactJWT string, field string) (any, bool) {
 	parts := strings.Split(compactJWT, ".")
-	require.Len(t, parts, 3)
+	if !assert.Len(obs, parts, 3) {
+		return nil, false
+	}
 	b, err := base64.RawURLEncoding.DecodeString(parts[0])
-	require.NoError(t, err)
+	if !assert.NoError(obs, err) {
+		return nil, false
+	}
 	var header map[string]any
-	require.NoError(t, json.Unmarshal(b, &header))
+	if !assert.NoError(obs, json.Unmarshal(b, &header)) {
+		return nil, false
+	}
 	value, ok := header[field]
-	require.True(t, ok, "field %q not found in header", field)
-	return value
+	if !assert.True(obs, ok, "field %q not found in header", field) {
+		return nil, false
+	}
+	return value, true
 }
 
 func TestWallet_generateDPoPProof_SignatureVerifies(t *testing.T) {
@@ -3002,10 +3299,11 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 		dpopNonce        = "issuer-dpop-nonce"
 	)
 
-	var credentialRequests int
+	obs := newServerObservations(t, "nonce", "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nonce":
+			obs.called("nonce")
 			if r.Method != http.MethodPost {
 				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 				return
@@ -3014,7 +3312,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
 		case "/credential":
-			credentialRequests++
+			credentialRequests := obs.called("credential")
 			if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 				http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 				return
@@ -3104,7 +3402,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.NoError(t, err)
 	require.NotNil(t, credential)
-	assert.Equal(t, 2, credentialRequests)
+	assert.Equal(t, 2, obs.callCount("credential"))
 }
 
 func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *testing.T) {
@@ -3123,11 +3421,13 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 
 	const accessTokenValue = "dpop-access-token"
 
+	obs := newServerObservations(t, "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/credential" {
 			http.NotFound(w, r)
 			return
 		}
+		obs.called("credential")
 		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 			return
@@ -3137,8 +3437,16 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
 			return
 		}
-		jwk, ok := extractHeaderField(t, dpopProof, "jwk").(map[string]any)
-		require.True(t, ok)
+		headerJWK, found := observedHeaderField(obs, dpopProof, "jwk")
+		if !found {
+			http.Error(w, "DPoP proof has no jwk header", http.StatusBadRequest)
+			return
+		}
+		jwk, ok := headerJWK.(map[string]any)
+		if !assert.True(obs, ok) {
+			http.Error(w, "DPoP proof jwk header is not an object", http.StatusBadRequest)
+			return
+		}
 		if got := jwk["kid"]; got != dpopKey.ID() {
 			http.Error(w, fmt.Sprintf("DPoP proof kid = %v", got), http.StatusBadRequest)
 			return
@@ -3197,13 +3505,15 @@ func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredential
 		nonceEndpointDPoPNonce = "nonce-endpoint-dpop-nonce"
 	)
 
-	var credentialRequests int
-	var nonceRequests int
+	obs := newServerObservations(t, "nonce", "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nonce":
-			nonceRequests++
-			require.Zero(t, credentialRequests, "c_nonce must be fetched before requesting the credential")
+			obs.called("nonce")
+			if !assert.Zero(obs, obs.callCount("credential"), "c_nonce must be fetched before requesting the credential") {
+				http.Error(w, "c_nonce must be fetched before requesting the credential", http.StatusBadRequest)
+				return
+			}
 			if r.Method != http.MethodPost {
 				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 				return
@@ -3218,7 +3528,7 @@ func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredential
 			return
 		}
 
-		credentialRequests++
+		credentialRequests := obs.called("credential")
 		dpopProof := r.Header.Get("DPoP")
 		if dpopProof == "" {
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
@@ -3286,8 +3596,8 @@ func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredential
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.NoError(t, err)
 	require.NotNil(t, credential)
-	assert.Equal(t, 2, credentialRequests)
-	assert.Equal(t, 1, nonceRequests)
+	assert.Equal(t, 2, obs.callCount("credential"))
+	assert.Equal(t, 1, obs.callCount("nonce"))
 }
 
 func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t *testing.T) {
@@ -3304,13 +3614,13 @@ func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t
 
 	const accessTokenValue = "dpop-access-token"
 
-	var credentialRequests int
+	obs := newServerObservations(t, "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/credential" {
 			http.NotFound(w, r)
 			return
 		}
-		credentialRequests++
+		obs.called("credential")
 		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 			return
@@ -3352,7 +3662,7 @@ func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t
 	require.Error(t, err)
 	require.Nil(t, credential)
 	assert.ErrorIs(t, err, receiverTypes.ErrUseDPoPNonce)
-	assert.Equal(t, 2, credentialRequests)
+	assert.Equal(t, 2, obs.callCount("credential"))
 }
 
 func TestAccessTokenCredentialIdentifier(t *testing.T) {
@@ -4809,9 +5119,12 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			controller, key := receiveCredentialForPresentationTest(t)
 			captured := make(chan url.Values, 1)
+			obs := newServerObservations(t, "response_uri")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if err := r.ParseForm(); err != nil {
-					t.Error(err)
+				obs.called("response_uri")
+				if !assert.NoError(obs, r.ParseForm()) {
+					http.Error(w, "malformed authorization response form", http.StatusBadRequest)
+					return
 				}
 				captured <- r.PostForm
 				w.Header().Set("Content-Type", "application/json")

@@ -2,6 +2,7 @@ package x509
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -133,4 +134,97 @@ func x5cHeaderEntries(raw any) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("x5c header must be an array of base64-encoded certificates: %w", ErrX5CInvalid)
 	}
+}
+
+// LeafThumbprintB64u returns the OpenID4VP 1.0 Section 5.9.3 x509_hash value of
+// a leaf certificate: "the base64url-encoded value of the SHA-256 hash of the
+// DER-encoded X.509 certificate". An empty certificate yields the empty string,
+// which never equals a well-formed identifier.
+func LeafThumbprintB64u(leaf *x509.Certificate) string {
+	if leaf == nil || len(leaf.Raw) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(leaf.Raw)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+// RequireLeafThumbprint enforces the OpenID4VP 1.0 Section 5.9.3 x509_hash
+// binding: "the original Client Identifier (the part without the `x509_hash:`
+// prefix) MUST be a hash and match the hash of the leaf certificate passed with
+// the request". expectedB64u is compared byte for byte, because base64url is
+// the only encoding the section defines for it.
+func RequireLeafThumbprint(leaf *x509.Certificate, expectedB64u string) error {
+	if leaf == nil || len(leaf.Raw) == 0 {
+		return fmt.Errorf("x5c leaf certificate is empty: %w", ErrX5CInvalid)
+	}
+	if strings.TrimSpace(expectedB64u) == "" {
+		return errors.New("x509_hash client_id is empty")
+	}
+	if LeafThumbprintB64u(leaf) != expectedB64u {
+		return errors.New("x509_hash client_id mismatch")
+	}
+	return nil
+}
+
+// RequireLeafDNSName enforces that host appears as a dNSName Subject
+// Alternative Name of the leaf certificate.
+//
+// wildcard selects the matching rule, and every caller in this library passes
+// false. OpenID4VP 1.0 Section 5.9.3 says of x509_san_dns that "the original
+// Client Identifier (the part after the `x509_san_dns:` prefix) MUST be a DNS
+// name and match a `dNSName` Subject Alternative Name (SAN) [@!RFC5280] entry
+// in the leaf certificate passed with the request", and the same exact match is
+// what OpenID4VCI Section 12.2.2 leaves for a credential issuer host: the
+// identifier is the name being authenticated, not a server the wallet happens
+// to be connected to. A wildcard SAN such as *.example.com would let one
+// certificate speak for every subdomain, so a Client Identifier is matched
+// exactly (case-insensitively, RFC 4343) and never through a wildcard.
+//
+// wildcard true applies the RFC 6125 Section 6.4.3 left-most-label rule
+// instead, for a caller that is authenticating a TLS server name rather than a
+// protocol identifier. The wildcard must be the entire left-most label and
+// matches exactly one label, so *.example.com matches a.example.com but neither
+// example.com nor a.b.example.com.
+func RequireLeafDNSName(leaf *x509.Certificate, host string, wildcard bool) error {
+	if leaf == nil || len(leaf.Raw) == 0 {
+		return fmt.Errorf("x5c leaf certificate is empty: %w", ErrX5CInvalid)
+	}
+	normalizedHost := normalizeDNSName(host)
+	if normalizedHost == "" {
+		return errors.New("DNS name to match is empty")
+	}
+	for _, name := range leaf.DNSNames {
+		candidate := normalizeDNSName(name)
+		if candidate == "" {
+			continue
+		}
+		if candidate == normalizedHost {
+			return nil
+		}
+		if wildcard && matchWildcardDNSName(candidate, normalizedHost) {
+			return nil
+		}
+	}
+	return errors.New("SAN of the certificate and client_id did not match")
+}
+
+// normalizeDNSName lowercases a DNS name and drops the trailing dot of an
+// absolute name, which is the case-insensitive comparison RFC 4343 defines. No
+// other normalization is applied: an internationalized name must already be in
+// its A-label form, as RFC 5280 requires inside a dNSName SAN.
+func normalizeDNSName(name string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(name), ".")
+	return strings.ToLower(trimmed)
+}
+
+// matchWildcardDNSName applies RFC 6125 Section 6.4.3 to an already normalized
+// SAN entry and host: the wildcard is the complete left-most label of the SAN
+// and covers exactly one label of the host.
+func matchWildcardDNSName(san string, host string) bool {
+	suffix, found := strings.CutPrefix(san, "*.")
+	if !found || suffix == "" || strings.Contains(suffix, "*") {
+		return false
+	}
+	label, rest, found := strings.Cut(host, ".")
+	return found && label != "" && rest == suffix
 }

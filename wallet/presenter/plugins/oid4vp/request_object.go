@@ -2,9 +2,7 @@ package oid4vp
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -375,24 +373,23 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 	return nil
 }
 
+// bindX509ClientID binds an x509_hash or x509_san_dns Client Identifier to the
+// leaf certificate that signed the Request Object, and then to the response
+// endpoint the request names.
+//
+// The DNS match is exact, never wildcard (commonX509.RequireLeafDNSName is
+// called with wildcard=false): OID4VP 1.0 Section 5.9.3 requires that the
+// original Client Identifier "MUST be a DNS name and match a `dNSName` Subject
+// Alternative Name (SAN) [@!RFC5280] entry in the leaf certificate passed with
+// the request", so a wildcard SAN such as *.example.com must not let one
+// certificate speak for every subdomain of a Verifier.
 func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request *CredentialPresentationRequest) error {
 	if clientID.prefix == OID4VPClientIDPrefixX509Hash {
-		digest := sha256.Sum256(leaf.Raw)
-		if base64.RawURLEncoding.EncodeToString(digest[:]) != clientID.original {
-			return errors.New("x509_hash client_id mismatch")
-		}
 		// Final 5.9.3 and HAIP 5: x509_hash does not imply a DNS binding.
-		return nil
+		return commonX509.RequireLeafThumbprint(leaf, clientID.original)
 	}
-	matched := false
-	for _, name := range leaf.DNSNames {
-		if strings.EqualFold(name, clientID.original) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		return errors.New("SAN of the certificate and client_id did not match")
+	if err := commonX509.RequireLeafDNSName(leaf, clientID.original, false); err != nil {
+		return err
 	}
 	boundURI := request.RedirectURI
 	if request.ResponseMode == OAuthAuthzReqResponseModeDirectPost || request.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,35 +28,32 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-func encryptFinalCredentialResponse(t *testing.T, key jose.JSONWebKey, payload any) string {
-	t.Helper()
-	plaintext, err := json.Marshal(payload)
-	require.NoError(t, err)
-	encrypter, err := jose.NewEncrypter(
-		jose.A128GCM,
-		jose.Recipient{Algorithm: jose.ECDH_ES, Key: key.Public().Key, KeyID: key.KeyID},
-		(&jose.EncrypterOptions{}).WithContentType("json"),
-	)
-	require.NoError(t, err)
-	encrypted, err := encrypter.Encrypt(plaintext)
-	require.NoError(t, err)
-	serialized, err := encrypted.CompactSerialize()
-	require.NoError(t, err)
-	return serialized
+// mustDecodeObservedCredentialRequest decodes a Credential Request body from
+// the fixture's handler goroutine, recording a decoding failure on obs instead
+// of asserting off the test goroutine. A body that does not decode is reported
+// when the test ends and is returned as nil here.
+func mustDecodeObservedCredentialRequest(obs *serverObservations, r *http.Request, key jose.JSONWebKey) map[string]any {
+	body, _ := decodeObservedCredentialRequest(obs, r, key)
+	return body
 }
 
-func writeEncryptedFinalCredentialResponse(t *testing.T, w http.ResponseWriter, key jose.JSONWebKey, payload any) {
-	t.Helper()
-	serialized := encryptFinalCredentialResponse(t, key, payload)
-	w.Header().Set("Content-Type", "application/jwt")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(serialized))
+// writeEncryptedFinalCredentialResponse writes an encrypted §8.2 Credential
+// Response from the fixture's handler goroutine. It delegates to
+// writeObservedFinalCredentialResponse so an encryption failure is recorded and
+// reported from the test goroutine: require.* on a server goroutine only ends
+// that goroutine, and the wallet would see a truncated response instead of the
+// reason.
+func writeEncryptedFinalCredentialResponse(obs *serverObservations, w http.ResponseWriter, key jose.JSONWebKey, payload any) {
+	writeObservedFinalCredentialResponse(obs, w, key, payload)
 }
 
 type finalIssuanceFixture struct {
 	t      *testing.T
 	server *httptest.Server
 	wallet *Wallet
+	// obs records what the fixture's handlers observed, so a failure inside a
+	// server goroutine is reported from the test goroutine when the test ends.
+	obs *serverObservations
 
 	holderKey     jose.JSONWebKey
 	additionalKey jose.JSONWebKey
@@ -130,6 +128,7 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 	require.NoError(t, err)
 	f := &finalIssuanceFixture{
 		t:                    t,
+		obs:                  newServerObservations(t),
 		holderKey:            newPrivateJWKForFinalVCITest(t, "holder-key-1"),
 		additionalKey:        newPrivateJWKForFinalVCITest(t, "holder-key-2"),
 		clientKey:            newPrivateJWKForFinalVCITest(t, "client-key-1"),
@@ -266,7 +265,7 @@ func (f *finalIssuanceFixture) authorizeRedirect(base string) string {
 
 func (f *finalIssuanceFixture) writeDefaultCredentialResponse(w http.ResponseWriter, payload any) {
 	if f.responseEncryption {
-		writeEncryptedFinalCredentialResponse(f.t, w, f.encryptionKey, payload)
+		writeEncryptedFinalCredentialResponse(f.obs, w, f.encryptionKey, payload)
 		return
 	}
 	mockserver.JSONResponse(w, http.StatusOK, payload)
@@ -316,9 +315,13 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		if f.requestEncryption {
+			// §12.2.4 defines credential_request_encryption with jwks,
+			// enc_values_supported, zip_values_supported and
+			// encryption_required only; alg_values_supported belongs to
+			// credential_response_encryption, so the fixture does not publish
+			// it and the wallet has to take the JWE alg from the JWK (§10).
 			metadata["credential_request_encryption"] = map[string]any{
 				"jwks":                 map[string]any{"keys": []any{f.requestEncryptionKey.Public()}},
-				"alg_values_supported": []string{"ECDH-ES"},
 				"enc_values_supported": []string{"A128GCM"},
 				"encryption_required":  true,
 			}
@@ -375,7 +378,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "credential-nonce-1"})
 	case "/credential":
 		f.credentialCalls++
-		f.lastCredentialBody = decodeEncryptedCredentialRequest(f.t, r, f.requestEncryptionKey)
+		f.lastCredentialBody = mustDecodeObservedCredentialRequest(f.obs, r, f.requestEncryptionKey)
 		if f.credentialHandler != nil {
 			f.credentialHandler(w, r)
 			return
@@ -387,7 +390,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		f.writeDefaultCredentialResponse(w, payload)
 	case "/deferred":
 		f.deferredCalls++
-		f.lastDeferredBody = decodeEncryptedCredentialRequest(f.t, r, f.requestEncryptionKey)
+		f.lastDeferredBody = mustDecodeObservedCredentialRequest(f.obs, r, f.requestEncryptionKey)
 		if f.deferredHandler != nil {
 			f.deferredHandler(w, r)
 			return
@@ -924,9 +927,36 @@ func TestReceiveOID4VCIFinalCredential_KeyAttestationProviderMissingHolderKey(t 
 	)
 	require.NoError(t, err)
 	fixture.wallet.keyAttestation = fixedKeyAttestationProvider{attestation: attestation}
+	// The provider is not one of the bundled attesters, so the wallet is told
+	// which key signs its attestations; without that the attestation is refused
+	// as unauthenticatable before its claims are read (see
+	// TestReceiveOID4VCIFinalCredential_KeyAttestationUnauthenticatable).
+	fixture.wallet.attestationTrust = AttestationTrustPolicy{ResolveKey: func(AttestationJOSEHeader) (any, error) {
+		return attesterKey.Public().Key, nil
+	}}
 
 	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
 	require.ErrorContains(t, err, "does not attest the holder key")
+}
+
+// TestReceiveOID4VCIFinalCredential_KeyAttestationUnauthenticatable pins the
+// fail-closed half: an attestation the wallet cannot authenticate — no x5c
+// chain to verify it with and no configured resolver — never reaches the
+// credential request, whatever its claims say.
+func TestReceiveOID4VCIFinalCredential_KeyAttestationUnauthenticatable(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
+	attestation, err := (&StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}).KeyAttestation(
+		context.Background(),
+		KeyAttestationRequest{Keys: []jose.JSONWebKey{fixture.holderKey}, Nonce: "credential-nonce-1"},
+	)
+	require.NoError(t, err)
+	fixture.wallet.keyAttestation = fixedKeyAttestationProvider{attestation: attestation}
+
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorContains(t, err, "cannot be authenticated")
 }
 
 func TestReceiveOID4VCIFinalCredential_IncludeKeyAttestationWhenNotRequired(t *testing.T) {
@@ -1488,7 +1518,7 @@ func TestDeferredCredentialRequestCarriesResponseEncryption(t *testing.T) {
 		f.encryptionRequired = true
 		f.requestEncryption = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
-			writeEncryptedFinalCredentialResponse(f.t, w, f.encryptionKey, map[string]any{"transaction_id": "tx-1"})
+			writeEncryptedFinalCredentialResponse(f.obs, w, f.encryptionKey, map[string]any{"transaction_id": "tx-1"})
 		}
 	})
 	req := fixture.request()
@@ -1836,4 +1866,56 @@ func TestWalletAcceptsTransportOnlyPlugin(t *testing.T) {
 	require.NotEmpty(t, fixture.tokenHeaders.Get("DPoP"))
 	claims := finalProofClaims(t, fixture.proofJWTs(t)[0])
 	require.Equal(t, fixture.credentialIssuer(fixture.server.URL), claims["aud"])
+}
+
+// TestFinalIssuanceBoundToALiveContextCompletes is the positive half of the
+// OID4VCIFinalTransport context contract: every transport method now takes the
+// flow context, and a live one must not change the outcome of an issuance.
+func TestFinalIssuanceBoundToALiveContextCompletes(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNotification = true
+	})
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredentialContext(context.Background(), fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	// Every ctx-bound step of the flow ran: PAR, token, nonce, credential and
+	// the §11 notification.
+	require.Equal(t, 1, fixture.parCalls)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, 1, fixture.nonceCalls)
+	require.Equal(t, 1, fixture.credentialCalls)
+	require.Equal(t, []string{"credential_accepted"}, fixture.notificationEvents)
+}
+
+// TestFinalIssuanceContextCancelsARequestInFlight is the negative half: the
+// context has to reach the HTTP request itself, not only the checks between
+// issuance steps. The Credential Endpoint blocks until the test cancels the
+// context from inside the handler, so the flow is past every step boundary and
+// waiting on the response when the cancellation arrives; only a request bound to
+// the context can fail then.
+func TestFinalIssuanceContextCancelsARequestInFlight(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var credentialRequests atomic.Int32
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			credentialRequests.Add(1)
+			// The request is in flight right now; cancelling here can only be
+			// observed by a request that carries the context.
+			cancel()
+			<-r.Context().Done()
+		}
+	})
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredentialContext(ctx, fixture.request())
+	require.Nil(t, result)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	// The failure is the credential request itself, not requireOID4VCIContext
+	// refusing to start the next step.
+	require.Contains(t, err.Error(), "failed to receive credential")
+	require.NotContains(t, err.Error(), "OpenID4VCI issuance cancelled before")
+	require.Equal(t, int32(1), credentialRequests.Load())
 }

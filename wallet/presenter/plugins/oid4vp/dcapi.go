@@ -1,7 +1,6 @@
 package oid4vp
 
 import (
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -18,8 +17,16 @@ import (
 
 // OID4VPClientIDPrefixWebOrigin is the effective Client Identifier Prefix the
 // Wallet assigns to an unsigned DC API request. OID4VP 1.0 Appendix A.2: "The
-// client_id parameter MUST be omitted in unsigned requests". The Wallet uses
-// the platform-authenticated Origin as the effective identifier.
+// `client_id` parameter MUST be omitted in unsigned requests defined in
+// (#unsigned_request). The Wallet MUST ignore any `client_id` parameter that is
+// present in an unsigned request." The Wallet uses the platform-authenticated
+// Origin as the effective identifier.
+//
+// This prefix is minted by the Wallet, never read from a request: an
+// Authorization Request that carries client_id=web-origin:... over any wire
+// delivery is rejected by parseOID4VPClientID, for the same reason OID4VP 1.0
+// Section 5.9.3 says of the companion "origin" prefix that "The Wallet MUST NOT
+// accept this Client Identifier Prefix in requests".
 const OID4VPClientIDPrefixWebOrigin OID4VPClientIDPrefix = "web-origin"
 
 // dcapiSignatureVerifier verifies one DC API request object signature with the
@@ -375,21 +382,19 @@ func (p *Oid4vpPresenter) BuildDCAPIResponse(request *CredentialPresentationRequ
 // the selected leaf certificate. Over the DC API there is no redirect_uri or
 // response_uri, so only the certificate binding is checked; the platform Origin
 // is validated separately against expected_origins.
+//
+// As on the Request Object path, the DNS match is exact and never wildcard
+// (commonX509.RequireLeafDNSName is called with wildcard=false): OID4VP 1.0
+// Section 5.9.3 requires the identifier to "match a `dNSName` Subject
+// Alternative Name (SAN) [@!RFC5280] entry in the leaf certificate passed with
+// the request", so a wildcard SAN must not let one certificate speak for every
+// subdomain.
 func bindDCAPIX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate) error {
 	switch clientID.prefix {
 	case OID4VPClientIDPrefixX509Hash:
-		digest := sha256.Sum256(leaf.Raw)
-		if base64.RawURLEncoding.EncodeToString(digest[:]) != clientID.original {
-			return errors.New("x509_hash client_id mismatch")
-		}
-		return nil
+		return commonX509.RequireLeafThumbprint(leaf, clientID.original)
 	case OID4VPClientIDPrefixX509SanDNS:
-		for _, name := range leaf.DNSNames {
-			if strings.EqualFold(name, clientID.original) {
-				return nil
-			}
-		}
-		return errors.New("SAN of the certificate and client_id did not match")
+		return commonX509.RequireLeafDNSName(leaf, clientID.original, false)
 	default:
 		return fmt.Errorf("unsupported DC API client_id prefix: %s", clientID.prefix)
 	}
