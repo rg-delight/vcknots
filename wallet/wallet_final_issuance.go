@@ -350,6 +350,15 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	if err != nil {
 		return nil, err
 	}
+	if len(authorizationDetails) > 0 && len(issuerMetadata.AuthorizationServers) > 0 {
+		// OpenID4VCI 1.0 §5.1.1: "locations: OPTIONAL ... If the Credential
+		// Issuer metadata contains an authorization_servers parameter, the
+		// authorization detail's locations field MUST be set to the Credential
+		// Issuer Identifier."
+		for _, detail := range authorizationDetails {
+			detail["locations"] = []string{issuerMetadata.CredentialIssuer}
+		}
+	}
 	parRequest := receiverTypes.PushedAuthorizationRequest{
 		ResponseType:         "code",
 		ClientID:             req.ClientID,

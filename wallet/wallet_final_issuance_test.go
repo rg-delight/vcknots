@@ -1000,3 +1000,21 @@ func TestReceiveOID4VCIFinalCredential_NoClientAuthSendsNoAssertion(t *testing.T
 	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
 	require.Empty(t, fixture.tokenForms[0].Get("client_assertion_type"))
 }
+
+// OpenID4VCI 1.0 §5.1.1: with authorization_servers advertised, each
+// authorization detail carries locations = [credential_issuer].
+func TestReceiveOID4VCIFinalCredential_RARCarriesLocationsWhenAuthorizationServersAdvertised(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	req.AuthorizationRequestType = OID4VCIAuthorizationRequestTypeAuthorizationDetails
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.NoError(t, err)
+	form := fixture.parForm
+	require.NotNil(t, form)
+	var details []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(form.Get("authorization_details")), &details))
+	require.Len(t, details, 1)
+	// The fixture always advertises authorization_servers, so locations must
+	// name the credential issuer identifier.
+	require.Equal(t, []any{fixture.credentialIssuer(fixture.server.URL)}, details[0]["locations"])
+}
