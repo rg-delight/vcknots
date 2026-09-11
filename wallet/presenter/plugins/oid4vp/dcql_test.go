@@ -1,7 +1,9 @@
 package oid4vp
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -200,4 +202,161 @@ func TestParseDcqlQuery_UnsupportedFormat(t *testing.T) {
 			assertAuthzErrorCode(t, err, VPFormatsNotSupportedError)
 		})
 	}
+}
+
+func TestParseDcqlQuery_HolderBindingRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		value                  any
+		present, want, invalid bool
+	}{
+		{name: "omitted", want: true},
+		{name: "true", value: true, present: true, want: true},
+		{name: "false", value: false, present: true},
+		{name: "null", present: true, invalid: true},
+		{name: "string", value: "false", present: true, invalid: true},
+		{name: "number", value: 0, present: true, invalid: true},
+		{name: "array", value: []any{false}, present: true, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}}
+			if tc.present {
+				raw["require_cryptographic_holder_binding"] = tc.value
+			}
+			query, err := parseDcqlQuery(map[string]any{"credentials": []any{raw}})
+			if tc.invalid {
+				assertAuthzErrorCode(t, err, InvalidRequestError)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := query.Credentials[0].RequiresHolderBinding(); got != tc.want {
+				t.Fatalf("holder binding = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDraft24DcqlQuery_IgnoresFinalHolderBindingField(t *testing.T) {
+	rawQuery := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}, "require_cryptographic_holder_binding": "ignored"}
+	query, err := parseDraft24DcqlQuery(map[string]any{"credentials": []any{rawQuery}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Credentials[0].RequireCryptographicHolderBinding != nil {
+		t.Fatal("Final field was retained in Draft24 query")
+	}
+	if rawQuery["require_cryptographic_holder_binding"] != "ignored" {
+		t.Fatal("caller input was mutated")
+	}
+}
+
+func TestParseDCQLClaimSetsPreservesClaimIDsAndValues(t *testing.T) {
+	const raw = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},
+		"claims":[{"id":"age","path":["age_over_18"],"values":[true]},
+		{"id":"number","path":["number"],"values":[9007199254740993,"18",false,-3,1.0]}],
+		"claim_sets":[["age"],["number"]]}]}`
+	for _, parser := range []struct {
+		name  string
+		parse func(any) (*DcqlQuery, error)
+	}{{"final", parseDcqlQuery}, {"draft24", parseDraft24DcqlQuery}} {
+		t.Run(parser.name, func(t *testing.T) {
+			query, err := parser.parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			credential := query.Credentials[0]
+			if !reflect.DeepEqual(credential.ClaimSets, [][]string{{"age"}, {"number"}}) || credential.Claims[0].ID != "age" {
+				t.Fatalf("claim set identifiers were lost: %#v", credential)
+			}
+			want := []any{json.Number("9007199254740993"), "18", false, json.Number("-3"), json.Number("1.0")}
+			if !reflect.DeepEqual(credential.Claims[1].Values, want) {
+				t.Fatalf("values = %#v, want %#v", credential.Claims[1].Values, want)
+			}
+			encoded, err := json.Marshal(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := parser.parse(string(encoded))
+			if err != nil || !reflect.DeepEqual(query, roundTrip) {
+				t.Fatalf("DCQL round trip lost constraints: %#v, %v", roundTrip, err)
+			}
+		})
+	}
+}
+
+func TestParseDCQLInvalidClaimConstraints(t *testing.T) {
+	for _, tc := range []struct{ name, fields string }{
+		{"claims null", `"claims":null`},
+		{"claims object", `"claims":{}`},
+		{"claims empty", `"claims":[]`},
+		{"claim not object", `"claims":[true]`},
+		{"path missing", `"claims":[{}]`},
+		{"path empty", `"claims":[{"path":[]}]`},
+		{"path string", `"claims":[{"path":"name"}]`},
+		{"negative index", `"claims":[{"path":["items",-1]}]`},
+		{"fractional index", `"claims":[{"path":["items",1.5]}]`},
+		{"id empty", `"claims":[{"id":"","path":["name"]}]`},
+		{"id invalid", `"claims":[{"id":"a b","path":["name"]}]`},
+		{"id null", `"claims":[{"id":null,"path":["name"]}]`},
+		{"duplicate id without sets", `"claims":[{"id":"n","path":["name"]},{"id":"n","path":["birthdate"]}]`},
+		{"claim sets without claims", `"claim_sets":[["name"]]`},
+		{"claim sets null", `"claims":[{"id":"n","path":["name"]}],"claim_sets":null`},
+		{"claim sets empty", `"claims":[{"id":"n","path":["name"]}],"claim_sets":[]`},
+		{"claim set null", `"claims":[{"id":"n","path":["name"]}],"claim_sets":[null]`},
+		{"claim set not array", `"claims":[{"id":"n","path":["name"]}],"claim_sets":["n"]`},
+		{"claim set unknown id", `"claims":[{"id":"n","path":["name"]}],"claim_sets":[["missing"]]`},
+		{"claim set numeric id", `"claims":[{"id":"n","path":["name"]}],"claim_sets":[[3]]`},
+		{"claim id required with sets", `"claims":[{"path":["name"]}],"claim_sets":[["n"]]`},
+		{"values null", `"claims":[{"path":["name"],"values":null}]`},
+		{"values empty", `"claims":[{"path":["name"],"values":[]}]`},
+		{"values not array", `"claims":[{"path":["name"],"values":"Alice"}]`},
+		{"value null", `"claims":[{"path":["name"],"values":[null]}]`},
+		{"value object", `"claims":[{"path":["name"],"values":[{}]}]`},
+		{"value array", `"claims":[{"path":["name"],"values":[[]]}]`},
+		{"fractional value", `"claims":[{"path":["age"],"values":[18.5]}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},` + tc.fields + `}]}`)
+			assertAuthzErrorCode(t, err, InvalidRequestError)
+		})
+	}
+}
+
+func TestParseDCQLInvalidCredentialSetConstraints(t *testing.T) {
+	for _, set := range []string{
+		`{}`, `{"options":null}`, `{"options":[]}`, `{"options":[[]]}`,
+		`{"options":[null]}`,
+		`{"options":["pid"]}`, `{"options":[[1]]}`, `{"options":[["unknown"]]}`,
+		`{"options":[["unknown"]],"required":false}`, `{"options":[["pid"]],"required":null}`,
+		`{"options":[["pid"]],"required":"false"}`,
+	} {
+		t.Run(set, func(t *testing.T) {
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{}}],"credential_sets":[` + set + `]}`)
+			assertAuthzErrorCode(t, err, InvalidRequestError)
+		})
+	}
+}
+
+func TestParseDCQLPreservesEmptyClaimSetOption(t *testing.T) {
+	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"id":"age","path":["age_over_18"]}],"claim_sets":[["age"],[]]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(query.Credentials[0].ClaimSets, [][]string{{"age"}, {}}) {
+		t.Fatalf("empty claim set option was not preserved: %#v", query.Credentials[0].ClaimSets)
+	}
+}
+
+func TestParseDCQLIgnoresUnknownExtensions(t *testing.T) {
+	query, err := parseDcqlQuery(`{"extension":true,"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"extension":true,"claims":[{"id":"n","path":["name"],"extension":true}],"claim_sets":[["n"]]}],"credential_sets":[{"options":[["pid"]],"extension":true}]}`)
+	if err != nil || len(query.Credentials) != 1 {
+		t.Fatalf("unknown extensions must be ignored: %#v, %v", query, err)
+	}
+}
+
+func TestParseDCQLRejectsTrailingJSON(t *testing.T) {
+	_, err := parseDcqlQuery(sampleSdJwtDcqlQuery + ` {}`)
+	assertAuthzErrorCode(t, err, InvalidRequestError)
 }
