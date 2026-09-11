@@ -18,6 +18,15 @@ type DcqlQuery struct {
 	CredentialSets []CredentialSetQuery `json:"credential_sets,omitempty"` // optional, non-empty array when present
 }
 
+// TrustedAuthority is one entry of the DCQL trusted_authorities query
+// (OID4VP 1.0 Section 6.1.1). Each entry identifies expected Issuers or trust
+// frameworks by type. This wallet evaluates the "aki" (Authority Key
+// Identifier) type, which HAIP 1.0 section 5 requires to be supported.
+type TrustedAuthority struct {
+	Type   string   `json:"type"`
+	Values []string `json:"values"`
+}
+
 // CredentialQuery represents a request for a presentation of one or more
 // matching Credentials (OID4VP 1.0 Section 6.1).
 type CredentialQuery struct {
@@ -29,6 +38,9 @@ type CredentialQuery struct {
 	Multiple  bool             `json:"multiple,omitempty"`
 	Claims    []DCQLClaimQuery `json:"claims,omitempty"`
 	ClaimSets [][]string       `json:"claim_sets,omitempty"`
+	// TrustedAuthorities optionally constrains the Issuers or trust frameworks
+	// the Verifier accepts (OID4VP 1.0 Section 6.1.1).
+	TrustedAuthorities []TrustedAuthority `json:"trusted_authorities,omitempty"`
 	// RequireCryptographicHolderBinding defaults to true when omitted (OID4VP
 	// 1.0 section 6.1). A pointer preserves an explicitly permitted unbound VC.
 	RequireCryptographicHolderBinding *bool `json:"require_cryptographic_holder_binding,omitempty"`
@@ -175,6 +187,7 @@ func parseDraft24DcqlQuery(raw any) (*DcqlQuery, error) {
 			if query, ok := item.(map[string]any); ok {
 				query = maps.Clone(query)
 				delete(query, "require_cryptographic_holder_binding")
+				delete(query, "trusted_authorities")
 				filtered[i] = query
 			}
 		}
@@ -286,8 +299,43 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].require_cryptographic_holder_binding must be a boolean", index)
 		}
 	}
+	if rawAuthorities, exists := credentialQuery["trusted_authorities"]; exists {
+		if err := validateTrustedAuthorities(index, rawAuthorities); err != nil {
+			return err
+		}
+	}
 
 	return validateDCQLClaimQueries(credentialQuery)
+}
+
+// validateTrustedAuthorities enforces the OID4VP 1.0 Section 6.1.1 shape:
+// a non-empty array of objects whose type is a non-empty string and whose
+// values is a non-empty array of non-empty strings.
+func validateTrustedAuthorities(index int, raw any) error {
+	authorities, ok := raw.([]any)
+	if !ok || len(authorities) == 0 {
+		return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].trusted_authorities must be a non-empty array", index)
+	}
+	for i, rawAuthority := range authorities {
+		authority, ok := rawAuthority.(map[string]any)
+		if !ok {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].trusted_authorities[%d] must be an object", index, i)
+		}
+		authorityType, ok := authority["type"].(string)
+		if !ok || authorityType == "" {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].trusted_authorities[%d].type must be a non-empty string", index, i)
+		}
+		values, ok := authority["values"].([]any)
+		if !ok || len(values) == 0 {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].trusted_authorities[%d].values must be a non-empty array of strings", index, i)
+		}
+		for _, rawValue := range values {
+			if value, ok := rawValue.(string); !ok || value == "" {
+				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].trusted_authorities[%d].values must contain only non-empty strings", index, i)
+			}
+		}
+	}
+	return nil
 }
 
 // validateCredentialQueryMeta enforces the format-specific constraints on the
@@ -347,11 +395,16 @@ func validateDCQLClaimQueries(query map[string]any) error {
 		if !ok || len(path) == 0 {
 			return newAuthorizationRequestError(InvalidRequestError, "claims[%d].path must be a non-empty array", i)
 		}
-		// Nested string paths retain their structure and are treated as
-		// unsatisfiable by this wallet's one-property claim selection capability.
+		// OID4VP 1.0 Section 7: a claims path pointer is an array of strings,
+		// nulls and non-negative integers.
 		for _, segment := range path {
-			if _, ok := segment.(string); !ok {
-				return newAuthorizationRequestError(InvalidRequestError, "claims[%d].path uses an unsupported non-string component", i)
+			switch segment.(type) {
+			case string, nil:
+				continue
+			default:
+				if _, ok := dcqlPathIndex(segment); !ok {
+					return newAuthorizationRequestError(InvalidRequestError, "claims[%d].path uses an unsupported non-string component", i)
+				}
 			}
 		}
 		if rawValues, exists := claim["values"]; exists {
@@ -400,10 +453,11 @@ type DCQLQuery = DcqlQuery
 type DCQLCredentialQuery = CredentialQuery
 type DCQLCredentialSet = CredentialSetQuery
 
-// DCQLClaimQuery preserves the fork's supported string claim paths.
-// General claims-path evaluation is tracked in the Final/HAIP roadmap.
+// DCQLClaimQuery preserves the DCQL claims path pointer. A path component is a
+// string (object key), null (all array elements) or a non-negative integer
+// (array index), per OID4VP 1.0 Section 7.
 type DCQLClaimQuery struct {
-	ID     string   `json:"id,omitempty"`
-	Path   []string `json:"path,omitempty"`
-	Values []any    `json:"values,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Path   []any  `json:"path,omitempty"`
+	Values []any  `json:"values,omitempty"`
 }

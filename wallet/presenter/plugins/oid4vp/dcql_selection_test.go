@@ -15,8 +15,8 @@ func TestResolveSatisfiableDCQLCredentials(t *testing.T) {
 				Format: "dc+sd-jwt",
 				Meta:   map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
 				Claims: []DCQLClaimQuery{
-					{Path: []string{"given_name"}},
-					{Path: []string{"family_name"}},
+					{Path: []any{"given_name"}},
+					{Path: []any{"family_name"}},
 				},
 			},
 		},
@@ -54,17 +54,17 @@ func TestResolveSatisfiableDCQLCredentials_CredentialSets(t *testing.T) {
 			{
 				ID:     "pid",
 				Format: "dc+sd-jwt",
-				Claims: []DCQLClaimQuery{{Path: []string{"given_name"}}},
+				Claims: []DCQLClaimQuery{{Path: []any{"given_name"}}},
 			},
 			{
 				ID:     "address",
 				Format: "dc+sd-jwt",
-				Claims: []DCQLClaimQuery{{Path: []string{"street_address"}}},
+				Claims: []DCQLClaimQuery{{Path: []any{"street_address"}}},
 			},
 			{
 				ID:     "optional_email",
 				Format: "dc+sd-jwt",
-				Claims: []DCQLClaimQuery{{Path: []string{"email"}}},
+				Claims: []DCQLClaimQuery{{Path: []any{"email"}}},
 			},
 		},
 		CredentialSets: []DCQLCredentialSet{
@@ -91,7 +91,7 @@ func TestResolveSatisfiableDCQLCredentials_RequiredCredentialSetFailure(t *testi
 			{
 				ID:     "pid",
 				Format: "dc+sd-jwt",
-				Claims: []DCQLClaimQuery{{Path: []string{"given_name"}}},
+				Claims: []DCQLClaimQuery{{Path: []any{"given_name"}}},
 			},
 		},
 		CredentialSets: []DCQLCredentialSet{
@@ -141,7 +141,7 @@ func TestResolveDCQLClaimSetPreference(t *testing.T) {
 func TestResolveDCQLEmptyClaimSetFallback(t *testing.T) {
 	typed := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt",
-		Claims:    []DCQLClaimQuery{{ID: "age", Path: []string{"age_over_18"}, Values: []any{true}}},
+		Claims:    []DCQLClaimQuery{{ID: "age", Path: []any{"age_over_18"}, Values: []any{true}}},
 		ClaimSets: [][]string{{"age"}, {}},
 	}}}
 	parsed, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"id":"age","path":["age_over_18"],"values":[true]}],"claim_sets":[["age"],[]]}]}`)
@@ -209,7 +209,7 @@ func TestResolveDCQLValuesRequireExactPrimitiveMatch(t *testing.T) {
 		{"small fractional exponent", json.Number("1e-1000000000"), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"value"}, Values: []any{tc.expected}}}}}}
+			query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"value"}, Values: []any{tc.expected}}}}}}
 			candidates := []DCQLCredentialCandidate{{ID: "value", Format: "dc+sd-jwt", Claims: []string{"value"}, ClaimValues: map[string]any{"value": tc.actual}}}
 			selected, err := ResolveSatisfiableDCQLCredentials(query, candidates)
 			if tc.match {
@@ -224,7 +224,7 @@ func TestResolveDCQLValuesRequireExactPrimitiveMatch(t *testing.T) {
 }
 
 func TestResolveDCQLMissingValueFailsClosed(t *testing.T) {
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"name"}, Values: []any{"Alice", "Bob"}}}}}}
+	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}, Values: []any{"Alice", "Bob"}}}}}}
 	candidate := DCQLCredentialCandidate{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name"}}
 	if selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{candidate}); err == nil || len(selected) != 0 {
 		t.Fatalf("claim name alone satisfied value restriction: %#v, %v", selected, err)
@@ -252,15 +252,15 @@ func TestResolveDCQLValidatesDirectCallerConstraints(t *testing.T) {
 		{"duplicate query id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt"}, {ID: "pid", Format: "dc+sd-jwt"}}}},
 		{"invalid query id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "bad id", Format: "dc+sd-jwt"}}}},
 		{"empty claims", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{}}}}},
-		{"empty values", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"name"}, Values: []any{}}}}}}},
-		{"fractional value", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"name"}, Values: []any{1.5}}}}}}},
+		{"empty values", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}, Values: []any{}}}}}}},
+		{"fractional value", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}, Values: []any{1.5}}}}}}},
 		{"missing path", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{ID: "n"}}}}}},
-		{"missing claim id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"name"}}}, ClaimSets: [][]string{{"n"}}}}}},
-		{"duplicate claim id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{ID: "n", Path: []string{"name"}}, {ID: "n", Path: []string{"birth"}}}}}}},
+		{"missing claim id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}}}, ClaimSets: [][]string{{"n"}}}}}},
+		{"duplicate claim id", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{ID: "n", Path: []any{"name"}}, {ID: "n", Path: []any{"birth"}}}}}}},
 		{"empty claim sets", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", ClaimSets: [][]string{}}}}},
 		{"claim sets without claims", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", ClaimSets: [][]string{{"n"}}}}}},
 		{"empty claim set without claims", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", ClaimSets: [][]string{{}}}}}},
-		{"null claim set", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{ID: "n", Path: []string{"name"}}}, ClaimSets: [][]string{nil}}}}},
+		{"null claim set", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{ID: "n", Path: []any{"name"}}}, ClaimSets: [][]string{nil}}}}},
 		{"empty credential sets", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt"}}, CredentialSets: []DCQLCredentialSet{}}},
 		{"empty optional credential option", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt"}}, CredentialSets: []DCQLCredentialSet{{Required: &optional, Options: [][]string{{}}}}}},
 		{"unknown optional credential reference", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt"}}, CredentialSets: []DCQLCredentialSet{{Required: &optional, Options: [][]string{{"unknown"}}}}}},
@@ -286,7 +286,7 @@ func TestResolveDCQLNestedClaimDoesNotBecomeRootClaim(t *testing.T) {
 }
 
 func TestResolveDCQLRepeatedClaimPathDisclosesOnce(t *testing.T) {
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []string{"name"}}, {Path: []string{"name"}}}}}}
+	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}}, {Path: []any{"name"}}}}}}
 	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name"}}})
 	if err != nil || len(selected) != 1 || !reflect.DeepEqual(selected[0].RequestedClaims, []string{"name"}) {
 		t.Fatalf("duplicate claim paths were not deduplicated: %#v, %v", selected, err)

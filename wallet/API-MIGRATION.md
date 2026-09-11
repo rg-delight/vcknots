@@ -221,3 +221,108 @@ RFC 7523, HAIP §4.3). `PushedAuthorizationRequest` and
 `AuthorizationCodeTokenRequest` carry the assertion fields;
 `AuthorizationCodeTokenRequest.ClientAssertionFactory` produces a new
 assertion for each retry.
+
+## DCQL semantics: trusted authorities, nested paths, multiple, transaction data
+
+This section records the DCQL semantics completed for the OID4VP 1.0 Final
+presenter. The quoted sentences are the normative basis for each change.
+
+### `trusted_authorities` and the `aki` query (OID4VP 1.0 §6.1.1, HAIP §5)
+
+`CredentialQuery` now carries `TrustedAuthorities []TrustedAuthority`, where
+`TrustedAuthority` is `{Type string; Values []string}`. The parser rejects a
+non-array, an empty array, a non-object entry, an empty `type`, and a missing
+or non-string `values` element with `invalid_request`.
+
+OID4VP 1.0 §6.1: "Every Credential returned by the Wallet SHOULD match at least
+one of the conditions present in the corresponding trusted_authorities array if
+present." §6.4.2: "Credentials not matching the respective constraints
+expressed within credentials MUST NOT be returned, i.e., they are treated as if
+they would not exist in the Wallet." HAIP 1.0 §5: "The Authority Key Identifier
+(aki)-based Trusted Authority Query (trusted_authorities) for DCQL ... MUST be
+supported."
+
+The `aki` value is the base64url encoding of the KeyIdentifier; per §6.1.1.1
+"the raw byte representation of this element MUST match with the
+AuthorityKeyIdentifier element of an X.509 certificate in the certificate chain
+present in the Credential". `oid4vp.AuthorityKeyIdentifiersFromCredential`
+extracts these from the issuer JWT header `x5c`, and `DCQLCredentialCandidate`
+now exposes `AuthorityKeyIDs []string` for matching. A credential that matches
+none of the entries is treated as absent.
+
+The specification does not define behavior for an unimplemented `type` (it
+lists `aki`, `etsi_tl` and `openid_federation`, while noting at the top of §6
+that "Implementations MUST ignore any unknown properties"). This wallet can only
+evaluate `aki`, so entries of any other `type` are ignored; a query whose
+entries are all of an unknown type therefore places no constraint. Other types
+can be added behind the same matcher later.
+
+### Holder-binding-aware selection (OID4VP 1.0 §6.4.2, Appendix B.3)
+
+`DCQLCredentialCandidate` gained `HolderBound *bool` (the issuer JWT `cnf`
+claim). For `dc+sd-jwt` queries that require holder binding (the default), a
+candidate explicitly marked unbound is excluded before selection so another
+credential can satisfy the query. Appendix B.3: "SD-JWTs that do not support
+Holder Binding (i.e., do not have a cnf Claim) cannot be returned in this
+case." A nil flag means the caller did not evaluate holder binding and the
+candidate is not excluded, preserving existing direct callers.
+
+### `multiple` (OID4VP 1.0 §6.1, §8.1)
+
+When `multiple` is true, `ResolveSatisfiableDCQLCredentials` returns every
+matching candidate for the Query id, each presented separately in the
+`vp_token` array. When false (the default) the first match is selected. §8.1:
+"When multiple is omitted, or set to false, the array MUST contain only one
+Presentation."
+
+### Claims path pointers (OID4VP 1.0 §7)
+
+`DCQLClaimQuery.Path` is now `[]any` and accepts strings, `null` and
+non-negative integers. §7: "A string value indicates that the respective key is
+to be selected, a null value indicates that all elements of the currently
+selected array(s) are to be selected; and a non-negative integer indicates that
+the respective index in an array is to be selected." Selection evaluates the
+pointer over the decoded credential (`DCQLCredentialCandidate.ClaimObject`,
+built for SD-JWT VC by the new `sdjwtvc.ReconstructClaimsObject`, which applies
+all disclosures). A path that selects no element is unsatisfied, and `values`
+restrictions apply to the selected elements.
+
+The serializer's disclosure selector now resolves JSON-encoded nested paths and
+returns only the disclosures needed to reveal the selected leaves, including
+nested `_sd` object properties and `...` array elements. §6.4: "Wallets MUST
+NOT send selectively disclosable claims that have not been selected according
+to the rules below."
+
+### Per-object `transaction_data_hashes_alg` (OID4VP 1.0 Appendix B.3.3.1)
+
+The Final path no longer reads the top-level `transaction_data_hashes_alg`
+parameter. For each `transaction_data` object the wallet selects the first
+algorithm in its `transaction_data_hashes_alg` array that it supports
+(sha-256/sha-384/sha-512), defaulting to sha-256 when the member is absent, and
+sets `CredentialPresentationRequest.TransactionDataHashesAlg` accordingly.
+Conflicting algorithms across objects are rejected with
+`invalid_transaction_data`. Appendix B.3.3.1: "one of which MUST be used to
+calculate hashes ... If this parameter is not present, a default value of
+sha-256 MUST be used."
+
+### Root configuration and submission
+
+`wallet.Config` gained `SupportedTransactionDataTypes []string`, propagated to
+the default OID4VP presenter exactly like `Profile`.
+`Oid4vpPresenter.SetSupportedTransactionDataTypes` is the propagation hook.
+`SubmitOID4VPFinalAuthorizationRequest` now builds transaction data through the
+same `buildDCQLVPToken` path as `PresentCredentialWithOptions` instead of
+refusing it.
+
+### Error codes (OID4VP 1.0 §8.2, §8.5)
+
+When no stored credential can satisfy the query the wallet returns
+`*oid4vp.AuthorizationRequestError{Code: oid4vp.AccessDeniedError}`. §8.5:
+"access_denied: The Wallet did not have the requested Credentials to satisfy
+the Authorization Request." Request validation failures (missing
+`response_type`/`client_id`/`redirect_uri`/`nonce`, a bad `response_uri`, and the
+redirect_uri/response_uri exclusivity rule, now scoped to the direct_post
+modes) return `AuthorizationRequestError{Code: invalid_request}`. §8.2: "If the
+redirect_uri Authorization Request parameter is present when the Response Mode
+is direct_post, the Wallet MUST return an invalid_request Authorization
+Response error."

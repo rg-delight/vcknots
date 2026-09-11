@@ -51,6 +51,7 @@ import (
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
+	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -116,6 +117,10 @@ type Config struct {
 	// every protocol plugin carrying the same profile or NewWalletWithConfig
 	// fails.
 	Profile profile.Profile
+
+	// SupportedTransactionDataTypes lists the transaction_data "type" values
+	// the wallet can process. It is propagated to the default presenter plugin.
+	SupportedTransactionDataTypes []string
 
 	// CredentialAcceptance configures the minimum credential verification rules
 	// applied before a received credential is stored.
@@ -337,6 +342,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}
 	if !presenterInjected {
 		propagatePresenterProfile(config.Presenter, normalizedProfile)
+		propagatePresenterTransactionDataTypes(config.Presenter, config.SupportedTransactionDataTypes)
 	}
 	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
 		return nil, err
@@ -382,6 +388,12 @@ type setProtocolProfile interface {
 	SetProtocolProfile(profile.Profile)
 }
 
+// setSupportedTransactionDataTypes is implemented by presenter plugins that can
+// accept the wallet's supported transaction_data types.
+type setSupportedTransactionDataTypes interface {
+	SetSupportedTransactionDataTypes([]string)
+}
+
 func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
 	for _, plugin := range dispatcher.Plugins() {
 		if setter, ok := plugin.(setProtocolProfile); ok {
@@ -394,6 +406,14 @@ func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, val
 	for _, plugin := range dispatcher.Plugins() {
 		if setter, ok := plugin.(setProtocolProfile); ok {
 			setter.SetProtocolProfile(value)
+		}
+	}
+}
+
+func propagatePresenterTransactionDataTypes(dispatcher *presenter.PresentationDispatcher, values []string) {
+	for _, plugin := range dispatcher.Plugins() {
+		if setter, ok := plugin.(setSupportedTransactionDataTypes); ok {
+			setter.SetSupportedTransactionDataTypes(values)
 		}
 	}
 }
@@ -1749,9 +1769,6 @@ func (w *Wallet) SubmitOID4VPFinalAuthorizationRequest(req *oid4vp.CredentialPre
 	if req.ClientMetadata == nil {
 		return "", fmt.Errorf("client_metadata is required for OID4VP Final encrypted submission")
 	}
-	if len(req.TransactionData) > 0 {
-		return "", fmt.Errorf("transaction_data is not supported")
-	}
 	response, err := w.buildOID4VPFinalAuthorizationResponse(req, key)
 	if err != nil {
 		return "", err
@@ -1848,7 +1865,7 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 		return nil, nil, fmt.Errorf("failed to get credential entries: %w", err)
 	}
 	if len(entries) == 0 {
-		return nil, nil, fmt.Errorf("no credentials available for presentation")
+		return nil, nil, newAccessDeniedError("no credentials available for presentation")
 	}
 
 	credentialsByID := map[string]*SavedCredential{}
@@ -1864,10 +1881,17 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 		}
 		claimNames := []string{}
 		claimValues := map[string]any{}
+		claimObject := map[string]any{}
 		if entry.Credential.Claims != nil {
 			for name, value := range *entry.Credential.Claims {
 				claimNames = append(claimNames, name)
 				claimValues[name] = value
+				claimObject[name] = value
+			}
+		}
+		if flavor == credential.SDJwtVC {
+			if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(entry.Entry.Raw)); reconstructErr == nil {
+				claimObject = reconstructed
 			}
 		}
 		vct := ""
@@ -1876,22 +1900,50 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 		}
 		credentialsByID[entry.Entry.Id] = entry
 		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
-			ID:          entry.Entry.Id,
-			Format:      vcFormat,
-			VCT:         vct,
-			Claims:      claimNames,
-			ClaimValues: claimValues,
+			ID:              entry.Entry.Id,
+			Format:          vcFormat,
+			VCT:             vct,
+			Claims:          claimNames,
+			ClaimValues:     claimValues,
+			ClaimObject:     claimObject,
+			HolderBound:     boolPointer(credentialHasHolderBinding(flavor, entry)),
+			AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(entry.Entry.Raw)),
 		})
 	}
 
 	selections, err := oid4vp.ResolveSatisfiableDCQLCredentials(query, candidates)
 	if err != nil {
-		return nil, nil, err
+		// OID4VP 1.0 Section 8.5: the Wallet did not have the requested
+		// Credentials to satisfy the Authorization Request.
+		return nil, nil, newAccessDeniedError("%v", err)
 	}
 	if len(selections) == 0 {
-		return nil, nil, fmt.Errorf("dcql_query cannot be satisfied by stored credentials")
+		return nil, nil, newAccessDeniedError("dcql_query cannot be satisfied by stored credentials")
 	}
 	return credentialsByID, selections, nil
+}
+
+// newAccessDeniedError returns the typed OID4VP 1.0 Section 8.5 access_denied
+// error so callers can send an authorization error response.
+func newAccessDeniedError(format string, args ...any) *oid4vp.AuthorizationRequestError {
+	return &oid4vp.AuthorizationRequestError{Code: oid4vp.AccessDeniedError, Err: fmt.Errorf(format, args...)}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+// credentialHasHolderBinding reports whether a stored credential carries a
+// cryptographic holder binding key.
+func credentialHasHolderBinding(flavor credential.SupportedSerializationFlavor, entry *SavedCredential) bool {
+	if flavor == credential.SDJwtVC {
+		return sdJWTCarriesConfirmation(entry.Entry.Raw)
+	}
+	if entry.Credential == nil || entry.Credential.Claims == nil {
+		return false
+	}
+	_, present := (*entry.Credential.Claims)["cnf"]
+	return present
 }
 
 func newestCredentials(entries []*SavedCredential, limit int) []*SavedCredential {

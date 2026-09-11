@@ -76,6 +76,12 @@ func (p *Oid4vpPresenter) SetProtocolProfile(value profile.Profile) {
 	p.Profile = value
 }
 
+// SetSupportedTransactionDataTypes is used by the wallet root to propagate its
+// supported transaction_data types to the default presenter plugin.
+func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(types []string) {
+	p.SupportedTransactionDataTypes = types
+}
+
 // ParsePresentationRequest parses the presentation request URI and returns a CredentialPresentationRequest,
 // following the flow defined in the OID4VP specification and RFC9101 (OAuth 2.0 with JAR).
 //
@@ -819,7 +825,7 @@ func (b *requestBuilder) validate() error {
 	}
 
 	if b.req.ResponseType == "" {
-		return fmt.Errorf("response_type is required")
+		return newAuthorizationRequestError(InvalidRequestError, "response_type is required")
 	}
 
 	if !b.draft24 && b.req.ResponseType != "vp_token" {
@@ -830,20 +836,20 @@ func (b *requestBuilder) validate() error {
 	}
 
 	if b.req.ClientID == "" {
-		return fmt.Errorf("client_id is required")
+		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 
 	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost && b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT && b.req.RedirectURI == "" {
-		return fmt.Errorf("redirect_uri is required")
+		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri is required")
 	}
 
 	if b.req.Nonce == "" {
-		return fmt.Errorf("nonce is required")
+		return newAuthorizationRequestError(InvalidRequestError, "nonce is required")
 	}
 
 	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
 		if _, err := parseResponseURI(b.req.ResponseURI, b.allowHTTP); err != nil {
-			return err
+			return newAuthorizationRequestError(InvalidRequestError, "%v", err)
 		}
 	}
 
@@ -852,11 +858,12 @@ func (b *requestBuilder) validate() error {
 
 // validateRedirectAndResponseURIExclusivity returns an error when the
 // redirect_uri and response_uri request parameters are both set. Per OID4VP
-// they are mutually exclusive on the wire: response_uri is used with
-// response_mode=direct_post (and its JWT variant), redirect_uri otherwise.
+// 1.0 §5.1/§8.2 they are mutually exclusive when response_mode is direct_post
+// (or direct_post.jwt); the Wallet MUST return an invalid_request Authorization
+// Response error. Callers scope this check to the direct_post modes.
 func validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam string) error {
 	if redirectURIFromParam != "" && responseURIFromParam != "" {
-		return fmt.Errorf("redirect_uri and response_uri must not both be present in the same request")
+		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not both be present in the same request")
 	}
 	return nil
 }
@@ -964,9 +971,13 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 	responseURIFromParam := getParam("response_uri", b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT)
 
-	if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
-		b.errValidation = err
-		return
+	// OID4VP 1.0 §8.2: redirect_uri and response_uri are mutually exclusive
+	// when response_mode is direct_post (or direct_post.jwt).
+	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
+		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
+			b.errValidation = err
+			return
+		}
 	}
 
 	b.req.ResponseURI = responseURIFromParam
@@ -1109,7 +1120,13 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	b.req.TransactionDataHashesAlg = getParam("transaction_data_hashes_alg", false)
+	if b.draft24 {
+		b.req.TransactionDataHashesAlg = getParam("transaction_data_hashes_alg", false)
+	}
+	// The Final profile carries transaction_data_hashes_alg inside each
+	// transaction_data object (OID4VP 1.0 Appendix B.3.3.1); it is resolved and
+	// set by validateFinalTransactionData below. A top-level value is not
+	// defined by the Final specification and is ignored.
 
 	if !b.draft24 && b.errValidation == nil && len(b.req.TransactionData) > 0 {
 		if err := b.validateFinalTransactionData(); err != nil {
@@ -1134,6 +1151,7 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 			queryIDs[query.ID] = true
 		}
 	}
+	resolvedAlg := ""
 	for i, encoded := range b.req.TransactionData {
 		raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
 		if err != nil {
@@ -1164,20 +1182,45 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 		}
 		// OID4VP 1.0 Appendix B.3.3.1 places transaction_data_hashes_alg in the
 		// transaction_data object alongside type and credential_ids, not at the
-		// Authorization Request top level.
-		if rawAlg, exists := entry["transaction_data_hashes_alg"]; exists {
-			algs, ok := rawAlg.([]any)
-			if !ok || len(algs) == 0 {
-				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must be a non-empty array of strings", i)
-			}
-			for _, rawName := range algs {
-				if name, ok := rawName.(string); !ok || name == "" {
-					return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must contain only non-empty strings", i)
-				}
-			}
+		// Authorization Request top level. The Wallet picks the first algorithm
+		// it supports from each object's array, defaulting to sha-256.
+		entryAlg, err := selectTransactionDataHashesAlg(i, entry)
+		if err != nil {
+			return err
+		}
+		if resolvedAlg == "" {
+			resolvedAlg = entryAlg
+		} else if resolvedAlg != entryAlg {
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data objects request conflicting transaction_data_hashes_alg values")
 		}
 	}
+	b.req.TransactionDataHashesAlg = resolvedAlg
 	return nil
+}
+
+// selectTransactionDataHashesAlg returns the first hash algorithm supported by
+// this wallet from one transaction_data object's transaction_data_hashes_alg
+// array, or sha-256 when the array is absent (OID4VP 1.0 Appendix B.3.3.1).
+func selectTransactionDataHashesAlg(index int, entry map[string]any) (string, error) {
+	rawAlg, exists := entry["transaction_data_hashes_alg"]
+	if !exists || rawAlg == nil {
+		return "sha-256", nil
+	}
+	algs, ok := rawAlg.([]any)
+	if !ok || len(algs) == 0 {
+		return "", newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must be a non-empty array of strings", index)
+	}
+	for _, rawName := range algs {
+		name, ok := rawName.(string)
+		if !ok || name == "" {
+			return "", newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg must contain only non-empty strings", index)
+		}
+		switch strings.ToLower(name) {
+		case "sha-256", "sha-384", "sha-512":
+			return strings.ToLower(name), nil
+		}
+	}
+	return "", newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].transaction_data_hashes_alg has no supported hash algorithm", index)
 }
 
 // WithQueryParams populates the CredentialPresentationRequest fields from URL query parameters.
@@ -1385,6 +1428,30 @@ func parseX5CCertificatesFromJWT(obj string) ([]*x509.Certificate, error) {
 	}
 
 	return certificates, nil
+}
+
+// AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority
+// Key Identifiers (RFC 5280 Section 4.2.1.1) of the certificates in the issuer
+// JWT header x5c chain of an SD-JWT VC (or JWT VC) wire value. It lets the
+// wallet evaluate DCQL aki trusted_authorities queries (OID4VP 1.0 Section
+// 6.1.1.1), which HAIP 1.0 section 5 requires.
+func AuthorityKeyIdentifiersFromCredential(rawCredential string) []string {
+	issuerJWT := rawCredential
+	if separator := strings.IndexByte(issuerJWT, '~'); separator >= 0 {
+		issuerJWT = issuerJWT[:separator]
+	}
+	certificates, err := parseX5CCertificatesFromJWT(issuerJWT)
+	if err != nil {
+		return nil
+	}
+	identifiers := make([]string, 0, len(certificates))
+	for _, certificate := range certificates {
+		if len(certificate.AuthorityKeyId) == 0 {
+			continue
+		}
+		identifiers = append(identifiers, base64.RawURLEncoding.EncodeToString(certificate.AuthorityKeyId))
+	}
+	return identifiers
 }
 
 func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {

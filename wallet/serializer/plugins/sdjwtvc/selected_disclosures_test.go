@@ -98,3 +98,88 @@ func TestDeserializeCredentialKeepsNestedNamesOutOfRootClaims(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectTopLevelDisclosuresNestedPaths(t *testing.T) {
+	encode := func(parts ...any) (string, string) {
+		raw, err := json.Marshal(parts)
+		require.NoError(t, err)
+		encoded := base64.RawURLEncoding.EncodeToString(raw)
+		digest := sha256.Sum256([]byte(encoded))
+		return encoded, base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+
+	t.Run("nested object property selects only the leaf disclosure", func(t *testing.T) {
+		postal, postalHash := encode("salt-p", "postal_code", "12345")
+		city, cityHash := encode("salt-c", "city", "Milliways")
+		payload := map[string]any{"address": map[string]any{"_sd": []any{postalHash, cityHash}}}
+		selected, err := selectTopLevelDisclosures(payload, []string{postal, city}, "sha-256", []string{`["address","postal_code"]`})
+		require.NoError(t, err)
+		require.Equal(t, []string{postal}, selected)
+	})
+
+	t.Run("null selects every array element and only the requested member", func(t *testing.T) {
+		type1, type1Hash := encode("salt-t1", "type", "BSc")
+		type2, type2Hash := encode("salt-t2", "type", "MSc")
+		other, otherHash := encode("salt-o", "university", "Betelgeuse")
+		payload := map[string]any{"degrees": []any{
+			map[string]any{"_sd": []any{type1Hash, otherHash}},
+			map[string]any{"_sd": []any{type2Hash, otherHash}},
+		}}
+		selected, err := selectTopLevelDisclosures(payload, []string{type1, type2, other}, "sha-256", []string{`["degrees",null,"type"]`})
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{type1, type2}, selected)
+	})
+
+	t.Run("integer index selects a disclosed array element", func(t *testing.T) {
+		cherry, cherryHash := encode("salt-ch", "Cherry")
+		payload := map[string]any{"fruits": []any{"Apple", map[string]any{"...": cherryHash}}}
+		selected, err := selectTopLevelDisclosures(payload, []string{cherry}, "sha-256", []string{`["fruits",1]`})
+		require.NoError(t, err)
+		require.Equal(t, []string{cherry}, selected)
+	})
+
+	t.Run("unselected sibling remains hidden", func(t *testing.T) {
+		postal, postalHash := encode("salt-p", "postal_code", "12345")
+		city, cityHash := encode("salt-c", "city", "Milliways")
+		payload := map[string]any{"address": map[string]any{"_sd": []any{postalHash, cityHash}}}
+		selected, err := selectTopLevelDisclosures(payload, []string{postal, city}, "sha-256", []string{`["address","postal_code"]`})
+		require.NoError(t, err)
+		require.NotContains(t, selected, city)
+	})
+}
+
+func TestReconstructClaimsObjectAppliesNestedDisclosures(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
+	require.NoError(t, err)
+
+	encode := func(parts ...any) (string, string) {
+		raw, err := json.Marshal(parts)
+		require.NoError(t, err)
+		encoded := base64.RawURLEncoding.EncodeToString(raw)
+		digest := sha256.Sum256([]byte(encoded))
+		return encoded, base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+	postal, postalHash := encode("salt-p", "postal_code", "12345")
+	type1, type1Hash := encode("salt-t1", "type", "BSc")
+	cherry, cherryHash := encode("salt-ch", "Cherry")
+
+	payload := map[string]any{
+		"iss":     "https://issuer.example",
+		"vct":     "urn:test:identity",
+		"address": map[string]any{"_sd": []any{postalHash}},
+		"degrees": []any{map[string]any{"_sd": []any{type1Hash}}},
+		"fruits":  []any{"Apple", map[string]any{"...": cherryHash}},
+		"_sd_alg": "sha-256",
+	}
+	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
+	require.NoError(t, err)
+	wire := signed + "~" + postal + "~" + type1 + "~" + cherry + "~"
+
+	object, err := ReconstructClaimsObject(wire)
+	require.NoError(t, err)
+	require.Equal(t, "12345", object["address"].(map[string]any)["postal_code"])
+	require.Equal(t, "BSc", object["degrees"].([]any)[0].(map[string]any)["type"])
+	require.Equal(t, "Cherry", object["fruits"].([]any)[1])
+}
