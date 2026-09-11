@@ -30,6 +30,17 @@ import (
 // resolution.
 const maxCredentialOfferResponseBytes int64 = 64 << 10
 
+// maxDeferredInterval caps the §9.2 deferred credential polling interval the
+// Credential Issuer chooses. The specification puts no upper bound on the
+// interval member, so without a cap an issuer could hold a polling goroutine
+// for an arbitrary time. OID4VCIFinalDeferredRequest.MaxInterval overrides it
+// per request.
+const maxDeferredInterval = 60 * time.Second
+
+// defaultDeferredInterval is the wait between §9 deferred polls when neither
+// the issuer nor the caller named one.
+const defaultDeferredInterval = 5 * time.Second
+
 // OID4VCIFinalReceiveRequest.AuthorizationRequestType selects how the selected
 // Credential Configuration is requested at the authorization endpoint as
 // defined by OpenID4VCI 1.0 §5.1.1 (authorization_details) and §5.1.2 (scope).
@@ -84,6 +95,9 @@ type OID4VCIFinalDeferredRequest struct {
 	CredentialResponseEncryptionKey *jose.JSONWebKey
 	DeferredPollAttempts            int
 	Interval                        time.Duration
+	// MaxInterval caps the polling interval, including one the issuer names in
+	// its §9.2 issuance_pending response. Zero uses maxDeferredInterval.
+	MaxInterval time.Duration
 }
 
 // parseCredentialOfferJSON decodes the §4.1.1 Credential Offer JSON shared by
@@ -112,6 +126,13 @@ func parseCredentialOfferJSON(rawOffer string) (*CredentialOffer, error) {
 // the §4.1.1 by-value (credential_offer) or by-reference (credential_offer_uri)
 // form. A URI carrying both parameters is rejected.
 func (w *Wallet) ResolveCredentialOffer(rawURL string) (*CredentialOffer, error) {
+	return w.ResolveCredentialOfferContext(context.Background(), rawURL)
+}
+
+// ResolveCredentialOfferContext resolves an openid-credential-offer:// URI in
+// either the §4.1.1 by-value (credential_offer) or by-reference
+// (credential_offer_uri) form. ctx bounds the by-reference fetch.
+func (w *Wallet) ResolveCredentialOfferContext(ctx context.Context, rawURL string) (*CredentialOffer, error) {
 	offerURL, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse credential offer URL: %w", err)
@@ -125,7 +146,7 @@ func (w *Wallet) ResolveCredentialOffer(rawURL string) (*CredentialOffer, error)
 	case rawOffer != "":
 		return parseCredentialOfferJSON(rawOffer)
 	case rawOfferURI != "":
-		body, err := w.fetchCredentialOfferJSON(rawOfferURI)
+		body, err := w.fetchCredentialOfferJSON(ctx, rawOfferURI)
 		if err != nil {
 			return nil, err
 		}
@@ -135,7 +156,7 @@ func (w *Wallet) ResolveCredentialOffer(rawURL string) (*CredentialOffer, error)
 	}
 }
 
-func (w *Wallet) fetchCredentialOfferJSON(credentialOfferURI string) (string, error) {
+func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferURI string) (string, error) {
 	parsedURI, err := url.Parse(credentialOfferURI)
 	if err != nil {
 		return "", fmt.Errorf("invalid credential_offer_uri: %w", err)
@@ -148,7 +169,7 @@ func (w *Wallet) fetchCredentialOfferJSON(credentialOfferURI string) (string, er
 		client = http.DefaultClient
 	}
 
-	request, err := http.NewRequest(http.MethodGet, parsedURI.String(), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURI.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to build credential_offer_uri request: %w", err)
 	}
@@ -193,11 +214,145 @@ func (w *Wallet) credentialOfferHTTPClient() (*http.Client, bool) {
 	return nil, false
 }
 
+// OID4VCIFinalAuthorization is the state a caller holds between the two halves
+// of the OpenID4VCI 1.0 §5 authorization code flow: BeginOID4VCIFinalAuthorization
+// produces it, the caller sends the user to AuthorizationURL in a browser, and
+// ResumeOID4VCIFinalAuthorization consumes it together with the redirect the
+// browser came back with. Every member is JSON-serialisable so the state can
+// survive a process restart.
+type OID4VCIFinalAuthorization struct {
+	// AuthorizationURL is the §5.2 authorization request the caller must open
+	// in the system browser.
+	AuthorizationURL string `json:"authorization_url"`
+	// State is the RFC 6749 §4.1.1 state parameter the redirect must echo.
+	State string `json:"state"`
+	// CodeVerifier is the RFC 7636 PKCE verifier for the token request.
+	CodeVerifier string `json:"code_verifier"`
+	// RequestURI is the RFC 9126 PAR request_uri, empty when the authorization
+	// request was sent with its parameters inline.
+	RequestURI string `json:"request_uri,omitempty"`
+	// ExpiresAt is the §5.1.4 request_uri expiry measured from the PAR
+	// response; the zero value disables the check.
+	ExpiresAt                   time.Time                                  `json:"expires_at"`
+	IssuerMetadata              *receiverTypes.CredentialIssuerMetadata    `json:"issuer_metadata"`
+	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata"`
+	CredentialConfigurationID   string                                     `json:"credential_configuration_id"`
+}
+
+// oid4vciFinalFlow is the part of an in-flight Final issuance that is not
+// serialisable: the receiver plugin, the holder keys and the signing decisions
+// taken from the wallet configuration. Begin builds it; Resume rebuilds it from
+// the request and the persisted OID4VCIFinalAuthorization.
+type oid4vciFinalFlow struct {
+	receiver                    receiverTypes.OID4VCIFinalReceiver
+	issuerMetadata              *receiverTypes.CredentialIssuerMetadata
+	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata
+	authorizationServerIssuer   string
+	credentialConfigurationID   string
+	credentialConfiguration     receiverTypes.CredentialConfiguration
+	holderKeys                  []jose.JSONWebKey
+	keyAttestation              *oid4vciKeyAttestationPlan
+	usePrivateKeyJwt            bool
+	generateClientAssertion     func() (string, error)
+}
+
+// issuerPolicy is the RFC 9207 expectation the authorization response must meet.
+func (f *oid4vciFinalFlow) issuerPolicy(haip bool) authorizationResponseIssuerPolicy {
+	advertised := f.authorizationServerMetadata.AuthorizationResponseIssParameterSupported
+	return authorizationResponseIssuerPolicy{
+		expected: f.authorizationServerIssuer,
+		required: haip || (advertised != nil && *advertised),
+	}
+}
+
 // ReceiveOID4VCIFinalCredential implements the OpenID4VCI 1.0 Final/HAIP
-// authorization-code credential issuance flow.
+// authorization-code credential issuance flow. It is
+// ReceiveOID4VCIFinalCredentialContext with a background context.
 func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (*OID4VCIFinalReceiveResult, error) {
+	return w.ReceiveOID4VCIFinalCredentialContext(context.Background(), req)
+}
+
+// ReceiveOID4VCIFinalCredentialContext runs the whole OpenID4VCI 1.0 Final/HAIP
+// authorization-code flow in one call, including the §5.2 authorization
+// endpoint. Driving the authorization endpoint from the wallet process only
+// works against an issuer that answers the bare GET with a redirect carrying
+// the code, so it is gated behind
+// OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization; a wallet with a user
+// calls BeginOID4VCIFinalAuthorization and ResumeOID4VCIFinalAuthorization
+// around a system browser instead.
+//
+// ctx bounds every request the flow makes and cancels deferred credential
+// polling.
+func (w *Wallet) ReceiveOID4VCIFinalCredentialContext(ctx context.Context, req OID4VCIFinalReceiveRequest) (*OID4VCIFinalReceiveResult, error) {
 	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
 		return nil, err
+	}
+	if !req.AllowSelfDrivenAuthorization {
+		// Checked before anything is sent, so a caller that has to migrate does
+		// not first consume a pushed authorization request_uri.
+		return nil, fmt.Errorf("the authorization code flow requires a browser: use BeginOID4VCIFinalAuthorization, or set AllowSelfDrivenAuthorization for a test issuer")
+	}
+	authorization, flow, err := w.beginOID4VCIFinalAuthorization(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	redirectURL, err := followOID4VCIAuthorizationEndpoint(req.HTTPClient, authorization)
+	if err != nil {
+		return nil, err
+	}
+	return w.resumeOID4VCIFinalAuthorization(ctx, req, authorization, flow, redirectURL)
+}
+
+// BeginOID4VCIFinalAuthorization performs everything the OpenID4VCI 1.0 §5
+// authorization code flow does before the user agent is involved: it resolves
+// the issuer and authorization server metadata, validates the selected
+// Credential Configuration, pushes the authorization request when the flow uses
+// RFC 9126 PAR, and returns the authorization URL to open in a browser together
+// with the state the caller must hand back to
+// ResumeOID4VCIFinalAuthorization.
+func (w *Wallet) BeginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest) (*OID4VCIFinalAuthorization, error) {
+	authorization, _, err := w.beginOID4VCIFinalAuthorization(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return authorization, nil
+}
+
+// ResumeOID4VCIFinalAuthorization continues the flow from the redirect the
+// browser delivered to the wallet's registered redirect_uri. It validates the
+// RFC 6749 §4.1.2 / RFC 9207 authorization response against auth, exchanges the
+// code at the token endpoint and performs the §8 credential request. req must
+// carry the same client, redirect_uri and holder keys the matching
+// BeginOID4VCIFinalAuthorization call used.
+func (w *Wallet) ResumeOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization, redirectURL string) (*OID4VCIFinalReceiveResult, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("authorization state is required")
+	}
+	flow, err := w.restoreOID4VCIFinalFlow(req, auth)
+	if err != nil {
+		return nil, err
+	}
+	return w.resumeOID4VCIFinalAuthorization(ctx, req, auth, flow, redirectURL)
+}
+
+// requireOID4VCIContext reports a cancelled context at an issuance step
+// boundary. The OID4VCIFinalReceiver interface carries no context, so the flow
+// checks between steps rather than inside a request; that is enough for a
+// caller that abandons an issuance to stop it before the next request leaves
+// the wallet.
+func requireOID4VCIContext(ctx context.Context, step string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("OpenID4VCI issuance cancelled before %s: %w", step, err)
+	}
+	return nil
+}
+
+func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest) (*OID4VCIFinalAuthorization, *oid4vciFinalFlow, error) {
+	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
+		return nil, nil, err
+	}
+	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
+		return nil, nil, err
 	}
 
 	// OpenID4VCI 1.0 §5: "The Wallet can also start the issuance without a
@@ -214,7 +369,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	if req.CredentialOffer != nil {
 		authCodeGrant = req.CredentialOffer.Grants["authorization_code"]
 		if authCodeGrant == nil {
-			return nil, fmt.Errorf("authorization_code grant is not included in the offer")
+			return nil, nil, fmt.Errorf("authorization_code grant is not included in the offer")
 		}
 		credentialConfigurationID = req.CredentialOffer.CredentialConfigurationIDs[0]
 		issuerIdentifier = req.CredentialOffer.CredentialIssuer.String()
@@ -227,65 +382,38 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
 	// mechanism at OAuth2 Endpoints that support client authentication".
 	if w.profile.IsHAIP() && w.clientAttestation == nil && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
-		return nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
+		return nil, nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
 	}
 
 	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
 	if err != nil {
-		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
-	}
-
-	holderKeys, err := resolveOID4VCIFinalHolderKeys(req)
-	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
 
 	issuerEndpoint, err := common.ParseURIField(issuerIdentifier)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
 	}
 	issuerMetadata, err := finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 	}
 	// §12.2.2/§12.2.4: the credential_issuer value in the metadata MUST match
 	// the credential issuer the wallet requested exactly; the wallet performs
 	// no normalization.
 	if issuerMetadata.CredentialIssuer != issuerIdentifier {
 		if req.CredentialOffer != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
 				issuerMetadata.CredentialIssuer, issuerIdentifier)
 		}
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"credential issuer metadata identifier %q does not match the requested credential issuer %q",
 			issuerMetadata.CredentialIssuer, issuerIdentifier)
 	}
 
-	// HAIP §4.1 constraints on the issuer metadata and the selected credential
-	// configuration are enforced before PAR so an unsupported issuer never sees
-	// an authorization request.
-	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
-	if w.profile.IsHAIP() && profileValidator == nil {
-		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
-	}
-	if profileValidator != nil {
-		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
-			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
-		}
-		if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok {
-			if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
-				return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
-			}
-		}
-	}
-
-	// OpenID4VCI 1.0 Appendix D / HAIP §4.5.1: a provider must be available
-	// before anything is sent to the issuer when the selected configuration
-	// requires a key attestation.
-	keyAttestation, err := w.planOID4VCIKeyAttestation(issuerMetadata, credentialConfigurationID, req.IncludeKeyAttestation)
-	if err != nil {
-		return nil, err
+	if _, err := requireOfferedCredentialConfiguration(issuerMetadata, credentialConfigurationID); err != nil {
+		return nil, nil, err
 	}
 
 	// §12.3: select the authorization server. A grant authorization_server hint
@@ -293,80 +421,50 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	// is used, falling back to the credential issuer when the list is empty.
 	authorizationServerEndpoint, err := selectOID4VCIAuthorizationServer(issuerMetadata, authCodeGrant, *issuerEndpoint)
 	if err != nil {
-		return nil, err
-	}
-	// §14.6: never request more proofs than the issuer's batch_size.
-	if len(holderKeys) > issuerMetadata.BatchSize() {
-		return nil, fmt.Errorf("requested %d credentials but the issuer batch_size is %d", len(holderKeys), issuerMetadata.BatchSize())
+		return nil, nil, err
 	}
 
 	authorizationServerMetadata, err := finalReceiver.FetchAuthorizationServerMetadata(authorizationServerEndpoint, req.Type)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 	if authorizationServerMetadata.AuthorizationEndpoint == nil {
-		return nil, fmt.Errorf("authorization endpoint is missing on authorization server")
-	}
-	if authorizationServerMetadata.PushedAuthorizationRequestEndpoint == nil {
-		return nil, fmt.Errorf("pushed authorization request endpoint is missing on authorization server")
+		return nil, nil, fmt.Errorf("authorization endpoint is missing on authorization server")
 	}
 	if authorizationServerMetadata.TokenEndpoint == nil {
-		return nil, fmt.Errorf("token endpoint is missing on authorization server")
+		return nil, nil, fmt.Errorf("token endpoint is missing on authorization server")
 	}
 	// RFC 8414 §3.3: the issuer identifier in the metadata MUST be identical to
 	// the authorization server identifier used to fetch it. The verified value
 	// is the attestation PoP audience.
-	authorizationServerIssuer := authorizationServerMetadata.Issuer.String()
-	if authorizationServerIssuer != authorizationServerEndpoint.String() {
-		return nil, fmt.Errorf(
+	if authorizationServerMetadata.Issuer.String() != authorizationServerEndpoint.String() {
+		return nil, nil, fmt.Errorf(
 			"authorization server metadata issuer %q does not match the selected authorization server %q",
-			authorizationServerIssuer, authorizationServerEndpoint.String())
+			authorizationServerMetadata.Issuer.String(), authorizationServerEndpoint.String())
 	}
 
-	// RFC 9126 §2 / HAIP §4.3: the PAR and token endpoints authenticate the
-	// client the same way. When private_key_jwt is configured, each endpoint
-	// gets its own freshly signed assertion because RFC 7523 §3 requires a
-	// unique jti. The authorization server must advertise the method before any
-	// request leaves the wallet.
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
-	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
-	usePrivateKeyJwt := false
-	// Attestation-based client authentication (Appendix E) and private_key_jwt
-	// are alternative mechanisms; a wallet uses one per issuance. When an
-	// attestation provider is in use it authenticates the client, so a
-	// ClientAuth configured for other flows is not sent and the authorization
-	// server need not advertise private_key_jwt.
-	attestationInUse := w.clientAttestation != nil || req.AttesterKey.Key != nil
-	if !attestationInUse && w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
-		if !asMetadataSupportsAuthMethod(authorizationServerMetadata, receiverTypes.PrivateKeyJwt) {
-			return nil, fmt.Errorf("authorization server metadata does not advertise the configured private_key_jwt client authentication method")
-		}
-		if _, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); !ok {
-			return nil, errNoUsableClientAuthMethod
-		}
-		usePrivateKeyJwt = true
-	}
-	generateClientAssertion := func() (string, error) {
-		return w.generateClientAssertion(
-			w.clientAuth.Key,
-			w.clientAuth.ClientID,
-			clientAssertionAudience,
-			w.clientAuth.signatureAlgorithm(),
-		)
-	}
-
-	attestationHeaders, attestationChallenge, err := w.createOID4VCIAttestationHeaders(finalReceiver, req, authorizationServerMetadata, authorizationServerIssuer)
+	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, issuerMetadata, authorizationServerMetadata, credentialConfigurationID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	// HAIP §4 ("Pushed Authorization Requests (PAR): Only required when using
+	// the Authorization Endpoint") makes PAR a HAIP obligation, not an
+	// OpenID4VCI one. A Final issuer that publishes no
+	// pushed_authorization_request_endpoint gets the authorization request
+	// parameters inline instead of being refused.
+	usePAR := authorizationServerMetadata.PushedAuthorizationRequestEndpoint != nil
+	if !usePAR && w.profile.IsHAIP() {
+		return nil, nil, fmt.Errorf("HAIP requires a pushed authorization request endpoint on the authorization server")
 	}
 
 	codeVerifier, err := randomBase64URL(32)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	state, err := randomBase64URL(16)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	codeChallengeBytes := sha256.Sum256([]byte(codeVerifier))
 	// §5.1.1/§5.1.2: the Credential Configuration is requested either with
@@ -375,10 +473,11 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	scope, authorizationDetails, err := oid4vciAuthorizationRequestParameters(
 		req.AuthorizationRequestType,
 		credentialConfigurationID,
-		issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID],
+		flow.credentialConfiguration,
+		w.profile.IsHAIP(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(authorizationDetails) > 0 && len(issuerMetadata.AuthorizationServers) > 0 {
 		// OpenID4VCI 1.0 §5.1.1: "locations: OPTIONAL ... If the Credential
@@ -400,29 +499,195 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 		CodeChallengeMethod:  "S256",
 		IssuerState:          issuerState,
 	}
-	if usePrivateKeyJwt {
-		assertion, err := generateClientAssertion()
+
+	if err := requireOID4VCIContext(ctx, "the authorization request"); err != nil {
+		return nil, nil, err
+	}
+	authorization := &OID4VCIFinalAuthorization{
+		State:                       state,
+		CodeVerifier:                codeVerifier,
+		IssuerMetadata:              issuerMetadata,
+		AuthorizationServerMetadata: authorizationServerMetadata,
+		CredentialConfigurationID:   credentialConfigurationID,
+	}
+	if usePAR {
+		attestationHeaders, _, err := w.createOID4VCIAttestationHeaders(ctx, finalReceiver, req, authorizationServerMetadata, flow.authorizationServerIssuer)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
+			return nil, nil, err
 		}
-		parRequest.ClientAssertion = assertion
-		parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+		if flow.usePrivateKeyJwt {
+			assertion, err := flow.generateClientAssertion()
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
+			}
+			parRequest.ClientAssertion = assertion
+			parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+		}
+		parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to push authorization request: %w", err)
+		}
+		authorization.RequestURI = parResponse.RequestURI
+		// §5.1.4: the request_uri expiry is measured from the PAR response time.
+		if parResponse.ExpiresIn > 0 {
+			authorization.ExpiresAt = time.Now().Add(time.Duration(parResponse.ExpiresIn) * time.Second)
+		}
 	}
-	parResponse, err := finalReceiver.PushAuthorizationRequest(*authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
+	authorization.AuthorizationURL = oid4vciAuthorizationRequestURL(authorizationServerMetadata.AuthorizationEndpoint, req.ClientID, parRequest, authorization.RequestURI)
+	return authorization, flow, nil
+}
+
+// restoreOID4VCIFinalFlow rebuilds the non-serialisable half of an issuance
+// from the request and the persisted authorization state. The issuer and
+// authorization server metadata come from the state, not from a fresh fetch, so
+// a restarted wallet continues against exactly the metadata the authorization
+// request was built from.
+func (w *Wallet) restoreOID4VCIFinalFlow(req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization) (*oid4vciFinalFlow, error) {
+	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
+		return nil, err
+	}
+	if auth.IssuerMetadata == nil {
+		return nil, fmt.Errorf("authorization state is missing the issuer metadata")
+	}
+	if auth.AuthorizationServerMetadata == nil {
+		return nil, fmt.Errorf("authorization state is missing the authorization server metadata")
+	}
+	if auth.AuthorizationServerMetadata.TokenEndpoint == nil {
+		return nil, fmt.Errorf("token endpoint is missing on authorization server")
+	}
+	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
 	if err != nil {
-		return nil, fmt.Errorf("failed to push authorization request: %w", err)
+		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	// §5.1.4: the request_uri expiry is measured from the PAR response time.
-	parExpiresAt := time.Time{}
-	if parResponse.ExpiresIn > 0 {
-		parExpiresAt = time.Now().Add(time.Duration(parResponse.ExpiresIn) * time.Second)
+	return w.newOID4VCIFinalFlow(req, finalReceiver, auth.IssuerMetadata, auth.AuthorizationServerMetadata, auth.CredentialConfigurationID)
+}
+
+// requireOfferedCredentialConfiguration resolves the selected Credential
+// Configuration. §12.2.4 makes credential_configurations_supported the list of
+// every Credential Configuration the Credential Issuer offers, so one that is
+// absent cannot be requested, and saying so here keeps an authorization request
+// for it off the wire entirely.
+func requireOfferedCredentialConfiguration(issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) (receiverTypes.CredentialConfiguration, error) {
+	config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]
+	if !ok {
+		return receiverTypes.CredentialConfiguration{}, fmt.Errorf(
+			"credential issuer %q does not offer credential_configuration_id %q: %w",
+			issuerMetadata.CredentialIssuer, credentialConfigurationID, ErrUnknownCredentialConfiguration)
+	}
+	return config, nil
+}
+
+// newOID4VCIFinalFlow validates the selected Credential Configuration against
+// the wallet profile, plans the key attestation and resolves how the client
+// authenticates at the PAR and token endpoints.
+func (w *Wallet) newOID4VCIFinalFlow(
+	req OID4VCIFinalReceiveRequest,
+	finalReceiver receiverTypes.OID4VCIFinalReceiver,
+	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
+	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata,
+	credentialConfigurationID string,
+) (*oid4vciFinalFlow, error) {
+	holderKeys, err := resolveOID4VCIFinalHolderKeys(req)
+	if err != nil {
+		return nil, err
 	}
 
-	issuerPolicy := authorizationResponseIssuerPolicy{
-		expected: authorizationServerIssuer,
-		required: w.profile.IsHAIP() || (authorizationServerMetadata.AuthorizationResponseIssParameterSupported != nil && *authorizationServerMetadata.AuthorizationResponseIssParameterSupported),
+	config, err := requireOfferedCredentialConfiguration(issuerMetadata, credentialConfigurationID)
+	if err != nil {
+		return nil, err
 	}
-	code, err := requestOID4VCIAuthorizationCode(req.HTTPClient, authorizationServerMetadata.AuthorizationEndpoint, req.ClientID, parResponse.RequestURI, state, req.RedirectURI, parExpiresAt, issuerPolicy)
+
+	// HAIP §4.1 constraints on the issuer metadata and the selected credential
+	// configuration are enforced before PAR so an unsupported issuer never sees
+	// an authorization request.
+	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
+	if w.profile.IsHAIP() && profileValidator == nil {
+		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
+	}
+	if profileValidator != nil {
+		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
+			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
+		}
+		if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
+			return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
+		}
+	}
+
+	// OpenID4VCI 1.0 Appendix D / HAIP §4.5.1: a provider must be available
+	// before anything is sent to the issuer when the selected configuration
+	// requires a key attestation.
+	keyAttestation, err := w.planOID4VCIKeyAttestation(issuerMetadata, credentialConfigurationID, req.IncludeKeyAttestation)
+	if err != nil {
+		return nil, err
+	}
+
+	// §14.6: never request more proofs than the issuer's batch_size.
+	if len(holderKeys) > issuerMetadata.BatchSize() {
+		return nil, fmt.Errorf("requested %d credentials but the issuer batch_size is %d", len(holderKeys), issuerMetadata.BatchSize())
+	}
+
+	// RFC 9126 §2 / HAIP §4.3: the PAR and token endpoints authenticate the
+	// client the same way. When private_key_jwt is configured, each endpoint
+	// gets its own freshly signed assertion because RFC 7523 §3 requires a
+	// unique jti. The authorization server must advertise the method before any
+	// request leaves the wallet.
+	authorizationServerIssuer := authorizationServerMetadata.Issuer.String()
+	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
+	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
+	usePrivateKeyJwt := false
+	// Attestation-based client authentication (Appendix E) and private_key_jwt
+	// are alternative mechanisms; a wallet uses one per issuance. When an
+	// attestation provider is in use it authenticates the client, so a
+	// ClientAuth configured for other flows is not sent and the authorization
+	// server need not advertise private_key_jwt.
+	attestationInUse := w.clientAttestation != nil || req.AttesterKey.Key != nil
+	if !attestationInUse && w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
+		if !asMetadataSupportsAuthMethod(authorizationServerMetadata, receiverTypes.PrivateKeyJwt) {
+			return nil, fmt.Errorf("authorization server metadata does not advertise the configured private_key_jwt client authentication method")
+		}
+		if _, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); !ok {
+			return nil, errNoUsableClientAuthMethod
+		}
+		usePrivateKeyJwt = true
+	}
+
+	return &oid4vciFinalFlow{
+		receiver:                    finalReceiver,
+		issuerMetadata:              issuerMetadata,
+		authorizationServerMetadata: authorizationServerMetadata,
+		authorizationServerIssuer:   authorizationServerIssuer,
+		credentialConfigurationID:   credentialConfigurationID,
+		credentialConfiguration:     config,
+		holderKeys:                  holderKeys,
+		keyAttestation:              keyAttestation,
+		usePrivateKeyJwt:            usePrivateKeyJwt,
+		generateClientAssertion: func() (string, error) {
+			return w.generateClientAssertion(
+				w.clientAuth.Key,
+				w.clientAuth.ClientID,
+				clientAssertionAudience,
+				w.clientAuth.signatureAlgorithm(),
+			)
+		},
+	}, nil
+}
+
+func (w *Wallet) resumeOID4VCIFinalAuthorization(
+	ctx context.Context,
+	req OID4VCIFinalReceiveRequest,
+	auth *OID4VCIFinalAuthorization,
+	flow *oid4vciFinalFlow,
+	redirectURL string,
+) (*OID4VCIFinalReceiveResult, error) {
+	code, err := validateOID4VCIAuthorizationRedirect(redirectURL, auth.AuthorizationURL, auth.State, req.RedirectURI, flow.issuerPolicy(w.profile.IsHAIP()))
+	if err != nil {
+		return nil, err
+	}
+
+	if err := requireOID4VCIContext(ctx, "the token request"); err != nil {
+		return nil, err
+	}
+	attestationHeaders, attestationChallenge, err := w.createOID4VCIAttestationHeaders(ctx, flow.receiver, req, flow.authorizationServerMetadata, flow.authorizationServerIssuer)
 	if err != nil {
 		return nil, err
 	}
@@ -430,23 +695,23 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 	tokenRequest := receiverTypes.AuthorizationCodeTokenRequest{
 		Code:         code,
 		RedirectURI:  req.RedirectURI,
-		CodeVerifier: codeVerifier,
+		CodeVerifier: auth.CodeVerifier,
 		ClientID:     req.ClientID,
 	}
-	if usePrivateKeyJwt {
+	if flow.usePrivateKeyJwt {
 		// The factory is invoked once per HTTP attempt, so a DPoP nonce retry
 		// re-sends the token request with a fresh client_assertion (new jti)
 		// rather than replaying the first one.
 		tokenRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
-		tokenRequest.ClientAssertionFactory = generateClientAssertion
+		tokenRequest.ClientAssertionFactory = flow.generateClientAssertion
 	}
-	token, err := finalReceiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
-		*authorizationServerMetadata.TokenEndpoint,
+	token, err := flow.receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
+		*flow.authorizationServerMetadata.TokenEndpoint,
 		tokenRequest,
 		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			tokenAttestationHeaders := attestationHeaders
 			if attestationHeaders.ClientAttestation != "" {
-				tokenPop, err := finalReceiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
+				tokenPop, err := flow.receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 				if err != nil {
 					return receiverTypes.OAuthClientAttestationHeaders{}, err
 				}
@@ -455,113 +720,124 @@ func (w *Wallet) ReceiveOID4VCIFinalCredential(req OID4VCIFinalReceiveRequest) (
 			return tokenAttestationHeaders, nil
 		},
 		func(nonce string) (string, error) {
-			return finalReceiver.CreateDpopProof(req.ClientKey, http.MethodPost, authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
+			return flow.receiver.CreateDpopProof(req.ClientKey, http.MethodPost, flow.authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
 
-	return w.receiveOID4VCIFinalCredentials(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, keyAttestation)
+	return w.receiveOID4VCIFinalCredentials(ctx, flow, token, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, req.MaxDeferredInterval)
 }
 
 // receiveOID4VCIFinalCredentials performs the §8 credential request (with §14.6
 // batch proofs, §8.2 response encryption and §6.2 credential_identifier), the
 // §9 deferred flow and the §11 notification bookkeeping.
 func (w *Wallet) receiveOID4VCIFinalCredentials(
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	credentialConfigurationID string,
-	holderKeys []jose.JSONWebKey,
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
 	encryptionKey *jose.JSONWebKey,
 	deferredPollAttempts int,
-	keyAttestation *oid4vciKeyAttestationPlan,
+	maxInterval time.Duration,
 ) (*OID4VCIFinalReceiveResult, error) {
+	issuerMetadata := flow.issuerMetadata
 	// §8.2 / §10: build the credential_response_encryption request parameter and
 	// fail closed when the issuer requires encryption but no key is supplied.
 	encryptionParams, err := receiverOid4vci.CredentialResponseEncryptionParameters(issuerMetadata, encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("credential response encryption: %w", err)
 	}
-	encryptionRequested := encryptionParams != nil
 
-	credentialIdentifier := credentialIdentifierForConfiguration(token, issuerMetadata, credentialConfigurationID)
-	build := oid4vciFinalCredentialRequestBodyFactory(finalReceiver, issuerMetadata, holderKeys, credentialIdentifier, credentialConfigurationID, encryptionParams, keyAttestation)
+	credentialIdentifier, err := credentialIdentifierForConfiguration(token, flow.credentialConfigurationID)
+	if err != nil {
+		return nil, err
+	}
+	build := oid4vciFinalCredentialRequestBodyFactory(ctx, flow, credentialIdentifier, encryptionParams)
 
 	// §7: the nonce endpoint is OPTIONAL. Only fetch c_nonce when the issuer
 	// advertises one; otherwise the proof is built without a nonce.
 	nonceEndpoint := issuerMetadata.NonceEndpoint
 	initialNonce := ""
 	if nonceEndpoint != nil {
-		nonceResponse, err := finalReceiver.FetchNonceResponse(*nonceEndpoint)
+		nonceResponse, err := flow.receiver.FetchNonceResponse(*nonceEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch credential nonce: %w", err)
 		}
 		initialNonce = nonceResponse.CNonce
 	}
 
+	if err := requireOID4VCIContext(ctx, "the credential request"); err != nil {
+		return nil, err
+	}
 	credentialEndpoint := issuerMetadata.CredentialEndpoint
-	rawResponse, _, err := finalReceiver.PostCredentialEndpointWithNonceRetry(
+	rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
 		credentialEndpoint,
-		token.Token,
+		*token,
 		nonceEndpoint,
 		initialNonce,
 		build,
-		oid4vciFinalDpopProofFactory(finalReceiver, clientKey, credentialEndpoint, token.Token),
+		oid4vciFinalDpopProofFactory(flow.receiver, clientKey, credentialEndpoint, token.Token),
 	)
 	if err != nil {
 		// CredentialEndpointError is retained so callers can branch with
 		// errors.Is (invalid_proof, credential_request_denied, ...).
 		return nil, fmt.Errorf("failed to receive credential: %w", err)
 	}
-	if encryptionRequested && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
+	if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
 		return nil, fmt.Errorf("credential response encryption was requested but the credential endpoint returned %q", rawResponse.ContentType)
 	}
-	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(finalReceiver, rawResponse, encryptionKey)
+	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
 
 	if credentialResponse.TransactionID != "" {
-		return w.handleOID4VCIFinalDeferredResponse(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, clientKey, encryptionKey, encryptionRequested, credentialResponse, deferredPollAttempts)
+		return w.handleOID4VCIFinalDeferredResponse(ctx, flow, token, clientKey, encryptionKey, encryptionParams, credentialResponse, deferredPollAttempts, maxInterval)
 	}
-	return w.storeAndNotifyOID4VCIFinalCredentials(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, clientKey, credentialResponse)
+	return w.storeAndNotifyOID4VCIFinalCredentials(ctx, flow, token, clientKey, credentialResponse)
 }
 
 func (w *Wallet) handleOID4VCIFinalDeferredResponse(
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	credentialConfigurationID string,
-	holderKeys []jose.JSONWebKey,
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
 	encryptionKey *jose.JSONWebKey,
-	encryptionRequested bool,
+	encryptionParams map[string]any,
 	credentialResponse *receiverTypes.CredentialResponse,
 	deferredPollAttempts int,
+	maxInterval time.Duration,
 ) (*OID4VCIFinalReceiveResult, error) {
-	if issuerMetadata.DeferredCredentialEndpoint == nil {
+	if flow.issuerMetadata.DeferredCredentialEndpoint == nil {
 		return nil, fmt.Errorf("deferred credential endpoint is missing on credential issuer")
 	}
 	if deferredPollAttempts <= 0 {
 		// §9: do not report success with zero credentials. Hand the caller the
 		// transaction_id and access token so it can resume after a restart.
-		return pendingOID4VCIFinalResult(issuerMetadata, credentialConfigurationID, token, credentialResponse), newOID4VCIFinalIssuancePendingError(credentialResponse.Interval)
+		return pendingOID4VCIFinalResult(flow.issuerMetadata, flow.credentialConfigurationID, token, credentialResponse), newOID4VCIFinalIssuancePendingError(credentialResponse.Interval)
 	}
-	interval := time.Duration(credentialResponse.Interval) * time.Second
+	interval := clampDeferredInterval(time.Duration(credentialResponse.Interval)*time.Second, maxInterval)
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = defaultDeferredInterval
 	}
-	return w.pollOID4VCIFinalDeferredCredential(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, clientKey, encryptionKey, encryptionRequested, credentialResponse.TransactionID, credentialResponse.NotificationID, deferredPollAttempts, interval)
+	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, token, clientKey, encryptionKey, encryptionParams, credentialResponse.TransactionID, credentialResponse.NotificationID, deferredPollAttempts, interval, maxInterval)
 }
 
 // ResumeOID4VCIFinalDeferredCredential resumes polling the §9 deferred
 // credential endpoint using a transaction_id returned by an IssuancePending
-// result. The issuer metadata may be supplied directly or refetched from
-// IssuerURL.
+// result. It is ResumeOID4VCIFinalDeferredCredentialContext with a background
+// context, so its polling cannot be cancelled.
 func (w *Wallet) ResumeOID4VCIFinalDeferredCredential(req OID4VCIFinalDeferredRequest) (*OID4VCIFinalReceiveResult, error) {
+	return w.ResumeOID4VCIFinalDeferredCredentialContext(context.Background(), req)
+}
+
+// ResumeOID4VCIFinalDeferredCredentialContext resumes polling the §9 deferred
+// credential endpoint using a transaction_id returned by an IssuancePending
+// result. The issuer metadata may be supplied directly or refetched from
+// IssuerURL. Cancelling ctx stops the polling between attempts.
+func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context, req OID4VCIFinalDeferredRequest) (*OID4VCIFinalReceiveResult, error) {
 	if req.Type != receiverTypes.Oid4vci {
 		return nil, fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
 	}
@@ -614,17 +890,23 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredential(req OID4VCIFinalDeferredRe
 	if err != nil {
 		return nil, fmt.Errorf("credential response encryption: %w", err)
 	}
-	encryptionRequested := encryptionParams != nil
 
 	attempts := req.DeferredPollAttempts
 	if attempts <= 0 {
 		attempts = 1
 	}
-	interval := req.Interval
+	interval := clampDeferredInterval(req.Interval, req.MaxInterval)
 	if interval <= 0 {
-		interval = 5 * time.Second
+		interval = defaultDeferredInterval
 	}
-	return w.pollOID4VCIFinalDeferredCredential(finalReceiver, issuerMetadata, req.CredentialConfigurationID, holderKeys, req.AccessToken, req.ClientKey, req.CredentialResponseEncryptionKey, encryptionRequested, req.TransactionID, "", attempts, interval)
+	flow := &oid4vciFinalFlow{
+		receiver:                  finalReceiver,
+		issuerMetadata:            issuerMetadata,
+		credentialConfigurationID: req.CredentialConfigurationID,
+		credentialConfiguration:   issuerMetadata.CredentialConfigurationSupported[req.CredentialConfigurationID],
+		holderKeys:                holderKeys,
+	}
+	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, req.CredentialResponseEncryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)
 }
 
 func pendingOID4VCIFinalResult(issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, token *receiverTypes.CredentialIssuanceAccessToken, response *receiverTypes.CredentialResponse) *OID4VCIFinalReceiveResult {
@@ -645,67 +927,86 @@ func pendingOID4VCIFinalResult(issuerMetadata *receiverTypes.CredentialIssuerMet
 }
 
 func (w *Wallet) pollOID4VCIFinalDeferredCredential(
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	credentialConfigurationID string,
-	holderKeys []jose.JSONWebKey,
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
 	encryptionKey *jose.JSONWebKey,
-	encryptionRequested bool,
+	encryptionParams map[string]any,
 	transactionID string,
 	notificationID string,
 	attempts int,
 	interval time.Duration,
+	maxInterval time.Duration,
 ) (*OID4VCIFinalReceiveResult, error) {
+	issuerMetadata := flow.issuerMetadata
 	endpoint := *issuerMetadata.DeferredCredentialEndpoint
 	pending := &OID4VCIFinalReceiveResult{
 		AccessToken:               token,
 		TransactionID:             transactionID,
 		NotificationID:            notificationID,
 		IssuerMetadata:            issuerMetadata,
-		CredentialConfigurationID: credentialConfigurationID,
+		CredentialConfigurationID: flow.credentialConfigurationID,
 	}
 
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 && interval > 0 {
-			time.Sleep(interval)
+			if err := waitForDeferredInterval(ctx, interval); err != nil {
+				return nil, err
+			}
 		}
-		body, err := json.Marshal(map[string]any{"transaction_id": transactionID})
+		if err := requireOID4VCIContext(ctx, "the deferred credential request"); err != nil {
+			return nil, err
+		}
+		// §9.1: "Deferred Credential Request encryption MUST be used if the
+		// `credential_response_encryption` parameter is included in the
+		// Deferred Credential Request... If it is not included encryption will
+		// not be performed." The wallet repeats the parameter it sent with the
+		// Credential Request so the deferred response is encrypted to the same
+		// key, and §8.1's "Credential Request encryption MUST be used if the
+		// `credential_response_encryption` parameter is included, to prevent it
+		// being substituted by an attacker" is honoured by routing the body
+		// through EncodeCredentialRequest, which fails closed when the issuer
+		// advertises no credential_request_encryption.
+		request := map[string]any{"transaction_id": transactionID}
+		if encryptionParams != nil {
+			request["credential_response_encryption"] = encryptionParams
+		}
+		body, contentType, err := flow.receiver.EncodeCredentialRequest(request, issuerMetadata)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode deferred credential request: %w", err)
 		}
-		rawResponse, _, err := finalReceiver.PostCredentialEndpointWithNonceRetry(
+		rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
 			endpoint,
-			token.Token,
+			*token,
 			nil,
 			"",
-			func(string) ([]byte, string, error) { return body, "application/json", nil },
-			oid4vciFinalDpopProofFactory(finalReceiver, clientKey, endpoint, token.Token),
+			func(string) ([]byte, string, error) { return body, contentType, nil },
+			oid4vciFinalDpopProofFactory(flow.receiver, clientKey, endpoint, token.Token),
 		)
 		if err != nil {
 			// §9.2: an issuance_pending error means poll again after the
 			// interval the issuer advertised.
 			if errors.Is(err, receiverTypes.ErrIssuancePending) {
-				interval = deferredIntervalFromError(err, interval)
+				interval = deferredIntervalFromError(err, interval, maxInterval)
 				continue
 			}
 			return nil, fmt.Errorf("failed to receive deferred credential: %w", err)
 		}
-		if encryptionRequested && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
+		if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
 			return nil, fmt.Errorf("credential response encryption was requested but the deferred credential endpoint returned %q", rawResponse.ContentType)
 		}
-		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(finalReceiver, rawResponse, encryptionKey)
+		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey)
 		if err != nil {
 			return nil, err
 		}
 		if credentialHasNoCredentials(credentialResponse) {
 			if credentialResponse.Interval > 0 {
-				interval = time.Duration(credentialResponse.Interval) * time.Second
+				interval = clampDeferredInterval(time.Duration(credentialResponse.Interval)*time.Second, maxInterval)
 			}
 			continue
 		}
-		result, err := w.storeAndNotifyOID4VCIFinalCredentials(finalReceiver, issuerMetadata, credentialConfigurationID, holderKeys, token, clientKey, credentialResponse)
+		result, err := w.storeAndNotifyOID4VCIFinalCredentials(ctx, flow, token, clientKey, credentialResponse)
 		if err != nil {
 			return nil, err
 		}
@@ -715,6 +1016,34 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 	return pending, newOID4VCIFinalIssuancePendingError(int(interval / time.Second))
 }
 
+// waitForDeferredInterval sleeps for interval, or returns as soon as ctx is
+// cancelled. A wallet polling a §9 deferred transaction must be able to give up
+// while it waits, which time.Sleep does not allow.
+func waitForDeferredInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return fmt.Errorf("deferred credential polling cancelled: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+// clampDeferredInterval bounds a polling interval that the Credential Issuer
+// chose. OpenID4VCI 1.0 §9.2 lets the issuer name the interval and sets no
+// upper bound, so an issuer could otherwise pin a polling goroutine for an
+// arbitrary time. maxInterval of zero or less uses maxDeferredInterval.
+func clampDeferredInterval(interval, maxInterval time.Duration) time.Duration {
+	if maxInterval <= 0 {
+		maxInterval = maxDeferredInterval
+	}
+	if interval > maxInterval {
+		return maxInterval
+	}
+	return interval
+}
+
 func credentialHasNoCredentials(response *receiverTypes.CredentialResponse) bool {
 	if response == nil {
 		return true
@@ -722,12 +1051,12 @@ func credentialHasNoCredentials(response *receiverTypes.CredentialResponse) bool
 	return response.Credential == nil && len(response.Credentials) == 0
 }
 
-func deferredIntervalFromError(err error, fallback time.Duration) time.Duration {
+func deferredIntervalFromError(err error, fallback time.Duration, maxInterval time.Duration) time.Duration {
 	var endpointError *receiverTypes.CredentialEndpointError
 	if errors.As(err, &endpointError) && endpointError.Interval > 0 {
-		return time.Duration(endpointError.Interval) * time.Second
+		return clampDeferredInterval(time.Duration(endpointError.Interval)*time.Second, maxInterval)
 	}
-	return fallback
+	return clampDeferredInterval(fallback, maxInterval)
 }
 
 func newOID4VCIFinalIssuancePendingError(intervalSeconds int) error {
@@ -739,20 +1068,19 @@ func newOID4VCIFinalIssuancePendingError(intervalSeconds int) error {
 }
 
 func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	credentialConfigurationID string,
-	holderKeys []jose.JSONWebKey,
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
 	credentialResponse *receiverTypes.CredentialResponse,
 ) (*OID4VCIFinalReceiveResult, error) {
-	result := pendingOID4VCIFinalResult(issuerMetadata, credentialConfigurationID, token, credentialResponse)
-	savedCredentials, storeErr := w.storeOID4VCIFinalCredentialResponseBatch(credentialResponse, issuerMetadata, credentialConfigurationID, holderKeys)
+	issuerMetadata := flow.issuerMetadata
+	result := pendingOID4VCIFinalResult(issuerMetadata, flow.credentialConfigurationID, token, credentialResponse)
+	savedCredentials, storeErr := w.storeOID4VCIFinalCredentialResponseBatch(ctx, credentialResponse, issuerMetadata, flow.credentialConfigurationID, flow.holderKeys)
 	if storeErr != nil {
 		// §11: a credential that failed verification/storage is reported with
 		// credential_failure (best effort); the original failure is returned.
-		if notifyErr := notifyOID4VCIFinalCredential(finalReceiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
 			return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
 		}
 		return nil, storeErr
@@ -761,7 +1089,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	// §11: credential_accepted MUST only be sent after the credential was
 	// successfully stored.
 	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil {
-		if notifyErr := notifyOID4VCIFinalCredential(finalReceiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
 			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
 		}
 	}
@@ -769,8 +1097,18 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 }
 
 // NotifyOID4VCIFinalCredentialDeleted sends the §11 credential_deleted
-// notification for a credential the wallet removed from storage.
+// notification for a credential the wallet removed from storage. It is
+// NotifyOID4VCIFinalCredentialDeletedContext with a background context.
 func (w *Wallet) NotifyOID4VCIFinalCredentialDeleted(req OID4VCIFinalNotificationRequest) error {
+	return w.NotifyOID4VCIFinalCredentialDeletedContext(context.Background(), req)
+}
+
+// NotifyOID4VCIFinalCredentialDeletedContext sends the §11 credential_deleted
+// notification for a credential the wallet removed from storage.
+func (w *Wallet) NotifyOID4VCIFinalCredentialDeletedContext(ctx context.Context, req OID4VCIFinalNotificationRequest) error {
+	if err := requireOID4VCIContext(ctx, "the notification request"); err != nil {
+		return err
+	}
 	if req.Type != receiverTypes.Oid4vci {
 		return fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
 	}
@@ -802,43 +1140,51 @@ func notifyOID4VCIFinalCredential(
 		return nil
 	}
 	endpoint := *issuerMetadata.NotificationEndpoint
-	return finalReceiver.SendCredentialNotificationWithDpopRetry(
+	return finalReceiver.SendCredentialNotificationWithDpopRetryForToken(
 		endpoint,
-		token.Token,
+		*token,
 		receiverTypes.NotificationRequest{NotificationID: notificationID, Event: event},
 		oid4vciFinalDpopProofFactory(finalReceiver, clientKey, endpoint, token.Token),
 	)
 }
 
 func oid4vciFinalCredentialRequestBodyFactory(
-	receiver receiverTypes.OID4VCIFinalReceiver,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	holderKeys []jose.JSONWebKey,
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
 	credentialIdentifier *string,
-	credentialConfigurationID string,
 	encryptionParams map[string]any,
-	keyAttestation *oid4vciKeyAttestationPlan,
 ) receiverTypes.CredentialRequestBodyFactory {
+	issuerMetadata := flow.issuerMetadata
 	return func(cNonce string) ([]byte, string, error) {
 		keyAttestationJWT := ""
-		if keyAttestation != nil {
+		if flow.keyAttestation != nil {
 			request := KeyAttestationRequest{
-				Keys:     holderKeys,
+				Keys:     flow.holderKeys,
 				Nonce:    cNonce,
 				Audience: issuerMetadata.CredentialIssuer,
 			}
-			attestation, err := keyAttestation.provider.KeyAttestation(context.Background(), request)
+			attestation, err := flow.keyAttestation.provider.KeyAttestation(ctx, request)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to obtain key attestation: %w", err)
 			}
-			if err := validateKeyAttestation(attestation, request, keyAttestation.requireX5C, time.Now()); err != nil {
+			if err := validateKeyAttestation(attestation, request, flow.keyAttestation.requireX5C, time.Now()); err != nil {
 				return nil, "", err
 			}
 			keyAttestationJWT = attestation.JWT
 		}
-		proofs := make([]string, 0, len(holderKeys))
-		for _, key := range holderKeys {
-			proof, err := receiver.CreateCredentialRequestJWTProofWithKeyAttestation(key, issuerMetadata.CredentialIssuer, cNonce, keyAttestationJWT)
+		// §8.2.1.1: "the `alg` JWT header of the key proof ... MUST match one
+		// of the values listed in the `proof_signing_alg_values_supported`
+		// metadata parameter", which §12.2.4.1 publishes per Credential
+		// Configuration.
+		proofOptions := receiverTypes.ProofOptions{
+			Audience:         issuerMetadata.CredentialIssuer,
+			Nonce:            cNonce,
+			KeyAttestation:   keyAttestationJWT,
+			SigningAlgValues: proofSigningAlgValues(flow.credentialConfiguration),
+		}
+		proofs := make([]string, 0, len(flow.holderKeys))
+		for _, key := range flow.holderKeys {
+			proof, err := flow.receiver.CreateCredentialRequestJWTProofWithOptions(key, proofOptions)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to create credential request proof: %w", err)
 			}
@@ -851,17 +1197,34 @@ func oid4vciFinalCredentialRequestBodyFactory(
 		if credentialIdentifier != nil && *credentialIdentifier != "" {
 			payload["credential_identifier"] = *credentialIdentifier
 		} else {
-			payload["credential_configuration_id"] = credentialConfigurationID
+			payload["credential_configuration_id"] = flow.credentialConfigurationID
 		}
 		if encryptionParams != nil {
 			payload["credential_response_encryption"] = encryptionParams
 		}
-		body, contentType, err := receiver.EncodeCredentialRequest(payload, issuerMetadata)
+		body, contentType, err := flow.receiver.EncodeCredentialRequest(payload, issuerMetadata)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to encode credential request: %w", err)
 		}
 		return body, contentType, nil
 	}
+}
+
+// proofSigningAlgValues reads the "jwt" proof type's
+// proof_signing_alg_values_supported from a Credential Configuration.
+// OpenID4VCI 1.0 §12.2.4.1 makes it "REQUIRED. A non-empty array of algorithm
+// identifiers that the Issuer supports for this proof type. The Wallet uses one
+// of them to sign the proof"; a configuration that publishes none imposes no
+// constraint.
+func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.SignatureAlgorithm {
+	if config.ProofTypesSupported == nil {
+		return nil
+	}
+	jwtProof, ok := (*config.ProofTypesSupported)["jwt"]
+	if !ok {
+		return nil
+	}
+	return jwtProof.ProofSigningAlgValuesSupported
 }
 
 func oid4vciFinalDpopProofFactory(receiver receiverTypes.OID4VCIFinalReceiver, clientKey jose.JSONWebKey, endpoint common.URIField, accessToken string) receiverTypes.DPoPProofFactory {
@@ -889,7 +1252,12 @@ func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalRec
 // §12.2.4 says "If scope is absent, the only way to request the Credential is
 // using authorization_details"; otherwise it sends an openid_credential entry
 // carrying credential_configuration_id.
-func oid4vciAuthorizationRequestParameters(requestedType, credentialConfigurationID string, config receiverTypes.CredentialConfiguration) (string, []map[string]any, error) {
+//
+// haip narrows that to scope only. HAIP §4.1: "For Grant Type
+// `authorization_code`, the Issuer MUST include a scope value ... The Wallet
+// MUST use that value in the `scope` Authorization parameter", and §4.2: the
+// Wallet "MUST use the `scope` parameter to communicate Credential Type(s)".
+func oid4vciAuthorizationRequestParameters(requestedType, credentialConfigurationID string, config receiverTypes.CredentialConfiguration, haip bool) (string, []map[string]any, error) {
 	scope := strings.TrimSpace(config.Scope)
 	authorizationDetails := []map[string]any{
 		{
@@ -897,7 +1265,21 @@ func oid4vciAuthorizationRequestParameters(requestedType, credentialConfiguratio
 			"credential_configuration_id": credentialConfigurationID,
 		},
 	}
-	switch strings.TrimSpace(requestedType) {
+	normalized := strings.TrimSpace(requestedType)
+	if haip {
+		switch normalized {
+		case "", OID4VCIAuthorizationRequestTypeScope:
+			if scope == "" {
+				return "", nil, fmt.Errorf("HAIP requires the credential configuration %q to advertise a scope", credentialConfigurationID)
+			}
+			return config.Scope, nil, nil
+		case OID4VCIAuthorizationRequestTypeAuthorizationDetails:
+			return "", nil, fmt.Errorf("HAIP requires the scope authorization request type")
+		default:
+			return "", nil, fmt.Errorf("unsupported authorization request type %q", requestedType)
+		}
+	}
+	switch normalized {
 	case "":
 		if scope != "" {
 			return config.Scope, nil, nil
@@ -915,47 +1297,42 @@ func oid4vciAuthorizationRequestParameters(requestedType, credentialConfiguratio
 	}
 }
 
-func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) *string {
+// credentialIdentifierForConfiguration selects the credential_identifier to put
+// in the Credential Request. OpenID4VCI 1.0 §6.2 binds each
+// authorization_details entry of the token response to its own
+// credential_configuration_id and lists that entry's credential_identifiers
+// under it, so an identifier is only usable for the configuration whose entry
+// carried it. A token response with no openid_credential entry yields no
+// identifier, and the request names the configuration instead (§8.1); a token
+// response that has entries but none for the requested configuration is an
+// error rather than a guess.
+func credentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, credentialConfigurationID string) (*string, error) {
 	if accessToken == nil {
-		return nil
+		return nil, nil
 	}
-	var identifiers []string
+	entries := 0
 	for _, detail := range accessToken.AuthorizationDetails {
 		if detail.Type != receiverTypes.AuthorizationDetailTypeOpenIDCredential {
 			continue
 		}
-		// §6.2: each authorization_details entry corresponds to the Credential
-		// Configuration named by credential_configuration_id. When the issuer
-		// echoes it, use the first credential_identifier of the matching entry.
-		if detail.CredentialConfigurationID == credentialConfigurationID {
-			for _, identifier := range detail.CredentialIdentifiers {
-				if identifier != "" {
-					selected := identifier
-					return &selected
-				}
-			}
+		entries++
+		if detail.CredentialConfigurationID != credentialConfigurationID {
+			continue
 		}
 		for _, identifier := range detail.CredentialIdentifiers {
 			if identifier != "" {
-				identifiers = append(identifiers, identifier)
+				selected := identifier
+				return &selected, nil
 			}
 		}
+		// The entry matched but carries no identifier: the Credential Request
+		// names the configuration, as it does without authorization_details.
+		return nil, nil
 	}
-	if len(identifiers) == 0 {
-		return nil
+	if entries == 0 {
+		return nil, nil
 	}
-	if issuerMetadata != nil {
-		if config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]; ok && config.CredentialIdentifier != "" {
-			for _, identifier := range identifiers {
-				if identifier == config.CredentialIdentifier {
-					selected := identifier
-					return &selected
-				}
-			}
-		}
-	}
-	selected := identifiers[0]
-	return &selected
+	return nil, fmt.Errorf("access token authorization_details contains no entry for credential_configuration_id %q", credentialConfigurationID)
 }
 
 func resolveOID4VCIFinalHolderKeys(req OID4VCIFinalReceiveRequest) ([]jose.JSONWebKey, error) {
@@ -1097,7 +1474,7 @@ func (w *Wallet) clientAttestationProvider(req OID4VCIFinalReceiveRequest) (Clie
 	return &StaticClientAttester{Key: req.AttesterKey, Issuer: req.AttesterIssuer}, nil
 }
 
-func (w *Wallet) createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
 	provider, err := w.clientAttestationProvider(req)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
@@ -1117,7 +1494,7 @@ func (w *Wallet) createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIF
 	// HAIP §4.4.1: verify the provider result before any request carrying the
 	// attestation leaves the wallet; the attester signature is not verified
 	// because the wallet does not hold the attester key.
-	attestation, err := provider.ClientAttestation(context.Background(), attestationRequest)
+	attestation, err := provider.ClientAttestation(ctx, attestationRequest)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", fmt.Errorf("failed to obtain client attestation: %w", err)
 	}
@@ -1144,10 +1521,6 @@ func (w *Wallet) createOID4VCIAttestationHeaders(receiver receiverTypes.OID4VCIF
 	}, attestationChallenge, nil
 }
 
-// requestOID4VCIAuthorizationCode drives the §5.2 authorization endpoint with
-// the pushed request_uri and validates the RFC 6749 §4.1.2 / RFC 9207
-// authorization response. parExpiresAt is the §5.1.4 request_uri expiry
-// measured from the PAR response time; the zero value disables the check.
 // authorizationResponseIssuerPolicy is the RFC 9207 expectation for the
 // authorization response: expected is the authorization server's issuer
 // identifier; required is true when the server advertises
@@ -1158,19 +1531,53 @@ type authorizationResponseIssuerPolicy struct {
 	required bool
 }
 
-func requestOID4VCIAuthorizationCode(client *http.Client, endpoint *common.URIField, clientID string, requestURI string, expectedState string, registeredRedirectURI string, parExpiresAt time.Time, issuer authorizationResponseIssuerPolicy) (string, error) {
-	if !parExpiresAt.IsZero() && !time.Now().Before(parExpiresAt) {
-		return "", fmt.Errorf("pushed authorization request_uri expired before use")
-	}
-
+// oid4vciAuthorizationRequestURL builds the §5.2 authorization request URL. With
+// a PAR request_uri only client_id and request_uri travel in the query, as RFC
+// 9126 §4 prescribes. Without one — which OpenID4VCI permits outside HAIP, since
+// HAIP §4 makes PAR "only required when using the Authorization Endpoint" — the
+// §5.1 authorization request parameters are sent inline instead.
+func oid4vciAuthorizationRequestURL(endpoint *common.URIField, clientID string, request receiverTypes.PushedAuthorizationRequest, requestURI string) string {
 	authorizationURL := url.URL(*endpoint)
 	query := authorizationURL.Query()
 	query.Set("client_id", clientID)
-	query.Set("request_uri", requestURI)
+	if requestURI != "" {
+		query.Set("request_uri", requestURI)
+		authorizationURL.RawQuery = query.Encode()
+		return authorizationURL.String()
+	}
+	query.Set("response_type", request.ResponseType)
+	query.Set("redirect_uri", request.RedirectURI)
+	query.Set("state", request.State)
+	query.Set("code_challenge", request.CodeChallenge)
+	query.Set("code_challenge_method", request.CodeChallengeMethod)
+	if request.Scope != "" {
+		query.Set("scope", request.Scope)
+	}
+	if len(request.AuthorizationDetails) > 0 {
+		if encoded, err := json.Marshal(request.AuthorizationDetails); err == nil {
+			query.Set("authorization_details", string(encoded))
+		}
+	}
+	if request.IssuerState != "" {
+		query.Set("issuer_state", request.IssuerState)
+	}
 	authorizationURL.RawQuery = query.Encode()
+	return authorizationURL.String()
+}
 
+// followOID4VCIAuthorizationEndpoint drives the §5.2 authorization endpoint from
+// inside the wallet process: it issues the bare GET and returns the Location the
+// endpoint answers with. Only an issuer that needs no user interaction — a test
+// or conformance issuer — behaves that way, which is why
+// OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization gates it. The client
+// must read the 302 rather than follow it, so http.ErrUseLastResponse applies
+// here instead of the blanket redirect refusal the other endpoints use.
+func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalAuthorization) (string, error) {
+	if !auth.ExpiresAt.IsZero() && !time.Now().Before(auth.ExpiresAt) {
+		return "", fmt.Errorf("pushed authorization request_uri expired before use")
+	}
 	authClient := noRedirectHTTPClient(client)
-	response, err := authClient.Get(authorizationURL.String())
+	response, err := authClient.Get(auth.AuthorizationURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
 	}
@@ -1179,12 +1586,24 @@ func requestOID4VCIAuthorizationCode(client *http.Client, endpoint *common.URIFi
 	if location == "" {
 		return "", fmt.Errorf("authorization endpoint did not redirect: %d", response.StatusCode)
 	}
+	return location, nil
+}
+
+// validateOID4VCIAuthorizationRedirect applies the RFC 6749 §4.1.2 / RFC 9207
+// §2.4 checks to the redirect the user agent delivered and returns the
+// authorization code. authorizationURL is the request the redirect answers, used
+// only to resolve a relative Location.
+func validateOID4VCIAuthorizationRedirect(location string, authorizationURL string, expectedState string, registeredRedirectURI string, issuer authorizationResponseIssuerPolicy) (string, error) {
 	redirectURL, err := url.Parse(location)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse authorization redirect: %w", err)
 	}
 	if !redirectURL.IsAbs() {
-		redirectURL = authorizationURL.ResolveReference(redirectURL)
+		base, err := url.Parse(authorizationURL)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse authorization endpoint URL: %w", err)
+		}
+		redirectURL = base.ResolveReference(redirectURL)
 	}
 	registeredRedirect, err := url.Parse(registeredRedirectURI)
 	if err != nil {
@@ -1241,18 +1660,18 @@ func noRedirectHTTPClient(client *http.Client) *http.Client {
 	}
 }
 
-func (w *Wallet) storeOID4VCIFinalCredentialResponse(response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKey *jose.JSONWebKey) ([]*SavedCredential, error) {
+func (w *Wallet) storeOID4VCIFinalCredentialResponse(ctx context.Context, response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKey *jose.JSONWebKey) ([]*SavedCredential, error) {
 	var holderKeys []jose.JSONWebKey
 	if holderKey != nil {
 		holderKeys = append(holderKeys, *holderKey)
 	}
-	return w.storeOID4VCIFinalCredentialResponseBatch(response, issuerMetadata, credentialConfigurationID, holderKeys)
+	return w.storeOID4VCIFinalCredentialResponseBatch(ctx, response, issuerMetadata, credentialConfigurationID, holderKeys)
 }
 
 // storeOID4VCIFinalCredentialResponseBatch verifies each returned credential
 // against the holder key at the same index (§14.6 batch order) and stores
 // nothing when any credential fails acceptance.
-func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKeys []jose.JSONWebKey) ([]*SavedCredential, error) {
+func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, response *receiverTypes.CredentialResponse, issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, holderKeys []jose.JSONWebKey) ([]*SavedCredential, error) {
 	if response == nil {
 		return nil, fmt.Errorf("credential response is nil")
 	}
@@ -1287,7 +1706,10 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(response *receiverType
 		if err != nil {
 			return nil, err
 		}
-		parsedCredential, verification, err := w.verifyCredentialForAcceptance(raw, flavor, holderKey)
+		// A credential arriving on the Final/HAIP issuance path has an issuer
+		// identity the flow can check, so Config.CredentialAcceptance is
+		// mandatory here rather than optional as on the Draft-13 path.
+		parsedCredential, verification, err := w.verifyCredentialForAcceptanceContext(ctx, raw, flavor, holderKey, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify credential: %w", err)
 		}

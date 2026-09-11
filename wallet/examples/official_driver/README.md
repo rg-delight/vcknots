@@ -42,7 +42,7 @@ absolute paths in the configuration.
 | `issuerJWKSFiles` | []string | `[]` | JWKS files (`{"keys":[...]}`) of public issuer keys for credentials without an `x5c` header. Non-empty sets `CredentialAcceptancePolicy.ResolveIssuerKeys`, which returns all operator-chosen keys; the library matches `kid`. Private keys are rejected. |
 | `requireHolderBinding` | bool | `false` | → `CredentialAcceptancePolicy.RequireHolderBinding`; credentials without `cnf` are rejected. |
 | `redirectUri` | string | `""` | Wallet's registered redirect URI for the authorization code flow. Required by `receive-code` and `receive-code-wallet-initiated`. |
-| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`. Selects how `receive-code`/`receive-code-wallet-initiated` request the Credential Configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2): `""` uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope (error before PAR otherwise); `"authorization_details"` sends `[{"type":"openid_credential","credential_configuration_id":...}]` and no scope. HAIP defaults to `scope` because HAIP §4.2 requires it; an explicit `"authorization_details"` is allowed. |
+| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`. Selects how `receive-code`/`receive-code-wallet-initiated` request the Credential Configuration (OpenID4VCI 1.0 §5.1.1/§5.1.2): `""` uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope (error before PAR otherwise); `"authorization_details"` sends `[{"type":"openid_credential","credential_configuration_id":...}]` and no scope. Under HAIP only `scope` is accepted, because HAIP §4.1/§4.2 require the Wallet to communicate the Credential Type with `scope`; an explicit `"authorization_details"` is rejected. |
 | `attesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticClientAttester` → `wallet.Config.ClientAttestation`. Must be set together with `attesterIssuer`. The JWK's `x5c` chain, when present, becomes the client attestation header chain. |
 | `attesterIssuer` | string | `""` | `iss` of the static client attester. Must be set together with `attesterKeyFile`. |
 | `keyAttesterKeyFile` | string | `""` | Private JWK for a test-only `wallet.StaticKeyAttester` → `wallet.Config.KeyAttestation`. Must be set together with `keyAttesterIssuer`. |
@@ -52,10 +52,12 @@ absolute paths in the configuration.
 | `credentialResponseEncryption` | bool | `false` | When true, the authorization code operations generate an ephemeral P-256 key per run and pass it as `CredentialResponseEncryptionKey`, so the issuer encrypts the credential response. |
 | `followRedirect` | bool | `true` | When true (or absent), `present` opens a returned `redirect_uri` like a same-device browser: HTTP GET with the TLS-configured client, `Accept: text/html,*/*`, `User-Agent: official_driver`, a 15 s timeout, and at most 5 followed redirects. Set `false` to return the URI without opening it. |
 
-`wallet.Config.CredentialAcceptance` is built only when at least one of
-`issuerCAFiles`, `issuerJWKSFiles` or `requireHolderBinding` is set. When all are
-omitted the policy is nil and only the library's minimum rules apply (credential
-must parse, and a `cnf` that does not match the holder key is rejected).
+`wallet.Config.CredentialAcceptance` is always set, because the OpenID4VCI 1.0
+Final and HAIP issuance paths refuse to store a credential without it. With
+`issuerCAFiles` or `issuerJWKSFiles` the policy authenticates the issuer key;
+with neither, the driver sets `CredentialAcceptancePolicy.UnverifiedIssuer`, so
+a run against an arbitrary test issuer keeps working and says so in one
+greppable place. `requireHolderBinding` applies in both cases.
 
 The TLS-configured HTTP client is passed as `IssuerX509TrustOptions.HTTPClient`
 and as `RequestObjectValidationOptions.CRL.HTTPClient`, so CRL fetches honour
@@ -139,10 +141,13 @@ Final authorization code flow from the offer URI (`credential_offer_uri` is
 resolved), using `clientId`, `redirectUri`, `holderKeyFile` and `clientKeyFile`,
 and returns `credentialIds`, a `verification` array in credential order, plus
 `notificationId` and `transactionId`; `pending` is `true` when the issuer left the
-issuance pending after the deferred polls. The driver follows the library's
-authorization-endpoint handling: the same TLS client fetches the endpoint
-without following redirects and expects a 302 `code` response, so no browser
-emulation is added here. `present` returns `redirectUri` plus `redirectFollowed`
+issuance pending after the deferred polls. The driver sets
+`OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization`, so the library drives
+the authorization endpoint itself: the same TLS client fetches it without
+following redirects and expects a 302 `code` response, and no browser emulation
+is added here. A wallet with a user does the opposite — it calls
+`BeginOID4VCIFinalAuthorization`, opens the returned `authorization_url` in the
+system browser and hands the redirect to `ResumeOID4VCIFinalAuthorization`. `present` returns `redirectUri` plus `redirectFollowed`
 (whether the driver opened it) and `redirectStatus` (the final HTTP status, `0`
 when not opened). `list` returns `credentialIds` and `total`. Existing fields
 keep their names. Protocol errors from `receive-code` propagate unchanged; the

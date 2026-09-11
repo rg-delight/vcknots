@@ -133,6 +133,9 @@ func TestReceiveOID4VCIFinalCredential_HAIPClientAuthentication(t *testing.T) {
 			RedirectURI: "openid-credential-offer://callback",
 			HolderKey:   holderKey,
 			ClientKey:   clientKey,
+			// The profile checks under test run before the authorization
+			// endpoint, so the browser gate is taken out of the way.
+			AllowSelfDrivenAuthorization: true,
 		}
 	}
 
@@ -174,11 +177,11 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder})
 
 		finalWallet := newProfileWallet(t, profile.Final, nil, nil, resolvePolicy())
-		_, err := finalWallet.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.NoError(t, err)
 
 		haipWallet := newProfileWallet(t, profile.HAIP, nil, nil, resolvePolicy())
-		_, err = haipWallet.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		_, err = haipWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.ErrorContains(t, err, "x5c")
 	})
 
@@ -186,11 +189,11 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
 
 		finalWallet := newProfileWallet(t, profile.Final, nil, nil, anchorPolicy())
-		_, err := finalWallet.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.NoError(t, err)
 
 		haipWallet := newProfileWallet(t, profile.HAIP, nil, nil, anchorPolicy())
-		_, err = haipWallet.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		_, err = haipWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.ErrorContains(t, err, "trust anchor")
 	})
 }
@@ -284,4 +287,110 @@ func TestWallet_HAIPForcesKeyBindingForConfirmationCredentials(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "kb+jwt", signed.Headers[0].ExtraHeaders[jose.HeaderType])
 	})
+}
+
+// newDraftIssuanceServer serves the OpenID4VCI Draft 13 pre-authorized code
+// flow and hands wire to the wallet as the issued credential.
+func newDraftIssuanceServer(t *testing.T, wire string, tokenType string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	server := httptest.NewTLSServer(mux)
+	t.Cleanup(server.Close)
+	writeJSON := func(w http.ResponseWriter, value any) {
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(value))
+	}
+	mux.HandleFunc("/.well-known/openid-credential-issuer", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{
+			"credential_issuer":     server.URL,
+			"credential_endpoint":   server.URL + "/credential",
+			"nonce_endpoint":        server.URL + "/nonce",
+			"authorization_servers": []string{server.URL},
+			"credential_configurations_supported": map[string]any{
+				"draft-config": map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:acceptance"},
+			},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{
+			"issuer":         server.URL,
+			"token_endpoint": server.URL + "/token",
+			"pre-authorized_grant_anonymous_access_supported": true,
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"access_token": "draft-token", "token_type": tokenType, "c_nonce": "draft-nonce"})
+	})
+	mux.HandleFunc("/nonce", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"c_nonce": "draft-nonce"})
+	})
+	mux.HandleFunc("/credential", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"credential": wire})
+	})
+	return server
+}
+
+func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry) ReceiveCredentialRequest {
+	t.Helper()
+	issuer, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	return ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuer,
+			CredentialConfigurationIDs: []string{"draft-config"},
+			Grants: map[string]*CredentialOfferGrant{
+				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
+			},
+		},
+		Type: receiverTypes.Oid4vci,
+		Key:  holder,
+	}
+}
+
+// ReceiveCredential is upstream's Draft 13 entry point and
+// Config.CredentialAcceptance is optional there by design, so a nil policy
+// keeps storing credentials. SD-JWT VC §3.5 leaves issuer key resolution to
+// ecosystem policy, so the library does not turn its absence into an error.
+func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
+	holder := newMockKeyEntry()
+	holderKey := holder.PublicKey()
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holderKey})
+	server := newDraftIssuanceServer(t, wire, "Bearer")
+
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client()}))
+	require.NoError(t, err)
+	store := newProfileCredStore(t)
+	w, err := NewWalletWithConfig(Config{Profile: profile.Final, CredStore: store, Receiver: receiving})
+	require.NoError(t, err)
+
+	saved, err := w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	require.NoError(t, err)
+	require.NotNil(t, saved)
+	require.Equal(t, 1, acceptanceEntryCount(t, store))
+}
+
+// HAIP is opt-in, so raising strictness there costs no existing integration:
+// a HAIP wallet must authenticate the issuer before it stores anything.
+func TestReceiveCredentialHAIPRequiresAcceptancePolicy(t *testing.T) {
+	holder := newMockKeyEntry()
+	holderKey := holder.PublicKey()
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holderKey})
+	// HAIP §4.3 requires a DPoP-bound access token, which the receiver
+	// plugin checks before the credential request.
+	server := newDraftIssuanceServer(t, wire, "DPoP")
+
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP}))
+	require.NoError(t, err)
+	store := newProfileCredStore(t)
+	w, err := NewWalletWithConfig(Config{
+		Profile:   profile.HAIP,
+		CredStore: store,
+		Receiver:  receiving,
+		DPoP:      DPoPConfig{Enabled: true, Key: newMockKeyEntry()},
+	})
+	require.NoError(t, err)
+
+	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Equal(t, 0, acceptanceEntryCount(t, store))
 }

@@ -147,7 +147,7 @@ func (f *acceptanceFixture) receive(t *testing.T) (*SavedCredential, error) {
 
 func (f *acceptanceFixture) storeCredential(t *testing.T, wire string, holder *jose.JSONWebKey) (*SavedCredential, error) {
 	t.Helper()
-	return f.wallet.storeAndParseCredential(&wire, credential.SDJwtVC, holder)
+	return f.wallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, holder, false)
 }
 
 func (f *acceptanceFixture) entryCount(t *testing.T) int {
@@ -536,7 +536,11 @@ func TestCredentialAcceptance_ResolveIssuerKeys(t *testing.T) {
 }
 
 func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
-	fixture := newAcceptanceFixture(t, nil)
+	// The Final issuance path requires an acceptance policy, so the property
+	// under test here — one unusable credential discards the whole batch — is
+	// exercised with issuer authentication explicitly opted out of rather than
+	// with the policy missing.
+	fixture := newAcceptanceFixture(t, &CredentialAcceptancePolicy{UnverifiedIssuer: true})
 	holder := fixture.holder.PublicKey()
 	valid := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
 	response := &receiverTypes.CredentialResponse{Credentials: []any{valid, "this-is-not-a-credential"}}
@@ -545,7 +549,7 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 			"acceptance-config": {Format: "dc+sd-jwt"},
 		},
 	}
-	_, err := fixture.wallet.storeOID4VCIFinalCredentialResponse(response, metadata, "acceptance-config", &holder)
+	_, err := fixture.wallet.storeOID4VCIFinalCredentialResponse(t.Context(), response, metadata, "acceptance-config", &holder)
 	require.Error(t, err)
 	require.Equal(t, 0, fixture.entryCount(t))
 }
@@ -663,7 +667,7 @@ func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 
 	t.Run("Final accepts the pool-trusted chain", func(t *testing.T) {
 		w, store := newAcceptanceWallet(t, profile.Final, poolPolicy())
-		saved, err := w.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		saved, err := w.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.NoError(t, err)
 		require.Len(t, saved.Verification.CertificateSHA256, 2)
 		require.Equal(t, 1, acceptanceEntryCount(t, store))
@@ -671,7 +675,7 @@ func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 
 	t.Run("HAIP rejects the trust anchor carried in x5c", func(t *testing.T) {
 		w, store := newAcceptanceWallet(t, profile.HAIP, poolPolicy())
-		_, err := w.storeAndParseCredential(&wire, credential.SDJwtVC, &holder)
+		_, err := w.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
 		require.Equal(t, 0, acceptanceEntryCount(t, store))
 	})

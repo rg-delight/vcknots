@@ -280,7 +280,7 @@ func TestCreateOID4VCIAttestationHeaders_RejectsBeforeNetwork(t *testing.T) {
 			require.NoError(t, err)
 			w := &Wallet{clientAttestation: fixedClientAttestationProvider{attestation: &ClientAttestation{JWT: token}}}
 			req := OID4VCIFinalReceiveRequest{ClientID: "client-1", ClientKey: clientKey}
-			_, _, err = w.createOID4VCIAttestationHeaders(nil, req, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
+			_, _, err = w.createOID4VCIAttestationHeaders(t.Context(), nil, req, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}

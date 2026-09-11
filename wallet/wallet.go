@@ -19,6 +19,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -593,9 +594,14 @@ type OID4VCIFinalReceiveRequest struct {
 	// authorization_details otherwise. "scope" requires the configuration to
 	// advertise a scope (error before PAR otherwise);
 	// "authorization_details" sends an openid_credential entry with the
-	// configuration id and no scope (OpenID4VCI 1.0 §5.1.1). Under HAIP the
-	// default remains scope because HAIP §4.2 requires it, but HAIP does not
-	// forbid an explicit authorization_details request.
+	// configuration id and no scope (OpenID4VCI 1.0 §5.1.1).
+	//
+	// Under HAIP only scope is allowed: HAIP §4.1 says "For Grant Type
+	// `authorization_code`, the Issuer MUST include a scope value ... The
+	// Wallet MUST use that value in the `scope` Authorization parameter" and
+	// §4.2 that the Wallet "MUST use the `scope` parameter to communicate
+	// Credential Type(s)". An explicit "authorization_details" fails, and so
+	// does a Credential Configuration that advertises no scope.
 	AuthorizationRequestType string
 	HolderKey                jose.JSONWebKey
 	// AdditionalHolderKeys requests §14.6 batch issuance. Each key yields one
@@ -618,9 +624,20 @@ type OID4VCIFinalReceiveRequest struct {
 	// DeferredPollAttempts is the number of §9 deferred credential endpoint
 	// polls. Zero means do not poll and return an IssuancePending result the
 	// caller can resume with ResumeOID4VCIFinalDeferredCredential.
-	DeferredPollAttempts            int
+	DeferredPollAttempts int
+	// MaxDeferredInterval caps the §9.2 deferred polling interval, including
+	// one the issuer names in its issuance_pending response. Zero uses the
+	// library's 60 second cap.
+	MaxDeferredInterval             time.Duration
 	CredentialResponseEncryptionKey *jose.JSONWebKey
 	HTTPClient                      *http.Client
+	// AllowSelfDrivenAuthorization lets ReceiveOID4VCIFinalCredential drive the
+	// §5.2 authorization endpoint itself, by issuing a bare GET and reading the
+	// Location header. Only an issuer that needs no user interaction answers
+	// that way, so the default is false and a wallet with a user calls
+	// BeginOID4VCIFinalAuthorization, opens the returned URL in the system
+	// browser, and hands the redirect to ResumeOID4VCIFinalAuthorization.
+	AllowSelfDrivenAuthorization bool
 }
 
 type OID4VCIFinalReceiveResult struct {
@@ -1206,7 +1223,10 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 		holderKey = &publicKey
 	}
 
-	return w.storeAndParseCredential(credentialJWT, serializationFlavor, holderKey)
+	// OpenID4VCI Draft 13 keeps Config.CredentialAcceptance optional, as
+	// SD-JWT VC §3.5 leaves issuer key resolution to ecosystem policy. HAIP is
+	// opt-in, so the policy is mandatory there.
+	return w.storeAndParseCredential(context.Background(), credentialJWT, serializationFlavor, holderKey, w.profile.IsHAIP())
 }
 
 // validateCredentialOffer validates the credential offer and extracts pre-authorization code.
@@ -1662,12 +1682,13 @@ func (w *Wallet) requestCredential(
 
 // storeAndParseCredential verifies the credential for acceptance, stores it and
 // parses it for return. Nothing is stored when verification fails.
-func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*SavedCredential, error) {
+// requirePolicy makes Config.CredentialAcceptance mandatory for this call.
+func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*SavedCredential, error) {
 	if serializationFlavor == "" {
 		serializationFlavor = credential.JwtVc
 	}
 
-	parsedCredential, verification, verificationErr := w.verifyCredentialForAcceptance([]byte(*credentialJWT), serializationFlavor, holderKey)
+	parsedCredential, verification, verificationErr := w.verifyCredentialForAcceptanceContext(ctx, []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
 	if verificationErr != nil {
 		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}

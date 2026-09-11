@@ -187,6 +187,31 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 	return controller
 }
 
+// createTestControllerWithAcceptance builds a wallet with an explicit
+// Config.CredentialAcceptance, which the OpenID4VCI Final and HAIP issuance
+// paths require before a credential may be stored.
+func createTestControllerWithAcceptance(t *testing.T, policy *CredentialAcceptancePolicy) *Wallet {
+	t.Helper()
+	tempConfigDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
+	t.Setenv("HOME", tempConfigDir)
+
+	controller, err := NewWalletWithConfig(Config{CredentialAcceptance: policy})
+	require.NoError(t, err)
+	return controller
+}
+
+// acceptIssuerKeyPolicy authenticates credentials signed by issuerKey. SD-JWT
+// VC §3.5 leaves issuer key resolution to ecosystem policy, so the tests model
+// a wallet that holds the issuer key out of band.
+func acceptIssuerKeyPolicy(issuerKey *ecdsa.PrivateKey) *CredentialAcceptancePolicy {
+	return &CredentialAcceptancePolicy{
+		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, Algorithm: "ES256"}}, nil
+		},
+	}
+}
+
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
 
@@ -766,8 +791,10 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
+	// VP §5.9.3: with response_mode direct_post the redirect_uri: Client
+	// Identifier is the Response URI, so the two must be the same value.
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
 		dcqlQuery,
 	)
 
@@ -784,7 +811,7 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/cb&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
 		dcqlQuery,
 	)
 
@@ -806,7 +833,10 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *te
 	require.NoError(t, err)
 	require.NotNil(t, endpoint)
 	require.NotNil(t, req.DcqlQuery)
-	assert.Equal(t, "https://example.com/response", req.RedirectURI)
+	// VP §5.9.3: the Client Identifier binds response_uri, and the wallet
+	// keeps the value there rather than in redirect_uri.
+	assert.Equal(t, "https://example.com/response", req.ResponseURI)
+	assert.Empty(t, req.RedirectURI)
 	assert.Equal(t, "https://example.com/response", endpoint.String())
 	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
 }
@@ -996,7 +1026,9 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	controller := createTestControllerWithAcceptance(t, acceptIssuerKeyPolicy(issuerKey))
 
 	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
@@ -1004,8 +1036,15 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	responseEncryptionKey := newPrivateJWKForFinalVCITest(t, "credential-response-enc-key-1")
 	responseEncryptionKey.Algorithm = "ECDH-ES"
 	responseEncryptionKey.Use = "enc"
+	// OpenID4VCI Final §8.1: "Credential Request encryption MUST be used if the
+	// credential_response_encryption parameter is included, to prevent it being
+	// substituted by an attacker", so an issuer that requires response
+	// encryption also advertises credential_request_encryption.
+	requestEncryptionKey := newPrivateJWKForFinalVCITest(t, "credential-request-enc-key-1")
+	requestEncryptionKey.Algorithm = "ECDH-ES"
+	requestEncryptionKey.Use = "enc"
 
-	issuedCredential := buildTestSDJWTVC(t, holderKey, map[string]string{"given_name": "Taro"})
+	issuedCredential := buildTestSDJWTVCWithIssuerKey(t, issuerKey, holderKey, map[string]string{"given_name": "Taro"})
 
 	var server *httptest.Server
 	pushedState := ""
@@ -1023,6 +1062,12 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				"notification_endpoint":        server.URL + "/notification",
 				"authorization_servers":        []string{server.URL},
 				"credential_response_encryption": map[string]any{
+					"alg_values_supported": []string{"ECDH-ES"},
+					"enc_values_supported": []string{"A128GCM"},
+					"encryption_required":  true,
+				},
+				"credential_request_encryption": map[string]any{
+					"jwks":                 map[string]any{"keys": []any{requestEncryptionKey.Public()}},
 					"alg_values_supported": []string{"ECDH-ES"},
 					"enc_values_supported": []string{"A128GCM"},
 					"encryption_required":  true,
@@ -1089,8 +1134,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				http.Error(w, "use nonce", http.StatusUnauthorized)
 				return
 			}
-			var body map[string]any
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			body := decodeEncryptedCredentialRequest(t, r, requestEncryptionKey)
 			require.Equal(t, "pid", body["credential_configuration_id"])
 			proofs, ok := body["proofs"].(map[string]any)
 			require.True(t, ok)
@@ -1106,9 +1150,14 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{"transaction_id": "tx-1"})
 		case "/deferred":
 			require.Equal(t, "DPoP access-1", r.Header.Get("Authorization"))
-			var body map[string]any
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			// §9.1: "Deferred Credential Request encryption MUST be used if
+			// the credential_response_encryption parameter is included."
+			body := decodeEncryptedCredentialRequest(t, r, requestEncryptionKey)
 			require.Equal(t, "tx-1", body["transaction_id"])
+			deferredEncryption, ok := body["credential_response_encryption"].(map[string]any)
+			require.True(t, ok, "deferred request is missing credential_response_encryption: %#v", body)
+			require.NotNil(t, deferredEncryption["jwk"])
+			require.Equal(t, "A128GCM", deferredEncryption["enc"])
 			writeEncryptedFinalCredentialResponse(t, w, responseEncryptionKey, map[string]string{
 				"credential":      issuedCredential,
 				"notification_id": "notification-1",
@@ -1130,6 +1179,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	issuerURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	result, err := controller.ReceiveOID4VCIFinalCredential(OID4VCIFinalReceiveRequest{
+		AllowSelfDrivenAuthorization: true,
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer:           issuerURL,
 			CredentialConfigurationIDs: []string{"pid"},
@@ -1158,6 +1208,30 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	require.Equal(t, 1, notificationAttempts)
 }
 
+// decodeEncryptedCredentialRequest decodes a Credential Request body that the
+// wallet encrypted to the issuer's credential_request_encryption key
+// (OpenID4VCI Final §8.1), or a plain JSON body when the issuer advertises no
+// request encryption.
+func decodeEncryptedCredentialRequest(t *testing.T, r *http.Request, key jose.JSONWebKey) map[string]any {
+	t.Helper()
+	raw, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	plaintext := raw
+	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/jwt") {
+		encrypted, err := jose.ParseEncryptedCompact(
+			string(raw),
+			[]jose.KeyAlgorithm{jose.ECDH_ES},
+			[]jose.ContentEncryption{jose.A128GCM, jose.A256GCM},
+		)
+		require.NoError(t, err)
+		plaintext, err = encrypted.Decrypt(key.Key)
+		require.NoError(t, err)
+	}
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(plaintext, &body))
+	return body
+}
+
 func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -1171,6 +1245,16 @@ func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
 }
 
 func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
+	t.Helper()
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return buildTestSDJWTVCWithIssuerKey(t, issuerKey, holderPublicKey, claims)
+}
+
+// buildTestSDJWTVCWithIssuerKey signs the credential with a caller-supplied
+// issuer key, so a test can configure a CredentialAcceptancePolicy that
+// resolves it.
+func buildTestSDJWTVCWithIssuerKey(t *testing.T, issuerKey *ecdsa.PrivateKey, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
 	t.Helper()
 	disclosures := make([]string, 0, len(claims))
 	hashes := make([]string, 0, len(claims))
@@ -1188,8 +1272,6 @@ func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[
 		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
 		"_sd": hashes, "_sd_alg": "sha-256",
 	}
-	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
 	require.NoError(t, err)
 	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
@@ -3949,7 +4031,7 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 
 	// Step 2: Present the credential and verify redirect handler execution
 	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`
-	clientID := "redirect_uri:https://example.com/cb"
+	clientID := "redirect_uri:" + responseServer.URL
 	presentationURI := fmt.Sprintf(
 		"openid4vp://present?dcql_query=%s&client_id=%s&response_type=vp_token&response_mode=direct_post&response_uri=%s&nonce=test-nonce-123&state=test-state-456",
 		url.QueryEscape(dcqlQuery),

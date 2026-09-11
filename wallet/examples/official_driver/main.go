@@ -331,11 +331,16 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		requestObjectValidation.CRL.HTTPClient = httpClient
 	}
 
-	// Credential acceptance. Absent issuer trust this stays nil so the library
-	// applies only its minimum rules.
-	var acceptance *wallet.CredentialAcceptancePolicy
-	if len(config.IssuerCAFiles) > 0 || len(config.IssuerJWKSFiles) > 0 || config.RequireHolderBinding {
-		acceptance = &wallet.CredentialAcceptancePolicy{RequireHolderBinding: config.RequireHolderBinding}
+	// Credential acceptance. The OpenID4VCI Final and HAIP issuance paths
+	// require a policy, so absent issuer trust the driver states in one place
+	// that it accepts unauthenticated issuers, which is what a conformance
+	// driver run against arbitrary test issuers needs.
+	acceptance := &wallet.CredentialAcceptancePolicy{
+		RequireHolderBinding: config.RequireHolderBinding,
+		UnverifiedIssuer:     true,
+	}
+	if len(config.IssuerCAFiles) > 0 || len(config.IssuerJWKSFiles) > 0 {
+		acceptance.UnverifiedIssuer = false
 		if len(config.IssuerCAFiles) > 0 {
 			anchors, err := readTrustAnchors(config.IssuerCAFiles)
 			if err != nil {
@@ -467,6 +472,10 @@ func run(config configuration, request operation) (any, error) {
 			additionalHolderKeys = append(additionalHolderKeys, jose.JSONWebKey{Key: privateKey})
 		}
 		receiveRequest := wallet.OID4VCIFinalReceiveRequest{
+			// The conformance issuers this driver targets answer the
+			// authorization endpoint with the code redirect and need no
+			// browser, which is what AllowSelfDrivenAuthorization opts into.
+			AllowSelfDrivenAuthorization:    true,
 			AdditionalHolderKeys:            additionalHolderKeys,
 			Type:                            receiverTypes.Oid4vci,
 			ClientID:                        config.ClientID,

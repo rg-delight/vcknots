@@ -29,8 +29,8 @@
 | プロトコル / 機能 | 状態 | 公開 API の入口 | 備考 |
 | --- | --- | --- | --- |
 | OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveCredential`（`ReceiveCredentialRequest`） | 旧 Draft 13 の入口も兼ねます。公開 driver では `receive-preauth` です。 |
-| OpenID4VCI 1.0 authorization code（PAR / PKCE / DPoP / `private_key_jwt` / client attestation） | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`OID4VCIFinalReceiveRequest`） | Pushed Authorization Request は必須、PKCE は常に `S256`、DPoP は `Config.DPoP` と `ClientKey`、`private_key_jwt` は認可サーバーが広告する場合に使用、attestation によるクライアント認証は `Config.ClientAttestation` を使用します。 |
-| Deferred | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`DeferredPollAttempts`）、`Wallet.ResumeOID4VCIFinalDeferredCredential` | 広告された interval でポーリングし、試行回数を使い切ると pending を返します。`OID4VCIFinalDeferredRequest` で別プロセスから再開できます。 |
+| OpenID4VCI 1.0 authorization code（PAR / PKCE / DPoP / `private_key_jwt` / client attestation） | Implemented | `Wallet.BeginOID4VCIFinalAuthorization` と `Wallet.ResumeOID4VCIFinalAuthorization`、または `Wallet.ReceiveOID4VCIFinalCredential`（`OID4VCIFinalReceiveRequest`） | Pushed Authorization Request は認可サーバーが広告する場合に使用し、必須なのは HAIP のみです（HAIP §4）。PKCE は常に `S256`、DPoP は `Config.DPoP` と `ClientKey`、`private_key_jwt` は認可サーバーが広告する場合に使用、attestation によるクライアント認証は `Config.ClientAttestation` を使用します。 |
+| Deferred | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`DeferredPollAttempts`）、`Wallet.ResumeOID4VCIFinalDeferredCredential` | 広告された interval でポーリングします。interval は 60 秒で頭打ちにし（`MaxDeferredInterval` で上書き可）、`…Context` 版で中断できます。試行回数を使い切ると pending を返します。deferred request は `credential_response_encryption` を再送します（§9.1）。`OID4VCIFinalDeferredRequest` で別プロセスから再開できます。 |
 | Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted`（`OID4VCIFinalNotificationRequest`） | `credential_deleted` を送信します。`credential_accepted` と `credential_failure` は保存の成否後に `storeAndNotifyOID4VCIFinalCredentials` が内部で送信します。 |
 | Batch | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`AdditionalHolderKeys`） | holder 鍵ごとに 1 つの proof を送り、`batch_credential_issuance.batch_size` を上限とします。応答の各 credential は対応する鍵で照合します。 |
 | Credential response encryption | Implemented | `OID4VCIFinalReceiveRequest.CredentialResponseEncryptionKey` | OpenID4VCI 1.0 §8.2（`jwk`、`enc`、任意の `zip`、`alg` なし）。issuer が暗号化を要求しているのに鍵が無い場合は fail-closed です。 |
@@ -101,10 +101,13 @@ w, err := wallet.NewWalletWithConfig(wallet.Config{
 ```
 
 authorization code フロー、または pre-authorized code で受領します。
+authorization endpoint にはブラウザが必要なため、フローはその前後で 2 つに
+分かれます。`BeginOID4VCIFinalAuthorization` が開くべき URL と保持すべき状態を
+返し、`ResumeOID4VCIFinalAuthorization` が redirect から続きを実行します。
 
 ```go
 offer, _ := w.ResolveCredentialOffer(offerURI) // offer by reference。inline offer は ParseCredentialOfferURL
-result, err := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
+request := wallet.OID4VCIFinalReceiveRequest{
 	CredentialOffer:                 offer,
 	Type:                            receiverTypes.Oid4vci,
 	ClientID:                        clientID,
@@ -113,7 +116,23 @@ result, err := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest
 	ClientKey:                       clientKey,
 	CredentialResponseEncryptionKey: encryptionKey, // nil は平文応答を要求
 	DeferredPollAttempts:            10,
-})
+}
+
+authorization, err := w.BeginOID4VCIFinalAuthorization(ctx, request)
+// authorization.AuthorizationURL をシステムブラウザで開きます。authorization は
+// JSON 直列化可能なので、プロセス再起動をまたいで保持できます
+result, err := w.ResumeOID4VCIFinalAuthorization(ctx, request, authorization, redirectURLFromBrowser)
+```
+
+ユーザー操作を必要とせず authorization endpoint が code redirect を返す
+テスト / 適合性試験の issuer には、1 回の呼出しで実行できます。
+
+```go
+request.AllowSelfDrivenAuthorization = true
+result, err := w.ReceiveOID4VCIFinalCredentialContext(ctx, request)
+```
+
+```go
 
 saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
 	CredentialOffer: offer,
@@ -140,13 +159,15 @@ response, err := w.PresentCredentialToDCAPI(
 
 fail-closed の既定値:
 - 検証者の trust anchor が無い場合、`RequestObjectValidation` は nil のままで、X.509（署名付き）Request Object をすべて拒否します。
-- `CredentialAcceptance` が nil の場合、最小規則だけが適用され、検証できない credential を 1 つでも含む Final 応答は何も保存しません。
+- `CredentialAcceptance` が nil の場合、Final / HAIP の発行経路は何も保存せずに `ErrCredentialAcceptancePolicyRequired` を返します。HAIP では `ReceiveCredential` も同様です。`profile.Final` の Draft 13 `ReceiveCredential` は従来どおり最小規則だけを適用します。issuer を認証せずに受け入れる場合は `CredentialAcceptancePolicy.UnverifiedIssuer` を明示的に設定します。
+- 未知の `credential_configuration_id` は、authorization request を送る前に `ErrUnknownCredentialConfiguration` で失敗します。
+- authorization code フローはブラウザを必要とします。`AllowSelfDrivenAuthorization` を設定しない限り `ReceiveOID4VCIFinalCredential` は拒否します。
 - `SupportedTransactionDataTypes` が空の場合、`transaction_data` を含む要求をすべて拒否します。
 - HAIP は既定では選ばれません。`Config.Profile` のゼロ値は `profile.Final` に正規化されます。
 
 ## セキュリティモデル
 
-**library が認証するもの。** 署名付き OID4VP Request Object は、呼出し側の X.509 anchor に対して `aud` / `exp` / `nbf`、任意の EKU / CRL policy、`x509_san_dns` または `x509_hash` の束縛を検証します（`authenticateFinalRequestObject`、`verifyRequestObjectCertificateChain`）。結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request から読み取ることはありません。credential は保存前に `verifyCredentialForAcceptance` が署名、`exp` / `nbf`、SD-JWT の開示完全性を検証します。provider の attestation は `validateClientAttestation` / `validateKeyAttestation` が `typ`、`sub`、RFC 7638 の `cnf.jwk`、`exp`、HAIP では非 self-signed の `x5c` leaf を検証します。attester 自身の署名は検証しません。
+**library が認証するもの。** 署名付き OID4VP Request Object は、呼出し側の X.509 anchor に対して `aud` / `exp` / `nbf`、任意の EKU / CRL policy、`x509_san_dns` または `x509_hash` の束縛を検証します（`authenticateFinalRequestObject`、`verifyRequestObjectCertificateChain`）。結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request から読み取ることはありません。credential は保存前に `verifyCredentialForAcceptanceContext` が署名、`exp` / `nbf`、SD-JWT の開示完全性を検証します。provider の attestation は `validateClientAttestation` / `validateKeyAttestation` が `typ`、`sub`、RFC 7638 の `cnf.jwk`、`exp`、HAIP では非 self-signed の `x5c` leaf を検証します。attester 自身の署名は検証しません。
 
 **アプリケーションが保持するもの。** trust anchor の選択と配布（`RequestObjectValidation.TrustAnchors` / `RootCAs`、`IssuerX509TrustOptions`）、失効 policy への入力（到達可能な CRL、`AllowUnadvertisedRevocation`）。共通の署名チェーン経路は CRL のみを参照し、OCSP は実装していません（`common/x509.NewCRLChecker` は OCSP を参照しません）。さらに同意とプロトコルより上位の ecosystem policy、migration guide が述べるプロトコル状態の永続化と再開（deferred の token / transaction identifier、notification identifier）、DC API の platform 認証済み origin です。
 

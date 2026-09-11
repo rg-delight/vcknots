@@ -214,19 +214,6 @@ func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw [
 	return parsedCredential, verification, nil
 }
 
-// verifyCredentialForAcceptance is the pre-context call shape, kept so the
-// callers that have not been threaded through yet keep compiling. It is
-// deliberately the permissive combination — a background context and no
-// required policy — because that is exactly what those call sites do today.
-//
-// TODO(S4/S5): remove once wallet.go's storeAndParseCredential and
-// wallet_final_issuance.go's storeOID4VCIFinalCredentialResponse call
-// verifyCredentialForAcceptanceContext with their own context and the
-// requirePolicy value their path warrants.
-func (w *Wallet) verifyCredentialForAcceptance(raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*credential.Credential, *CredentialVerification, error) {
-	return w.verifyCredentialForAcceptanceContext(context.Background(), raw, flavor, holderKey, false)
-}
-
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
 // bounds the CRL retrieval the trust path may perform.

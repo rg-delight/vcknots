@@ -259,8 +259,11 @@ type CredentialConfiguration struct {
 	Display             *[]CredentialConfigurationDisplay `json:"display,omitempty"`
 	ProofTypesSupported *map[string]ProofType             `json:"proof_types_supported,omitempty"`
 	Scope               string                            `json:"scope,omitempty"`
-	// Deprecated: non-standard; removed once wallet_final_issuance.go stops reading it.
-	CredentialIdentifier                 string                `json:"credential_identifier,omitempty"`
+	// OpenID4VCI 1.0 Section 12.2.4 defines no credential_identifier member on
+	// a Credential Configuration: credential_identifier values reach the wallet
+	// only in the token response's authorization_details (Section 6.2). An
+	// issuer that publishes the member anyway is ignored like any other unknown
+	// metadata member.
 	CryptographicBindingMethodsSupported *[]string             `json:"cryptographic_binding_methods_supported,omitempty"`
 	Format                               string                `json:"format"`
 	CredentialDefinition                 *CredentialDefinition `json:"credential_definition,omitempty"`
@@ -677,6 +680,26 @@ type CredentialEndpointHTTPResponse struct {
 	ContentType string
 }
 
+// ProofOptions carries the inputs of an OpenID4VCI 1.0 Section 8.2.1.1 "jwt"
+// key proof. It lives here, next to the interface that takes it, so a plugin
+// outside this repository can implement OID4VCIFinalReceiver without depending
+// on the bundled oid4vci plugin.
+type ProofOptions struct {
+	// Audience is the Credential Issuer Identifier the proof is bound to.
+	// Section 8.2.1.1 makes it "REQUIRED. ... the Credential Issuer Identifier".
+	Audience string
+	// Nonce is the c_nonce the issuer supplied, omitted when empty.
+	Nonce string
+	// KeyAttestation is the OpenID4VCI 1.0 Appendix D key attestation JWT,
+	// carried in the key_attestation JOSE header parameter when non-empty.
+	KeyAttestation string
+	// SigningAlgValues is the proof_signing_alg_values_supported list of the
+	// Credential Configuration being requested, that is
+	// CredentialConfigurationSupported[id].ProofTypesSupported["jwt"]. An empty
+	// list means the issuer published no constraint.
+	SigningAlgValues []jose.SignatureAlgorithm
+}
+
 // OID4VCIFinalReceiver is an optional plugin capability for OpenID4VCI
 // Final 1.0 / HAIP flows. It intentionally extends, rather than replaces,
 // the legacy Receiver interface used by the existing Draft 13 flow.
@@ -699,6 +722,23 @@ type OID4VCIFinalReceiver interface {
 	// CreateCredentialRequestJWTProof and, when keyAttestation is non-empty,
 	// adds the OpenID4VCI 1.0 Appendix D key_attestation header parameter.
 	CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error)
+	// CreateCredentialRequestJWTProofWithOptions builds the same proof and, in
+	// addition, honours the Credential Configuration's
+	// proof_signing_alg_values_supported. OpenID4VCI 1.0 Section 8.2.1.1: "the
+	// `alg` JWT header of the key proof ... MUST match one of the values listed
+	// in the `proof_signing_alg_values_supported` metadata parameter".
+	CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts ProofOptions) (string, error)
+	// PostCredentialEndpointWithNonceRetryForToken is
+	// PostCredentialEndpointWithNonceRetry taking the parsed token response
+	// rather than the bare access token, so the Authorization header carries the
+	// scheme the authorization server issued. RFC 6750 Section 2.1 defines the
+	// Bearer scheme and RFC 9449 Section 7.1 the DPoP scheme; the string-taking
+	// overload above cannot tell them apart and always sends DPoP.
+	PostCredentialEndpointWithNonceRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
+	// SendCredentialNotificationWithDpopRetryForToken is
+	// SendCredentialNotificationWithDpopRetry taking the parsed token response,
+	// for the same reason as PostCredentialEndpointWithNonceRetryForToken.
+	SendCredentialNotificationWithDpopRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, notification NotificationRequest, proofFactory DPoPProofFactory) error
 	CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error)
 	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
 }

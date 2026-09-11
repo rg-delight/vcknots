@@ -1,6 +1,11 @@
 package wallet
 
-import "errors"
+import (
+	"errors"
+
+	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
+	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+)
 
 // Sentinel errors the OpenID4VCI Final and HAIP paths wrap with context. They
 // exist so callers can branch on a condition with errors.Is instead of
@@ -17,14 +22,18 @@ var (
 	// ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered
 	// with a redirect. Redirects are refused rather than followed, so that a
 	// bound request body and its Authorization header never reach an origin
-	// the response chose.
-	ErrHTTPRedirectNotAllowed = errors.New("OID4VCI endpoint redirected; redirects are not followed")
+	// the response chose. It is an alias of the oid4vci plugin's sentinel:
+	// the error travels up from there, so the two must be the same value for
+	// errors.Is to hold at either import path.
+	ErrHTTPRedirectNotAllowed = receiverOid4vci.ErrHTTPRedirectNotAllowed
 	// ErrProofAlgorithmNotSupported reports that the wallet and the issuer
-	// share no proof signing algorithm.
-	ErrProofAlgorithmNotSupported = errors.New("no proof signing algorithm shared with the issuer")
+	// share no proof signing algorithm. It aliases the oid4vci plugin's
+	// sentinel for the same reason as ErrHTTPRedirectNotAllowed.
+	ErrProofAlgorithmNotSupported = receiverOid4vci.ErrProofAlgorithmNotSupported
 	// ErrPreRegisteredClientUnknown reports that a pre-registered client_id
-	// was presented which the wallet's client registry does not hold.
-	ErrPreRegisteredClientUnknown = errors.New("pre-registered client_id is not in the wallet registry")
+	// was presented which the wallet's client registry does not hold. It
+	// aliases the oid4vp presenter plugin's sentinel, which raises it.
+	ErrPreRegisteredClientUnknown = oid4vp.ErrPreRegisteredClientUnknown
 )
 
 // ErrHolderBindingConfirmationUnsupported reports that a credential's cnf

@@ -1289,21 +1289,10 @@ func (o *Oid4vciReceiver) CreateCredentialRequestJWTProofWithKeyAttestation(key 
 // ProofOptions carries the inputs of an OpenID4VCI 1.0 Section 8.2.1.1 jwt key
 // proof. It exists so the proof can honour issuer metadata without widening the
 // two established CreateCredentialRequestJWTProof signatures, which delegate here
-// with no algorithm constraint.
-type ProofOptions struct {
-	// Audience is the Credential Issuer Identifier the proof is bound to.
-	Audience string
-	// Nonce is the c_nonce the issuer supplied, omitted when empty.
-	Nonce string
-	// KeyAttestation is the Appendix D key attestation JWT, carried in the
-	// key_attestation JOSE header when non-empty.
-	KeyAttestation string
-	// SigningAlgValues is the proof_signing_alg_values_supported list of the
-	// credential configuration being requested, that is
-	// CredentialConfigurationSupported[id].ProofTypesSupported["jwt"]. An empty
-	// list means the issuer published no constraint.
-	SigningAlgValues []jose.SignatureAlgorithm
-}
+// with no algorithm constraint. It is an alias of types.ProofOptions, which the
+// OID4VCIFinalReceiver interface names, so a plugin outside this repository can
+// build the same proof without importing this package.
+type ProofOptions = types.ProofOptions
 
 // CreateCredentialRequestJWTProofWithOptions builds the jwt key proof for a
 // Credential Request, signing it with an algorithm the Credential Issuer accepts.

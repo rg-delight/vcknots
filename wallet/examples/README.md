@@ -30,8 +30,8 @@ This Go wallet implements OpenID4VCI 1.0 and OpenID4VP 1.0. HAIP 1.0 is availabl
 | Protocol / feature | Status | Public API entry point | Notes |
 | --- | --- | --- | --- |
 | OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveCredential` (`ReceiveCredentialRequest`) | Also the legacy Draft 13 entry point. The public driver exposes it as `receive-preauth`. |
-| OpenID4VCI 1.0 authorization code with PAR / PKCE / DPoP / `private_key_jwt` / client attestation | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`OID4VCIFinalReceiveRequest`) | Pushed Authorization Request is required; PKCE is always `S256`; DPoP is configured with `Config.DPoP` and `ClientKey`; `private_key_jwt` is used when the authorization server advertises it; attestation-based client authentication uses `Config.ClientAttestation`. |
-| Deferred issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`DeferredPollAttempts`), `Wallet.ResumeOID4VCIFinalDeferredCredential` | Polls at the advertised interval and returns a pending result when the attempt budget is exhausted. The `OID4VCIFinalDeferredRequest` can resume in another process. |
+| OpenID4VCI 1.0 authorization code with PAR / PKCE / DPoP / `private_key_jwt` / client attestation | Implemented | `Wallet.BeginOID4VCIFinalAuthorization` + `Wallet.ResumeOID4VCIFinalAuthorization`, or `Wallet.ReceiveOID4VCIFinalCredential` (`OID4VCIFinalReceiveRequest`) | Pushed Authorization Request is used when the authorization server advertises one and is required only under HAIP (HAIP §4); PKCE is always `S256`; DPoP is configured with `Config.DPoP` and `ClientKey`; `private_key_jwt` is used when the authorization server advertises it; attestation-based client authentication uses `Config.ClientAttestation`. |
+| Deferred issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`DeferredPollAttempts`), `Wallet.ResumeOID4VCIFinalDeferredCredential` | Polls at the advertised interval, capped at 60 seconds (`MaxDeferredInterval` overrides it) and cancellable through the `…Context` variants, and returns a pending result when the attempt budget is exhausted. The deferred request repeats `credential_response_encryption` (§9.1). The `OID4VCIFinalDeferredRequest` can resume in another process. |
 | Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted` (`OID4VCIFinalNotificationRequest`) | Sends `credential_deleted`. `credential_accepted` and `credential_failure` are sent internally by `storeAndNotifyOID4VCIFinalCredentials` only after storage has succeeded or failed. |
 | Batch issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`AdditionalHolderKeys`) | Sends one proof per holder key, bounded by `batch_credential_issuance.batch_size`; each response credential is matched to its own key. |
 | Credential response encryption | Implemented | `OID4VCIFinalReceiveRequest.CredentialResponseEncryptionKey` | OpenID4VCI 1.0 §8.2 (`jwk`, `enc`, optional `zip`, no `alg`). Fails closed when the issuer requires encryption and no key was supplied. |
@@ -102,11 +102,14 @@ w, err := wallet.NewWalletWithConfig(wallet.Config{
 })
 ```
 
-Receive with the authorization-code flow, or with a pre-authorized code:
+Receive with the authorization-code flow, or with a pre-authorized code. The
+authorization endpoint needs a system browser, so the flow splits in two around
+it: `BeginOID4VCIFinalAuthorization` returns the URL to open and the state to
+keep, and `ResumeOID4VCIFinalAuthorization` continues from the redirect.
 
 ```go
 offer, _ := w.ResolveCredentialOffer(offerURI) // offer by reference; ParseCredentialOfferURL for an inline offer
-result, err := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
+request := wallet.OID4VCIFinalReceiveRequest{
 	CredentialOffer:                 offer,
 	Type:                            receiverTypes.Oid4vci,
 	ClientID:                        clientID,
@@ -115,7 +118,23 @@ result, err := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest
 	ClientKey:                       clientKey,
 	CredentialResponseEncryptionKey: encryptionKey, // nil requests a plaintext response
 	DeferredPollAttempts:            10,
-})
+}
+
+authorization, err := w.BeginOID4VCIFinalAuthorization(ctx, request)
+// open authorization.AuthorizationURL in the system browser; authorization is
+// JSON-serialisable, so it survives a process restart
+result, err := w.ResumeOID4VCIFinalAuthorization(ctx, request, authorization, redirectURLFromBrowser)
+```
+
+A test or conformance issuer that answers the authorization endpoint with the
+code redirect and needs no user interaction can be driven in one call instead:
+
+```go
+request.AllowSelfDrivenAuthorization = true
+result, err := w.ReceiveOID4VCIFinalCredentialContext(ctx, request)
+```
+
+```go
 
 saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
 	CredentialOffer: offer,
@@ -142,13 +161,15 @@ response, err := w.PresentCredentialToDCAPI(
 
 Fail-closed defaults:
 - No verifier trust anchors: `RequestObjectValidation` stays nil and every X.509 (signed) Request Object is rejected.
-- Nil `CredentialAcceptance`: only the minimum rules run, and a Final response containing one unverifiable credential stores nothing.
+- Nil `CredentialAcceptance`: the Final and HAIP issuance paths refuse to store anything (`ErrCredentialAcceptancePolicyRequired`), and `ReceiveCredential` under HAIP does the same. Draft-13 `ReceiveCredential` under `profile.Final` keeps running the minimum rules. Set `CredentialAcceptancePolicy.UnverifiedIssuer` to accept an unauthenticated issuer on purpose.
+- An unknown `credential_configuration_id` fails with `ErrUnknownCredentialConfiguration` before any authorization request is sent.
+- The authorization code flow needs a browser: `ReceiveOID4VCIFinalCredential` refuses unless `AllowSelfDrivenAuthorization` is set.
 - Empty `SupportedTransactionDataTypes`: every request carrying `transaction_data` is rejected.
 - HAIP is not chosen by default: the zero `Config.Profile` normalizes to `profile.Final`.
 
 ## Security model
 
-**What the library authenticates.** Signed OID4VP Request Objects are verified against the caller's X.509 anchors, with `aud` / `exp` / `nbf`, an optional EKU and CRL policy, and the `x509_san_dns` or `x509_hash` binding (`authenticateFinalRequestObject`, `verifyRequestObjectCertificateChain`). The outcome is exposed only in `CredentialPresentationRequest.RequestObjectVerification` and is never read from the request. Credentials are authenticated before storage by `verifyCredentialForAcceptance`, which checks the signature, `exp` / `nbf` and SD-JWT disclosure integrity. Attestations from providers are checked by `ValidateClientAttestation` / `validateKeyAttestation` for `typ`, `sub`, RFC 7638 `cnf.jwk`, `exp` and, under HAIP, a non-self-signed `x5c` leaf; the attester's own signature is not verified.
+**What the library authenticates.** Signed OID4VP Request Objects are verified against the caller's X.509 anchors, with `aud` / `exp` / `nbf`, an optional EKU and CRL policy, and the `x509_san_dns` or `x509_hash` binding (`authenticateFinalRequestObject`, `verifyRequestObjectCertificateChain`). The outcome is exposed only in `CredentialPresentationRequest.RequestObjectVerification` and is never read from the request. Credentials are authenticated before storage by `verifyCredentialForAcceptanceContext`, which checks the signature, `exp` / `nbf` and SD-JWT disclosure integrity. Attestations from providers are checked by `ValidateClientAttestation` / `validateKeyAttestation` for `typ`, `sub`, RFC 7638 `cnf.jwk`, `exp` and, under HAIP, a non-self-signed `x5c` leaf; the attester's own signature is not verified.
 
 **What the application must keep.** Trust-anchor selection and distribution (`RequestObjectValidation.TrustAnchors` / `RootCAs`, `IssuerX509TrustOptions`); the inputs to the revocation policy (reachable CRLs, `AllowUnadvertisedRevocation`). The shared signing-chain path consults CRLs only and does not implement OCSP (`common/x509.NewCRLChecker` never follows OCSP). It also keeps consent and any ecosystem policy above the protocol; persistence and resumption of the protocol state the migration guide describes (deferred token and transaction identifiers, notification identifiers); and the platform-authenticated origin for DC API.
 
