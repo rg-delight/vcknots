@@ -11,9 +11,6 @@
 		"build": "pnpm --filter @trustknots/* build",
 		"doc": "pnpm --filter docusaurus",
 		"typecheck": "pnpm -r --filter @trustknots/* typecheck",
-		"conformance:oidf": "node conformance/oidf/scripts/create-plan-spike.mjs",
-		"conformance:oidf:haip": "node conformance/oidf/scripts/create-plan-spike.mjs run-all-haip",
-		"conformance:oidf:wallet-final": "node conformance/oidf/scripts/create-plan-spike.mjs run-all-wallet-final",
 		"pack:vcknots": "cd issuer+verifier && npm pack",
 		"publish:vcknots": "cd issuer+verifier && npm publish --access public",
 		"prepare": "husky"
