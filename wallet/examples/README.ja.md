@@ -22,6 +22,138 @@
 
 上表のクレデンシャル形式にかかわらず、ローカルサーバー統合テストモードのサンプルはいずれも `private_key_jwt` によるクライアント認証と DPoP を使用します。
 
+## 対応プロトコル
+
+この Go Wallet は OpenID4VCI 1.0 と OpenID4VP 1.0 を実装しています。HAIP 1.0 は明示的に選択するプロファイルです。`profile.Profile` のゼロ値は `profile.Final` に正規化され、`profile.HAIP` を選ぶと HAIP の制約が Final に追加されます。下表は公開 API とそのテストで確認できる挙動だけを記載します。`Partial` はインターフェースは存在するが、本番での接続は呼出し側の責務である機能を表します。
+
+| プロトコル / 機能 | 状態 | 公開 API の入口 | 備考 |
+| --- | --- | --- | --- |
+| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveCredential`（`ReceiveCredentialRequest`） | 旧 Draft 13 の入口も兼ねます。公開 driver では `receive-preauth` です。 |
+| OpenID4VCI 1.0 authorization code（PAR / PKCE / DPoP / `private_key_jwt` / client attestation） | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`OID4VCIFinalReceiveRequest`） | Pushed Authorization Request は必須、PKCE は常に `S256`、DPoP は `Config.DPoP` と `ClientKey`、`private_key_jwt` は認可サーバーが広告する場合に使用、attestation によるクライアント認証は `Config.ClientAttestation` を使用します。 |
+| Deferred | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`DeferredPollAttempts`）、`Wallet.ResumeOID4VCIFinalDeferredCredential` | 広告された interval でポーリングし、試行回数を使い切ると pending を返します。`OID4VCIFinalDeferredRequest` で別プロセスから再開できます。 |
+| Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted`（`OID4VCIFinalNotificationRequest`） | `credential_deleted` を送信します。`credential_accepted` と `credential_failure` は保存の成否後に `storeAndNotifyOID4VCIFinalCredentials` が内部で送信します。 |
+| Batch | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`AdditionalHolderKeys`） | holder 鍵ごとに 1 つの proof を送り、`batch_credential_issuance.batch_size` を上限とします。応答の各 credential は対応する鍵で照合します。 |
+| Credential response encryption | Implemented | `OID4VCIFinalReceiveRequest.CredentialResponseEncryptionKey` | OpenID4VCI 1.0 §8.2（`jwk`、`enc`、任意の `zip`、`alg` なし）。issuer が暗号化を要求しているのに鍵が無い場合は fail-closed です。 |
+| Key attestation | Partial | `Config.KeyAttestation`（`KeyAttestationProvider`）、`StaticKeyAttester`、`OID4VCIFinalReceiveRequest.IncludeKeyAttestation` | provider インターフェースとテスト専用の静的 attester。library は provider の JWT（`typ`、`attested_keys`、`exp`）を検証しますが、attester の署名は検証しません。本番の attester / HSM は呼出し側が用意します。 |
+| OpenID4VP 1.0 redirect flow（`x509_hash` / `x509_san_dns` / `redirect_uri` / pre-registered） | Implemented | `Wallet.PresentCredential`、`Wallet.PresentCredentialWithOptions`、`Oid4vpPresenter.ParsePresentationRequest` | 4 種の client identifier を `parseOID4VPClientID` が解析します。署名付き Request Object の認証は `x509_san_dns` と `x509_hash`（`authenticateFinalRequestObject`）に対応し、コロンを含まない identifier は pre-registered client として扱います（OpenID4VP §5.9.2）。HAIP は `x509_hash` を要求します。 |
+| `request_uri` の GET / POST と `wallet_nonce` | Implemented | `Oid4vpPresenter.ParsePresentationRequest`、`requestBuilder.WithRequestObjectURI`、`Oid4vpPresenter.RequestURINonce` | GET と POST の両方に対応します。Final の POST は毎回新しい `wallet_nonce`（32 バイトの乱数）と任意の `wallet_metadata` を送り、echo は `RequestObjectVerification.WalletNonce` に現れます。 |
+| DCQL `credential_sets` | Implemented | `Oid4vpPresenter.ParsePresentationRequest`、`ResolveSatisfiableDCQLCredentials` | `options` と `required` に対応します。必須 query がすべて成立するまで応答は送信されません。 |
+| DCQL `claims` / `claim_sets` / `values` | Implemented | 同上 | claim の identifier と `values`（文字列・整数・真偽値）を検証し、`claim_sets` は 1 つの option を選びます。 |
+| DCQL `trusted_authorities`（`aki`）と `multiple` | Implemented | 同上、`AuthorityKeyIdentifiersFromCredential` | 評価するのは `aki` 種別のみで（HAIP §5）、他の種別は無視します。`multiple: true` は一致するものをすべて返します。 |
+| DCQL nested / array claim path | Implemented | `evaluateDCQLClaimPath`、`sdjwtvc.selectTopLevelDisclosures` | 文字列 key、`null`（配列の全要素）、非負の配列 index に対応します（OID4VP §7）。選択した leaf に必要な `_sd` / `...` の開示だけを出力します。 |
+| `direct_post` / `direct_post.jwt` | Implemented | `Wallet.PresentCredential`、`Oid4vpPresenter.PresentDCQL`、`Oid4vpPresenter.CreateEncryptedAuthorizationResponse` | `direct_post` は平文 form POST、`direct_post.jwt` は ECDH-ES の JWE です。エラー応答は verifier metadata が許す場合に暗号化し、それ以外は §8.3.1 の平文 fallback を送ります。 |
+| `transaction_data` | Implemented | `Config.SupportedTransactionDataTypes`、`Oid4vpPresenter.SetSupportedTransactionDataTypes` | 各 object は既知の `credential_ids` を持つ base64url JSON で、hash は KB-JWT に束縛されます。リストが空の場合、`transaction_data` を含む要求はすべて `invalid_transaction_data` で拒否します。 |
+| W3C Digital Credentials API（`dc_api` / `dc_api.jwt`、unsigned / signed / multi-signed） | Implemented（protocol のみ） | `Wallet.PresentCredentialToDCAPI`、`Oid4vpPresenter.ParseDCAPIRequest`、`Oid4vpPresenter.BuildDCAPIResponse` | `openid4vp-v1-unsigned`、`-signed`、`-multisigned` に対応します。platform が認証した `origin` は呼出し側が渡し、library に browser / OS 連携はありません。 |
+| HAIP 1.0 profile switch | Implemented | `profile.HAIP`、`Config.Profile`、`Oid4vpPresenter.Profile`、`Oid4vciReceiver.Profile` | 既定は `profile.Final` です。profile は全 plugin へ伝播し、呼出し側が注入した dispatcher の plugin が異なる profile を報告した場合は拒否します。 |
+| Draft 13 / Draft 24 の旧入口 | Implemented | `Wallet.ReceiveCredential`、`Wallet.PresentDraft24Credential`、`Oid4vpPresenter.ParseDraft24PresentationRequest`、`NewDraft24RequestBuilder`、`PresentDraft24` | Draft 経路は `InsecureSkipX509Verify` を含む従来の挙動を保ち、Final / HAIP の profile を無視します。 |
+| 形式: SD-JWT VC（`dc+sd-jwt`、`vc+sd-jwt`）と `jwt_vc_json` | Implemented | `credential.SDJwtVC`、`credential.JwtVc`、SD-JWT VC / JWT VC serializer plugin | 両形式のシリアライズと提示に対応します。SD-JWT VC の issuer `typ` は `dc+sd-jwt` または `vc+sd-jwt` です。 |
+| 形式: ISO mdoc（`mso_mdoc`） | Not implemented | - | mdoc / COSE / CBOR の serializer はありません。HAIP の形式許可リストには `mso_mdoc` が現れますが、提示を構築できません。今回の対象外です。 |
+
+**適合の記録。** `examples/official_driver` の公開 driver は、Final / HAIP roadmap に記録された公式 module をローカルで build した OIDF 適合 suite に対して通過しました。HAIP VCI plan `oid4vci-1_0-wallet-haip-test-plan`（credential-issuance、notification、client-attestation-challenge、deferred、batch module）と、Final / HAIP VP plan `oid4vp-1final-wallet-test-plan` / `oid4vp-1final-wallet-haip-test-plan` の `direct_post.jwt`、`request_uri_signed`、`x509_hash`、および `dc_api.jwt` variant（unsigned / signed / multi-signed）です。これは suite の一部の実行結果であり、profile 全体の適合や認証を意味しません。正確な module と variant の一覧は roadmap の記録を参照してください。
+
+## クイックスタート
+
+実行可能な参考実装は独立した[公開 Wallet API driver](official_driver/README.md)です。明示的な trust と受理 policy を持つ `wallet.Wallet` を構成し、受領と提示を実行します。中心となる構成は次のとおりです。
+
+```go
+// 署名付き OID4VP Request Object の trust anchor。Config に検証者 trust の
+// 直接のフィールドは無いため、RequestObjectValidation を持つ presenter
+// plugin を注入します。anchors が無い場合、library は X.509 Request Object を
+// すべて拒否します（fail-closed）。
+requestObjectValidation := &oid4vp.RequestObjectValidationOptions{
+	TrustAnchors:                verifierAnchors, // []*x509.Certificate
+	AllowUnadvertisedRevocation: false,
+	WalletAudience:              []string{"https://self-issued.me/v2"},
+}
+
+// 保存前の issuer 認証。policy が nil の場合は library の最小規則だけが
+// 適用されます。credential が parse でき、対応する alg と（SD-JWT VC では）
+// dc+sd-jwt / vc+sd-jwt の typ を持ち、holder 鍵と一致しない cnf は拒否します。
+acceptance := &wallet.CredentialAcceptancePolicy{
+	IssuerX509:           &wallet.IssuerX509TrustOptions{TrustAnchors: issuerAnchors},
+	RequireHolderBinding: true,
+}
+
+receiving, _ := receiver.NewReceivingDispatcher(receiver.WithPlugin(
+	receiverTypes.Oid4vci,
+	&oid4vci.Oid4vciReceiver{HTTPClient: httpClient, Profile: profile.HAIP},
+))
+presenting, _ := presenter.NewPresentationDispatcher(presenter.WithPlugin(
+	presenter.Oid4vp,
+	&oid4vp.Oid4vpPresenter{
+		HTTPClient:              httpClient,
+		RequestObjectValidation: requestObjectValidation,
+		Profile:                 profile.HAIP,
+	},
+))
+
+w, err := wallet.NewWalletWithConfig(wallet.Config{
+	Receiver:                      receiving,
+	Presenter:                     presenting,
+	Profile:                       profile.HAIP, // 既定は profile.Final
+	CredentialAcceptance:          acceptance,
+	SupportedTransactionDataTypes: []string{"payment"}, // 空にすると transaction_data 要求をすべて拒否
+	DPoP:                          wallet.DPoPConfig{Enabled: true, Key: dpopKey},
+	ClientAuth:                    wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: clientID, Key: clientKey},
+	ClientAttestation:             clientAttestation, // wallet.ClientAttestationProvider または nil
+	KeyAttestation:                keyAttestation,    // wallet.KeyAttestationProvider または nil
+})
+```
+
+authorization code フロー、または pre-authorized code で受領します。
+
+```go
+offer, _ := w.ResolveCredentialOffer(offerURI) // offer by reference。inline offer は ParseCredentialOfferURL
+result, err := w.ReceiveOID4VCIFinalCredential(wallet.OID4VCIFinalReceiveRequest{
+	CredentialOffer:                 offer,
+	Type:                            receiverTypes.Oid4vci,
+	ClientID:                        clientID,
+	RedirectURI:                     redirectURI,
+	HolderKey:                       holderKey,
+	ClientKey:                       clientKey,
+	CredentialResponseEncryptionKey: encryptionKey, // nil は平文応答を要求
+	DeferredPollAttempts:            10,
+})
+
+saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
+	CredentialOffer: offer,
+	Type:            receiverTypes.Oid4vci,
+	Key:             holder,
+	RequestedFormat: credential.SDJwtVC,
+	TxCode:          txCode,
+})
+```
+
+launch URI で提示するか、W3C Digital Credentials API の invocation に応答します。
+
+```go
+redirectURI, err := w.PresentCredential(requestURI, holderKey, nil)
+
+response, err := w.PresentCredentialToDCAPI(
+	oid4vp.DCAPIInvocation{
+		Request: oid4vp.DCAPIRequest{Protocol: oid4vp.DCAPIProtocolSigned, Data: data},
+		Origin:  origin, // platform が認証した値。data からは読まない
+	},
+	holderKey, nil,
+)
+```
+
+fail-closed の既定値:
+- 検証者の trust anchor が無い場合、`RequestObjectValidation` は nil のままで、X.509（署名付き）Request Object をすべて拒否します。
+- `CredentialAcceptance` が nil の場合、最小規則だけが適用され、検証できない credential を 1 つでも含む Final 応答は何も保存しません。
+- `SupportedTransactionDataTypes` が空の場合、`transaction_data` を含む要求をすべて拒否します。
+- HAIP は既定では選ばれません。`Config.Profile` のゼロ値は `profile.Final` に正規化されます。
+
+## セキュリティモデル
+
+**library が認証するもの。** 署名付き OID4VP Request Object は、呼出し側の X.509 anchor に対して `aud` / `exp` / `nbf`、任意の EKU / CRL policy、`x509_san_dns` または `x509_hash` の束縛を検証します（`authenticateFinalRequestObject`、`verifyRequestObjectCertificateChain`）。結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request から読み取ることはありません。credential は保存前に `verifyCredentialForAcceptance` が署名、`exp` / `nbf`、SD-JWT の開示完全性を検証します。provider の attestation は `validateClientAttestation` / `validateKeyAttestation` が `typ`、`sub`、RFC 7638 の `cnf.jwk`、`exp`、HAIP では非 self-signed の `x5c` leaf を検証します。attester 自身の署名は検証しません。
+
+**アプリケーションが保持するもの。** trust anchor の選択と配布（`RequestObjectValidation.TrustAnchors` / `RootCAs`、`IssuerX509TrustOptions`）、失効 policy への入力（到達可能な CRL、`AllowUnadvertisedRevocation`）。共通の署名チェーン経路は CRL のみを参照し、OCSP は実装していません（`common/x509.NewCRLChecker` は OCSP を参照しません）。さらに同意とプロトコルより上位の ecosystem policy、migration guide が述べるプロトコル状態の永続化と再開（deferred の token / transaction identifier、notification identifier）、DC API の platform 認証済み origin です。
+
+**明示的な escape（ローカル開発とテスト専用）。** `AllowHTTP`（および環境変数 `VCKNOTS_WALLET_HTTP_ALLOWED` / `VCKNOTS_WALLET_DEBUG`）は平文 HTTP endpoint を許可し、HAIP では拒否されます。`InsecureSkipX509Verify` は Draft24 の入口だけに適用され、Final 経路は拒否します。`AllowUnadvertisedRevocation` は CRL / OCSP が公開されていない証明書を trust path に残し、検証済みではなく別枠として報告します。`DeliveredByReference` は `request=` の Request Object が元は `request_uri` で取得されたことを呼出し側が証明するもので、HAIP §5.1 の配送要件を満たします。アプリ自身の admission 経路が取得を記録した場合にだけ設定してください。
+
+統合された API の変更は [API migration guide](../API-MIGRATION.md)、完全な構成は[公開 Wallet API driver](official_driver/README.md)を参照してください。
+
 ## 前提条件
 
 ローカルサーバー統合テストモードでは、Go に加えて Node.js と pnpm が必要です。
