@@ -171,7 +171,7 @@ private key. `ClientAttestationProvider` is called once per issuance with the
 selected authorization server identifier and must return a compact JWS with typ
 `oauth-client-attestation+jwt`, `sub` = `ClientID` and `cnf.jwk` = the wallet
 instance key; `KeyAttestationProvider` is called with the holder keys and
-`c_nonce` and must return a `key_attestation+jwt` whose `attested_keys` contain
+`c_nonce` and must return a `key-attestation+jwt` whose `attested_keys` contain
 every holder key.
 
 Before use the wallet validates the provider result without verifying the

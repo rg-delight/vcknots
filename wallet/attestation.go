@@ -19,7 +19,7 @@ import (
 // OpenID4VCI 1.0 Appendix D.
 const (
 	clientAttestationJWTType = "oauth-client-attestation+jwt"
-	keyAttestationJWTType    = "key_attestation+jwt"
+	keyAttestationJWTType    = "key-attestation+jwt"
 
 	defaultAttestationLifetime = 5 * time.Minute
 )
@@ -63,7 +63,7 @@ type KeyAttestationRequest struct {
 	Audience string            // credential issuer identifier
 }
 
-// KeyAttestation is a provider-issued key_attestation+jwt.
+// KeyAttestation is a provider-issued key-attestation+jwt.
 type KeyAttestation struct {
 	JWT string
 }
@@ -126,7 +126,7 @@ func (a *StaticClientAttester) ClientAttestation(_ context.Context, request Clie
 }
 
 // KeyAttestation implements KeyAttestationProvider. The returned JWT has typ
-// key_attestation+jwt and lists every requested holder key in attested_keys,
+// key-attestation+jwt and lists every requested holder key in attested_keys,
 // with nonce copied from the c_nonce when one was supplied (OpenID4VCI 1.0
 // Appendix D).
 func (a *StaticKeyAttester) KeyAttestation(_ context.Context, request KeyAttestationRequest) (*KeyAttestation, error) {
