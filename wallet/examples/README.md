@@ -167,6 +167,37 @@ Fail-closed defaults:
 - Empty `SupportedTransactionDataTypes`: every request carrying `transaction_data` is rejected.
 - HAIP is not chosen by default: the zero `Config.Profile` normalizes to `profile.Final`.
 
+### Receiver plugin contract: transport and signer
+
+A receiver plugin implements `receiverTypes.Receiver` for the Draft 13 flow and
+`receiverTypes.OID4VCIFinalTransport` for Final / HAIP. The transport contract
+is HTTP only — the Pushed Authorization Request, the token endpoint, the
+client-attestation challenge and nonce endpoints, the credential and
+notification endpoints, and the Credential Request / Credential Response codec
+— so a plugin never holds the wallet's private keys.
+
+Those keys are used behind `receiverTypes.OID4VCIFinalSigner`: `CreateDpopProof`,
+`CreateCredentialRequestJWTProofWithOptions` and `CreateClientAttestationPop`.
+`Config.OID4VCISigner` selects the implementation, so a wallet can sign in a
+hardware module or a remote signing service and still use the bundled transport:
+
+```go
+w, err := wallet.NewWalletWithConfig(wallet.Config{
+	Receiver:      receiving,   // any OID4VCIFinalTransport plugin
+	OID4VCISigner: hsmSigner,   // nil keeps the software signer
+})
+```
+
+With a nil `OID4VCISigner` the receiver plugin signs when it also implements the
+signer — the bundled `oid4vci.Oid4vciReceiver` does, by embedding
+`oid4vcisign.Default` — and `oid4vcisign.Default` signs otherwise. A third-party
+transport plugin embeds `oid4vcisign.Default` to get the same software
+behaviour. The wallet never mints a Client Attestation: it is issued by the
+attester and reaches the wallet through `Config.ClientAttestation`.
+
+`receiverTypes.OID4VCIFinalReceiver` is the deprecated union of the two
+interfaces; it is kept so plugins and callers written against it still compile.
+
 ## Security model
 
 **What the library authenticates.** Signed OID4VP Request Objects are verified against the caller's X.509 anchors, with `aud` / `exp` / `nbf`, an optional EKU and CRL policy, and the `x509_san_dns` or `x509_hash` binding (`authenticateFinalRequestObject`, `verifyRequestObjectCertificateChain`). The outcome is exposed only in `CredentialPresentationRequest.RequestObjectVerification` and is never read from the request. Credentials are authenticated before storage by `verifyCredentialForAcceptanceContext`, which checks the signature, `exp` / `nbf` and SD-JWT disclosure integrity. Attestations from providers are checked by `ValidateClientAttestation` / `validateKeyAttestation` for `typ`, `sub`, RFC 7638 `cnf.jwk`, `exp` and, under HAIP, a non-self-signed `x5c` leaf; the attester's own signature is not verified.

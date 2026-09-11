@@ -83,8 +83,27 @@ func (d *ReceivingDispatcher) Plugins() []types.Receiver {
 	return plugins
 }
 
+// OID4VCIFinalTransport returns the optional Final 1.0 / HAIP transport
+// capability of a receiver plugin without changing the legacy Draft 13 Receiver
+// contract. A plugin that only speaks HTTP satisfies it; the signing primitives
+// are supplied separately through the wallet configuration.
+func (d *ReceivingDispatcher) OID4VCIFinalTransport(receivingType types.SupportedReceivingTypes) (types.OID4VCIFinalTransport, error) {
+	plugin, err := d.getPlugin(receivingType)
+	if err != nil {
+		return nil, err
+	}
+	transport, ok := plugin.(types.OID4VCIFinalTransport)
+	if !ok {
+		return nil, types.NewReceiverError(receivingType, "", "get_oid4vci_final_transport", types.ErrUnsupportedProtocol)
+	}
+	return transport, nil
+}
+
 // OID4VCIFinalReceiver returns the optional Final 1.0 / HAIP capability for a
 // receiver plugin without changing the legacy Draft 13 Receiver contract.
+//
+// Deprecated: use OID4VCIFinalTransport, which does not require the plugin to
+// hold the wallet's signing keys.
 func (d *ReceivingDispatcher) OID4VCIFinalReceiver(receivingType types.SupportedReceivingTypes) (types.OID4VCIFinalReceiver, error) {
 	plugin, err := d.getPlugin(receivingType)
 	if err != nil {

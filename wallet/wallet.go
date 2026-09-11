@@ -49,6 +49,7 @@ import (
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -90,6 +91,11 @@ type Wallet struct {
 	// built from a per-request AttesterKey for compatibility.
 	clientAttestation ClientAttestationProvider
 	keyAttestation    KeyAttestationProvider
+
+	// oid4vciSigner is the caller-selected OpenID4VCI Final signer. A nil value
+	// means "ask the receiver plugin, then fall back to oid4vcisign.Default",
+	// which is resolved per issuance by oid4vciFinalSigner.
+	oid4vciSigner receiverTypes.OID4VCIFinalSigner
 
 	credentialAcceptance *CredentialAcceptancePolicy
 }
@@ -135,6 +141,16 @@ type Config struct {
 	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
 	// the issuer requires them or the caller opts in.
 	KeyAttestation KeyAttestationProvider
+
+	// OID4VCISigner builds the private-key operations of an OpenID4VCI 1.0
+	// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt"
+	// key proof and the Client Attestation PoP. Configure it to keep the
+	// wallet's keys in a hardware module or a remote signing service.
+	//
+	// When nil the receiver plugin is used if it implements
+	// receiver/types.OID4VCIFinalSigner, as the bundled OpenID4VCI plugin does,
+	// and oid4vcisign.Default otherwise.
+	OID4VCISigner receiverTypes.OID4VCIFinalSigner
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -370,9 +386,24 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 
 		clientAttestation: config.ClientAttestation,
 		keyAttestation:    config.KeyAttestation,
+		oid4vciSigner:     config.OID4VCISigner,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
+}
+
+// oid4vciFinalSigner resolves the OpenID4VCI Final signing primitives for one
+// issuance. Config.OID4VCISigner wins; otherwise the transport plugin itself is
+// used when it also implements the signer, which keeps the bundled plugin's
+// behaviour; otherwise the software default signs.
+func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCIFinalTransport) receiverTypes.OID4VCIFinalSigner {
+	if w.oid4vciSigner != nil {
+		return w.oid4vciSigner
+	}
+	if signer, ok := transport.(receiverTypes.OID4VCIFinalSigner); ok {
+		return signer
+	}
+	return oid4vcisign.Default{}
 }
 
 // oid4vciProfileValidator is the optional receiver capability the root uses to

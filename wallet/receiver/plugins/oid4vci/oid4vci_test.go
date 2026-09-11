@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
+	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -2454,4 +2455,76 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 	// spelled as RFC 9449 Section 7.1 defines it.
 	assert.Equal(t, "DPoP dpop-access-token", requests[0].Authorization)
 	assert.Equal(t, "dpop-proof", requests[0].DPoP)
+}
+
+// transportOnlyReceiver exposes only the transport half of the bundled plugin.
+// Embedding the interface, rather than the concrete receiver, means the signing
+// primitives are not promoted, which is what a third-party HTTP-only plugin
+// looks like.
+type transportOnlyReceiver struct {
+	types.OID4VCIFinalTransport
+}
+
+// TestOid4vciReceiverSatisfiesTransportAndSigner pins the split of the Final
+// receiver capability into a transport contract a plugin owns and a signer
+// contract the wallet may replace. The bundled plugin implements both, so it
+// also satisfies the deprecated compound interface; a transport-only plugin
+// satisfies the transport contract alone.
+func TestOid4vciReceiverSatisfiesTransportAndSigner(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+
+	var transport types.OID4VCIFinalTransport = receiver
+	var signer types.OID4VCIFinalSigner = receiver
+	var compound types.OID4VCIFinalReceiver = receiver
+	if compound == nil {
+		t.Fatal("compound interface is nil")
+	}
+
+	if _, ok := any(&transportOnlyReceiver{OID4VCIFinalTransport: receiver}).(types.OID4VCIFinalSigner); ok {
+		t.Fatal("a transport-only plugin must not satisfy OID4VCIFinalSigner")
+	}
+
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-key-1", Algorithm: string(jose.ES256), Use: "sig"}
+
+	// Signer view: the key proof of Section 8.2.1.1 verifies under the holder key.
+	proof, err := signer.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
+		Audience:         "https://issuer.example",
+		Nonce:            "credential-nonce",
+		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES256},
+	})
+	require.NoError(t, err)
+	parsedProof, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+	var proofClaims map[string]any
+	require.NoError(t, parsedProof.Claims(&privateKey.PublicKey, &proofClaims))
+	require.Equal(t, "https://issuer.example", proofClaims["aud"])
+	require.Equal(t, "credential-nonce", proofClaims["nonce"])
+
+	// The same proof comes out of the default signer on its own, which is what a
+	// wallet gets when its plugin implements the transport contract only.
+	standalone, err := oid4vcisign.Default{}.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
+		Audience:         "https://issuer.example",
+		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES256},
+	})
+	require.NoError(t, err)
+	standaloneParsed, err := jwt.ParseSigned(standalone, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+	require.Equal(t, "openid4vci-proof+jwt", standaloneParsed.Headers[0].ExtraHeaders[jose.HeaderType])
+
+	// Transport view: the Credential Request codec round-trips without any key.
+	body, contentType, err := transport.EncodeCredentialRequest(
+		map[string]any{"credential_configuration_id": "pid", "proofs": map[string]any{"jwt": []string{proof}}},
+		&types.CredentialIssuerMetadata{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "application/json", contentType)
+	var encoded map[string]any
+	require.NoError(t, json.Unmarshal(body, &encoded))
+	require.Equal(t, "pid", encoded["credential_configuration_id"])
+
+	response, err := transport.DecodeCredentialResponse([]byte(`{"credential":"credential-1"}`), "application/json", nil)
+	require.NoError(t, err)
+	require.Equal(t, "credential-1", response.Credential)
 }

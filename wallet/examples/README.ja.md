@@ -165,6 +165,38 @@ fail-closed の既定値:
 - `SupportedTransactionDataTypes` が空の場合、`transaction_data` を含む要求をすべて拒否します。
 - HAIP は既定では選ばれません。`Config.Profile` のゼロ値は `profile.Final` に正規化されます。
 
+### receiver プラグインの契約: transport と signer
+
+receiver プラグインは、Draft 13 では `receiverTypes.Receiver` を、Final / HAIP では
+`receiverTypes.OID4VCIFinalTransport` を実装します。
+transport の契約は HTTP だけです。Pushed Authorization Request、token endpoint、
+client attestation の challenge と nonce の endpoint、credential と notification の
+endpoint、そして Credential Request / Credential Response のコーデックであり、
+プラグインが wallet の秘密鍵を持つことはありません。
+
+秘密鍵を使う操作は `receiverTypes.OID4VCIFinalSigner` の側にあります。
+`CreateDpopProof`、`CreateCredentialRequestJWTProofWithOptions`、
+`CreateClientAttestationPop` の 3 つです。
+実装は `Config.OID4VCISigner` で選べるので、署名を HSM やリモートの署名サービスに
+置いたまま、同梱の transport をそのまま使えます。
+
+```go
+w, err := wallet.NewWalletWithConfig(wallet.Config{
+	Receiver:      receiving,   // OID4VCIFinalTransport を実装したプラグイン
+	OID4VCISigner: hsmSigner,   // nil ならソフトウェア実装のまま
+})
+```
+
+`OID4VCISigner` が nil のときは、receiver プラグインが signer も実装していればそれが署名します。
+同梱の `oid4vci.Oid4vciReceiver` は `oid4vcisign.Default` を埋め込んでいるので該当します。
+実装していなければ `oid4vcisign.Default` が署名します。
+外部の transport プラグインも `oid4vcisign.Default` を埋め込めば同じ挙動になります。
+Client Attestation を wallet が発行することはありません。attester が発行したものを
+`Config.ClientAttestation` 経由で受け取ります。
+
+`receiverTypes.OID4VCIFinalReceiver` は上記 2 つを合わせた非推奨のインターフェースで、
+既存のプラグインと呼出し側がそのままコンパイルできるように残しています。
+
 ## セキュリティモデル
 
 **library が認証するもの。** 署名付き OID4VP Request Object は、呼出し側の X.509 anchor に対して `aud` / `exp` / `nbf`、任意の EKU / CRL policy、`x509_san_dns` または `x509_hash` の束縛を検証します（`authenticateFinalRequestObject`、`verifyRequestObjectCertificateChain`）。結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request から読み取ることはありません。credential は保存前に `verifyCredentialForAcceptanceContext` が署名、`exp` / `nbf`、SD-JWT の開示完全性を検証します。provider の attestation は `validateClientAttestation` / `validateKeyAttestation` が `typ`、`sub`、RFC 7638 の `cnf.jwk`、`exp`、HAIP では非 self-signed の `x5c` leaf を検証します。attester 自身の署名は検証しません。

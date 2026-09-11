@@ -1,10 +1,11 @@
-# Wallet API migration from the NICE fork
+# Wallet API migration
 
-This integration incorporates upstream `f0c7c53dac3cb7d7df535ef775635f14d4b6d124`
-into the NICE fork based on `5b363598aae9b6677a88c3b74d0b6d65e687ed31`.
-Passing regression tests is not evidence of complete Final or HAIP conformance.
+This document lists the API changes the OpenID4VCI / OpenID4VP Final and HAIP
+support introduced, and how a caller written against the previous API moves to
+the current one. Passing regression tests is not evidence of complete Final or
+HAIP conformance.
 
-| Previous fork API | Integrated API |
+| Previous API | Current API |
 | --- | --- |
 | `FetchAccessToken(type, endpoint, request)` | `FetchAccessToken(type, endpoint, authzCode, txCode, ...TokenRequestOption)` |
 | Structured `FetchNonce(endpoint)` | `FetchNonceResponse(endpoint)`; upstream `FetchNonce(type, endpoint)` returns `*string` |
@@ -38,7 +39,7 @@ plugin's policy. Token POSTs retain redirect refusal even with an injected
 client. The receiver's default client has a 15-second timeout; presenter
 operations using its default client have a 30-second timeout.
 
-The legacy root Draft flow retains the fork's single-credential selection and
+The legacy root Draft flow retains its single-credential selection and
 descriptor generation limitations. Applications with their own selected
 credentials and input descriptor mapping use `PresentDraft24`. This integration
 does not claim to fix the root automatic selection, untrusted issuer storage,
@@ -46,11 +47,11 @@ all request-object trust paths, or the Final retry/nonce contracts. These are
 tracked separately by the Final/HAIP roadmap and require independent behavior
 tests.
 
-The explicit Draft24 JARM operation preserves the legacy fork's JSON-string
+The explicit Draft24 JARM operation preserves the legacy JSON-string
 `presentation_submission` inside the encrypted payload. This historical double
 encoding is retained for compatibility, not claimed as normative conformance.
-The NICE sidecar's regular single-format presentations already build an object
-in their own response path. Final response objects are unaffected.
+A caller that builds single-format presentations in its own response path is
+unaffected, as are Final response objects.
 
 ## Final Request Object authentication
 
@@ -148,7 +149,8 @@ when present and required when advertised or under HAIP (RFC 9207), and an
 expired PAR `request_uri` is not used. The Nonce Endpoint is optional (§7);
 token-response `credential_identifiers` are used when present (§6.2);
 `invalid_nonce` triggers one re-proof through
-`PostCredentialEndpointWithNonceRetry` (§8.3.1); credential endpoint failures
+`PostCredentialEndpointWithNonceRetryForToken` (§8.3.1); credential endpoint
+failures
 are `receiver/types.CredentialEndpointError` values usable with `errors.Is`.
 Credential response encryption follows §8.2 (`jwk`, `enc`, optional `zip`, no
 `alg`), fails closed when `encryption_required` is set without a key, and
@@ -161,6 +163,51 @@ its own key. Deferred issuance polls with `interval` up to
 `credential_accepted` is sent only after storage succeeded,
 `credential_failure` on verification or storage failure, and
 `NotifyOID4VCIFinalCredentialDeleted` sends `credential_deleted`.
+
+## Final receiver plugin contract: transport and signer
+
+`receiver/types.OID4VCIFinalReceiver` mixed the HTTP exchanges of the Final
+flow with the wallet's private-key operations, so a plugin could not be written
+without also owning the wallet's keys. It is now split:
+
+| Interface | What it covers |
+| --- | --- |
+| `OID4VCIFinalTransport` | the Draft 13 `Receiver`, plus `PushAuthorizationRequest`, `ExchangeAuthorizationCodeWithDpopAndAttestationRetry`, `FetchClientAttestationChallenge`, `FetchNonceResponse`, `PostCredentialEndpointWithNonceRetryForToken`, `SendCredentialNotificationWithDpopRetryForToken`, `EncodeCredentialRequest`, `DecodeCredentialResponse` |
+| `OID4VCIFinalSigner` | `CreateDpopProof`, `CreateCredentialRequestJWTProofWithOptions`, `CreateClientAttestationPop` |
+| `OID4VCIFinalReceiver` | both of the above; **deprecated**, kept so existing implementations and callers still compile |
+
+The bundled `oid4vci.Oid4vciReceiver` satisfies all three: it embeds
+`receiver/oid4vcisign.Default`, the software implementation of the signer, which
+any third-party transport plugin can embed for the same behaviour.
+
+`Config.OID4VCISigner` selects the signer, so a wallet can keep its keys in a
+hardware module or a remote signing service and still use the bundled
+transport. When it is nil the receiver plugin signs if it implements
+`OID4VCIFinalSigner`, and `oid4vcisign.Default` signs otherwise; a wallet that
+configures nothing behaves exactly as before.
+`ReceivingDispatcher.OID4VCIFinalTransport` resolves the transport capability
+and accepts a plugin that does not sign; `OID4VCIFinalReceiver` still resolves
+the compound capability and is deprecated.
+
+Five methods left the interface and stay as concrete methods on
+`oid4vci.Oid4vciReceiver` (and on `oid4vcisign.Default` for the signing ones),
+because the wallet calls none of them. A caller that reached them through an
+`OID4VCIFinalReceiver`-typed value now needs the concrete plugin type or its own
+narrow interface:
+
+| Removed from the interface | Replacement for a caller |
+| --- | --- |
+| `ExchangeAuthorizationCodeWithDpopRetry` | `ExchangeAuthorizationCodeWithDpopAndAttestationRetry` with a headers factory |
+| `PostCredentialEndpointWithDpopRetry` | `PostCredentialEndpointWithNonceRetryForToken`, which carries the token's own authorization scheme |
+| `PostCredentialEndpointWithNonceRetry`, `SendCredentialNotificationWithDpopRetry` | the `…ForToken` overloads: RFC 6750 §2.1 `Bearer` and RFC 9449 §7.1 `DPoP` are told apart by the token response, which the bare access token cannot express |
+| `CreateCredentialRequestJWTProof`, `CreateCredentialRequestJWTProofWithKeyAttestation` | `CreateCredentialRequestJWTProofWithOptions` with `ProofOptions{Audience, Nonce, KeyAttestation}` |
+
+`CreateClientAttestation` is not part of `OID4VCIFinalSigner` either. The wallet
+never mints a Client Attestation: it is issued by the attester, and the wallet
+obtains it from a `ClientAttestationProvider` (see below), so the library does
+not hold the attester's private key. The method remains on
+`oid4vcisign.Default` and on the bundled plugin for tests, examples and
+single-operator deployments that act as their own attester.
 
 ## Attestation providers
 
@@ -192,8 +239,10 @@ is required before PAR; under HAIP a missing provider names HAIP §4.5.1. A
 configured provider is otherwise only used when
 `OID4VCIFinalReceiveRequest.IncludeKeyAttestation` is set. The key attestation
 is attached to each `proofs.jwt` entry as the Appendix D `key_attestation`
-protected-header parameter via `CreateCredentialRequestJWTProofWithKeyAttestation`
-(the original `CreateCredentialRequestJWTProof` keeps its signature).
+protected-header parameter through `ProofOptions.KeyAttestation` on
+`CreateCredentialRequestJWTProofWithOptions`; the two older
+`CreateCredentialRequestJWTProof…` overloads keep their signatures as concrete
+methods.
 
 ## Final request validation and private_key_jwt at PAR
 

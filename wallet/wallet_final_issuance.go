@@ -244,7 +244,8 @@ type OID4VCIFinalAuthorization struct {
 // taken from the wallet configuration. Begin builds it; Resume rebuilds it from
 // the request and the persisted OID4VCIFinalAuthorization.
 type oid4vciFinalFlow struct {
-	receiver                    receiverTypes.OID4VCIFinalReceiver
+	receiver                    receiverTypes.OID4VCIFinalTransport
+	signer                      receiverTypes.OID4VCIFinalSigner
 	issuerMetadata              *receiverTypes.CredentialIssuerMetadata
 	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata
 	authorizationServerIssuer   string
@@ -336,7 +337,7 @@ func (w *Wallet) ResumeOID4VCIFinalAuthorization(ctx context.Context, req OID4VC
 }
 
 // requireOID4VCIContext reports a cancelled context at an issuance step
-// boundary. The OID4VCIFinalReceiver interface carries no context, so the flow
+// boundary. The OID4VCIFinalTransport interface carries no context, so the flow
 // checks between steps rather than inside a request; that is enough for a
 // caller that abandons an issuance to stop it before the next request leaves
 // the wallet.
@@ -385,7 +386,7 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 		return nil, nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
 	}
 
-	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -555,7 +556,7 @@ func (w *Wallet) restoreOID4VCIFinalFlow(req OID4VCIFinalReceiveRequest, auth *O
 	if auth.AuthorizationServerMetadata.TokenEndpoint == nil {
 		return nil, fmt.Errorf("token endpoint is missing on authorization server")
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -582,7 +583,7 @@ func requireOfferedCredentialConfiguration(issuerMetadata *receiverTypes.Credent
 // authenticates at the PAR and token endpoints.
 func (w *Wallet) newOID4VCIFinalFlow(
 	req OID4VCIFinalReceiveRequest,
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
+	finalReceiver receiverTypes.OID4VCIFinalTransport,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
 	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata,
 	credentialConfigurationID string,
@@ -653,6 +654,7 @@ func (w *Wallet) newOID4VCIFinalFlow(
 
 	return &oid4vciFinalFlow{
 		receiver:                    finalReceiver,
+		signer:                      w.oid4vciFinalSigner(finalReceiver),
 		issuerMetadata:              issuerMetadata,
 		authorizationServerMetadata: authorizationServerMetadata,
 		authorizationServerIssuer:   authorizationServerIssuer,
@@ -711,7 +713,7 @@ func (w *Wallet) resumeOID4VCIFinalAuthorization(
 		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			tokenAttestationHeaders := attestationHeaders
 			if attestationHeaders.ClientAttestation != "" {
-				tokenPop, err := flow.receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
+				tokenPop, err := flow.signer.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 				if err != nil {
 					return receiverTypes.OAuthClientAttestationHeaders{}, err
 				}
@@ -720,7 +722,7 @@ func (w *Wallet) resumeOID4VCIFinalAuthorization(
 			return tokenAttestationHeaders, nil
 		},
 		func(nonce string) (string, error) {
-			return flow.receiver.CreateDpopProof(req.ClientKey, http.MethodPost, flow.authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
+			return flow.signer.CreateDpopProof(req.ClientKey, http.MethodPost, flow.authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
 		},
 	)
 	if err != nil {
@@ -778,7 +780,7 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 		nonceEndpoint,
 		initialNonce,
 		build,
-		oid4vciFinalDpopProofFactory(flow.receiver, clientKey, credentialEndpoint, token.Token),
+		oid4vciFinalDpopProofFactory(flow.signer, clientKey, credentialEndpoint, token.Token),
 	)
 	if err != nil {
 		// CredentialEndpointError is retained so callers can branch with
@@ -847,7 +849,7 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	if strings.TrimSpace(req.TransactionID) == "" {
 		return nil, fmt.Errorf("transaction ID is required")
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -901,6 +903,7 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	}
 	flow := &oid4vciFinalFlow{
 		receiver:                  finalReceiver,
+		signer:                    w.oid4vciFinalSigner(finalReceiver),
 		issuerMetadata:            issuerMetadata,
 		credentialConfigurationID: req.CredentialConfigurationID,
 		credentialConfiguration:   issuerMetadata.CredentialConfigurationSupported[req.CredentialConfigurationID],
@@ -982,7 +985,7 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 			nil,
 			"",
 			func(string) ([]byte, string, error) { return body, contentType, nil },
-			oid4vciFinalDpopProofFactory(flow.receiver, clientKey, endpoint, token.Token),
+			oid4vciFinalDpopProofFactory(flow.signer, clientKey, endpoint, token.Token),
 		)
 		if err != nil {
 			// §9.2: an issuance_pending error means poll again after the
@@ -1080,7 +1083,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	if storeErr != nil {
 		// §11: a credential that failed verification/storage is reported with
 		// credential_failure (best effort); the original failure is returned.
-		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
 			return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
 		}
 		return nil, storeErr
@@ -1089,7 +1092,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	// §11: credential_accepted MUST only be sent after the credential was
 	// successfully stored.
 	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil {
-		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
 			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
 		}
 	}
@@ -1121,15 +1124,16 @@ func (w *Wallet) NotifyOID4VCIFinalCredentialDeletedContext(ctx context.Context,
 	if req.IssuerMetadata == nil || req.IssuerMetadata.NotificationEndpoint == nil {
 		return fmt.Errorf("notification endpoint is missing on credential issuer")
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalReceiver(req.Type)
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	return notifyOID4VCIFinalCredential(finalReceiver, req.IssuerMetadata, req.AccessToken, req.ClientKey, req.NotificationID, "credential_deleted")
+	return notifyOID4VCIFinalCredential(finalReceiver, w.oid4vciFinalSigner(finalReceiver), req.IssuerMetadata, req.AccessToken, req.ClientKey, req.NotificationID, "credential_deleted")
 }
 
 func notifyOID4VCIFinalCredential(
-	finalReceiver receiverTypes.OID4VCIFinalReceiver,
+	finalReceiver receiverTypes.OID4VCIFinalTransport,
+	signer receiverTypes.OID4VCIFinalSigner,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
@@ -1144,7 +1148,7 @@ func notifyOID4VCIFinalCredential(
 		endpoint,
 		*token,
 		receiverTypes.NotificationRequest{NotificationID: notificationID, Event: event},
-		oid4vciFinalDpopProofFactory(finalReceiver, clientKey, endpoint, token.Token),
+		oid4vciFinalDpopProofFactory(signer, clientKey, endpoint, token.Token),
 	)
 }
 
@@ -1184,7 +1188,7 @@ func oid4vciFinalCredentialRequestBodyFactory(
 		}
 		proofs := make([]string, 0, len(flow.holderKeys))
 		for _, key := range flow.holderKeys {
-			proof, err := flow.receiver.CreateCredentialRequestJWTProofWithOptions(key, proofOptions)
+			proof, err := flow.signer.CreateCredentialRequestJWTProofWithOptions(key, proofOptions)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to create credential request proof: %w", err)
 			}
@@ -1227,13 +1231,13 @@ func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.
 	return jwtProof.ProofSigningAlgValuesSupported
 }
 
-func oid4vciFinalDpopProofFactory(receiver receiverTypes.OID4VCIFinalReceiver, clientKey jose.JSONWebKey, endpoint common.URIField, accessToken string) receiverTypes.DPoPProofFactory {
+func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clientKey jose.JSONWebKey, endpoint common.URIField, accessToken string) receiverTypes.DPoPProofFactory {
 	return func(nonce string) (string, error) {
-		return receiver.CreateDpopProof(clientKey, http.MethodPost, endpoint.String(), nonce, accessToken)
+		return signer.CreateDpopProof(clientKey, http.MethodPost, endpoint.String(), nonce, accessToken)
 	}
 }
 
-func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalReceiver, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
+func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
 	var decryptionKey any
 	if key != nil {
 		decryptionKey = key.Key
@@ -1474,7 +1478,7 @@ func (w *Wallet) clientAttestationProvider(req OID4VCIFinalReceiveRequest) (Clie
 	return &StaticClientAttester{Key: req.AttesterKey, Issuer: req.AttesterIssuer}, nil
 }
 
-func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCIFinalReceiver, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCIFinalTransport, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
 	provider, err := w.clientAttestationProvider(req)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
@@ -1511,7 +1515,7 @@ func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver r
 		attestationChallenge = challenge.AttestationChallenge
 	}
 
-	clientAttestationPop, err := receiver.CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
+	clientAttestationPop, err := w.oid4vciFinalSigner(receiver).CreateClientAttestationPop(req.ClientKey, req.ClientID, authorizationServerIssuer, attestationChallenge, 5*time.Minute)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err
 	}

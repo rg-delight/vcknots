@@ -681,9 +681,9 @@ type CredentialEndpointHTTPResponse struct {
 }
 
 // ProofOptions carries the inputs of an OpenID4VCI 1.0 Section 8.2.1.1 "jwt"
-// key proof. It lives here, next to the interface that takes it, so a plugin
-// outside this repository can implement OID4VCIFinalReceiver without depending
-// on the bundled oid4vci plugin.
+// key proof. It lives here, next to the interface that takes it, so a signer
+// outside this repository can implement OID4VCIFinalSigner without depending on
+// the bundled oid4vci plugin.
 type ProofOptions struct {
 	// Audience is the Credential Issuer Identifier the proof is bound to.
 	// Section 8.2.1.1 makes it "REQUIRED. ... the Credential Issuer Identifier".
@@ -700,45 +700,101 @@ type ProofOptions struct {
 	SigningAlgValues []jose.SignatureAlgorithm
 }
 
-// OID4VCIFinalReceiver is an optional plugin capability for OpenID4VCI
-// Final 1.0 / HAIP flows. It intentionally extends, rather than replaces,
-// the legacy Receiver interface used by the existing Draft 13 flow.
-type OID4VCIFinalReceiver interface {
+// OID4VCIFinalTransport is the OpenID4VCI 1.0 Final / HAIP transport a
+// receiver plugin owns: the HTTP exchanges of Section 5 (Pushed Authorization
+// Request and the Token Endpoint), Section 6.3 (the Client Attestation
+// challenge), Section 7 (the Nonce Endpoint), Section 8 (the Credential
+// Endpoint), Section 11 (the Notification Endpoint) and the Credential Request
+// and Credential Response codec of Section 8.1 and Section 8.2. It
+// intentionally extends, rather than replaces, the legacy Receiver interface
+// used by the existing Draft 13 flow.
+//
+// It carries no signing primitive. Key proofs, DPoP proofs and Client
+// Attestation PoPs are built by an OID4VCIFinalSigner, so a transport plugin
+// can be implemented outside this repository without access to the wallet's
+// private keys.
+type OID4VCIFinalTransport interface {
 	Receiver
 
+	// PushAuthorizationRequest sends the RFC 9126 Pushed Authorization Request
+	// that OpenID4VCI 1.0 Section 5.1 and HAIP Section 4.3 use to move the
+	// authorization request off the front channel.
 	PushAuthorizationRequest(endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
-	ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headers OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	// ExchangeAuthorizationCodeWithDpopAndAttestationRetry exchanges the
+	// authorization code at the Token Endpoint (Section 6.1). Both factories are
+	// invoked once per HTTP attempt, so an RFC 9449 Section 8 "use_dpop_nonce"
+	// retry re-signs the DPoP proof and rebuilds the Client Attestation headers
+	// instead of replaying the first ones.
 	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	// FetchClientAttestationChallenge fetches a challenge from the
+	// authorization server's challenge endpoint so the Client Attestation PoP
+	// can be bound to it.
 	FetchClientAttestationChallenge(endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
+	// FetchNonceResponse fetches the Section 7 Nonce Endpoint response,
+	// including the optional c_nonce_expires_in member.
 	FetchNonceResponse(endpoint common.URIField) (*NonceResponse, error)
-	PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
-	PostCredentialEndpointWithNonceRetry(endpoint common.URIField, accessToken string, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
-	SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification NotificationRequest, proofFactory DPoPProofFactory) error
-	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
-	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
-	CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error)
-	CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error)
-	// CreateCredentialRequestJWTProofWithKeyAttestation builds the same proof as
-	// CreateCredentialRequestJWTProof and, when keyAttestation is non-empty,
-	// adds the OpenID4VCI 1.0 Appendix D key_attestation header parameter.
-	CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error)
-	// CreateCredentialRequestJWTProofWithOptions builds the same proof and, in
-	// addition, honours the Credential Configuration's
-	// proof_signing_alg_values_supported. OpenID4VCI 1.0 Section 8.2.1.1: "the
-	// `alg` JWT header of the key proof ... MUST match one of the values listed
-	// in the `proof_signing_alg_values_supported` metadata parameter".
-	CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts ProofOptions) (string, error)
-	// PostCredentialEndpointWithNonceRetryForToken is
-	// PostCredentialEndpointWithNonceRetry taking the parsed token response
-	// rather than the bare access token, so the Authorization header carries the
-	// scheme the authorization server issued. RFC 6750 Section 2.1 defines the
-	// Bearer scheme and RFC 9449 Section 7.1 the DPoP scheme; the string-taking
-	// overload above cannot tell them apart and always sends DPoP.
+	// PostCredentialEndpointWithNonceRetryForToken posts the Credential Request
+	// and, on the Section 8.3.1.2 "invalid_nonce" error, rebuilds the body with
+	// a fresh c_nonce from the Nonce Endpoint and posts it once more. It takes
+	// the parsed token response rather than the bare access token so the
+	// Authorization header carries the scheme the authorization server issued:
+	// RFC 6750 Section 2.1 defines the Bearer scheme and RFC 9449 Section 7.1
+	// the DPoP scheme. It returns the raw HTTP response and the c_nonce the
+	// accepted request was built with.
 	PostCredentialEndpointWithNonceRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
-	// SendCredentialNotificationWithDpopRetryForToken is
-	// SendCredentialNotificationWithDpopRetry taking the parsed token response,
-	// for the same reason as PostCredentialEndpointWithNonceRetryForToken.
+	// SendCredentialNotificationWithDpopRetryForToken sends the Section 11
+	// notification, taking the parsed token response for the same reason as
+	// PostCredentialEndpointWithNonceRetryForToken.
 	SendCredentialNotificationWithDpopRetryForToken(endpoint common.URIField, accessToken CredentialIssuanceAccessToken, notification NotificationRequest, proofFactory DPoPProofFactory) error
-	CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey jose.JSONWebKey, attesterIssuer string, clientID string, lifetime time.Duration) (string, error)
+	// EncodeCredentialRequest serialises a Credential Request, applying the
+	// Section 8.1 Credential Request encryption when the issuer metadata
+	// advertises credential_request_encryption. It returns the body and the
+	// Content-Type to send it with.
+	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
+	// DecodeCredentialResponse parses a Credential Response, decrypting the
+	// Section 8.2 encrypted response with decryptionKey when the Content-Type
+	// says the issuer encrypted it.
+	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
+}
+
+// OID4VCIFinalSigner builds the private-key operations of an OpenID4VCI 1.0
+// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt" key
+// proof and the attestation-based client authentication PoP of
+// draft-ietf-oauth-attestation-based-client-auth Section 4.
+//
+// It is separated from OID4VCIFinalTransport so a wallet can keep its keys in a
+// hardware module or a remote signing service while still using the bundled
+// transport plugin. Wallet.Config selects the implementation; the receiver
+// oid4vcisign package provides the software default.
+//
+// The Client Attestation itself is not built here: it is issued by the
+// attester, not by the wallet, and reaches the wallet through a
+// ClientAttestationProvider.
+type OID4VCIFinalSigner interface {
+	// CreateDpopProof builds the RFC 9449 Section 4.2 DPoP proof for one HTTP
+	// request. An empty nonce omits the nonce claim and an empty accessToken
+	// omits the ath claim.
+	CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error)
+	// CreateCredentialRequestJWTProofWithOptions builds the OpenID4VCI 1.0
+	// Section 8.2.1.1 "jwt" key proof. It honours the Credential
+	// Configuration's proof_signing_alg_values_supported, which Section 8.2.1.1
+	// makes binding: "the `alg` JWT header of the key proof ... MUST match one
+	// of the values listed in the `proof_signing_alg_values_supported` metadata
+	// parameter".
+	CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts ProofOptions) (string, error)
+	// CreateClientAttestationPop builds the Client Attestation PoP JWT of
+	// draft-ietf-oauth-attestation-based-client-auth Section 4, bound to the
+	// authorization server and, when the server issued one, to its challenge.
 	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
+}
+
+// OID4VCIFinalReceiver is a plugin that is both an OID4VCIFinalTransport and an
+// OID4VCIFinalSigner.
+//
+// Deprecated: implement OID4VCIFinalTransport instead and supply the signing
+// primitives through Wallet Config.OID4VCISigner. This compound interface is
+// kept so existing plugins and callers keep compiling.
+type OID4VCIFinalReceiver interface {
+	OID4VCIFinalTransport
+	OID4VCIFinalSigner
 }

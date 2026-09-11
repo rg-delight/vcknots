@@ -22,6 +22,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -93,10 +94,16 @@ type finalIssuanceFixture struct {
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
 	authSigningAlgsSupported []jose.SignatureAlgorithm
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
-	tokenResponse            map[string]any
-	tokenHandler             http.HandlerFunc
-	credentialHandler        http.HandlerFunc
-	deferredHandler          http.HandlerFunc
+	// oid4vciSigner is the Config.OID4VCISigner the fixture wallet is built
+	// with; nil leaves the receiver plugin signing.
+	oid4vciSigner receiverTypes.OID4VCIFinalSigner
+	// wrapReceiverPlugin decorates the bundled receiver plugin before it is
+	// registered, so a test can register a narrower plugin than the bundled one.
+	wrapReceiverPlugin func(receiverTypes.Receiver) receiverTypes.Receiver
+	tokenResponse      map[string]any
+	tokenHandler       http.HandlerFunc
+	credentialHandler  http.HandlerFunc
+	deferredHandler    http.HandlerFunc
 
 	issuerMetadataCalls int
 	parCalls            int
@@ -112,6 +119,7 @@ type finalIssuanceFixture struct {
 	authorizeQuery      url.Values
 	parForm             url.Values
 	parHeaders          http.Header
+	tokenHeaders        http.Header
 	tokenForms          []url.Values
 }
 
@@ -154,18 +162,28 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 	// Config.CredentialAcceptance, so the fixture wallet authenticates the
 	// issuer key it signs with.
 	acceptance := acceptIssuerKeyPolicy(f.issuerKey)
-	if f.walletProfile == "" {
+	if f.walletProfile == "" && f.oid4vciSigner == nil && f.wrapReceiverPlugin == nil {
 		f.wallet = createTestControllerWithAcceptance(t, acceptance)
 		return f
 	}
-	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci,
-		&oid4vci.Oid4vciReceiver{HTTPClient: f.server.Client(), Profile: f.walletProfile}))
+	// HAIP serves over TLS, so only the Final fixtures need the plain-HTTP
+	// allowance the default dispatcher takes from the environment.
+	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
+		HTTPClient: f.server.Client(),
+		AllowHTTP:  !f.walletProfile.IsHAIP(),
+		Profile:    f.walletProfile,
+	})
+	if f.wrapReceiverPlugin != nil {
+		plugin = f.wrapReceiverPlugin(plugin)
+	}
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	config := Config{
 		Profile:              f.walletProfile,
 		CredStore:            newProfileCredStore(t),
 		Receiver:             receiving,
 		CredentialAcceptance: acceptance,
+		OID4VCISigner:        f.oid4vciSigner,
 	}
 	if f.clientAuthKey != nil {
 		// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
@@ -352,6 +370,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		f.tokenCalls++
 		_ = r.ParseForm()
 		f.tokenForms = append(f.tokenForms, r.Form)
+		f.tokenHeaders = r.Header.Clone()
 		if f.tokenHandler != nil {
 			f.tokenHandler(w, r)
 			return
@@ -1690,4 +1709,82 @@ func TestReceiveOID4VCIFinalCredentialRefusesSelfDrivenAuthorizationByDefault(t 
 	require.ErrorContains(t, err, "the authorization code flow requires a browser")
 	require.Equal(t, 0, fixture.parCalls)
 	require.Equal(t, 0, fixture.authorizeCalls)
+}
+
+// fakeFinalSigner is a caller-supplied receiverTypes.OID4VCIFinalSigner. It
+// keeps the software key proof and PoP by embedding the default signer, and
+// replaces only the DPoP proof with a value a test can recognise on the wire.
+type fakeFinalSigner struct {
+	oid4vcisign.Default
+
+	dpopProof  string
+	dpopCalls  int
+	proofCalls int
+}
+
+func (s *fakeFinalSigner) CreateDpopProof(jose.JSONWebKey, string, string, string, string) (string, error) {
+	s.dpopCalls++
+	return s.dpopProof, nil
+}
+
+func (s *fakeFinalSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
+	s.proofCalls++
+	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// transportOnlyOID4VCIPlugin is a receiver plugin that implements the Final
+// transport contract and nothing else. Embedding the interface rather than the
+// bundled receiver keeps the signing primitives from being promoted, which is
+// what a plugin written outside this module looks like.
+type transportOnlyOID4VCIPlugin struct {
+	receiverTypes.OID4VCIFinalTransport
+}
+
+// TestWalletAcceptsCustomFinalSigner drives a whole Final issuance with
+// Config.OID4VCISigner set, so the wallet's private-key operations come from the
+// caller: the DPoP proof the fake signs is the one the issuer's token endpoint
+// receives.
+func TestWalletAcceptsCustomFinalSigner(t *testing.T) {
+	signer := &fakeFinalSigner{dpopProof: "fake-dpop-proof"}
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.oid4vciSigner = signer
+	})
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredentialContext(t.Context(), fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+
+	require.Equal(t, "fake-dpop-proof", fixture.tokenHeaders.Get("DPoP"))
+	require.Positive(t, signer.dpopCalls)
+	require.Positive(t, signer.proofCalls)
+	// The key proof still comes from the configured signer, so the issuer sees a
+	// proof bound to the holder key.
+	claims := finalProofClaims(t, fixture.proofJWTs(t)[0])
+	require.Equal(t, fixture.credentialIssuer(fixture.server.URL), claims["aud"])
+}
+
+// TestWalletAcceptsTransportOnlyPlugin registers a receiver plugin thatonly speaks
+// HTTP and lets the wallet fall back to the bundled software signer, which is
+// the point of splitting OID4VCIFinalReceiver into a transport and a signer.
+func TestWalletAcceptsTransportOnlyPlugin(t *testing.T) {
+	var registered receiverTypes.Receiver
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.wrapReceiverPlugin = func(plugin receiverTypes.Receiver) receiverTypes.Receiver {
+			transport, ok := plugin.(receiverTypes.OID4VCIFinalTransport)
+			require.True(t, ok)
+			registered = &transportOnlyOID4VCIPlugin{OID4VCIFinalTransport: transport}
+			return registered
+		}
+	})
+
+	_, isSigner := registered.(receiverTypes.OID4VCIFinalSigner)
+	require.False(t, isSigner, "the registered plugin must not implement the signer")
+
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredentialContext(t.Context(), fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	// The fallback signer produced a real DPoP proof and a real key proof.
+	require.NotEmpty(t, fixture.tokenHeaders.Get("DPoP"))
+	claims := finalProofClaims(t, fixture.proofJWTs(t)[0])
+	require.Equal(t, fixture.credentialIssuer(fixture.server.URL), claims["aud"])
 }
