@@ -1193,3 +1193,36 @@ func TestVerifyCredentialWithPolicyRequiresAProvableHolderBinding(t *testing.T) 
 		require.False(t, verification.HolderBound)
 	})
 }
+
+// TestIssuerSignedJOSEHeader pins the credential-acceptance header extraction:
+// the protected header is read without verifying the signature, and for an
+// SD-JWT VC only the issuer-signed JWT before the first disclosure separator is
+// considered.
+func TestIssuerSignedJOSEHeader(t *testing.T) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"dc+sd-jwt"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"vct":"https://example/pid"}`))
+
+	t.Run("sd-jwt-vc-stops-at-the-disclosure", func(t *testing.T) {
+		got, err := IssuerSignedJOSEHeader(credential.SDJwtVC, []byte(header+"."+payload+".signature~disclosure"))
+		require.NoError(t, err)
+		require.Equal(t, "dc+sd-jwt", got["typ"])
+	})
+	t.Run("jwt-vc-header", func(t *testing.T) {
+		got, err := IssuerSignedJOSEHeader(credential.JwtVc, []byte(header+"."+payload+".signature"))
+		require.NoError(t, err)
+		require.Equal(t, "ES256", got["alg"])
+	})
+	t.Run("not-a-compact-jws", func(t *testing.T) {
+		_, err := IssuerSignedJOSEHeader(credential.JwtVc, []byte("not-a-jwt"))
+		require.ErrorIs(t, err, ErrCredentialParse)
+	})
+	t.Run("header-not-base64url", func(t *testing.T) {
+		_, err := IssuerSignedJOSEHeader(credential.JwtVc, []byte("!!!."+payload+".signature"))
+		require.ErrorIs(t, err, ErrCredentialParse)
+	})
+	t.Run("header-not-json", func(t *testing.T) {
+		notJSON := base64.RawURLEncoding.EncodeToString([]byte("not json"))
+		_, err := IssuerSignedJOSEHeader(credential.JwtVc, []byte(notJSON+"."+payload+".signature"))
+		require.ErrorIs(t, err, ErrCredentialParse)
+	})
+}

@@ -425,7 +425,7 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 	// §12.3: select the authorization server. A grant authorization_server hint
 	// MUST be listed in authorization_servers; otherwise the first listed server
 	// is used, falling back to the credential issuer when the list is empty.
-	authorizationServerEndpoint, err := selectOID4VCIAuthorizationServer(issuerMetadata, authCodeGrant, *issuerEndpoint)
+	authorizationServerEndpoint, err := SelectOID4VCIAuthorizationServer(issuerMetadata, authCodeGrant, *issuerEndpoint)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1404,12 +1404,19 @@ func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {
 	return nil
 }
 
-func selectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIssuerMetadata, grant *CredentialOfferGrant, issuerEndpoint common.URIField) (common.URIField, error) {
+// SelectOID4VCIAuthorizationServer chooses the authorization server for one
+// OpenID4VCI issuance. The Credential Offer grant's authorization_server hint
+// is a recommendation: "The value of this parameter MUST match with one of the
+// values in the `authorization_servers` array obtained from the Credential
+// Issuer metadata", so a hint that is not listed is rejected. Without a hint
+// the wallet takes the first listed authorization server, or issuerEndpoint
+// when the metadata lists none.
+func SelectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIssuerMetadata, grant *CredentialOfferGrant, issuerEndpoint common.URIField) (common.URIField, error) {
 	if issuerMetadata == nil {
 		return common.URIField{}, fmt.Errorf("issuer metadata is required")
 	}
 	// A wallet-initiated issuance has no grant and therefore no
-	// authorization_server hint; §12.3 then falls back to the first listed
+	// authorization_server hint; it falls back to the first listed
 	// authorization server or the credential issuer.
 	hint := ""
 	if grant != nil {
@@ -1442,7 +1449,7 @@ type oid4vciKeyAttestationPlan struct {
 // fails before any request is sent when the issuer requires one but the wallet
 // has no provider, naming HAIP §4.5.1 under the HAIP profile.
 func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, include bool) (*oid4vciKeyAttestationPlan, error) {
-	required := issuerRequiresKeyAttestation(metadata, credentialConfigurationID)
+	required := IssuerRequiresKeyAttestation(metadata, credentialConfigurationID)
 	if required && w.keyAttestation == nil {
 		if w.profile.IsHAIP() {
 			return nil, fmt.Errorf("HAIP §4.5.1 requires wallets to support key attestations: the issuer requires a key attestation but no KeyAttestation provider is configured")
@@ -1455,11 +1462,11 @@ func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIss
 	return &oid4vciKeyAttestationPlan{provider: w.keyAttestation, policy: w.attestationPolicyFor(w.keyAttestation)}, nil
 }
 
-// issuerRequiresKeyAttestation reports whether the selected credential
+// IssuerRequiresKeyAttestation reports whether the selected credential
 // configuration advertises proof_types_supported.jwt.key_attestations_required
 // (OpenID4VCI 1.0 Appendix D). Presence of the object, even empty, is the
 // signal.
-func issuerRequiresKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) bool {
+func IssuerRequiresKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) bool {
 	if metadata == nil || metadata.CredentialConfigurationSupported == nil {
 		return false
 	}

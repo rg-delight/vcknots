@@ -668,24 +668,16 @@ func verifyAttestationChain(ctx context.Context, chain []*x509.Certificate, poli
 			return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header of the %s", label)
 		}
 	}
-	crlOptions := policy.CRL
-	if crlOptions.RequireStatus && policy.AllowUnadvertisedRevocation {
-		return fmt.Errorf("conflicting %s revocation policies", label)
-	}
-	crlOptions.RequireStatus = !policy.AllowUnadvertisedRevocation
-	if crlOptions.HTTPClient == nil {
+	if policy.CRL.HTTPClient == nil {
 		return fmt.Errorf("%s trust anchors are configured but the policy supplies no CRL HTTP client", label)
 	}
-	checker, err := commonX509.NewCRLChecker(crlOptions)
-	if err != nil {
-		return fmt.Errorf("failed to create %s revocation checker: %w", label, err)
-	}
-	if _, err := commonX509.VerifySigningCertificateChain(ctx, chain, commonX509.SigningChainOptions{
-		TrustAnchors: policy.TrustAnchors,
-		Roots:        policy.RootCAs,
-		CurrentTime:  now,
-		KeyUsages:    policy.KeyUsages,
-		Revocation:   checker,
+	if _, err := commonX509.VerifySigningChainWithPolicy(ctx, chain, commonX509.SigningChainPolicy{
+		TrustAnchors:                policy.TrustAnchors,
+		Roots:                       policy.RootCAs,
+		KeyUsages:                   policy.KeyUsages,
+		CRL:                         policy.CRL,
+		AllowUnadvertisedRevocation: policy.AllowUnadvertisedRevocation,
+		CurrentTime:                 now,
 	}); err != nil {
 		return fmt.Errorf("%s certificate chain is not trusted: %w", label, err)
 	}

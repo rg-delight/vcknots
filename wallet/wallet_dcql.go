@@ -70,7 +70,7 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 					// binding, a KB-JWT ... MUST always be present". A credential
 					// that carries cnf is holder-bound even when the verifier
 					// waived the requirement, so HAIP forces the KB-JWT.
-					if w.profile.IsHAIP() && flavor == credential.SDJwtVC && sdJWTCarriesConfirmation(saved.Entry.Raw) {
+					if w.profile.IsHAIP() && flavor == credential.SDJwtVC && SDJWTCarriesConfirmation(saved.Entry.Raw) {
 						sdOpts.RequireKeyBinding = true
 					}
 					break
@@ -110,10 +110,10 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 	return vpToken, nil
 }
 
-// sdJWTCarriesConfirmation reports whether the SD-JWT VC wire value's issuer
+// SDJWTCarriesConfirmation reports whether the SD-JWT VC wire value's issuer
 // JWT payload contains a cnf claim, i.e. the credential has cryptographic
 // holder binding.
-func sdJWTCarriesConfirmation(raw []byte) bool {
+func SDJWTCarriesConfirmation(raw []byte) bool {
 	issuerJWT := string(raw)
 	if separator := strings.IndexByte(issuerJWT, '~'); separator >= 0 {
 		issuerJWT = issuerJWT[:separator]

@@ -157,24 +157,21 @@ func (b *requestBuilder) requestObjectValidationOptions() (RequestObjectValidati
 // revocation checks for a leaf-first certificate list. It is shared by the
 // request_uri signed Request Object path and the signed DC API paths.
 func (b *requestBuilder) verifyRequestObjectCertificateChain(certificates []*x509.Certificate, options RequestObjectValidationOptions, now time.Time) (*commonX509.SigningChainResult, error) {
-	crlOptions := options.CRL
-	if crlOptions.RequireStatus && options.AllowUnadvertisedRevocation {
-		return nil, errors.New("conflicting Request Object revocation policies")
-	}
-	crlOptions.RequireStatus = !options.AllowUnadvertisedRevocation
-	if crlOptions.HTTPClient == nil {
-		crlOptions.HTTPClient = b.httpClient
-		if crlOptions.HTTPClient == nil {
-			crlOptions.HTTPClient = (&Oid4vpPresenter{}).httpClient()
+	client := options.CRL.HTTPClient
+	if client == nil {
+		client = b.httpClient
+		if client == nil {
+			client = (&Oid4vpPresenter{}).httpClient()
 		}
 	}
-	checker, err := commonX509.NewCRLChecker(crlOptions)
-	if err != nil {
-		return nil, err
-	}
-	return commonX509.VerifySigningCertificateChain(options.resolveContext(), certificates, commonX509.SigningChainOptions{
-		TrustAnchors: options.TrustAnchors, Roots: options.RootCAs, CurrentTime: now,
-		KeyUsages: options.CertificateKeyUsages, Revocation: checker,
+	return commonX509.VerifySigningChainWithPolicy(options.resolveContext(), certificates, commonX509.SigningChainPolicy{
+		TrustAnchors:                options.TrustAnchors,
+		Roots:                       options.RootCAs,
+		KeyUsages:                   options.CertificateKeyUsages,
+		CRL:                         options.CRL,
+		AllowUnadvertisedRevocation: options.AllowUnadvertisedRevocation,
+		CurrentTime:                 now,
+		HTTPClient:                  client,
 	})
 }
 

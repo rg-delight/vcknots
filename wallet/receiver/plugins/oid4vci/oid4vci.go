@@ -613,24 +613,14 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	if signing.Now != nil {
 		now = signing.Now()
 	}
-	crlOptions := signing.CRL
-	if crlOptions.RequireStatus && signing.AllowUnadvertisedRevocation {
-		return nil, nil, fmt.Errorf("conflicting signed issuer metadata revocation policies")
-	}
-	crlOptions.RequireStatus = !signing.AllowUnadvertisedRevocation
-	if crlOptions.HTTPClient == nil {
-		crlOptions.HTTPClient = o.httpClient()
-	}
-	checker, err := commonX509.NewCRLChecker(crlOptions)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create signed issuer metadata revocation checker: %w", err)
-	}
-	result, err := commonX509.VerifySigningCertificateChain(ctx, chain, commonX509.SigningChainOptions{
-		TrustAnchors: signing.TrustAnchors,
-		Roots:        signing.RootCAs,
-		CurrentTime:  now,
-		KeyUsages:    signing.KeyUsages,
-		Revocation:   checker,
+	result, err := commonX509.VerifySigningChainWithPolicy(ctx, chain, commonX509.SigningChainPolicy{
+		TrustAnchors:                signing.TrustAnchors,
+		Roots:                       signing.RootCAs,
+		KeyUsages:                   signing.KeyUsages,
+		CRL:                         signing.CRL,
+		AllowUnadvertisedRevocation: signing.AllowUnadvertisedRevocation,
+		CurrentTime:                 now,
+		HTTPClient:                  o.httpClient(),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: %w", err)

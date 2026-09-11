@@ -335,3 +335,60 @@ func TestVerifySigningCertificateChainRequiresExplicitConfiguration(t *testing.T
 		})
 	}
 }
+
+// TestVerifySigningChainWithPolicyDerivesRevocationStrictness pins the exported
+// policy entry point: RequireStatus is derived from AllowUnadvertisedRevocation,
+// a chain to an unconfigured anchor is refused, and setting the contradicting
+// policy pair is a configuration error.
+func TestVerifySigningChainWithPolicyDerivesRevocationStrictness(t *testing.T) {
+	root := newSigningTestCertificate(t, "Root", nil, true, nil)
+	issuer := newSigningTestCertificate(t, "Issuer", &root, true, nil)
+	leaf := newSigningTestCertificate(t, "Signer", &issuer, false, nil)
+	chain := []*x509.Certificate{leaf.certificate, issuer.certificate}
+
+	t.Run("trusted-chain-with-unadvertised-revocation", func(t *testing.T) {
+		result, err := VerifySigningChainWithPolicy(context.Background(), chain, SigningChainPolicy{
+			TrustAnchors:                []*x509.Certificate{root.certificate},
+			CurrentTime:                 signingTestTime,
+			AllowUnadvertisedRevocation: true,
+			HTTPClient:                  &http.Client{Transport: signingTestNoNetwork{t}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSigningTestPath(t, result, leaf.certificate, issuer.certificate, root.certificate)
+	})
+	t.Run("revocation-required-but-unadvertised", func(t *testing.T) {
+		result, err := VerifySigningChainWithPolicy(context.Background(), chain, SigningChainPolicy{
+			TrustAnchors: []*x509.Certificate{root.certificate},
+			CurrentTime:  signingTestTime,
+			HTTPClient:   &http.Client{Transport: signingTestNoNetwork{t}},
+		})
+		if err == nil || result != nil {
+			t.Fatalf("chain without a revocation mechanism accepted under RequireStatus: %#v, %v", result, err)
+		}
+	})
+	t.Run("untrusted-anchor", func(t *testing.T) {
+		otherRoot := newSigningTestCertificate(t, "OtherRoot", nil, true, nil)
+		_, err := VerifySigningChainWithPolicy(context.Background(), chain, SigningChainPolicy{
+			TrustAnchors:                []*x509.Certificate{otherRoot.certificate},
+			CurrentTime:                 signingTestTime,
+			AllowUnadvertisedRevocation: true,
+			HTTPClient:                  &http.Client{Transport: signingTestNoNetwork{t}},
+		})
+		if err == nil {
+			t.Fatal("chain to an unconfigured anchor was accepted")
+		}
+	})
+	t.Run("conflicting-revocation-policies", func(t *testing.T) {
+		_, err := VerifySigningChainWithPolicy(context.Background(), chain, SigningChainPolicy{
+			TrustAnchors:                []*x509.Certificate{root.certificate},
+			CurrentTime:                 signingTestTime,
+			AllowUnadvertisedRevocation: true,
+			CRL:                         CRLCheckerOptions{RequireStatus: true, HTTPClient: &http.Client{Transport: signingTestNoNetwork{t}}},
+		})
+		if err == nil {
+			t.Fatal("CRL.RequireStatus=true with AllowUnadvertisedRevocation=true was accepted")
+		}
+	})
+}

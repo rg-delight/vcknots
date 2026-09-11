@@ -2016,7 +2016,7 @@ func boolPointer(value bool) *bool {
 // cryptographic holder binding key.
 func credentialHasHolderBinding(flavor credential.SupportedSerializationFlavor, entry *SavedCredential) bool {
 	if flavor == credential.SDJwtVC {
-		return sdJWTCarriesConfirmation(entry.Entry.Raw)
+		return SDJWTCarriesConfirmation(entry.Entry.Raw)
 	}
 	if entry.Credential == nil || entry.Credential.Claims == nil {
 		return false

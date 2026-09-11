@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 )
@@ -104,6 +105,64 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 		return &SigningChainResult{Chain: chain, Fingerprints: fingerprints, Revocation: revocation}, nil
 	}
 	return invalid("path", errors.Join(failures...))
+}
+
+// SigningChainPolicy is one complete relying-party trust policy for a
+// signing-certificate verification: the anchors, the optional EKU constraint,
+// the CRL retrieval tuning, and the HTTP client the revocation fetches use.
+//
+// Revocation strictness is expressed once, through AllowUnadvertisedRevocation.
+// A certificate that advertises no CRL distribution point stays on the trust
+// path only when it is true; CRL.RequireStatus is derived from it and must not
+// be set as well, which VerifySigningChainWithPolicy rejects as a conflict.
+type SigningChainPolicy struct {
+	// TrustAnchors and Roots name the trust anchors. Supply exactly one of
+	// them; Roots preserves *x509.CertPool integrations.
+	TrustAnchors []*x509.Certificate
+	Roots        *x509.CertPool
+	// KeyUsages constrains EKU when the ecosystem defines a signing purpose.
+	// Empty means no additional EKU policy, not TLS server authentication.
+	KeyUsages []x509.ExtKeyUsage
+	// CRL tunes the revocation retrieval. Its RequireStatus is derived from
+	// AllowUnadvertisedRevocation; its HTTPClient, when set, wins over
+	// HTTPClient below.
+	CRL CRLCheckerOptions
+	// AllowUnadvertisedRevocation keeps certificates that publish no CRL/OCSP
+	// mechanism on the trust path, reported separately rather than positively
+	// checked. False requires positive status for every certificate below the
+	// anchor.
+	AllowUnadvertisedRevocation bool
+	// CurrentTime is the single verification clock.
+	CurrentTime time.Time
+	// HTTPClient performs the CRL fetches when CRL.HTTPClient is nil.
+	HTTPClient *http.Client
+}
+
+// VerifySigningChainWithPolicy builds the per-operation CRL checker from policy
+// and verifies a leaf-first signing chain against it. It is the one place the
+// RequireStatus derivation exists, so every in-library caller that accepts
+// unadvertised revocation expresses it the same way and an integrator does not
+// reproduce the rule.
+func VerifySigningChainWithPolicy(ctx context.Context, certificates []*x509.Certificate, policy SigningChainPolicy) (*SigningChainResult, error) {
+	if policy.CRL.RequireStatus && policy.AllowUnadvertisedRevocation {
+		return nil, errors.New("conflicting revocation policies: CRL.RequireStatus and AllowUnadvertisedRevocation cannot both be set")
+	}
+	crlOptions := policy.CRL
+	crlOptions.RequireStatus = !policy.AllowUnadvertisedRevocation
+	if crlOptions.HTTPClient == nil {
+		crlOptions.HTTPClient = policy.HTTPClient
+	}
+	checker, err := NewCRLChecker(crlOptions)
+	if err != nil {
+		return nil, err
+	}
+	return VerifySigningCertificateChain(ctx, certificates, SigningChainOptions{
+		TrustAnchors: policy.TrustAnchors,
+		Roots:        policy.Roots,
+		CurrentTime:  policy.CurrentTime,
+		KeyUsages:    policy.KeyUsages,
+		Revocation:   checker,
+	})
 }
 
 func signingPaths(certificates []*x509.Certificate, options SigningChainOptions) ([][]*x509.Certificate, error) {

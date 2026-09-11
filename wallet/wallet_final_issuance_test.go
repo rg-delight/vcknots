@@ -1919,3 +1919,74 @@ func TestFinalIssuanceContextCancelsARequestInFlight(t *testing.T) {
 	require.NotContains(t, err.Error(), "OpenID4VCI issuance cancelled before")
 	require.Equal(t, int32(1), credentialRequests.Load())
 }
+
+// TestIssuerRequiresKeyAttestation pins the OpenID4VCI 1.0 Appendix D signal:
+// proof_types_supported.jwt.key_attestations_required is required when the
+// member is present, even as an empty object, and only for the configuration
+// it is advertised under.
+func TestIssuerRequiresKeyAttestation(t *testing.T) {
+	withProof := func(proof receiverTypes.ProofType) *receiverTypes.CredentialIssuerMetadata {
+		return &receiverTypes.CredentialIssuerMetadata{
+			CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+				"pid": {ProofTypesSupported: &map[string]receiverTypes.ProofType{"jwt": proof}},
+			},
+		}
+	}
+	required := receiverTypes.ProofType{KeyAttestationsRequired: &receiverTypes.KeyAttestationsRequired{}}
+	notRequired := receiverTypes.ProofType{}
+
+	t.Run("key-attestations-required", func(t *testing.T) {
+		require.True(t, IssuerRequiresKeyAttestation(withProof(required), "pid"))
+	})
+	t.Run("key-attestations-not-required", func(t *testing.T) {
+		require.False(t, IssuerRequiresKeyAttestation(withProof(notRequired), "pid"))
+	})
+	t.Run("unknown-configuration", func(t *testing.T) {
+		require.False(t, IssuerRequiresKeyAttestation(withProof(required), "other"))
+	})
+	t.Run("nil-metadata", func(t *testing.T) {
+		require.False(t, IssuerRequiresKeyAttestation(nil, "pid"))
+	})
+}
+
+// TestSelectOID4VCIAuthorizationServer pins the Credential Offer
+// authorization_server rule: "The value of this parameter MUST match with one
+// of the values in the `authorization_servers` array obtained from the
+// Credential Issuer metadata", with the first-listed and credential-issuer
+// fallbacks otherwise.
+func TestSelectOID4VCIAuthorizationServer(t *testing.T) {
+	uri := func(t *testing.T, raw string) common.URIField {
+		t.Helper()
+		parsed, err := common.ParseURIField(raw)
+		require.NoError(t, err)
+		return *parsed
+	}
+	first := uri(t, "https://as.example/")
+	second := uri(t, "https://other.example/")
+	issuer := uri(t, "https://issuer.example/")
+	metadata := &receiverTypes.CredentialIssuerMetadata{AuthorizationServers: []common.URIField{first, second}}
+
+	t.Run("grant-hint-that-is-listed", func(t *testing.T) {
+		got, err := SelectOID4VCIAuthorizationServer(metadata, &CredentialOfferGrant{AuthorizationServer: "https://other.example/"}, issuer)
+		require.NoError(t, err)
+		require.Equal(t, second.String(), got.String())
+	})
+	t.Run("grant-hint-that-is-not-listed", func(t *testing.T) {
+		_, err := SelectOID4VCIAuthorizationServer(metadata, &CredentialOfferGrant{AuthorizationServer: "https://unlisted.example/"}, issuer)
+		require.Error(t, err)
+	})
+	t.Run("no-hint-selects-the-first-listed", func(t *testing.T) {
+		got, err := SelectOID4VCIAuthorizationServer(metadata, nil, issuer)
+		require.NoError(t, err)
+		require.Equal(t, first.String(), got.String())
+	})
+	t.Run("no-listed-servers-falls-back-to-the-issuer", func(t *testing.T) {
+		got, err := SelectOID4VCIAuthorizationServer(&receiverTypes.CredentialIssuerMetadata{}, nil, issuer)
+		require.NoError(t, err)
+		require.Equal(t, issuer.String(), got.String())
+	})
+	t.Run("nil-metadata-is-rejected", func(t *testing.T) {
+		_, err := SelectOID4VCIAuthorizationServer(nil, nil, issuer)
+		require.Error(t, err)
+	})
+}

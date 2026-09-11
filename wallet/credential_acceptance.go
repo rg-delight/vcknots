@@ -170,24 +170,17 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 
+	header, err := IssuerSignedJOSEHeader(flavor, raw)
+	if err != nil {
+		return nil, nil, err
+	}
 	issuerJWT := issuerSignedJWT(flavor, raw)
 	jwtParts := strings.Split(issuerJWT, ".")
-	if len(jwtParts) != 3 {
-		return nil, nil, fmt.Errorf("%w: issuer JWT must have exactly three parts", ErrCredentialParse)
-	}
-	headerBytes, err := base64.RawURLEncoding.DecodeString(jwtParts[0])
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: issuer JWT header is not base64url: %w", ErrCredentialParse, err)
-	}
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(jwtParts[1])
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: issuer JWT payload is not base64url: %w", ErrCredentialParse, err)
 	}
 
-	var header map[string]any
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, nil, fmt.Errorf("%w: issuer JWT header is not JSON: %w", ErrCredentialParse, err)
-	}
 	payload := map[string]any{}
 	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
 	decoder.UseNumber()
@@ -352,27 +345,14 @@ func (w *Wallet) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential
 				return ErrHAIPTrustAnchorInX5C
 			}
 		}
-		crlOptions := policy.IssuerX509.CRL
-		if crlOptions.RequireStatus && policy.IssuerX509.AllowUnadvertisedRevocation {
-			return fmt.Errorf("conflicting issuer revocation policies")
-		}
-		crlOptions.RequireStatus = !policy.IssuerX509.AllowUnadvertisedRevocation
-		if crlOptions.HTTPClient == nil {
-			crlOptions.HTTPClient = policy.IssuerX509.HTTPClient
-			if crlOptions.HTTPClient == nil {
-				crlOptions.HTTPClient = &http.Client{Timeout: 15 * time.Second}
-			}
-		}
-		checker, err := commonX509.NewCRLChecker(crlOptions)
-		if err != nil {
-			return fmt.Errorf("failed to create issuer revocation checker: %w", err)
-		}
-		result, err := commonX509.VerifySigningCertificateChain(ctx, certificates, commonX509.SigningChainOptions{
-			TrustAnchors: policy.IssuerX509.TrustAnchors,
-			Roots:        policy.IssuerX509.RootCAs,
-			CurrentTime:  now,
-			KeyUsages:    policy.IssuerX509.CertificateKeyUsages,
-			Revocation:   checker,
+		result, err := commonX509.VerifySigningChainWithPolicy(ctx, certificates, commonX509.SigningChainPolicy{
+			TrustAnchors:                policy.IssuerX509.TrustAnchors,
+			Roots:                       policy.IssuerX509.RootCAs,
+			KeyUsages:                   policy.IssuerX509.CertificateKeyUsages,
+			CRL:                         policy.IssuerX509.CRL,
+			AllowUnadvertisedRevocation: policy.IssuerX509.AllowUnadvertisedRevocation,
+			CurrentTime:                 now,
+			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
 			return fmt.Errorf("issuer certificate chain is not trusted: %w", err)
@@ -516,6 +496,39 @@ func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte)
 		}
 	}
 	return string(raw)
+}
+
+// issuerRevocationHTTPClient resolves the CRL fetch client for issuer trust:
+// the caller's client when configured, otherwise a bounded default. A client
+// already set on IssuerX509TrustOptions.CRL takes precedence inside
+// commonX509.VerifySigningChainWithPolicy.
+func issuerRevocationHTTPClient(client *http.Client) *http.Client {
+	if client != nil {
+		return client
+	}
+	return &http.Client{Timeout: 15 * time.Second}
+}
+
+// IssuerSignedJOSEHeader decodes the protected header of a credential's
+// issuer-signed JWT without verifying anything: the key that would verify the
+// signature is what the acceptance run resolves afterwards. For an SD-JWT VC
+// the issuer-signed JWT is the parts before the first disclosure separator.
+// Every failure wraps ErrCredentialParse, so a caller branches with errors.Is.
+func IssuerSignedJOSEHeader(flavor credential.SupportedSerializationFlavor, raw []byte) (map[string]any, error) {
+	issuerJWT := issuerSignedJWT(flavor, raw)
+	jwtParts := strings.Split(issuerJWT, ".")
+	if len(jwtParts) != 3 {
+		return nil, fmt.Errorf("%w: issuer JWT must have exactly three parts", ErrCredentialParse)
+	}
+	headerBytes, err := base64.RawURLEncoding.DecodeString(jwtParts[0])
+	if err != nil {
+		return nil, fmt.Errorf("%w: issuer JWT header is not base64url: %w", ErrCredentialParse, err)
+	}
+	var header map[string]any
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return nil, fmt.Errorf("%w: issuer JWT header is not JSON: %w", ErrCredentialParse, err)
+	}
+	return header, nil
 }
 
 // AcceptedSDAlgorithms lists the _sd_alg values this wallet accepts on an
