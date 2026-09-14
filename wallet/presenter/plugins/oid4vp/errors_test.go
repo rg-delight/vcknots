@@ -211,3 +211,52 @@ func TestSubmitAuthorizationErrorResponseRejectsPlaintextHTTP(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "https")
 }
+
+// TestSubmitAuthorizationErrorResponseRefusalsAreTyped covers the two
+// caller-supplied values SubmitAuthorizationErrorResponse checks before it
+// sends anything. An integrator has to tell these apart from a Verifier or
+// network failure to answer its own caller, so the refusals carry sentinels
+// rather than only message text, and nothing reaches the endpoint.
+func TestSubmitAuthorizationErrorResponseRefusalsAreTyped(t *testing.T) {
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+	defer server.Close()
+	reachable, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	t.Run("endpoint", func(t *testing.T) {
+		for name, endpoint := range map[string]string{
+			"plaintext http":   "http://verifier.example/response",
+			"no authority":     "https:///response",
+			"relative":         "/response",
+			"not a URL at all": "not a url",
+		} {
+			t.Run(name, func(t *testing.T) {
+				parsed, parseErr := url.Parse(endpoint)
+				require.NoError(t, parseErr)
+				p := &Oid4vpPresenter{AllowHTTP: name != "plaintext http"}
+				_, err := p.SubmitAuthorizationErrorResponse(*parsed, "access_denied", "", "")
+				require.ErrorIs(t, err, ErrResponseURIInvalid)
+			})
+		}
+	})
+
+	t.Run("error_description", func(t *testing.T) {
+		for name, description := range map[string]string{
+			"double quote":  `he said "no"`,
+			"backslash":     `path\to\thing`,
+			"newline":       "line1\nline2",
+			"control byte":  "bell\x07",
+			"outside ASCII": "利用者が拒否しました",
+		} {
+			t.Run(name, func(t *testing.T) {
+				p := &Oid4vpPresenter{AllowHTTP: true}
+				_, err := p.SubmitAuthorizationErrorResponse(*reachable, "access_denied", description, "")
+				require.ErrorIs(t, err, ErrErrorDescriptionInvalid)
+				require.False(t, reached, "a refused error response must not reach the verifier")
+			})
+		}
+	})
+}

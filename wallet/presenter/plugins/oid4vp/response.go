@@ -69,18 +69,28 @@ func (p *Oid4vpPresenter) sendAuthorizationErrorResponse(req *CredentialPresenta
 	return nil
 }
 
-// parseResponseURI parses a response_uri and enforces the https scheme unless
-// http is explicitly allowed for testing.
+// parseResponseURI parses a response_uri and enforces what OID4VP 1.0 requires
+// of the Response Endpoint: an absolute URL whose scheme is https, unless http
+// is explicitly allowed for testing. A relative reference or an authority-less
+// URL ("https:///callback") never addresses a Verifier, so it is refused here
+// rather than handed to an HTTP client that would resolve it against nothing.
+//
+// Every refusal wraps ErrResponseURIInvalid, so an integrator that has to tell
+// a caller mistake from a Verifier or network failure branches with errors.Is
+// instead of reproducing these rules ahead of the call.
 func parseResponseURI(responseURI string, allowHTTP bool) (*url.URL, error) {
 	if responseURI == "" {
-		return nil, fmt.Errorf("response_uri is required")
+		return nil, fmt.Errorf("%w: response_uri is required", ErrResponseURIInvalid)
 	}
 	parsed, err := url.Parse(responseURI)
 	if err != nil {
-		return nil, fmt.Errorf("response_uri must be URI: %w", err)
+		return nil, fmt.Errorf("%w: response_uri must be URI: %w", ErrResponseURIInvalid, err)
+	}
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("%w: response_uri must be an absolute URL", ErrResponseURIInvalid)
 	}
 	if !allowHTTP && !strings.EqualFold(parsed.Scheme, "https") {
-		return nil, fmt.Errorf("response_uri must use https scheme")
+		return nil, fmt.Errorf("%w: response_uri must use https scheme", ErrResponseURIInvalid)
 	}
 	return parsed, nil
 }

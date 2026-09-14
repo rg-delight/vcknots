@@ -532,6 +532,23 @@ type AttestationJOSEHeader struct {
 	X5C []string
 }
 
+// AttestationJOSEHeaderFromJWT decodes the protected header of an attestation
+// JWT without verifying anything: whoever signed it is established afterwards,
+// by ValidateClientAttestation or ValidateKeyAttestation. It is the attestation
+// counterpart of IssuerSignedJOSEHeader, for a caller that has to decide how to
+// configure the validation — whether an x5c chain is present and a key resolver
+// is therefore unnecessary, for instance — before the attestation is validated.
+// Nothing it returns may be believed on its own.
+func AttestationJOSEHeaderFromJWT(token string) (AttestationJOSEHeader, error) {
+	header, _, err := parseAttestationJWT(token)
+	if err != nil {
+		return AttestationJOSEHeader{}, err
+	}
+	// attestationJWTHeader and AttestationJOSEHeader hold the same fields in
+	// the same order, so the conversion is the whole mapping.
+	return AttestationJOSEHeader(header), nil
+}
+
 // AttestationKeyResolver returns the public key that verifies an attestation
 // JWT, for an attester that does not carry its certificate in x5c: a Wallet
 // Provider JWKS looked up by kid, or the locally held key of a self-issued

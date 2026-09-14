@@ -675,3 +675,50 @@ func TestValidateKeyAttestationAuthenticatesTheAttester(t *testing.T) {
 		require.ErrorContains(t, ValidateKeyAttestation(t.Context(), tampered, request, AttestationTrustPolicy{}), "signature could not be verified")
 	})
 }
+
+// TestAttestationJOSEHeaderFromJWT covers the exported protected-header
+// decode: it reports the header a caller configures validation from, and it
+// refuses a token it cannot read rather than reporting an empty header that
+// would read as "no x5c".
+func TestAttestationJOSEHeaderFromJWT(t *testing.T) {
+	t.Run("reports the header", func(t *testing.T) {
+		token := unsignedAttestationJWT(t, map[string]any{
+			"typ": "oauth-client-attestation+jwt", "alg": "ES256", "kid": "attester-1", "x5c": []string{"Zm9v"},
+		})
+		header, err := AttestationJOSEHeaderFromJWT(token)
+		require.NoError(t, err)
+		require.Equal(t, "oauth-client-attestation+jwt", header.Type)
+		require.Equal(t, "ES256", header.Algorithm)
+		require.Equal(t, "attester-1", header.KeyID)
+		require.Equal(t, []string{"Zm9v"}, header.X5C)
+	})
+
+	t.Run("reports no chain when x5c is absent", func(t *testing.T) {
+		token := unsignedAttestationJWT(t, map[string]any{"typ": "key-attestation+jwt", "alg": "ES256"})
+		header, err := AttestationJOSEHeaderFromJWT(token)
+		require.NoError(t, err)
+		require.Empty(t, header.X5C)
+	})
+
+	for name, token := range map[string]string{
+		"not three parts":   "header.payload",
+		"header not base64": "!!!.eyJpc3MiOiJ4In0.sig",
+		"header not JSON":   base64.RawURLEncoding.EncodeToString([]byte("nope")) + ".eyJpc3MiOiJ4In0.sig",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := AttestationJOSEHeaderFromJWT(token)
+			require.Error(t, err)
+		})
+	}
+}
+
+// unsignedAttestationJWT builds a compact JWS whose signature is a placeholder,
+// for the header decode that deliberately verifies nothing.
+func unsignedAttestationJWT(t *testing.T, header map[string]any) string {
+	t.Helper()
+	return strings.Join([]string{
+		base64.RawURLEncoding.EncodeToString(mustJSON(t, header)),
+		base64.RawURLEncoding.EncodeToString(mustJSON(t, map[string]any{"iss": "https://provider.example"})),
+		base64.RawURLEncoding.EncodeToString([]byte("not-a-signature")),
+	}, ".")
+}

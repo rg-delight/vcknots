@@ -42,6 +42,13 @@ var (
 	// Authorization Request delivered through request_uri, and this request did
 	// not arrive that way (HAIP 1.0 §5.1).
 	ErrHAIPRequestURIRequired = errors.New("HAIP requires the Authorization Request delivered by request_uri")
+	// ErrResponseURIInvalid reports that a response_uri is not a usable
+	// Response Endpoint: absent, unparseable, without an authority, or not
+	// https while the presenter does not allow plain http.
+	ErrResponseURIInvalid = errors.New("response_uri is not a usable Response Endpoint")
+	// ErrErrorDescriptionInvalid reports an error_description outside the
+	// character set RFC 6749 §4.1.2.1 defines for it.
+	ErrErrorDescriptionInvalid = errors.New("error_description is outside the RFC 6749 4.1.2.1 character set")
 )
 
 // ErrDCQLSelectionUnsatisfied reports that credentials chosen outside this
@@ -125,8 +132,17 @@ func normalizeOAuthErrorCode(code string) string {
 // endpoint must use https unless the presenter enables AllowHTTP for a local
 // test. A non-200 answer is reported as a *VerifierResponseError that does not
 // carry the response body.
+//
+// The two caller-supplied values that reach the wire are checked before
+// anything is sent: the endpoint through parseResponseURI (ErrResponseURIInvalid)
+// and description against the RFC 6749 §4.1.2.1 character set
+// (ErrErrorDescriptionInvalid), so an integrator branches on the refusal with
+// errors.Is instead of reproducing either rule ahead of the call.
 func (p *Oid4vpPresenter) SubmitAuthorizationErrorResponse(endpoint url.URL, code, description, state string) (string, error) {
 	if _, err := parseResponseURI(endpoint.String(), p.AllowHTTP); err != nil {
+		return "", err
+	}
+	if err := validateOAuthErrorDescription(description); err != nil {
 		return "", err
 	}
 
@@ -154,4 +170,30 @@ func (p *Oid4vpPresenter) SubmitAuthorizationErrorResponse(endpoint url.URL, cod
 		return "", nil
 	}
 	return verifierResponse.RedirectURI, nil
+}
+
+// validateOAuthErrorDescription checks error_description against the production
+// RFC 6749 §4.1.2.1 gives it:
+//
+//	error_description = 1*NQSCHAR
+//	NQSCHAR           = %x20-21 / %x23-5B / %x5D-7E
+//
+// which is printable US-ASCII without the double quote and the backslash. A
+// value outside it cannot be carried by the Authorization Error Response, so it
+// is refused rather than silently reshaped into something the Verifier reads
+// differently.
+func validateOAuthErrorDescription(description string) error {
+	for index, character := range description {
+		switch {
+		case character >= 0x20 && character <= 0x21,
+			character >= 0x23 && character <= 0x5B,
+			character >= 0x5D && character <= 0x7E:
+			continue
+		}
+		return fmt.Errorf(
+			"%w: character at byte %d is not allowed (%%x20-21 / %%x23-5B / %%x5D-7E): %q",
+			ErrErrorDescriptionInvalid, index, character,
+		)
+	}
+	return nil
 }
