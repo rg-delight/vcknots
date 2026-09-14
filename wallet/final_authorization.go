@@ -1,0 +1,555 @@
+package wallet
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/trustknots/vcknots/wallet/common"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
+)
+
+// OID4VCIFinalReceiveRequest.AuthorizationRequestType selects how the selected
+// Credential Configuration is requested at the authorization endpoint as
+// defined by OpenID4VCI 1.0 §5.1.1 (authorization_details) and §5.1.2 (scope).
+// The empty value lets the wallet choose: scope when the Credential
+// Configuration advertises one, authorization_details otherwise.
+const (
+	OID4VCIAuthorizationRequestTypeScope                = "scope"
+	OID4VCIAuthorizationRequestTypeAuthorizationDetails = "authorization_details"
+)
+
+// AuthorizationResponseError is the RFC 6749 §4.1.2 / RFC 9207 §2.4 error
+// redirect payload returned to the wallet's registered redirect_uri.
+type AuthorizationResponseError struct {
+	Code        string
+	Description string
+}
+
+func (e *AuthorizationResponseError) Error() string {
+	if e == nil {
+		return "authorization response error"
+	}
+	if e.Description == "" {
+		return fmt.Sprintf("authorization response error: %s", e.Code)
+	}
+	return fmt.Sprintf("authorization response error: %s: %s", e.Code, e.Description)
+}
+
+// OID4VCIFinalAuthorization is the state a caller holds between the two halves
+// of the OpenID4VCI 1.0 §5 authorization code flow: BeginOID4VCIFinalAuthorization
+// produces it, the caller sends the user to AuthorizationURL in a browser, and
+// ResumeOID4VCIFinalAuthorization consumes it together with the redirect the
+// browser came back with. Every member is JSON-serialisable so the state can
+// survive a process restart.
+type OID4VCIFinalAuthorization struct {
+	// AuthorizationURL is the §5.2 authorization request the caller must open
+	// in the system browser.
+	AuthorizationURL string `json:"authorization_url"`
+	// State is the RFC 6749 §4.1.1 state parameter the redirect must echo.
+	State string `json:"state"`
+	// CodeVerifier is the RFC 7636 PKCE verifier for the token request.
+	CodeVerifier string `json:"code_verifier"`
+	// RequestURI is the RFC 9126 PAR request_uri, empty when the authorization
+	// request was sent with its parameters inline.
+	RequestURI string `json:"request_uri,omitempty"`
+	// ExpiresAt is the §5.1.4 request_uri expiry measured from the PAR
+	// response; the zero value disables the check.
+	ExpiresAt                   time.Time                                  `json:"expires_at"`
+	IssuerMetadata              *receiverTypes.CredentialIssuerMetadata    `json:"issuer_metadata"`
+	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata"`
+	CredentialConfigurationID   string                                     `json:"credential_configuration_id"`
+}
+
+// issuerPolicy is the RFC 9207 expectation the authorization response must meet.
+func (f *oid4vciFinalFlow) issuerPolicy(haip bool) authorizationResponseIssuerPolicy {
+	advertised := f.authorizationServerMetadata.AuthorizationResponseIssParameterSupported
+	return authorizationResponseIssuerPolicy{
+		expected: f.authorizationServerIssuer,
+		required: haip || (advertised != nil && *advertised),
+	}
+}
+
+func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest) (*OID4VCIFinalAuthorization, *oid4vciFinalFlow, error) {
+	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
+		return nil, nil, err
+	}
+	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
+		return nil, nil, err
+	}
+
+	// OpenID4VCI 1.0 §5: "The Wallet can also start the issuance without a
+	// Credential Offer". With an offer the authorization_code grant supplies
+	// the configuration list, the issuer_state and the authorization_server
+	// hint; wallet-initiated issuance has none of them and takes the
+	// configuration and issuer from the request.
+	var (
+		credentialConfigurationID string
+		issuerIdentifier          string
+		issuerState               string
+		authCodeGrant             *CredentialOfferGrant
+	)
+	if req.CredentialOffer != nil {
+		authCodeGrant = req.CredentialOffer.Grants["authorization_code"]
+		if authCodeGrant == nil {
+			return nil, nil, fmt.Errorf("authorization_code grant is not included in the offer")
+		}
+		credentialConfigurationID = req.CredentialOffer.CredentialConfigurationIDs[0]
+		issuerIdentifier = req.CredentialOffer.CredentialIssuer.String()
+		issuerState = authCodeGrant.IssuerState
+	} else {
+		credentialConfigurationID = strings.TrimSpace(req.CredentialConfigurationID)
+		issuerIdentifier = req.CredentialIssuer.String()
+	}
+
+	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
+	// mechanism at OAuth2 Endpoints that support client authentication".
+	if w.profile.IsHAIP() && w.clientAttestation == nil && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
+		return nil, nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
+	}
+
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	if err != nil {
+		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
+	}
+
+	issuerEndpoint, err := common.ParseURIField(issuerIdentifier)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
+	}
+	issuerMetadata, err := finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+	}
+	// §12.2.2/§12.2.4: the credential_issuer value in the metadata MUST match
+	// the credential issuer the wallet requested exactly; the wallet performs
+	// no normalization.
+	if issuerMetadata.CredentialIssuer != issuerIdentifier {
+		if req.CredentialOffer != nil {
+			return nil, nil, fmt.Errorf(
+				"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
+				issuerMetadata.CredentialIssuer, issuerIdentifier)
+		}
+		return nil, nil, fmt.Errorf(
+			"credential issuer metadata identifier %q does not match the requested credential issuer %q",
+			issuerMetadata.CredentialIssuer, issuerIdentifier)
+	}
+
+	if _, err := requireOfferedCredentialConfiguration(issuerMetadata, credentialConfigurationID); err != nil {
+		return nil, nil, err
+	}
+
+	// §12.3: select the authorization server. A grant authorization_server hint
+	// MUST be listed in authorization_servers; otherwise the first listed server
+	// is used, falling back to the credential issuer when the list is empty.
+	authorizationServerEndpoint, err := SelectOID4VCIAuthorizationServer(issuerMetadata, authCodeGrant, *issuerEndpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	authorizationServerMetadata, err := finalReceiver.FetchAuthorizationServerMetadata(authorizationServerEndpoint, req.Type)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
+	}
+	if authorizationServerMetadata.AuthorizationEndpoint == nil {
+		return nil, nil, fmt.Errorf("authorization endpoint is missing on authorization server")
+	}
+	if authorizationServerMetadata.TokenEndpoint == nil {
+		return nil, nil, fmt.Errorf("token endpoint is missing on authorization server")
+	}
+	// RFC 8414 §3.3: the issuer identifier in the metadata MUST be identical to
+	// the authorization server identifier used to fetch it. The verified value
+	// is the attestation PoP audience.
+	if authorizationServerMetadata.Issuer.String() != authorizationServerEndpoint.String() {
+		return nil, nil, fmt.Errorf(
+			"authorization server metadata issuer %q does not match the selected authorization server %q",
+			authorizationServerMetadata.Issuer.String(), authorizationServerEndpoint.String())
+	}
+
+	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, issuerMetadata, authorizationServerMetadata, credentialConfigurationID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// HAIP §4 ("Pushed Authorization Requests (PAR): Only required when using
+	// the Authorization Endpoint") makes PAR a HAIP obligation, not an
+	// OpenID4VCI one. A Final issuer that publishes no
+	// pushed_authorization_request_endpoint gets the authorization request
+	// parameters inline instead of being refused.
+	usePAR := authorizationServerMetadata.PushedAuthorizationRequestEndpoint != nil
+	if !usePAR && w.profile.IsHAIP() {
+		return nil, nil, fmt.Errorf("HAIP requires a pushed authorization request endpoint on the authorization server")
+	}
+
+	codeVerifier, err := randomBase64URL(32)
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := randomBase64URL(16)
+	if err != nil {
+		return nil, nil, err
+	}
+	codeChallengeBytes := sha256.Sum256([]byte(codeVerifier))
+	// §5.1.1/§5.1.2: the Credential Configuration is requested either with
+	// scope or with authorization_details. An explicit scope on a
+	// configuration that does not advertise one fails here, before PAR.
+	scope, authorizationDetails, err := oid4vciAuthorizationRequestParameters(
+		req.AuthorizationRequestType,
+		credentialConfigurationID,
+		flow.credentialConfiguration,
+		w.profile.IsHAIP(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(authorizationDetails) > 0 && len(issuerMetadata.AuthorizationServers) > 0 {
+		// OpenID4VCI 1.0 §5.1.1: "locations: OPTIONAL ... If the Credential
+		// Issuer metadata contains an authorization_servers parameter, the
+		// authorization detail's locations field MUST be set to the Credential
+		// Issuer Identifier."
+		for _, detail := range authorizationDetails {
+			detail["locations"] = []string{issuerMetadata.CredentialIssuer}
+		}
+	}
+	parRequest := receiverTypes.PushedAuthorizationRequest{
+		ResponseType:         "code",
+		ClientID:             req.ClientID,
+		RedirectURI:          req.RedirectURI,
+		Scope:                scope,
+		AuthorizationDetails: authorizationDetails,
+		State:                state,
+		CodeChallenge:        base64.RawURLEncoding.EncodeToString(codeChallengeBytes[:]),
+		CodeChallengeMethod:  "S256",
+		IssuerState:          issuerState,
+	}
+
+	if err := requireOID4VCIContext(ctx, "the authorization request"); err != nil {
+		return nil, nil, err
+	}
+	authorization := &OID4VCIFinalAuthorization{
+		State:                       state,
+		CodeVerifier:                codeVerifier,
+		IssuerMetadata:              issuerMetadata,
+		AuthorizationServerMetadata: authorizationServerMetadata,
+		CredentialConfigurationID:   credentialConfigurationID,
+	}
+	if usePAR {
+		attestationHeaders, _, err := w.createOID4VCIAttestationHeaders(ctx, finalReceiver, req, authorizationServerMetadata, flow.authorizationServerIssuer)
+		if err != nil {
+			return nil, nil, err
+		}
+		if flow.usePrivateKeyJwt {
+			assertion, err := flow.generateClientAssertion()
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
+			}
+			parRequest.ClientAssertion = assertion
+			parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+		}
+		parResponse, err := finalReceiver.PushAuthorizationRequest(ctx, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to push authorization request: %w", err)
+		}
+		authorization.RequestURI = parResponse.RequestURI
+		// §5.1.4: the request_uri expiry is measured from the PAR response time.
+		if parResponse.ExpiresIn > 0 {
+			authorization.ExpiresAt = time.Now().Add(time.Duration(parResponse.ExpiresIn) * time.Second)
+		}
+	}
+	authorization.AuthorizationURL = oid4vciAuthorizationRequestURL(authorizationServerMetadata.AuthorizationEndpoint, req.ClientID, parRequest, authorization.RequestURI)
+	return authorization, flow, nil
+}
+
+// oid4vciAuthorizationRequestParameters resolves how the selected Credential
+// Configuration is requested at the authorization endpoint. OpenID4VCI 1.0
+// §5.1.1 defines the authorization_details member and §5.1.2 the scope member.
+// The default uses scope when the configuration advertises one, because
+// §12.2.4 says "If scope is absent, the only way to request the Credential is
+// using authorization_details"; otherwise it sends an openid_credential entry
+// carrying credential_configuration_id.
+//
+// haip narrows that to scope only. HAIP §4.1: "For Grant Type
+// `authorization_code`, the Issuer MUST include a scope value ... The Wallet
+// MUST use that value in the `scope` Authorization parameter", and §4.2: the
+// Wallet "MUST use the `scope` parameter to communicate Credential Type(s)".
+func oid4vciAuthorizationRequestParameters(requestedType, credentialConfigurationID string, config receiverTypes.CredentialConfiguration, haip bool) (string, []map[string]any, error) {
+	scope := strings.TrimSpace(config.Scope)
+	authorizationDetails := []map[string]any{
+		{
+			"type":                        receiverTypes.AuthorizationDetailTypeOpenIDCredential,
+			"credential_configuration_id": credentialConfigurationID,
+		},
+	}
+	normalized := strings.TrimSpace(requestedType)
+	if haip {
+		switch normalized {
+		case "", OID4VCIAuthorizationRequestTypeScope:
+			if scope == "" {
+				return "", nil, fmt.Errorf("HAIP requires the credential configuration %q to advertise a scope", credentialConfigurationID)
+			}
+			return config.Scope, nil, nil
+		case OID4VCIAuthorizationRequestTypeAuthorizationDetails:
+			return "", nil, fmt.Errorf("HAIP requires the scope authorization request type")
+		default:
+			return "", nil, fmt.Errorf("unsupported authorization request type %q", requestedType)
+		}
+	}
+	switch normalized {
+	case "":
+		if scope != "" {
+			return config.Scope, nil, nil
+		}
+		return "", authorizationDetails, nil
+	case OID4VCIAuthorizationRequestTypeScope:
+		if scope == "" {
+			return "", nil, fmt.Errorf("authorization request type %q requires the credential configuration %q to advertise a scope", OID4VCIAuthorizationRequestTypeScope, credentialConfigurationID)
+		}
+		return config.Scope, nil, nil
+	case OID4VCIAuthorizationRequestTypeAuthorizationDetails:
+		return "", authorizationDetails, nil
+	default:
+		return "", nil, fmt.Errorf("unsupported authorization request type %q", requestedType)
+	}
+}
+
+// AuthorizationDetailsMode records how the authorization request asked for the
+// Credential Configuration. It is what lets the Token Response be judged against
+// the request that produced it: OpenID4VCI 1.0 §6.2 makes
+// `authorization_details` in the Token Response "REQUIRED when the
+// `authorization_details` parameter ... is used in either the Authorization
+// Request or Token Request. OPTIONAL when `scope` parameter was used".
+type AuthorizationDetailsMode int
+
+const (
+	// AuthorizationDetailsOptional accepts a Token Response that carries no
+	// usable openid_credential authorization_details, because the request used
+	// scope and §6.2 makes the member OPTIONAL there.
+	AuthorizationDetailsOptional AuthorizationDetailsMode = iota
+	// AuthorizationDetailsRequired demands a usable openid_credential entry,
+	// because the request used authorization_details and §6.2 makes the member
+	// REQUIRED there.
+	AuthorizationDetailsRequired
+)
+
+// ErrAuthorizationDetailsMissing reports a Token Response that carries no
+// usable openid_credential authorization_details for the requested Credential
+// Configuration even though the authorization request used authorization_details.
+// OpenID4VCI 1.0 §6.2 makes the member REQUIRED in that case, and §8.1 makes
+// `credential_configuration_id` unusable once a `credential_identifiers` array
+// was returned, so a request that falls back to the configuration id would be
+// rejected by the issuer anyway.
+var ErrAuthorizationDetailsMissing = errors.New("token response carries no usable authorization_details")
+
+// CredentialIdentifierForConfiguration selects the credential_identifier to put
+// in the Credential Request. OpenID4VCI 1.0 §6.2 binds each
+// authorization_details entry of the token response to its own
+// credential_configuration_id and lists that entry's credential_identifiers
+// under it, so an identifier is only usable for the configuration whose entry
+// carried it. A token response with no openid_credential entry yields no
+// identifier and the request names the configuration instead (§8.1) when the
+// mode is AuthorizationDetailsOptional; under AuthorizationDetailsRequired that
+// absence, a foreign configuration, an empty credential_identifiers array or
+// more than one identifier is ErrAuthorizationDetailsMissing. It is exported so
+// integrators can apply the library's single
+// implementation of the §6.2 mapping instead of copying it.
+func CredentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, credentialConfigurationID string, mode AuthorizationDetailsMode) (*string, error) {
+	if accessToken == nil {
+		if mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("token response is missing an access token with authorization_details for %q: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+		}
+		return nil, nil
+	}
+	entries := 0
+	for _, detail := range accessToken.AuthorizationDetails {
+		if detail.Type != receiverTypes.AuthorizationDetailTypeOpenIDCredential {
+			continue
+		}
+		entries++
+		if detail.CredentialConfigurationID != credentialConfigurationID {
+			continue
+		}
+		identifiers := nonEmptyCredentialIdentifiers(detail.CredentialIdentifiers)
+		if len(identifiers) == 0 {
+			if mode == AuthorizationDetailsRequired {
+				return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries no credential_identifiers: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+			}
+			// The entry matched but carries no identifier: the Credential
+			// Request names the configuration, as it does without
+			// authorization_details.
+			return nil, nil
+		}
+		if len(identifiers) > 1 && mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries %d credential_identifiers, but this wallet requests exactly one credential: %w", credentialConfigurationID, len(identifiers), ErrAuthorizationDetailsMissing)
+		}
+		selected := identifiers[0]
+		return &selected, nil
+	}
+	if entries == 0 {
+		if mode == AuthorizationDetailsRequired {
+			return nil, fmt.Errorf("token response for credential_configuration_id %q carries no authorization_details: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+		}
+		return nil, nil
+	}
+	if mode == AuthorizationDetailsRequired {
+		return nil, fmt.Errorf("token response authorization_details carries no entry for credential_configuration_id %q: %w", credentialConfigurationID, ErrAuthorizationDetailsMissing)
+	}
+	return nil, fmt.Errorf("access token authorization_details contains no entry for credential_configuration_id %q", credentialConfigurationID)
+}
+
+// nonEmptyCredentialIdentifiers drops the blank strings a malformed entry may
+// contain, so only a real identifier is ever selected.
+func nonEmptyCredentialIdentifiers(identifiers []string) []string {
+	usable := identifiers[:0:0]
+	for _, identifier := range identifiers {
+		if strings.TrimSpace(identifier) != "" {
+			usable = append(usable, identifier)
+		}
+	}
+	return usable
+}
+
+// authorizationResponseIssuerPolicy is the RFC 9207 expectation for the
+// authorization response: expected is the authorization server's issuer
+// identifier; required is true when the server advertises
+// authorization_response_iss_parameter_supported or the profile is HAIP (FAPI
+// 2.0 §5.3.2.2 requires clients to check iss).
+type authorizationResponseIssuerPolicy struct {
+	expected string
+	required bool
+}
+
+// oid4vciAuthorizationRequestURL builds the §5.2 authorization request URL. With
+// a PAR request_uri only client_id and request_uri travel in the query, as RFC
+// 9126 §4 prescribes. Without one — which OpenID4VCI permits outside HAIP, since
+// HAIP §4 makes PAR "only required when using the Authorization Endpoint" — the
+// §5.1 authorization request parameters are sent inline instead.
+func oid4vciAuthorizationRequestURL(endpoint *common.URIField, clientID string, request receiverTypes.PushedAuthorizationRequest, requestURI string) string {
+	authorizationURL := url.URL(*endpoint)
+	query := authorizationURL.Query()
+	query.Set("client_id", clientID)
+	if requestURI != "" {
+		query.Set("request_uri", requestURI)
+		authorizationURL.RawQuery = query.Encode()
+		return authorizationURL.String()
+	}
+	query.Set("response_type", request.ResponseType)
+	query.Set("redirect_uri", request.RedirectURI)
+	query.Set("state", request.State)
+	query.Set("code_challenge", request.CodeChallenge)
+	query.Set("code_challenge_method", request.CodeChallengeMethod)
+	if request.Scope != "" {
+		query.Set("scope", request.Scope)
+	}
+	if len(request.AuthorizationDetails) > 0 {
+		if encoded, err := json.Marshal(request.AuthorizationDetails); err == nil {
+			query.Set("authorization_details", string(encoded))
+		}
+	}
+	if request.IssuerState != "" {
+		query.Set("issuer_state", request.IssuerState)
+	}
+	authorizationURL.RawQuery = query.Encode()
+	return authorizationURL.String()
+}
+
+// followOID4VCIAuthorizationEndpoint drives the §5.2 authorization endpoint from
+// inside the wallet process: it issues the bare GET and returns the Location the
+// endpoint answers with. Only an issuer that needs no user interaction — a test
+// or conformance issuer — behaves that way, which is why
+// OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization gates it. The client
+// must read the 302 rather than follow it, so http.ErrUseLastResponse applies
+// here instead of the blanket redirect refusal the other endpoints use.
+func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalAuthorization) (string, error) {
+	if !auth.ExpiresAt.IsZero() && !time.Now().Before(auth.ExpiresAt) {
+		return "", fmt.Errorf("pushed authorization request_uri expired before use")
+	}
+	authClient := noRedirectHTTPClient(client)
+	response, err := authClient.Get(auth.AuthorizationURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
+	}
+	defer response.Body.Close()
+	location := response.Header.Get("Location")
+	if location == "" {
+		return "", fmt.Errorf("authorization endpoint did not redirect: %d", response.StatusCode)
+	}
+	return location, nil
+}
+
+// validateOID4VCIAuthorizationRedirect applies the RFC 6749 §4.1.2 / RFC 9207
+// §2.4 checks to the redirect the user agent delivered and returns the
+// authorization code. authorizationURL is the request the redirect answers, used
+// only to resolve a relative Location.
+func validateOID4VCIAuthorizationRedirect(location string, authorizationURL string, expectedState string, registeredRedirectURI string, issuer authorizationResponseIssuerPolicy) (string, error) {
+	redirectURL, err := url.Parse(location)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse authorization redirect: %w", err)
+	}
+	if !redirectURL.IsAbs() {
+		base, err := url.Parse(authorizationURL)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse authorization endpoint URL: %w", err)
+		}
+		redirectURL = base.ResolveReference(redirectURL)
+	}
+	registeredRedirect, err := url.Parse(registeredRedirectURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse registered redirect URI: %w", err)
+	}
+	if !sameOriginAndPath(registeredRedirect, redirectURL) {
+		return "", fmt.Errorf("authorization redirect does not match the registered redirect_uri")
+	}
+	if errorCode := redirectURL.Query().Get("error"); errorCode != "" {
+		return "", &AuthorizationResponseError{Code: errorCode, Description: redirectURL.Query().Get("error_description")}
+	}
+	if state := redirectURL.Query().Get("state"); state != expectedState {
+		return "", fmt.Errorf("authorization redirect state mismatch")
+	}
+	// RFC 9207 §2.4: an iss parameter that is present MUST equal the issuer
+	// identifier of the authorization server that was used; when the server
+	// advertises support (or the profile requires it) the parameter MUST be
+	// present so a mix-up attack cannot omit it.
+	if iss, present := redirectURL.Query()["iss"]; present {
+		if len(iss) != 1 || iss[0] != issuer.expected {
+			return "", fmt.Errorf("authorization redirect iss does not identify the authorization server")
+		}
+	} else if issuer.required {
+		return "", fmt.Errorf("authorization redirect is missing the iss parameter required by the authorization server metadata")
+	}
+	code := redirectURL.Query().Get("code")
+	if code == "" {
+		return "", fmt.Errorf("authorization redirect code is missing")
+	}
+	return code, nil
+}
+
+func sameOriginAndPath(registered, actual *url.URL) bool {
+	return strings.EqualFold(registered.Scheme, actual.Scheme) &&
+		strings.EqualFold(registered.Host, actual.Host) &&
+		registered.Path == actual.Path
+}
+
+func noRedirectHTTPClient(client *http.Client) *http.Client {
+	transport := http.DefaultTransport
+	timeout := time.Duration(0)
+	if client != nil {
+		if client.Transport != nil {
+			transport = client.Transport
+		}
+		timeout = client.Timeout
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}

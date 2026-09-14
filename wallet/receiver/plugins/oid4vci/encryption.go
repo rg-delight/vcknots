@@ -1,0 +1,232 @@
+package oid4vci
+
+import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/go-jose/go-jose/v4"
+
+	"github.com/trustknots/vcknots/wallet/receiver/types"
+)
+
+// CredentialResponseEncryptionParameters builds the OpenID4VCI 1.0 §8.2
+// "credential_response_encryption" request parameter from the §12.2.4 issuer
+// metadata and the wallet's public encryption key. Final §8.2 defines exactly
+// jwk, enc and zip (there is no top-level alg, unlike earlier drafts). enc is
+// the first advertised value this library can decrypt; zip is included only when
+// zip_values_supported lists DEF, matching the §10 encrypted-messages rules. A
+// missing key is an error when the issuer marks
+// credential_response_encryption.encryption_required true.
+func CredentialResponseEncryptionParameters(metadata *types.CredentialIssuerMetadata, key *jose.JSONWebKey) (map[string]any, error) {
+	if metadata == nil || metadata.CredentialResponseEncryption == nil {
+		return nil, nil
+	}
+	encryption := metadata.CredentialResponseEncryption
+	required := encryption.EncryptionRequired != nil && *encryption.EncryptionRequired
+	if key == nil {
+		if required {
+			return nil, fmt.Errorf("credential response encryption is required but no encryption key was provided")
+		}
+		return nil, nil
+	}
+
+	enc, err := selectSupportedResponseEncryption(encryption.EncValuesSupported)
+	if err != nil {
+		return nil, err
+	}
+
+	parameters := map[string]any{
+		"jwk": key.Public(),
+		"enc": enc,
+	}
+	if containsZipDeflate(encryption.ZipValuesSupported) {
+		parameters["zip"] = "DEF"
+	}
+	return parameters, nil
+}
+
+// requestCarriesResponseEncryption reports whether a marshalled credential or
+// deferred credential request carries a non-empty credential_response_encryption
+// member. The serialized form is inspected rather than the Go value so that a
+// map body, a typed struct and a caller-supplied shape are all read the same way.
+func requestCarriesResponseEncryption(payload []byte) bool {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return false
+	}
+	raw, present := body["credential_response_encryption"]
+	if !present {
+		return false
+	}
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", "{}":
+		return false
+	default:
+		return true
+	}
+}
+
+func selectSupportedResponseEncryption(encValues []string) (string, error) {
+	for _, enc := range encValues {
+		if enc == "" {
+			continue
+		}
+		if _, err := parseJWEContentEncryption(enc); err == nil {
+			return enc, nil
+		}
+	}
+	return "", fmt.Errorf("credential response encryption: issuer advertises no supported enc value in %v", encValues)
+}
+
+func containsZipDeflate(zipValues []string) bool {
+	for _, value := range zipValues {
+		if strings.EqualFold(strings.TrimSpace(value), "DEF") {
+			return true
+		}
+	}
+	return false
+}
+
+// selectEncryptionKey picks the Credential Request encryption key out of the
+// Section 12.2.4 jwks. Section 10 leaves the choice to the Wallet: "In the case
+// where multiple public keys are available, any may be selected based on the
+// information about each key, such as the `kty` (Key Type), `use` (Public Key
+// Use), `alg` (Algorithm), and other JWK parameters."
+//
+// A key published with use "sig" is never selected: RFC 7517 Section 4.2 makes
+// "use" the key's intended use, and encrypting to a signature key is both
+// outside that use and, for a key this wallet could otherwise encrypt to,
+// harmful. Among the remaining keys the first one whose algorithm this wallet
+// can actually perform wins, so that a JWKS mixing an unsupported key with a
+// usable one still yields an encrypted request; only if none is usable does the
+// first eligible key stand, so the caller reports the real algorithm error.
+func selectEncryptionKey(jwks *jose.JSONWebKeySet) (*jose.JSONWebKey, error) {
+	if jwks == nil || len(jwks.Keys) == 0 {
+		return nil, fmt.Errorf("encryption JWKS does not contain a key")
+	}
+	var firstEligible *jose.JSONWebKey
+	for i := range jwks.Keys {
+		key := &jwks.Keys[i]
+		if key.Use == "sig" {
+			continue
+		}
+		if firstEligible == nil {
+			firstEligible = key
+		}
+		alg, err := credentialRequestEncryptionAlgorithm(key)
+		if err != nil {
+			continue
+		}
+		if _, err := parseJWEKeyAlgorithm(alg); err == nil {
+			return key, nil
+		}
+	}
+	if firstEligible != nil {
+		return firstEligible, nil
+	}
+	return nil, fmt.Errorf("encryption JWKS contains no key usable for encryption")
+}
+
+// credentialRequestEncryptionAlgorithm resolves the JWE "alg" to encrypt a
+// Credential Request with. Section 10 requires it to come from the chosen key:
+// "The `alg` parameter MUST be present. The JWE `alg` algorithm used MUST be
+// equal to the `alg` value of the chosen JWK."
+//
+// A Credential Issuer that publishes a key without "alg" is not conformant with
+// that requirement, so rather than guess one algorithm for every key type the
+// wallet derives the only key agreement or key encryption algorithm the key
+// type admits: EC and OKP keys are used with ECDH-ES (RFC 7518 Section 4.6) and
+// RSA keys with RSA-OAEP-256 (RFC 7518 Section 4.3). Any other key type - a
+// symmetric "oct" key above all, which no Credential Issuer can publish as a
+// public encryption key - is an error rather than a silent fallback.
+func credentialRequestEncryptionAlgorithm(key *jose.JSONWebKey) (string, error) {
+	if key == nil {
+		return "", fmt.Errorf("credential request encryption key is missing")
+	}
+	if alg := strings.TrimSpace(key.Algorithm); alg != "" {
+		return alg, nil
+	}
+	switch key.Key.(type) {
+	case *ecdsa.PublicKey, *ecdsa.PrivateKey:
+		return "ECDH-ES", nil
+	case ed25519.PublicKey, ed25519.PrivateKey:
+		return "ECDH-ES", nil
+	case *rsa.PublicKey, *rsa.PrivateKey:
+		return "RSA-OAEP-256", nil
+	default:
+		return "", fmt.Errorf(
+			"credential request encryption key %q omits the required alg parameter and its key type %T admits no default",
+			key.KeyID, key.Key)
+	}
+}
+
+func firstOrDefault(values []string, fallback string) string {
+	if len(values) > 0 && values[0] != "" {
+		return values[0]
+	}
+	return fallback
+}
+
+// parseJWEKeyAlgorithm maps a JWE "alg" identifier to the go-jose key algorithm
+// this wallet will encrypt a Credential Request with. The list is an allowlist:
+// RSA1_5 is deliberately absent because RFC 8017 Section 7.2 RSAES-PKCS1-v1_5
+// is the Bleichenbacher-attackable scheme this library must never be talked
+// into using, and so are the RSA-OAEP variants go-jose v4 does not implement
+// (only RSA-OAEP-256 is available; there is no RSA-OAEP-384 or RSA-OAEP-512),
+// as well as RSA-OAEP itself, whose SHA-1 mask generation function is obsolete.
+func parseJWEKeyAlgorithm(alg string) (jose.KeyAlgorithm, error) {
+	switch alg {
+	case "ECDH-ES":
+		return jose.ECDH_ES, nil
+	case "ECDH-ES+A128KW":
+		return jose.ECDH_ES_A128KW, nil
+	case "ECDH-ES+A192KW":
+		return jose.ECDH_ES_A192KW, nil
+	case "ECDH-ES+A256KW":
+		return jose.ECDH_ES_A256KW, nil
+	case "RSA-OAEP-256":
+		return jose.RSA_OAEP_256, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption algorithm: %s", alg)
+	}
+}
+
+func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
+	switch enc {
+	case "A128GCM":
+		return jose.A128GCM, nil
+	case "A192GCM":
+		return jose.A192GCM, nil
+	case "A256GCM":
+		return jose.A256GCM, nil
+	case "A128CBC-HS256":
+		return jose.A128CBC_HS256, nil
+	case "A192CBC-HS384":
+		return jose.A192CBC_HS384, nil
+	case "A256CBC-HS512":
+		return jose.A256CBC_HS512, nil
+	default:
+		return "", fmt.Errorf("unsupported encryption encoding: %s", enc)
+	}
+}
+
+// supportedJWEKeyAlgorithms lists the JWE key management algorithms accepted
+// when decrypting an encrypted Credential Response (Section 8.2 / Section 10).
+// The wallet may publish either an EC or an RSA response-encryption key, so
+// both RFC 7518 Section 4.6 ECDH-ES and Section 4.3 RSA-OAEP-256 are accepted;
+// omitting RSA-OAEP-256 would leave an RSA key the wallet itself advertised
+// undecryptable. RSA1_5 is deliberately absent: RFC 8017 Section 7.2
+// RSAES-PKCS1-v1_5 is the Bleichenbacher-attackable scheme this library must
+// never be talked into using. go-jose v4 implements only RSA-OAEP-256 among the
+// OAEP variants.
+func supportedJWEKeyAlgorithms() []jose.KeyAlgorithm {
+	return []jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW, jose.RSA_OAEP_256}
+}
+
+func supportedJWEContentEncryptions() []jose.ContentEncryption {
+	return []jose.ContentEncryption{jose.A128GCM, jose.A192GCM, jose.A256GCM, jose.A128CBC_HS256, jose.A192CBC_HS384, jose.A256CBC_HS512}
+}
