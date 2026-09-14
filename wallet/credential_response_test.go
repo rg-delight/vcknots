@@ -90,7 +90,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsMalformedJSON(t *testing.T)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RequireEncryptionRejectsPlaintext
-// pins the ADR-0062 strictness: a holder who requires an encrypted response is
+// pins the strictness: a holder who requires an encrypted response is
 // never served a plaintext one.
 func TestDecodeOID4VCIFinalCredentialResponse_RequireEncryptionRejectsPlaintext(t *testing.T) {
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"}]}`)

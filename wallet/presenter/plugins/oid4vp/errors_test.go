@@ -123,7 +123,7 @@ func TestPresentDCQLSendsEmptyVPTokenObject(t *testing.T) {
 	require.Len(t, form, 1)
 }
 
-// TestPresentDCQLVerifierResponseErrorHidesBody covers ADR-0013: a non-200
+// TestPresentDCQLVerifierResponseErrorHidesBody covers the leak boundary: a non-200
 // verifier response becomes a *VerifierResponseError that carries only the
 // status and the normalized OAuth error code, never the body.
 func TestPresentDCQLVerifierResponseErrorHidesBody(t *testing.T) {

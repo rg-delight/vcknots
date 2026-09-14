@@ -57,7 +57,7 @@ var ErrDCQLSelectionUnsatisfied = errors.New("DCQL credential selection does not
 // Response Endpoint. It deliberately retains only the HTTP status and the
 // OAuth 2.0 error code normalized from the response body: the body is under
 // the Verifier's control and may echo protocol state or secrets, so it never
-// becomes part of the error text (ADR-0013).
+// becomes part of the error text.
 type VerifierResponseError struct {
 	// StatusCode is the HTTP status the Verifier returned.
 	StatusCode int

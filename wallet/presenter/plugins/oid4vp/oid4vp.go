@@ -318,7 +318,7 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
 	if resp.StatusCode != http.StatusOK {
 		// The response body is controlled by the Verifier and may echo state or
-		// secrets; retain only the OAuth error code (ADR-0013).
+		// secrets; retain only the OAuth error code.
 		return nil, &VerifierResponseError{
 			StatusCode: resp.StatusCode,
 			OAuthError: oauthErrorCodeFromResponseBody(body),
@@ -682,7 +682,7 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// As in postAuthorizationResponse, only the status and the normalized
 		// OAuth error code leave this boundary; the verifier-controlled body is
-		// discarded (ADR-0013).
+		// discarded.
 		return "", &VerifierResponseError{
 			StatusCode: resp.StatusCode,
 			OAuthError: oauthErrorCodeFromResponseBody(body),

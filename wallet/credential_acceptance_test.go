@@ -1268,7 +1268,7 @@ func TestNewCredentialAcceptorValidatesInputs(t *testing.T) {
 	})
 }
 
-// TestCredentialAcceptorVerifyReuse pins the property the sidecar needs: one
+// TestCredentialAcceptorVerifyReuse pins the property an integrator needs: one
 // acceptor built once answers every credential identically without a wallet or
 // credential store per call, inferring the SD-JWT VC serialization from the raw
 // value and establishing holder binding from the supplied holder key.
