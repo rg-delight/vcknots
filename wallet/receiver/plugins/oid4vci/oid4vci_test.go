@@ -155,7 +155,7 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 		defer server.Close()
 		// §12.2.4 makes credential_issuer identical to the requested identifier,
 		// which drops the endpoint's trailing slash.
-		metadata.CredentialIssuer = server.URL
+		metadata.CredentialIssuer = server.URL + "/"
 
 		// Create endpoint WITH trailing slash
 		endpointURL, _ := url.Parse(server.URL + "/")
@@ -187,7 +187,7 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 		defer server.Close()
 		// §12.2.4 makes credential_issuer identical to the requested identifier,
 		// which drops the endpoint's trailing slash.
-		metadata.CredentialIssuer = server.URL + "/issuer"
+		metadata.CredentialIssuer = server.URL + "/issuer/"
 
 		// Create endpoint WITH path and trailing slash
 		endpointURL, _ := url.Parse(server.URL + "/issuer/")
@@ -2173,14 +2173,11 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == tt.expectedPath {
-					// The credential_issuer must be the identifier the wallet
-					// requested (VCI 1.0 §12.2.4), which is the request origin
-					// with the well-known prefix removed and any trailing slash
-					// dropped.
-					credentialIssuer := "http://" + r.Host
-					if rest := strings.TrimPrefix(r.URL.Path, "/.well-known/openid-credential-issuer"); rest != "" {
-						credentialIssuer = "http://" + r.Host + strings.TrimSuffix(rest, "/")
-					}
+					// The credential_issuer must be byte-identical to the
+					// identifier the wallet requested (VCI 1.0 §12.2.4): the
+					// request origin with the well-known prefix removed and any
+					// trailing slash kept.
+					credentialIssuer := "http://" + r.Host + tt.identifier
 					mockserver.JSONResponse(w, http.StatusOK, map[string]string{
 						"issuer":            "https://example.com",
 						"credential_issuer": credentialIssuer,

@@ -468,7 +468,10 @@ func (o *Oid4vciReceiver) issuerMetadataSigningOptions(normalized profile.Profil
 // inserting the well-known path between the host and path components of the
 // identifier, so removing that prefix is the inverse; an endpoint that is
 // already the identifier is returned unchanged. Query and fragment components
-// are dropped because Section 12.2.1 forbids them in an identifier.
+// are dropped because Section 12.2.1 forbids them in an identifier. Nothing
+// else is normalised: Section 12.2.4 compares the metadata's credential_issuer
+// with this value "using a simple string comparison with no normalization", so
+// a trailing slash the issuer chose is part of its identity and is kept.
 func credentialIssuerIdentifier(endpointURL url.URL) string {
 	identifier := endpointURL
 	identifier.RawQuery = ""
@@ -477,7 +480,7 @@ func credentialIssuerIdentifier(endpointURL url.URL) string {
 	if rest, found := strings.CutPrefix(identifier.Path, wellKnownCredentialIssuer); found {
 		identifier.Path = rest
 	}
-	return strings.TrimSuffix(identifier.String(), "/")
+	return identifier.String()
 }
 
 type metadataHTTPStatusError struct {
