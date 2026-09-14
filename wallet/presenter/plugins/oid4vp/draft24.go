@@ -22,7 +22,30 @@ func (p *Oid4vpPresenter) PresentDraft24(protocol types.SupportedPresentationPro
 		if request.State != "" {
 			form.Set("state", request.State)
 		}
-		if metadata, ok := request.ClientMetadata.(*VerifierMetadata); ok && metadata != nil && metadata.AuthorizationEncryptedResponseAlg != "" {
+		metadata, _ := request.ClientMetadata.(*VerifierMetadata)
+		switch {
+		case request.ResponseMode == string(OAuthAuthzReqResponseModeDirectPostJWT):
+			// OID4VP 1.0 Section 8.3: the JWE payload carries the response
+			// parameters as top-level JSON members, so presentation_submission
+			// is the object itself. A request that named direct_post.jwt is
+			// never answered in plaintext, so a verifier without a usable
+			// encryption key fails here instead of falling back.
+			payload := map[string]interface{}{
+				"vp_token":                string(serializedPresentation),
+				"presentation_submission": json.RawMessage(submissionJSON),
+			}
+			if request.State != "" {
+				payload["state"] = request.State
+			}
+			encrypted, err := p.CreateEncryptedAuthorizationResponse(payload, metadata)
+			if err != nil {
+				return "", fmt.Errorf("failed to create Draft24 encrypted authorization response: %w", err)
+			}
+			form = url.Values{"response": {encrypted}}
+		case metadata != nil && metadata.AuthorizationEncryptedResponseAlg != "":
+			// The legacy fork JARM shape, kept for Draft24 requests that ask
+			// for encryption through client_metadata alone: the submission
+			// stays a double-encoded JSON string there.
 			payload := map[string]interface{}{"vp_token": string(serializedPresentation), "presentation_submission": string(submissionJSON)}
 			if request.State != "" {
 				payload["state"] = request.State

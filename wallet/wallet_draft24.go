@@ -33,7 +33,7 @@ func (w *Wallet) PresentDraft24Credential(uriString string, key IKeyEntry, optio
 	}
 	applyOID4VPRequestOptions(req, options)
 
-	descriptorMap, err := w.buildDraft24DescriptorMap(credentials, flavor)
+	descriptorMap, err := w.buildDraft24DescriptorMap(credentials, flavor, nil)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,15 @@ func (w *Wallet) parseDraft24AuthorizationRequest(uriString string) (*oid4vp.Cre
 	return req, endpoint, nil
 }
 
-func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavor *credential.SupportedSerializationFlavor) ([]presenterTypes.DescriptorMapItem, error) {
+// buildDraft24DescriptorMap renders the DIF Presentation Exchange
+// descriptor_map for the credentials being presented.
+//
+// descriptorIDs[i] names the presentation_definition input_descriptor ids that
+// credentials[i] answers; the Holder's own choice of which descriptor a
+// credential satisfies is not something the library can re-derive. A nil or
+// empty entry keeps the legacy behaviour of inventing an id, which is what the
+// single-credential PresentDraft24Credential flow has always done.
+func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavor *credential.SupportedSerializationFlavor, descriptorIDs [][]string) ([]presenterTypes.DescriptorMapItem, error) {
 	vcFormat, vpFormat, err := flavor.OID4VPFormatIdentifier()
 	if err != nil {
 		return nil, fmt.Errorf("unsupported serialization format: %w", err)
@@ -87,37 +95,46 @@ func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavo
 
 	var descriptorMap []presenterTypes.DescriptorMapItem
 	for i := range credentials {
-		descriptionItemID := uuid.New().String()
+		ids := []string{uuid.New().String()}
+		if i < len(descriptorIDs) && len(descriptorIDs[i]) > 0 {
+			ids = descriptorIDs[i]
+		}
 		descriptorPath := "$"
 		if len(credentials) > 1 {
 			descriptorPath = fmt.Sprintf("$[%d]", i)
 		}
-		// Temporary compatibility workaround:
-		// the current verifier/request-object flow still requires
-		// presentation_submission.descriptor_map, and dc+sd-jwt must point to the
-		// combined vp_token itself with path "$" instead of JWT-VP style nested paths.
-		// This format-specific branching does not belong in wallet core long term and
-		// should be removed or moved once the verifier/request-object flow is
-		// reorganized around DCQL.
-		if vpFormat == "dc+sd-jwt" {
+		for _, descriptionItemID := range ids {
+			// Temporary compatibility workaround:
+			// the current verifier/request-object flow still requires
+			// presentation_submission.descriptor_map, and dc+sd-jwt must point to the
+			// combined vp_token itself with path "$" instead of JWT-VP style nested paths.
+			// This format-specific branching does not belong in wallet core long term and
+			// should be removed or moved once the verifier/request-object flow is
+			// reorganized around DCQL.
+			if vpFormat == "dc+sd-jwt" {
+				descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
+					ID:     descriptionItemID,
+					Format: vpFormat,
+					Path:   descriptorPath,
+				})
+				continue
+			}
+
 			descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
 				ID:     descriptionItemID,
 				Format: vpFormat,
 				Path:   descriptorPath,
+				PathNested: &presenterTypes.DescriptorMapItem{
+					ID:     descriptionItemID,
+					Format: vcFormat,
+					// W3C VC-JWT carries the Verifiable Presentation under the
+					// "vp" claim, so a path_nested evaluated against the decoded
+					// jwt_vp_json token reaches a credential at
+					// $.vp.verifiableCredential[i].
+					Path: fmt.Sprintf("$.vp.verifiableCredential[%d]", i),
+				},
 			})
-			continue
 		}
-
-		descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
-			ID:     descriptionItemID,
-			Format: vpFormat,
-			Path:   descriptorPath,
-			PathNested: &presenterTypes.DescriptorMapItem{
-				ID:     descriptionItemID,
-				Format: vcFormat,
-				Path:   fmt.Sprintf("$.verifiableCredential[%d]", i),
-			},
-		})
 	}
 
 	return descriptorMap, nil
