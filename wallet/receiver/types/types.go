@@ -200,6 +200,16 @@ type CredentialIssuerMetadata struct {
 	// callers can audit the signer. It is internal state and never serialized
 	// (json:"-").
 	MetadataSignature *MetadataVerification `json:"-"`
+	// RawDocument is the accepted Credential Issuer Metadata document in the
+	// bytes it was published in: the verified JWS payload of a §12.2.3 signed
+	// response, or the body of an unsigned §12.2.2 one. §12.2.2 lets a
+	// Credential Issuer publish metadata members this type does not model, and
+	// §12.2.3 requires every one of them to be a top-level claim of the signed
+	// payload, so a caller that must preserve the whole document — to store it,
+	// to re-display it, or to read an extension — reads it here rather than
+	// re-serializing the parsed struct. It is set only on an accepted document
+	// and is never serialized (json:"-").
+	RawDocument json.RawMessage `json:"-"`
 }
 
 // MetadataVerification records the outcome of verifying the OpenID4VCI 1.0
@@ -210,8 +220,20 @@ type CredentialIssuerMetadata struct {
 // identity the metadata was accepted under; they are never serialized.
 type MetadataVerification struct {
 	// LeafCertificateSHA256 is the SHA-256 fingerprint of the leaf X.509
-	// certificate that signed the metadata.
+	// certificate that signed the metadata. It is the first element of
+	// CertificateSHA256, kept as its own field for callers that record only
+	// the signer.
 	LeafCertificateSHA256 string
+	// CertificateSHA256 lists the SHA-256 fingerprints of the accepted
+	// certification path in chain order, leaf first, ending at the trust anchor
+	// the path reached. A caller that shows the holder which chain the metadata
+	// was accepted under needs the whole path, not only its ends.
+	CertificateSHA256 []string
+	// AnchorSHA256 is the SHA-256 fingerprint of the configured trust anchor
+	// the path terminated at, which is what says under whose trust the metadata
+	// was accepted when several anchors are configured. It is the last element
+	// of CertificateSHA256.
+	AnchorSHA256 string
 	// Subject is the subject distinguished name of the signing certificate.
 	Subject string
 	// IssuedAt is the JWS iat: the time the Credential Issuer Metadata was

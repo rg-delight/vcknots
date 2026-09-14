@@ -679,7 +679,15 @@ A receiver plugin implements `receiverTypes.Receiver` for the Draft 13 flow and 
 
 ### Signed issuer metadata
 
-`Oid4vciReceiver.IssuerMetadataSigning` configures OpenID4VCI 1.0 §12.2.3 signed credential issuer metadata. `Request` sends the signed-metadata `Accept` header and has no effect without trust material; `Require` rejects an unsigned `application/json` response. The `Oid4vciReceiver` and the wallet's default HTTP client refuse HTTP redirects (`ErrHTTPRedirectNotAllowed`); `NoRedirectClient` wraps a caller-supplied client the same way.
+`Oid4vciReceiver.IssuerMetadataSigning` configures OpenID4VCI 1.0 §12.2.3 signed credential issuer metadata. `Request` sends the signed-metadata `Accept` header and has no effect without trust material; `Require` rejects an unsigned `application/json` response. The signer is authenticated from the `x5c` JOSE header against `TrustAnchors` / `RootCAs`, and the payload's `sub` and `credential_issuer` must both be the requested Credential Issuer Identifier, compared as a simple string with no normalization.
+
+`RequireIssuerDNSBinding` adds the ecosystem binding that the leaf certificate carry the Credential Issuer Identifier's host as a `dNSName` Subject Alternative Name; `ExpectedLeafDNSName` names a different DNS name to bind to and is enforced on its own. The match is exact and case-insensitive, never a wildcard — a wildcard SAN authenticates a TLS server, not the credential issuer the metadata speaks for. Neither option is applied unless it is set, because §12.2.3 establishes trust in the signer through the chain alone.
+
+Every rejection of a signed document satisfies `errors.Is(err, ErrIssuerMetadataSignatureInvalid)`, and the conditions a caller usually reports separately wrap it: `ErrIssuerMetadataSubjectMismatch` (`sub` names another issuer), `ErrIssuerMetadataLeafDNSMismatch` (the binding above), `ErrIssuerMetadataExpired` (`exp` has passed). `ErrIssuerMetadataSignatureRequired` is the `Require` outcome — the issuer answered unsigned, or no trust material was configured — and is deliberately not a signature failure. A `credential_issuer` that is not the requested identifier stays `ErrIssuerIdentifierMismatch` (§12.2.4). Trust path failures also arrive as `*x509.SigningChainError` / `*x509.CRLCheckError` for `errors.As`.
+
+`CredentialIssuerMetadata.MetadataSignature` records the accepted signer: `CertificateSHA256` is the accepted path in chain order (leaf first), `AnchorSHA256` the trust anchor it terminated at, alongside the leaf fingerprint, subject, `iat` and `exp`. `CredentialIssuerMetadata.RawDocument` keeps the accepted document in the bytes the issuer published — the verified JWS payload, or the unsigned response body — so metadata members this library does not model survive the fetch.
+
+The `Oid4vciReceiver` and the wallet's default HTTP client refuse HTTP redirects (`ErrHTTPRedirectNotAllowed`); `NoRedirectClient` wraps a caller-supplied client the same way.
 
 ## Credential acceptance
 

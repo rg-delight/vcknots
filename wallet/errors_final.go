@@ -34,6 +34,26 @@ var (
 	// credential_issuer other than the requested Credential Issuer Identifier
 	// (VCI 1.0 §12.2.4). It aliases the oid4vci plugin's sentinel of that name.
 	ErrIssuerIdentifierMismatch = receiverOid4vci.ErrIssuerIdentifierMismatch
+	// ErrIssuerMetadataSignatureInvalid reports that a VCI 1.0 §12.2.3 signed
+	// Credential Issuer Metadata document was not accepted. The conditions a
+	// caller reports separately wrap it, so errors.Is holds for both the
+	// specific cause and this umbrella. It aliases the oid4vci plugin's
+	// sentinel, as the four below do.
+	ErrIssuerMetadataSignatureInvalid = receiverOid4vci.ErrIssuerMetadataSignatureInvalid
+	// ErrIssuerMetadataSubjectMismatch reports that the signed metadata's sub
+	// claim names another Credential Issuer Identifier than the requested one.
+	ErrIssuerMetadataSubjectMismatch = receiverOid4vci.ErrIssuerMetadataSubjectMismatch
+	// ErrIssuerMetadataLeafDNSMismatch reports that the metadata signer's leaf
+	// certificate carries no dNSName SAN equal to the DNS name it was required
+	// to be bound to.
+	ErrIssuerMetadataLeafDNSMismatch = receiverOid4vci.ErrIssuerMetadataLeafDNSMismatch
+	// ErrIssuerMetadataExpired reports that the signed metadata's exp claim is
+	// not in the future of the verification clock.
+	ErrIssuerMetadataExpired = receiverOid4vci.ErrIssuerMetadataExpired
+	// ErrIssuerMetadataSignatureRequired reports that signed metadata was
+	// demanded and none was obtained: the issuer answered unsigned, or no trust
+	// material was configured to authenticate a signer with.
+	ErrIssuerMetadataSignatureRequired = receiverOid4vci.ErrIssuerMetadataSignatureRequired
 	// ErrPreRegisteredClientUnknown reports that a pre-registered client_id
 	// was presented which the wallet's client registry does not hold. It
 	// aliases the oid4vp presenter plugin's sentinel, which raises it.

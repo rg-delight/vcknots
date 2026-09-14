@@ -9,12 +9,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -102,6 +104,13 @@ type signedMetadataFixture struct {
 
 func newSignedMetadataFixture(t *testing.T) signedMetadataFixture {
 	t.Helper()
+	return newSignedMetadataFixtureWithDNSNames(t)
+}
+
+// newSignedMetadataFixtureWithDNSNames issues the same fixture with dNSName
+// Subject Alternative Names on the leaf, for the signer-to-host binding.
+func newSignedMetadataFixtureWithDNSNames(t *testing.T, dnsNames ...string) signedMetadataFixture {
+	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +144,7 @@ func newSignedMetadataFixture(t *testing.T) signedMetadataFixture {
 		NotAfter:              time.Now().Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
+		DNSNames:              dnsNames,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &leafKey.PublicKey, caKey)
 	if err != nil {
@@ -150,13 +160,20 @@ func newSignedMetadataFixture(t *testing.T) signedMetadataFixture {
 // sign serializes claims as signed metadata carrying chain in its x5c header.
 func (f signedMetadataFixture) sign(t *testing.T, claims map[string]any, chain []*x509.Certificate) string {
 	t.Helper()
+	return f.signWithType(t, signedIssuerMetadataJWTType, claims, chain)
+}
+
+// signWithType serializes claims under a caller-chosen typ JOSE header, for the
+// §12.2.3 rule that the header must be openidvci-issuer-metadata+jwt.
+func (f signedMetadataFixture) signWithType(t *testing.T, typ string, claims map[string]any, chain []*x509.Certificate) string {
+	t.Helper()
 	encoded := make([]string, 0, len(chain))
 	for _, certificate := range chain {
 		encoded = append(encoded, base64.StdEncoding.EncodeToString(certificate.Raw))
 	}
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.ES256, Key: f.leafKey},
-		(&jose.SignerOptions{}).WithType("openidvci-issuer-metadata+jwt").WithHeader("x5c", encoded),
+		(&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader("x5c", encoded),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -288,8 +305,8 @@ func TestFetchIssuerMetadataRejectsUntrustedSignedMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
 	}
-	if !strings.Contains(err.Error(), "signed issuer metadata is not trusted") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, ErrIssuerMetadataSignatureInvalid) {
+		t.Fatalf("errors.Is(ErrIssuerMetadataSignatureInvalid) = false, err = %v", err)
 	}
 }
 
@@ -320,7 +337,8 @@ func TestFetchIssuerMetadataRejectsIssuerMismatchInSignedMetadata(t *testing.T) 
 	if err == nil {
 		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
 	}
-	if !strings.Contains(err.Error(), `signed issuer metadata sub "https://other-issuer.example" does not match the credential issuer`) {
+	if !errors.Is(err, ErrIssuerMetadataSubjectMismatch) ||
+		!strings.Contains(err.Error(), `sub "https://other-issuer.example" does not match the credential issuer`) {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -452,8 +470,8 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 	if err == nil {
 		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
 	}
-	if !strings.Contains(err.Error(), "issuer metadata is not signed but signed metadata is required") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, ErrIssuerMetadataSignatureRequired) {
+		t.Fatalf("errors.Is(ErrIssuerMetadataSignatureRequired) = false, err = %v", err)
 	}
 
 	t.Run("requiring signed metadata without trust material is a configuration error", func(t *testing.T) {
@@ -463,7 +481,8 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
 		}
 		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
-		if err == nil || !strings.Contains(err.Error(), "signed issuer metadata is required but no trust anchors are configured") {
+		if !errors.Is(err, ErrIssuerMetadataSignatureRequired) ||
+			!strings.Contains(err.Error(), "no trust anchors are configured") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -494,5 +513,247 @@ func TestFetchIssuerMetadataHAIPAcceptsUnsignedByDefault(t *testing.T) {
 	// so it does not ask for one it would have to reject.
 	if strings.Contains(acceptHeader(), "application/jwt") {
 		t.Fatalf("Accept = %q, want application/json only", acceptHeader())
+	}
+}
+
+// signedMetadataReceiver builds a wallet that accepts fixture's anchor for
+// signed Credential Issuer Metadata, with the caller's extra signing policy.
+func signedMetadataReceiver(client *http.Client, fixture signedMetadataFixture, adjust func(*IssuerMetadataSigningOptions)) *Oid4vciReceiver {
+	signing := &IssuerMetadataSigningOptions{
+		Request:                     true,
+		TrustAnchors:                []*x509.Certificate{fixture.caCert},
+		AllowUnadvertisedRevocation: true,
+	}
+	if adjust != nil {
+		adjust(signing)
+	}
+	return &Oid4vciReceiver{HTTPClient: client, AllowHTTP: true, IssuerMetadataSigning: signing}
+}
+
+func signedMetadataClaims(identifier string) map[string]any {
+	return map[string]any{
+		"sub":                 identifier,
+		"iat":                 time.Now().Add(-time.Minute).Unix(),
+		"credential_issuer":   identifier,
+		"credential_endpoint": identifier + "/credential",
+	}
+}
+
+// TestFetchIssuerMetadataBindsSignerToIssuerHost pins the ecosystem binding
+// IssuerMetadataSigningOptions.RequireIssuerDNSBinding asks for: the chain
+// authenticates the signer against the configured anchors, and the dNSName SAN
+// is what says which Credential Issuer that signer may speak for.
+func TestFetchIssuerMetadataBindsSignerToIssuerHost(t *testing.T) {
+	t.Run("a leaf carrying the issuer host is accepted", func(t *testing.T) {
+		fixture := newSignedMetadataFixtureWithDNSNames(t, "127.0.0.1")
+		serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+			return "application/jwt", fixture.sign(t, signedMetadataClaims(identifier), []*x509.Certificate{fixture.leaf})
+		})
+		receiver := signedMetadataReceiver(client, fixture, func(signing *IssuerMetadataSigningOptions) {
+			signing.RequireIssuerDNSBinding = true
+		})
+
+		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+		if err != nil {
+			t.Fatalf("FetchIssuerMetadata() error = %v", err)
+		}
+		verification := metadata.MetadataSignature
+		if verification == nil {
+			t.Fatal("MetadataSignature is nil")
+		}
+		leafDigest := sha256.Sum256(fixture.leaf.Raw)
+		anchorDigest := sha256.Sum256(fixture.caCert.Raw)
+		want := []string{hex.EncodeToString(leafDigest[:]), hex.EncodeToString(anchorDigest[:])}
+		if !slices.Equal(verification.CertificateSHA256, want) {
+			t.Fatalf("CertificateSHA256 = %v, want the accepted path %v", verification.CertificateSHA256, want)
+		}
+		if verification.AnchorSHA256 != want[1] {
+			t.Fatalf("AnchorSHA256 = %q, want the anchor the path reached %q", verification.AnchorSHA256, want[1])
+		}
+		if verification.LeafCertificateSHA256 != want[0] {
+			t.Fatalf("LeafCertificateSHA256 = %q", verification.LeafCertificateSHA256)
+		}
+	})
+
+	t.Run("a leaf without the issuer host is rejected", func(t *testing.T) {
+		fixture := newSignedMetadataFixtureWithDNSNames(t, "issuer.example")
+		serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+			return "application/jwt", fixture.sign(t, signedMetadataClaims(identifier), []*x509.Certificate{fixture.leaf})
+		})
+		receiver := signedMetadataReceiver(client, fixture, func(signing *IssuerMetadataSigningOptions) {
+			signing.RequireIssuerDNSBinding = true
+		})
+
+		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+		if err == nil {
+			t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
+		}
+		if !errors.Is(err, ErrIssuerMetadataLeafDNSMismatch) || !errors.Is(err, ErrIssuerMetadataSignatureInvalid) {
+			t.Fatalf("error = %v, want the DNS binding and the umbrella sentinel", err)
+		}
+
+		// The same document is accepted when the caller names the DNS name the
+		// ecosystem binds the signer to instead of the identifier's host.
+		named := signedMetadataReceiver(client, fixture, func(signing *IssuerMetadataSigningOptions) {
+			signing.ExpectedLeafDNSName = "issuer.example"
+		})
+		if _, err := named.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci); err != nil {
+			t.Fatalf("FetchIssuerMetadata() with ExpectedLeafDNSName error = %v", err)
+		}
+	})
+
+	// Without the binding the signer is authenticated by the chain alone, which
+	// is what §12.2.3 itself requires; a wallet that did not opt in keeps
+	// accepting a leaf with no dNSName SAN.
+	t.Run("the binding is not applied unless it is asked for", func(t *testing.T) {
+		fixture := newSignedMetadataFixture(t)
+		serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+			return "application/jwt", fixture.sign(t, signedMetadataClaims(identifier), []*x509.Certificate{fixture.leaf})
+		})
+		if _, err := signedMetadataReceiver(client, fixture, nil).
+			FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci); err != nil {
+			t.Fatalf("FetchIssuerMetadata() error = %v", err)
+		}
+	})
+}
+
+// TestFetchIssuerMetadataReportsTypedSignatureFailures pins that every §12.2.3
+// rejection is recoverable with errors.Is, so a caller reports the condition
+// instead of matching message text.
+func TestFetchIssuerMetadataReportsTypedSignatureFailures(t *testing.T) {
+	cases := []struct {
+		name     string
+		document func(t *testing.T, fixture signedMetadataFixture, identifier string) (string, string)
+		want     []error
+		notWant  []error
+	}{
+		{
+			name: "sub names another credential issuer",
+			document: func(t *testing.T, fixture signedMetadataFixture, identifier string) (string, string) {
+				claims := signedMetadataClaims(identifier)
+				claims["sub"] = "https://other-issuer.example"
+				return "application/jwt", fixture.sign(t, claims, []*x509.Certificate{fixture.leaf})
+			},
+			want: []error{ErrIssuerMetadataSubjectMismatch, ErrIssuerMetadataSignatureInvalid},
+		},
+		{
+			name: "typ is not the signed metadata media type",
+			document: func(t *testing.T, fixture signedMetadataFixture, identifier string) (string, string) {
+				return "application/jwt", fixture.signWithType(t, "jwt", signedMetadataClaims(identifier),
+					[]*x509.Certificate{fixture.leaf})
+			},
+			want: []error{ErrIssuerMetadataSignatureInvalid},
+		},
+		{
+			name: "exp has passed",
+			document: func(t *testing.T, fixture signedMetadataFixture, identifier string) (string, string) {
+				claims := signedMetadataClaims(identifier)
+				claims["exp"] = time.Now().Add(-time.Minute).Unix()
+				return "application/jwt", fixture.sign(t, claims, []*x509.Certificate{fixture.leaf})
+			},
+			want: []error{ErrIssuerMetadataExpired, ErrIssuerMetadataSignatureInvalid},
+		},
+		{
+			name: "the signer is not anchored",
+			document: func(t *testing.T, _ signedMetadataFixture, identifier string) (string, string) {
+				foreign := newSignedMetadataFixture(t)
+				return "application/jwt", foreign.sign(t, signedMetadataClaims(identifier),
+					[]*x509.Certificate{foreign.leaf})
+			},
+			want: []error{ErrIssuerMetadataSignatureInvalid},
+		},
+		{
+			name: "the issuer answers unsigned while signed metadata is required",
+			document: func(_ *testing.T, _ signedMetadataFixture, identifier string) (string, string) {
+				return "application/json", `{"credential_issuer":"` + identifier + `","credential_endpoint":"` + identifier + `/credential"}`
+			},
+			want: []error{ErrIssuerMetadataSignatureRequired},
+			// A policy outcome is not a rejected signature: nothing was signed.
+			notWant: []error{ErrIssuerMetadataSignatureInvalid},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newSignedMetadataFixture(t)
+			serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+				return testCase.document(t, fixture, identifier)
+			})
+			receiver := signedMetadataReceiver(client, fixture, func(signing *IssuerMetadataSigningOptions) {
+				signing.Require = true
+			})
+
+			metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+			if err == nil {
+				t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
+			}
+			for _, sentinel := range testCase.want {
+				if !errors.Is(err, sentinel) {
+					t.Fatalf("errors.Is(err, %v) = false, err = %v", sentinel, err)
+				}
+			}
+			for _, sentinel := range testCase.notWant {
+				if errors.Is(err, sentinel) {
+					t.Fatalf("errors.Is(err, %v) = true, err = %v", sentinel, err)
+				}
+			}
+		})
+	}
+
+	t.Run("requiring signed metadata without trust material is reported the same way", func(t *testing.T) {
+		serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+			return "application/json", `{"credential_issuer":"` + identifier + `"}`
+		})
+		unconfigured := &Oid4vciReceiver{
+			HTTPClient:            client,
+			AllowHTTP:             true,
+			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
+		}
+		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+		if !errors.Is(err, ErrIssuerMetadataSignatureRequired) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+// TestFetchIssuerMetadataKeepsTheAcceptedDocument pins that the bytes the
+// Credential Issuer published survive the fetch. §12.2.2 allows metadata
+// members this library does not model, so a caller that stores or re-displays
+// the document must not have to re-serialize the parsed struct.
+func TestFetchIssuerMetadataKeepsTheAcceptedDocument(t *testing.T) {
+	for _, signedResponse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("signed=%v", signedResponse), func(t *testing.T) {
+			fixture := newSignedMetadataFixture(t)
+			var published string
+			serverURL, client, _ := serveIssuerMetadata(t, false, func(identifier string) (string, string) {
+				claims := signedMetadataClaims(identifier)
+				claims["jwks_uri"] = identifier + "/jwks"
+				if !signedResponse {
+					encoded, err := json.Marshal(claims)
+					if err != nil {
+						t.Fatal(err)
+					}
+					published = string(encoded)
+					return "application/json", published
+				}
+				published = fixture.sign(t, claims, []*x509.Certificate{fixture.leaf})
+				return "application/jwt", published
+			})
+
+			metadata, err := signedMetadataReceiver(client, fixture, nil).
+				FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
+			if err != nil {
+				t.Fatalf("FetchIssuerMetadata() error = %v", err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal(metadata.RawDocument, &document); err != nil {
+				t.Fatalf("RawDocument = %q: %v", metadata.RawDocument, err)
+			}
+			if document["jwks_uri"] != serverURL+"/jwks" {
+				t.Fatalf("RawDocument dropped the unmodeled member: %v", document)
+			}
+			if document["credential_issuer"] != serverURL {
+				t.Fatalf("RawDocument = %v, want the accepted document", document)
+			}
+		})
 	}
 }

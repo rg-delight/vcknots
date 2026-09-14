@@ -1,6 +1,7 @@
 package oid4vci
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +37,53 @@ const (
 // MUST NOT be used." The root wallet package cannot import a plugin, so it
 // declares its own alias of this sentinel.
 var ErrIssuerIdentifierMismatch = errors.New("credential_issuer does not match the requested Credential Issuer Identifier")
+
+// Sentinel errors of OpenID4VCI 1.0 Section 12.2.3 signed Credential Issuer
+// Metadata. They exist so a caller can branch on why a signed document was not
+// accepted — with errors.Is, which holds through every wrapping this package
+// performs — instead of matching message text.
+//
+// ErrIssuerMetadataSignatureInvalid is the umbrella every rejection of a signed
+// document satisfies; the conditions a caller commonly reports separately wrap
+// it in turn, so errors.Is holds for both the specific cause and the umbrella.
+// The trust path's own failures additionally arrive as a
+// *x509.SigningChainError or *x509.CRLCheckError from wallet/common/x509, which
+// carry the certificate and the reason and stay recoverable with errors.As.
+var (
+	// ErrIssuerMetadataSignatureInvalid reports that the Credential Issuer
+	// answered with a signed metadata document the Wallet could not accept:
+	// Section 12.2.3 requires the Wallet to "establish trust in the signer of
+	// the metadata. Otherwise, the Wallet MUST reject the signed metadata", and
+	// every check that establishes that trust — the typ and alg JOSE headers,
+	// the x5c chain to a configured anchor, the signature itself, and the
+	// registered claims below — reports its failure through this error.
+	ErrIssuerMetadataSignatureInvalid = errors.New("signed issuer metadata was not accepted")
+	// ErrIssuerMetadataSubjectMismatch reports that the sub claim, which
+	// Section 12.2.3 defines as "REQUIRED. String matching the Credential
+	// Issuer Identifier", names another identifier than the one the metadata
+	// was requested from.
+	ErrIssuerMetadataSubjectMismatch = fmt.Errorf(
+		"signed issuer metadata sub is not the requested Credential Issuer Identifier: %w",
+		ErrIssuerMetadataSignatureInvalid)
+	// ErrIssuerMetadataLeafDNSMismatch reports that the signing certificate
+	// carries no dNSName Subject Alternative Name equal to the DNS name the
+	// signer was required to be bound to. It is reachable only when the caller
+	// asks for that binding through IssuerMetadataSigningOptions.
+	ErrIssuerMetadataLeafDNSMismatch = fmt.Errorf(
+		"signed issuer metadata signer is not bound to the expected DNS name: %w",
+		ErrIssuerMetadataSignatureInvalid)
+	// ErrIssuerMetadataExpired reports that the optional exp claim of Section
+	// 12.2.3 is not in the future of the verification clock.
+	ErrIssuerMetadataExpired = fmt.Errorf(
+		"signed issuer metadata has expired: %w", ErrIssuerMetadataSignatureInvalid)
+	// ErrIssuerMetadataSignatureRequired reports that signed metadata was
+	// demanded and none was obtained: the Credential Issuer answered with the
+	// unsigned application/json document Section 12.2.2 lets it publish, or the
+	// demand was made without the trust material Section 12.2.3 needs to
+	// authenticate a signer. It is a policy outcome, not a rejected signature,
+	// and therefore does not satisfy ErrIssuerMetadataSignatureInvalid.
+	ErrIssuerMetadataSignatureRequired = errors.New("signed issuer metadata is required")
+)
 
 // requireMatchingCredentialIssuer enforces the OpenID4VCI 1.0 Section 12.2.4
 // identity rule on a decoded Credential Issuer Metadata document: the
@@ -180,9 +229,45 @@ type IssuerMetadataSigningOptions struct {
 	// RequireStatus is derived from AllowUnadvertisedRevocation and must not be
 	// set here as well.
 	CRL commonX509.CRLCheckerOptions
+	// RequireIssuerDNSBinding binds the signer to the Credential Issuer
+	// Identifier's host: the leaf certificate MUST carry that host as a
+	// dNSName Subject Alternative Name. It is ecosystem policy rather than a
+	// Section 12.2.3 requirement — the section establishes trust in the signer
+	// through the chain alone — and it is spelled as the credential acceptance
+	// policy spells the same rule for an issuer certificate, so an integrator
+	// meets one name for it. A Credential Issuer Identifier with no host fails
+	// the fetch rather than silently skipping the binding.
+	RequireIssuerDNSBinding bool
+	// ExpectedLeafDNSName overrides the DNS name the binding matches, for an
+	// ecosystem whose signer is named by something other than the identifier's
+	// own host. A non-empty value is enforced whether or not
+	// RequireIssuerDNSBinding is set. The match is the exact, case-insensitive
+	// one commonX509.RequireLeafDNSName performs for every identifier in this
+	// library: a wildcard SAN authenticates a TLS server, not the Credential
+	// Issuer the metadata speaks for.
+	ExpectedLeafDNSName string
 	// Now supplies the verification time, for tests and for callers with their
 	// own clock. Nil means time.Now.
 	Now func() time.Time
+}
+
+// expectedLeafDNSName resolves the dNSName SAN the signing certificate must
+// carry for one fetch, or "" when the caller asked for no binding. identifier
+// is the Credential Issuer Identifier the metadata was requested from.
+func (s IssuerMetadataSigningOptions) expectedLeafDNSName(identifier string) (string, error) {
+	if name := strings.TrimSpace(s.ExpectedLeafDNSName); name != "" {
+		return name, nil
+	}
+	if !s.RequireIssuerDNSBinding {
+		return "", nil
+	}
+	parsed, err := url.Parse(identifier)
+	if err != nil || parsed.Hostname() == "" {
+		return "", fmt.Errorf(
+			"%w: the Credential Issuer Identifier %q names no host to bind the signer to",
+			ErrIssuerMetadataLeafDNSMismatch, identifier)
+	}
+	return parsed.Hostname(), nil
 }
 
 // signedIssuerMetadataJWTType is the media type Section 12.2.3 requires in the
@@ -212,7 +297,7 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 	}
 	trustConfigured := len(signing.TrustAnchors) > 0 || signing.RootCAs != nil
 	if signing.Require && !trustConfigured {
-		return fmt.Errorf("signed issuer metadata is required but no trust anchors are configured")
+		return fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureRequired)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
@@ -249,7 +334,8 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 		return o.decodeSignedIssuerMetadata(ctx, strings.TrimSpace(string(bodyBytes)), identifier, signing, normalized, target)
 	}
 	if signing.Require {
-		return fmt.Errorf("issuer metadata is not signed but signed metadata is required")
+		return fmt.Errorf("%w: the Credential Issuer answered with an unsigned document",
+			ErrIssuerMetadataSignatureRequired)
 	}
 	if err := json.Unmarshal(bodyBytes, target); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
@@ -257,6 +343,11 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 	if err := requireMatchingCredentialIssuer(target.CredentialIssuer, identifier); err != nil {
 		return err
 	}
+	// Section 12.2.2 allows metadata members this library does not model, and a
+	// Credential Issuer may publish extensions of its own. The accepted bytes
+	// are kept so a caller reads the document the issuer published rather than
+	// a re-serialization of the parsed struct.
+	target.RawDocument = bytes.Clone(bodyBytes)
 	return nil
 }
 
@@ -281,6 +372,9 @@ func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compac
 	}
 	target.SignedMetadata = compact
 	target.MetadataSignature = verification
+	// The verified payload is the complete document, including the members this
+	// library does not model, so it is the document the caller reads.
+	target.RawDocument = bytes.Clone(payload)
 	return nil
 }
 
@@ -292,34 +386,42 @@ func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compac
 // self-signed signing certificate.
 func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile) (*types.MetadataVerification, []byte, error) {
 	if len(signing.TrustAnchors) == 0 && signing.RootCAs == nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: no trust anchors are configured")
+		return nil, nil, fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureInvalid)
+	}
+	expectedDNSName, err := signing.expectedLeafDNSName(identifier)
+	if err != nil {
+		return nil, nil, err
 	}
 	signed, err := jose.ParseSigned(compact, signedIssuerMetadataAlgorithms())
 	if err != nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}
 	if len(signed.Signatures) != 1 {
-		return nil, nil, fmt.Errorf("signed issuer metadata must carry exactly one signature")
+		return nil, nil, fmt.Errorf("%w: signed issuer metadata must carry exactly one signature",
+			ErrIssuerMetadataSignatureInvalid)
 	}
 	typ, _ := signed.Signatures[0].Header.ExtraHeaders[jose.HeaderType].(string)
 	if typ != signedIssuerMetadataJWTType {
-		return nil, nil, fmt.Errorf("signed issuer metadata typ must be %q, got %q", signedIssuerMetadataJWTType, typ)
+		return nil, nil, fmt.Errorf("%w: typ must be %q, got %q",
+			ErrIssuerMetadataSignatureInvalid, signedIssuerMetadataJWTType, typ)
 	}
 
 	chain, err := commonX509.DecodeX5CFromJWTHeader(compact)
 	if err != nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}
 	if normalized.IsHAIP() {
 		containsAnchor, err := commonX509.ContainsTrustAnchor(chain, signing.TrustAnchors, signing.RootCAs)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 		}
 		if containsAnchor {
-			return nil, nil, fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header")
+			return nil, nil, fmt.Errorf(
+				"%w: HAIP forbids including the trust anchor certificate in the x5c header",
+				ErrIssuerMetadataSignatureInvalid)
 		}
 		if err := commonX509.RequireNonSelfSignedLeaf(chain, "signed issuer metadata"); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 		}
 	}
 
@@ -337,12 +439,21 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 		HTTPClient:                  o.httpClient(),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
+	}
+	// The chain authenticates the signer against the configured anchors;
+	// binding it to a DNS name is what names which Credential Issuer that
+	// signer is allowed to speak for, so it is applied to the verified leaf.
+	if expectedDNSName != "" {
+		if err := commonX509.RequireLeafDNSName(result.Chain[0], expectedDNSName, false); err != nil {
+			return nil, nil, fmt.Errorf("%w: the leaf certificate carries no dNSName SAN %q: %w",
+				ErrIssuerMetadataLeafDNSMismatch, expectedDNSName, err)
+		}
 	}
 
 	payload, err := signed.Verify(result.Chain[0].PublicKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is not trusted: %w", err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}
 
 	var claims struct {
@@ -351,7 +462,8 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 		Exp *int64 `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse signed issuer metadata payload: %w", err)
+		return nil, nil, fmt.Errorf("%w: failed to parse the payload: %w",
+			ErrIssuerMetadataSignatureInvalid, err)
 	}
 	// Section 12.2.3: sub is "REQUIRED. String matching the Credential Issuer
 	// Identifier". Binding it to the identifier the metadata was requested from
@@ -366,20 +478,30 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	// wallet that trimmed a trailing slash first would be normalizing, and would
 	// accept a document signed for a different identifier than the one it asked.
 	if claims.Sub != identifier {
-		return nil, nil, fmt.Errorf("signed issuer metadata sub %q does not match the credential issuer %q", claims.Sub, identifier)
+		return nil, nil, fmt.Errorf("%w: sub %q does not match the credential issuer %q",
+			ErrIssuerMetadataSubjectMismatch, claims.Sub, identifier)
 	}
 	if claims.Iat == nil {
-		return nil, nil, fmt.Errorf("signed issuer metadata is missing the required iat claim")
+		return nil, nil, fmt.Errorf("%w: the required iat claim is missing",
+			ErrIssuerMetadataSignatureInvalid)
 	}
 	verification := &types.MetadataVerification{
 		LeafCertificateSHA256: result.Fingerprints[0],
+		CertificateSHA256:     slices.Clone(result.Fingerprints),
 		Subject:               result.Chain[0].Subject.String(),
 		IssuedAt:              time.Unix(*claims.Iat, 0).UTC(),
+	}
+	// The verified path is leaf first and ends at the configured anchor it
+	// reached, so its last fingerprint names the anchor the metadata was
+	// accepted under.
+	if len(result.Fingerprints) > 1 {
+		verification.AnchorSHA256 = result.Fingerprints[len(result.Fingerprints)-1]
 	}
 	if claims.Exp != nil {
 		expiresAt := time.Unix(*claims.Exp, 0).UTC()
 		if !expiresAt.After(now) {
-			return nil, nil, fmt.Errorf("signed issuer metadata expired at %s", expiresAt.Format(time.RFC3339))
+			return nil, nil, fmt.Errorf("%w: exp was %s",
+				ErrIssuerMetadataExpired, expiresAt.Format(time.RFC3339))
 		}
 		verification.ExpiresAt = &expiresAt
 	}

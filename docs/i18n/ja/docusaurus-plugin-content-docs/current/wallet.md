@@ -703,7 +703,15 @@ receiver プラグインは Draft 13 では `receiverTypes.Receiver`、Final / H
 
 ### 署名付き issuer metadata
 
-`Oid4vciReceiver.IssuerMetadataSigning` は OpenID4VCI 1.0 §12.2.3 の署名付き credential issuer metadata を設定します。`Request` は署名付き metadata の `Accept` ヘッダを送り、trust material が無い場合は効果がありません。`Require` は平文の `application/json` 応答を拒否します。`Oid4vciReceiver` と呼出し側の既定 HTTP client は HTTP redirect を拒否します（`ErrHTTPRedirectNotAllowed`）。`NoRedirectClient` は呼出し側の client を同様にラップします。
+`Oid4vciReceiver.IssuerMetadataSigning` は OpenID4VCI 1.0 §12.2.3 の署名付き credential issuer metadata を設定します。`Request` は署名付き metadata の `Accept` ヘッダを送り、trust material が無い場合は効果がありません。`Require` は平文の `application/json` 応答を拒否します。署名者は `x5c` JOSE ヘッダから `TrustAnchors` / `RootCAs` に対して認証され、payload の `sub` と `credential_issuer` はいずれも要求した Credential Issuer Identifier と、正規化なしの単純な文字列比較で一致しなければなりません。
+
+`RequireIssuerDNSBinding` は、leaf 証明書が Credential Issuer Identifier の host を `dNSName` Subject Alternative Name として持つことを求める ecosystem 上の束縛を追加します。`ExpectedLeafDNSName` は束縛する DNS 名を別に指定し、それ単独で適用されます。照合は完全一致かつ大文字小文字を区別せず、wildcard は使いません。wildcard SAN が認証するのは TLS サーバであって、metadata が名乗る credential issuer ではないからです。§12.2.3 自体は chain だけで署名者への信頼を確立するため、いずれの option も設定しない限り適用されません。
+
+署名付き文書の拒否はすべて `errors.Is(err, ErrIssuerMetadataSignatureInvalid)` を満たし、呼出し側が個別に報告する条件はこれをラップします。`ErrIssuerMetadataSubjectMismatch`（`sub` が別の issuer を指す）、`ErrIssuerMetadataLeafDNSMismatch`（上記の束縛）、`ErrIssuerMetadataExpired`（`exp` 超過）です。`ErrIssuerMetadataSignatureRequired` は `Require` の結果（issuer が署名なしで応答した、または trust material が未設定）であり、署名の失敗ではないため umbrella を満たしません。要求した identifier と異なる `credential_issuer` は従来どおり `ErrIssuerIdentifierMismatch`（§12.2.4）です。trust path の失敗は `errors.As` 用に `*x509.SigningChainError` / `*x509.CRLCheckError` としても届きます。
+
+`CredentialIssuerMetadata.MetadataSignature` は受理した署名者を記録します。`CertificateSHA256` は受理した path を chain 順（leaf が先頭）で、`AnchorSHA256` は到達した trust anchor を、leaf の fingerprint・subject・`iat`・`exp` と併せて保持します。`CredentialIssuerMetadata.RawDocument` は受理した文書を issuer が公開したバイト列のまま（検証済み JWS payload、または署名なし応答の body）保持するため、このライブラリが型で表現していない metadata member も失われません。
+
+`Oid4vciReceiver` と呼出し側の既定 HTTP client は HTTP redirect を拒否します（`ErrHTTPRedirectNotAllowed`）。`NoRedirectClient` は呼出し側の client を同様にラップします。
 
 ## Credential の受理
 
