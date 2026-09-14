@@ -7,7 +7,16 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/eddsa"
 	"github.com/trustknots/vcknots/wallet/verifier/plugins/es256"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/es384"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/es512"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/ps256"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/ps384"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/ps512"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/rs256"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/rs384"
+	"github.com/trustknots/vcknots/wallet/verifier/plugins/rs512"
 	"github.com/trustknots/vcknots/wallet/verifier/types"
 )
 
@@ -32,11 +41,39 @@ func NewVerificationDispatcher(options ...func(*VerificationDispatcher) error) (
 	return d, nil
 }
 
-// WithDefaultConfig is an option function to configure the dispatcher with built-in components
+// WithDefaultConfig is an option function to configure the dispatcher with built-in components.
+//
+// It registers every JWS signature algorithm this library implements with the
+// standard library alone: the ECDSA family of RFC 7518 Section 3.4, the RSASSA
+// families of Sections 3.3 and 3.5 and EdDSA over Ed25519 (RFC 8037). Registering
+// a plugin only makes an algorithm verifiable; it does not decide which
+// algorithms a credential may be signed with. That stays a caller decision,
+// expressed in CredentialAcceptancePolicy.SigningAlgorithms, so that adding a
+// plugin here never widens what a deployment accepts.
+//
+// The "none" algorithm of RFC 7515 Section 3.6 is deliberately absent and can
+// never be registered by this option: an unsigned JWS has no signature to
+// verify.
 func WithDefaultConfig() func(*VerificationDispatcher) error {
 	return func(d *VerificationDispatcher) error {
 		// Register built-in verification components
-		return d.RegisterPlugin(jose.ES256, es256.NewES256Verifier())
+		for algorithm, component := range map[jose.SignatureAlgorithm]types.VerificationComponent{
+			jose.ES256: es256.NewES256Verifier(),
+			jose.ES384: es384.NewES384Verifier(),
+			jose.ES512: es512.NewES512Verifier(),
+			jose.RS256: rs256.NewRS256Verifier(),
+			jose.RS384: rs384.NewRS384Verifier(),
+			jose.RS512: rs512.NewRS512Verifier(),
+			jose.PS256: ps256.NewPS256Verifier(),
+			jose.PS384: ps384.NewPS384Verifier(),
+			jose.PS512: ps512.NewPS512Verifier(),
+			jose.EdDSA: eddsa.NewEdDSAVerifier(),
+		} {
+			if err := d.RegisterPlugin(algorithm, component); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 }
 
