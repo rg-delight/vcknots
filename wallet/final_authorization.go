@@ -27,10 +27,21 @@ const (
 )
 
 // AuthorizationResponseError is the RFC 6749 §4.1.2 / RFC 9207 §2.4 error
-// redirect payload returned to the wallet's registered redirect_uri.
+// redirect payload returned to the wallet's registered redirect_uri. It is
+// recovered with errors.As from AuthorizeOID4VCIFinalToken and
+// ResumeOID4VCIFinalAuthorization, so a caller reports the authorization
+// server's own error code rather than a generic authorization failure.
 type AuthorizationResponseError struct {
-	Code        string
+	// Code is the RFC 6749 §4.1.2.1 error code, such as access_denied.
+	Code string
+	// Description is the optional error_description that accompanied it.
 	Description string
+	// State is the state the authorization server echoed on the error
+	// redirect, when it carried one. RFC 6749 §4.1.2.1 makes the parameter
+	// REQUIRED "if a state parameter was present in the client authorization
+	// request", so it is reported here for a caller that dispatched several
+	// requests and attributes the failure to one of them.
+	State string
 }
 
 func (e *AuthorizationResponseError) Error() string {
@@ -66,6 +77,25 @@ type OID4VCIFinalAuthorization struct {
 	IssuerMetadata              *receiverTypes.CredentialIssuerMetadata    `json:"issuer_metadata"`
 	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata"`
 	CredentialConfigurationID   string                                     `json:"credential_configuration_id"`
+}
+
+// RequestURIExpired reports whether the RFC 9126 §2.2 request_uri lifetime has
+// run out at now, so the authorization request can no longer be sent to the
+// authorization endpoint. A zero ExpiresAt — a PAR response without expires_in,
+// or an authorization request whose parameters travelled inline — is never
+// expired, because no deadline was stated and the wallet does not invent one.
+//
+// The lifetime bounds the use of the request_uri at the authorization endpoint
+// and nothing after it: the authorization code arrives whenever the user
+// finishes authenticating, which may well be later than the request_uri would
+// have been accepted. AuthorizeOID4VCIFinalToken therefore does not refuse a
+// callback on this ground; a wallet that wants to bound how long a started
+// issuance stays resumable owns that policy and applies it here.
+func (a *OID4VCIFinalAuthorization) RequestURIExpired(now time.Time) bool {
+	if a == nil || a.ExpiresAt.IsZero() {
+		return false
+	}
+	return !now.Before(a.ExpiresAt)
 }
 
 // issuerPolicy is the RFC 9207 expectation the authorization response must meet.
@@ -467,8 +497,8 @@ func oid4vciAuthorizationRequestURL(endpoint *common.URIField, clientID string, 
 // must read the 302 rather than follow it, so http.ErrUseLastResponse applies
 // here instead of the blanket redirect refusal the other endpoints use.
 func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalAuthorization) (string, error) {
-	if !auth.ExpiresAt.IsZero() && !time.Now().Before(auth.ExpiresAt) {
-		return "", fmt.Errorf("pushed authorization request_uri expired before use")
+	if auth.RequestURIExpired(time.Now()) {
+		return "", fmt.Errorf("the authorization request cannot be sent: %w", ErrAuthorizationRequestURIExpired)
 	}
 	authClient := noRedirectHTTPClient(client)
 	response, err := authClient.Get(auth.AuthorizationURL)
@@ -490,27 +520,34 @@ func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalA
 func validateOID4VCIAuthorizationRedirect(location string, authorizationURL string, expectedState string, registeredRedirectURI string, issuer authorizationResponseIssuerPolicy) (string, error) {
 	redirectURL, err := url.Parse(location)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse authorization redirect: %w", err)
+		return "", fmt.Errorf("failed to parse authorization redirect: %w: %w", ErrAuthorizationRedirectInvalid, err)
 	}
 	if !redirectURL.IsAbs() {
 		base, err := url.Parse(authorizationURL)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse authorization endpoint URL: %w", err)
+			return "", fmt.Errorf("failed to parse authorization endpoint URL: %w: %w", ErrAuthorizationRedirectInvalid, err)
 		}
 		redirectURL = base.ResolveReference(redirectURL)
 	}
 	registeredRedirect, err := url.Parse(registeredRedirectURI)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse registered redirect URI: %w", err)
+		// An unparseable registered redirect_uri cannot be compared with, so
+		// the callback cannot be shown to belong to this request: the same
+		// condition the comparison below reports.
+		return "", fmt.Errorf("failed to parse registered redirect URI: %w: %w", ErrAuthorizationRedirectURIMismatch, err)
 	}
 	if !sameOriginAndPath(registeredRedirect, redirectURL) {
-		return "", fmt.Errorf("authorization redirect does not match the registered redirect_uri")
+		return "", ErrAuthorizationRedirectURIMismatch
 	}
 	if errorCode := redirectURL.Query().Get("error"); errorCode != "" {
-		return "", &AuthorizationResponseError{Code: errorCode, Description: redirectURL.Query().Get("error_description")}
+		return "", &AuthorizationResponseError{
+			Code:        errorCode,
+			Description: redirectURL.Query().Get("error_description"),
+			State:       redirectURL.Query().Get("state"),
+		}
 	}
 	if state := redirectURL.Query().Get("state"); state != expectedState {
-		return "", fmt.Errorf("authorization redirect state mismatch")
+		return "", ErrAuthorizationStateMismatch
 	}
 	// RFC 9207 §2.4: an iss parameter that is present MUST equal the issuer
 	// identifier of the authorization server that was used; when the server
@@ -518,14 +555,14 @@ func validateOID4VCIAuthorizationRedirect(location string, authorizationURL stri
 	// present so a mix-up attack cannot omit it.
 	if iss, present := redirectURL.Query()["iss"]; present {
 		if len(iss) != 1 || iss[0] != issuer.expected {
-			return "", fmt.Errorf("authorization redirect iss does not identify the authorization server")
+			return "", ErrAuthorizationIssMismatch
 		}
 	} else if issuer.required {
-		return "", fmt.Errorf("authorization redirect is missing the iss parameter required by the authorization server metadata")
+		return "", ErrAuthorizationIssMissing
 	}
 	code := redirectURL.Query().Get("code")
 	if code == "" {
-		return "", fmt.Errorf("authorization redirect code is missing")
+		return "", ErrAuthorizationCodeMissing
 	}
 	return code, nil
 }

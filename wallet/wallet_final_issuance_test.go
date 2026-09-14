@@ -1134,12 +1134,12 @@ func TestRequestOID4VCIAuthorizationCodeValidatesIssuer(t *testing.T) {
 	mismatch := newServer("https://wallet.example/callback?code=c1&state=state-1&iss=https%3A%2F%2Fattacker.example")
 	defer mismatch.Close()
 	_, err = call(mismatch, authorizationResponseIssuerPolicy{expected: "https://as.example"})
-	require.ErrorContains(t, err, "iss does not identify")
+	require.ErrorIs(t, err, ErrAuthorizationIssMismatch)
 
 	missing := newServer("https://wallet.example/callback?code=c1&state=state-1")
 	defer missing.Close()
 	_, err = call(missing, authorizationResponseIssuerPolicy{expected: "https://as.example", required: true})
-	require.ErrorContains(t, err, "missing the iss parameter")
+	require.ErrorIs(t, err, ErrAuthorizationIssMissing)
 	code, err = call(missing, authorizationResponseIssuerPolicy{expected: "https://as.example"})
 	require.NoError(t, err)
 	require.Equal(t, "c1", code)
@@ -1781,7 +1781,7 @@ func TestResumeOID4VCIFinalAuthorizationRejectsStateMismatch(t *testing.T) {
 
 	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
 		"openid-credential-offer://callback?code=code-1&state=someone-elses-state")
-	require.ErrorContains(t, err, "state mismatch")
+	require.ErrorIs(t, err, ErrAuthorizationStateMismatch)
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 
@@ -1798,7 +1798,7 @@ func TestResumeOID4VCIFinalAuthorizationRejectsMissingIssuerParameter(t *testing
 
 	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
 		"openid-credential-offer://callback?code=code-1&state="+url.QueryEscape(authorization.State))
-	require.ErrorContains(t, err, "missing the iss parameter")
+	require.ErrorIs(t, err, ErrAuthorizationIssMissing)
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 
@@ -1815,6 +1815,76 @@ func TestResumeOID4VCIFinalAuthorizationReturnsAuthorizationError(t *testing.T) 
 	require.Equal(t, "access_denied", authorizationError.Code)
 	require.Equal(t, "user said no", authorizationError.Description)
 	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 6749 §4.1.2.1 makes state REQUIRED on an error redirect when the
+// authorization request carried one, so it is reported with the error.
+func TestResumeOID4VCIFinalAuthorizationReportsAuthorizationErrorState(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+url.QueryEscape(authorization.State))
+	var authorizationError *AuthorizationResponseError
+	require.ErrorAs(t, err, &authorizationError)
+	require.Equal(t, "access_denied", authorizationError.Code)
+	require.Equal(t, authorization.State, authorizationError.State)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// A callback delivered anywhere but the registered redirect_uri is not this
+// request's authorization response, whatever parameters it carries.
+func TestAuthorizeOID4VCIFinalTokenRejectsForeignRedirectURI(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization,
+		"openid-credential-offer://elsewhere?code=code-1&state="+url.QueryEscape(authorization.State))
+	require.ErrorIs(t, err, ErrAuthorizationRedirectURIMismatch)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// A redirect that is neither an error response nor carries a code leaves
+// nothing to exchange.
+func TestAuthorizeOID4VCIFinalTokenRejectsMissingCode(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization,
+		"openid-credential-offer://callback?state="+url.QueryEscape(authorization.State))
+	require.ErrorIs(t, err, ErrAuthorizationCodeMissing)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 9126 §2.2: the request_uri lifetime bounds the authorization request, so
+// an expired one is refused before the authorization endpoint is reached. The
+// callback that may arrive afterwards is not judged by it — the holder's login
+// can outlast the request_uri the browser already spent.
+func TestOID4VCIFinalAuthorizationRequestURIExpiry(t *testing.T) {
+	expiry := time.Now().Add(time.Minute)
+	authorization := &OID4VCIFinalAuthorization{ExpiresAt: expiry}
+	require.False(t, authorization.RequestURIExpired(expiry.Add(-time.Second)))
+	require.True(t, authorization.RequestURIExpired(expiry))
+	require.True(t, authorization.RequestURIExpired(expiry.Add(time.Second)))
+	// No stated deadline is not an expiry the wallet invents.
+	require.False(t, (&OID4VCIFinalAuthorization{}).RequestURIExpired(time.Now()))
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("the authorization endpoint must not be reached with an expired request_uri")
+	}))
+	defer server.Close()
+	_, err := followOID4VCIAuthorizationEndpoint(server.Client(), &OID4VCIFinalAuthorization{
+		AuthorizationURL: server.URL + "/authorize",
+		RequestURI:       "urn:request:1",
+		ExpiresAt:        time.Now().Add(-time.Second),
+	})
+	require.ErrorIs(t, err, ErrAuthorizationRequestURIExpired)
 }
 
 // A real wallet needs a system browser at the authorization endpoint, so

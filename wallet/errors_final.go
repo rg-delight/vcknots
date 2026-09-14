@@ -193,3 +193,50 @@ var (
 	// hold objects and forbids it alongside transaction_id.
 	ErrCredentialResponseShape = errors.New("credential response has an invalid shape")
 )
+
+// Sentinel errors the RFC 6749 §4.1.2 / RFC 9207 §2.4 checks on the
+// authorization response wrap. A wallet that drives the system browser itself
+// gets the condition that made the callback unusable — so it can tell the
+// holder whether the request expired, whether the redirect belongs to another
+// request, or whether the authorization server answered a different issuer —
+// instead of one opaque "authorization failed". Every one of them is reachable
+// through AuthorizeOID4VCIFinalToken and ResumeOID4VCIFinalAuthorization.
+//
+// The error redirect itself is the one condition reported with a struct rather
+// than a sentinel: it arrives as an *AuthorizationResponseError carrying the
+// RFC 6749 §4.1.2.1 error code, its description and the echoed state.
+var (
+	// ErrAuthorizationRedirectInvalid reports that the redirect the caller
+	// handed back is not a URL, or that it is relative and the authorization
+	// request it answers is not a URL either, so no parameter of the
+	// authorization response can be read.
+	ErrAuthorizationRedirectInvalid = errors.New("authorization redirect could not be read")
+	// ErrAuthorizationRedirectURIMismatch reports that the redirect was not
+	// delivered to the registered redirect_uri of this authorization request,
+	// compared by scheme, host and path. A redirect to any other target is not
+	// this request's response, whatever parameters it carries.
+	ErrAuthorizationRedirectURIMismatch = errors.New("authorization redirect does not match the registered redirect_uri")
+	// ErrAuthorizationStateMismatch reports that the redirect does not echo the
+	// RFC 6749 §4.1.1 state of the authorization request it is presented
+	// against, which is what binds the response to the request.
+	ErrAuthorizationStateMismatch = errors.New("authorization redirect state does not match the authorization request")
+	// ErrAuthorizationIssMismatch reports that the redirect carries an RFC 9207
+	// iss parameter that is not the issuer identifier of the authorization
+	// server the request was sent to, or carries it more than once. §2.4: the
+	// client "MUST compare" the value and reject a mismatch, which is what
+	// stops a mix-up attack from replaying a code from another server.
+	ErrAuthorizationIssMismatch = errors.New("authorization redirect iss does not identify the authorization server")
+	// ErrAuthorizationIssMissing reports that the redirect carries no iss
+	// parameter while one is required: the authorization server advertises
+	// authorization_response_iss_parameter_supported, or the wallet runs the
+	// HAIP profile, whose FAPI 2.0 §5.3.2.2 base requires clients to check iss.
+	ErrAuthorizationIssMissing = errors.New("authorization redirect is missing the required iss parameter")
+	// ErrAuthorizationCodeMissing reports a redirect that is neither an error
+	// response nor carries the RFC 6749 §4.1.2 code parameter, so there is
+	// nothing to exchange at the token endpoint.
+	ErrAuthorizationCodeMissing = errors.New("authorization redirect carries no authorization code")
+	// ErrAuthorizationRequestURIExpired reports that the RFC 9126 §2.2
+	// request_uri of a Pushed Authorization Request is no longer usable at the
+	// authorization endpoint, measured against OID4VCIFinalAuthorization.ExpiresAt.
+	ErrAuthorizationRequestURIExpired = errors.New("pushed authorization request_uri has expired")
+)
