@@ -160,6 +160,46 @@ func (d *PresentationDispatcher) ParseDraft24RequestURI(uri string) (*oid4vp.Cre
 	return draft.ParseDraft24PresentationRequest(uri)
 }
 
+// ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
+// already holds, instead of reading it out of an Authorization Request URI. It
+// is the by-value counterpart of ParseRequestURI and applies the same Request
+// Object authentication; expectedClientID is the Authorization Request client_id
+// the Request Object's own claim must match, and may be empty when the caller
+// has none.
+func (d *PresentationDispatcher) ParseRequestObject(requestObject string, expectedClientID string) (*oid4vp.CredentialPresentationRequest, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", err)
+	}
+	parser, ok := plugin.(interface {
+		ParseRequestObject(string, string) (*oid4vp.CredentialPresentationRequest, error)
+	})
+	if !ok {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", types.ErrUnsupportedProtocol)
+	}
+	request, err := parser.ParseRequestObject(requestObject, expectedClientID)
+	if err != nil {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", err)
+	}
+	return request, nil
+}
+
+// ParseDraft24RequestObject is ParseRequestObject for the Presentation Exchange
+// wire contract, the by-value counterpart of ParseDraft24RequestURI.
+func (d *PresentationDispatcher) ParseDraft24RequestObject(requestObject string, expectedClientID string) (*oid4vp.CredentialPresentationRequest, error) {
+	plugin, err := d.getPlugin(types.Oid4vp)
+	if err != nil {
+		return nil, err
+	}
+	parser, ok := plugin.(interface {
+		ParseDraft24RequestObject(string, string) (*oid4vp.CredentialPresentationRequest, error)
+	})
+	if !ok {
+		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_draft24_request_object", types.ErrUnsupportedProtocol)
+	}
+	return parser.ParseDraft24RequestObject(requestObject, expectedClientID)
+}
+
 // PresentDraft24 submits a legacy Presentation Exchange response through the registered capability.
 func (d *PresentationDispatcher) PresentDraft24(protocol SupportedPresentationProtocol, endpoint url.URL, serialized []byte, submission types.PresentationSubmission, request *PresentationRequest) (string, error) {
 	if len(serialized) == 0 {

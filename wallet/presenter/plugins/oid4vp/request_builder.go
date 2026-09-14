@@ -25,8 +25,15 @@ type requestBuilder struct {
 	insecureSkipX509Verify  bool
 	requestObjectValidation *RequestObjectValidationOptions
 	expectedClientID        string
-	walletMetadata          map[string]any
-	requestURINonce         func() (string, error)
+	// expectedClientIDAbsent records that this parse has no Authorization
+	// Request client_id parameter to cross-check the Request Object against,
+	// because the caller supplied the Request Object by value and named none.
+	// The client_id claim is still authenticated against the certificate that
+	// signed the Request Object; only the equality with an outer parameter that
+	// does not exist is skipped.
+	expectedClientIDAbsent bool
+	walletMetadata         map[string]any
+	requestURINonce        func() (string, error)
 	// supportedTransactionDataTypes is copied from the presenter for the Final
 	// transaction_data validation.
 	supportedTransactionDataTypes []string

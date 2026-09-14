@@ -281,7 +281,7 @@ func (b *requestBuilder) rejectTrustAnchorInX5C(certificates []*x509.Certificate
 }
 
 func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
-	if b.expectedClientID == "" {
+	if b.expectedClientID == "" && !b.expectedClientIDAbsent {
 		return errors.New("client_id Authorization Request parameter is required with a Request Object")
 	}
 	options, err := b.requestObjectValidationOptions()

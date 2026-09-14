@@ -105,18 +105,50 @@ func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*Credentia
 func (p *Oid4vpPresenter) ParseDraft24PresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
 	return p.parsePresentationRequest(uriString, true)
 }
+
+// ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
+// already holds, with no Authorization Request URI to read it out of: a JWT the
+// application fetched from request_uri itself, or one that reached it over a
+// transport this library does not drive.
+//
+// It runs the authentication ParsePresentationRequest runs for a Request Object
+// it fetched, and returns the same typed errors: the compact JWS shape and the
+// typ header, the x5c signature and certificate chain, the Client Identifier
+// Prefix binding to the signing certificate and to the response endpoint, aud,
+// exp / nbf and the profile's lifetime policy. Every Authorization Request
+// parameter is taken from the signed claims.
+//
+// expectedClientID is the client_id of the Authorization Request this Request
+// Object belongs to. The Request Object's own client_id claim must equal it
+// (OpenID4VP 1.0 Section 5.10.1, RFC 9101 Section 6.1); a mismatch is reported
+// with ErrRequestObjectClientIDMismatch. Pass "" only when the caller holds the
+// Request Object alone and has no Authorization Request parameter to compare it
+// against: the client_id claim is still authenticated against the certificate
+// that signed the Request Object, and only the comparison against an outer
+// parameter that does not exist is skipped.
+//
+// What this entry point cannot receive is what belongs to the Authorization
+// Request rather than to the Request Object. There is no request_uri_method and
+// no wallet_nonce echo, because the fetch already happened outside this call;
+// an application that did fetch through request_uri records that with
+// RequestObjectValidationOptions.DeliveredByReference so the HAIP Section 5.1
+// delivery requirement is still met. A Digital Credentials API invocation is
+// not a Request Object delivery at all: it carries a platform-authenticated
+// Origin and is parsed by ParseDCAPIRequest.
+func (p *Oid4vpPresenter) ParseRequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
+	return p.parseRequestObject(requestObject, expectedClientID, false)
+}
+
+// ParseDraft24RequestObject is ParseRequestObject for the existing Draft24 wire
+// contract, the by-value counterpart of ParseDraft24PresentationRequest. New
+// Final integrations must use ParseRequestObject.
+func (p *Oid4vpPresenter) ParseDraft24RequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
+	return p.parseRequestObject(requestObject, expectedClientID, true)
+}
 func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 bool) (*CredentialPresentationRequest, error) {
-	// Normalize the profile once per parse so an unknown value fails closed
-	// before any network access and every checkpoint reads a validated value.
-	normalizedProfile, err := p.Profile.Normalize()
+	builder, err := p.newParseBuilder(draft24)
 	if err != nil {
-		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
-	}
-	if !draft24 && normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
-		// HAIP §5: the profile requires TLS verifier endpoints and verified
-		// X.509 request signing; the test-only escapes must not weaken it. The
-		// Draft24 entrypoints are exempt from the HAIP policy.
-		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
+		return nil, err
 	}
 
 	parsedURL, err := url.Parse(uriString)
@@ -125,30 +157,13 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	}
 	queryParams := parsedURL.Query()
 	// Reject malformed outer identifiers before dereferencing request_uri.
-	if clientID := strings.TrimSpace(queryParams.Get("client_id")); clientID != "" {
+	clientID := strings.TrimSpace(queryParams.Get("client_id"))
+	if clientID != "" {
 		if _, err := parseOID4VPClientID(clientID); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
-
-	builder, err := NewRequestBuilderForProfile(normalizedProfile)
-	if err != nil {
-		return nil, err
-	}
-	builder.draft24 = draft24
-	builder.httpClient = p.httpClient()
-	builder.allowHTTP = p.AllowHTTP
-	builder.x509TrustChainRoots = p.X509TrustChainRoots
-	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
-	builder.expectedClientID = strings.TrimSpace(queryParams.Get("client_id"))
-	builder.walletMetadata = p.WalletMetadata
-	builder.requestURINonce = p.RequestURINonce
-	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
-	builder.preRegisteredClients = p.PreRegisteredClients
-	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
-	if p.RequestObjectValidation != nil {
-		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
-	}
+	builder.expectedClientID = clientID
 
 	requestURI := queryParams.Get("request_uri")
 	requestObj := queryParams.Get("request")
@@ -196,6 +211,80 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 		builder = builder.WithQueryParams(queryParams)
 	}
 
+	return p.buildParsedRequest(builder)
+}
+
+// parseRequestObject is the by-value counterpart of parsePresentationRequest:
+// the Authorization Request parameters arrive as the Request Object itself
+// instead of as a URI to read it out of. Both load the same builder through
+// newParseBuilder and finish through buildParsedRequest, so the Request Object
+// reaches exactly the same WithRequestObject authentication either way.
+func (p *Oid4vpPresenter) parseRequestObject(requestObject string, expectedClientID string, draft24 bool) (*CredentialPresentationRequest, error) {
+	builder, err := p.newParseBuilder(draft24)
+	if err != nil {
+		return nil, err
+	}
+
+	// The caller's Authorization Request client_id is checked the same way the
+	// URI forms check the one they read from the query string, so a malformed
+	// identifier is refused before the Request Object is authenticated against
+	// it.
+	clientID := strings.TrimSpace(expectedClientID)
+	if clientID != "" {
+		if _, err := parseOID4VPClientID(clientID); err != nil {
+			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
+		}
+	}
+	builder.expectedClientID = clientID
+	builder.expectedClientIDAbsent = clientID == ""
+
+	return p.buildParsedRequest(builder.WithRequestObject(requestObject))
+}
+
+// newParseBuilder creates the requestBuilder one parse operation runs on and
+// copies the presenter's transport, trust and protocol policy onto it. Every
+// entry point that parses an Authorization Request starts here, so the URI
+// forms and the by-value Request Object forms cannot drift apart in the policy
+// they apply.
+func (p *Oid4vpPresenter) newParseBuilder(draft24 bool) (*requestBuilder, error) {
+	// Normalize the profile once per parse so an unknown value fails closed
+	// before any network access and every checkpoint reads a validated value.
+	normalizedProfile, err := p.Profile.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
+	}
+	if !draft24 && normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
+		// HAIP §5: the profile requires TLS verifier endpoints and verified
+		// X.509 request signing; the test-only escapes must not weaken it. The
+		// Draft24 entrypoints are exempt from the HAIP policy.
+		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
+	}
+
+	builder, err := NewRequestBuilderForProfile(normalizedProfile)
+	if err != nil {
+		return nil, err
+	}
+	builder.draft24 = draft24
+	builder.httpClient = p.httpClient()
+	builder.allowHTTP = p.AllowHTTP
+	builder.x509TrustChainRoots = p.X509TrustChainRoots
+	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
+	builder.walletMetadata = p.WalletMetadata
+	builder.requestURINonce = p.RequestURINonce
+	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
+	builder.preRegisteredClients = p.PreRegisteredClients
+	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
+	if p.RequestObjectValidation != nil {
+		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
+	}
+	return builder, nil
+}
+
+// buildParsedRequest finalizes one parse operation: it builds the
+// CredentialPresentationRequest and, where the parameters were obtained from a
+// delivery whose response endpoint is trustworthy, delivers the OAuth error
+// authorization response a refusal calls for.
+func (p *Oid4vpPresenter) buildParsedRequest(builder *requestBuilder) (*CredentialPresentationRequest, error) {
 	req, err := builder.Build()
 	if err != nil {
 		// OID4VP: when the Authorization Request is rejected with an OAuth

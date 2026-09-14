@@ -27,7 +27,7 @@ SD-JWT VC では選択的開示と Key Binding JWT も利用できます。
 | Batch | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`AdditionalHolderKeys`） | holder 鍵ごとに 1 つの proof を送り、`batch_credential_issuance.batch_size` を上限とします。 |
 | Credential response encryption | Implemented | `OID4VCIFinalReceiveRequest.CredentialResponseEncryptionKey` | OpenID4VCI 1.0 §8.2（`jwk`、`enc`、任意の `zip`、`alg` なし）。issuer が暗号化を要求しているのに鍵が無い場合は fail-closed です。 |
 | Key attestation | Partial | `Config.KeyAttestation`（`KeyAttestationProvider`）、`StaticKeyAttester`、`OID4VCIFinalReceiveRequest.IncludeKeyAttestation` | library は provider の JWT（`typ`、`attested_keys`、`exp`）を検証しますが、attester の署名は検証しません。本番の attester / HSM は呼出し側が用意します。 |
-| OpenID4VP 1.0 redirect flow（`x509_hash` / `x509_san_dns` / `redirect_uri` / pre-registered） | Implemented | `Wallet.PresentCredential`、`Wallet.PresentCredentialWithOptions`、`Oid4vpPresenter.ParsePresentationRequest` | 署名付き Request Object の認証は `x509_san_dns` と `x509_hash` に対応し、コロンを含まない identifier は pre-registered client として扱います（OpenID4VP §5.9.2）。HAIP は `x509_hash` を要求します。 |
+| OpenID4VP 1.0 redirect flow（`x509_hash` / `x509_san_dns` / `redirect_uri` / pre-registered） | Implemented | `Wallet.PresentCredential`、`Wallet.PresentCredentialWithOptions`、`Oid4vpPresenter.ParsePresentationRequest`、`Oid4vpPresenter.ParseRequestObject` | 署名付き Request Object の認証は `x509_san_dns` と `x509_hash` に対応し、コロンを含まない identifier は pre-registered client として扱います（OpenID4VP §5.9.2）。HAIP は `x509_hash` を要求します。 |
 | `request_uri` の GET / POST と `wallet_nonce` | Implemented | `Oid4vpPresenter.ParsePresentationRequest`、`requestBuilder.WithRequestObjectURI`、`Oid4vpPresenter.RequestURINonce` | Final の POST は毎回新しい `wallet_nonce` と任意の `wallet_metadata` を送り、echo は `RequestObjectVerification.WalletNonce` に現れます。 |
 | DCQL（`credential_sets`、`claims`、`claim_sets`、`values`、nested / array claim path、`aki` の `trusted_authorities`、`multiple`） | Implemented | `Oid4vpPresenter.ParsePresentationRequest`、`ResolveSatisfiableDCQLCredentials`、`AuthorityKeyIdentifiersFromCredential` | 評価するのは `aki` 種別のみで（HAIP §5）、他の種別は無視します。`multiple: true` は一致するものをすべて返します。 |
 | `direct_post` / `direct_post.jwt` | Implemented | `Wallet.PresentCredential`、`Oid4vpPresenter.PresentDCQL`、`Oid4vpPresenter.CreateEncryptedAuthorizationResponse` | `direct_post` は平文 form POST、`direct_post.jwt` は ECDH-ES の JWE です。エラー応答は verifier metadata が許す場合に暗号化し、それ以外は §8.3.1 の平文 fallback を送ります。 |
@@ -750,6 +750,14 @@ receiver プラグインは Draft 13 では `receiverTypes.Receiver`、Final / H
 * 検証結果は `CredentialPresentationRequest.RequestObjectVerification` にのみ現れ、request data からは読み取りません。client id、証明書 SHA-256 fingerprint、失効カウンタ、echo された `WalletNonce`、観測した `Delivery`（`"reference"`、`"value"`、`"query"`）、`DeliveryAttested` を記録します。
 
 admission 時に `request_uri` で署名付き Request Object を取得し、後に値を直接再送するアプリは、`RequestObjectValidationOptions.DeliveredByReference` でそれを証明できます。HAIP §5.1 の配送要件をその request についてのみ満たします。アプリ自身の admission 経路が取得を記録した場合にだけ設定してください。
+
+#### 呼出し側が既に保持する Request Object の解析
+
+`Oid4vpPresenter.ParseRequestObject(requestObject, expectedClientID)` は、値として渡された Request Object を認証します。アプリ自身が `request_uri` から取得した JWT や、この library が扱わない transport で届いた JWT が対象です。`ParsePresentationRequest` と builder を共有するため、同じ JWT からはどちらの経路でも同じ `CredentialPresentationRequest` と同じ typed error が得られ、Authorization Request の各 parameter は署名済み claim からのみ取得します。Presentation Exchange 側の対応物は `ParseDraft24RequestObject` です。dispatcher からは `ParseRequestObject` と `ParseDraft24RequestObject` として利用します。
+
+`expectedClientID` は、その Request Object が属する Authorization Request の `client_id` です。一致しない場合は `ErrRequestObjectClientIDMismatch` を返します。`""` を渡すのは、呼出し側が Request Object 単体しか保持しない場合に限ってください。その場合も `client_id` claim は署名した証明書に対して認証され、存在しない外側 parameter との比較だけを省きます。
+
+この入口は `request_uri_method` を受け取らず、`wallet_nonce` の echo もありません。取得は呼出しの外で完了しているためで、実際に取得した場合は `DeliveredByReference` で記録すれば HAIP §5.1 を満たします。Digital Credentials API の invocation は Request Object の配送ではなく、`ParseDCAPIRequest` が解析します。
 
 ### DCQL
 
