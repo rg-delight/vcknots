@@ -57,6 +57,17 @@ func (d *PresentationDispatcher) getPlugin(protocol types.SupportedPresentationP
 	return plugin, nil
 }
 
+// Plugins returns the registered presenter plugins for profile propagation and
+// inspection. The returned slice is a copy, so callers cannot mutate the
+// dispatcher's registry.
+func (d *PresentationDispatcher) Plugins() []types.Presenter {
+	plugins := make([]types.Presenter, 0, len(d.plugins))
+	for _, plugin := range d.plugins {
+		plugins = append(plugins, plugin)
+	}
+	return plugins
+}
+
 func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *PresentationRequest) (string, error) {
 	if len(serializedPresentation) == 0 {
 		return "", types.NewPresenterError(protocol, endpoint.String(), "present", types.ErrInvalidPresentation)
