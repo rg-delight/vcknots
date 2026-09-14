@@ -1,4 +1,4 @@
-module github.com/trustknots/vcknots/wallet/examples/custom_dispatcher
+module github.com/trustknots/vcknots/wallet/examples/official_driver
 
 go 1.25.0
 
