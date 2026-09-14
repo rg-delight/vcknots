@@ -100,8 +100,11 @@ type finalIssuanceFixture struct {
 	wrapReceiverPlugin func(receiverTypes.Receiver) receiverTypes.Receiver
 	tokenResponse      map[string]any
 	tokenHandler       http.HandlerFunc
-	credentialHandler  http.HandlerFunc
-	deferredHandler    http.HandlerFunc
+	// nonceHandler replaces the default §7 Nonce Endpoint response, so a test
+	// can make the issuer hand out a different c_nonce on a second request.
+	nonceHandler      http.HandlerFunc
+	credentialHandler http.HandlerFunc
+	deferredHandler   http.HandlerFunc
 
 	issuerMetadataCalls int
 	parCalls            int
@@ -375,6 +378,10 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		mockserver.JSONResponse(w, http.StatusOK, f.tokenResponseValue())
 	case "/nonce":
 		f.nonceCalls++
+		if f.nonceHandler != nil {
+			f.nonceHandler(w, r)
+			return
+		}
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "credential-nonce-1"})
 	case "/credential":
 		f.credentialCalls++

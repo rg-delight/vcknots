@@ -28,7 +28,7 @@
 
 | プロトコル / 機能 | 状態 | 公開 API の入口 | 備考 |
 | --- | --- | --- | --- |
-| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveCredential`（`ReceiveCredentialRequest`） | 旧 Draft 13 の入口も兼ねます。公開 driver では `receive-preauth` です。 |
+| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveOID4VCIFinalPreAuthorizedCredential`（`OID4VCIFinalPreAuthorizedReceiveRequest`）。`Wallet.ReceiveCredential` は旧 Draft 13 の入口 | `tx_code` は offer が宣言したときに限り必須、`client_id` は Final では任意・HAIP では必須、DPoP は `ClientKey` があれば常に使用し HAIP では必須です。公開 driver では `receive-preauth` です。 |
 | OpenID4VCI 1.0 authorization code（PAR / PKCE / DPoP / `private_key_jwt` / client attestation） | Implemented | `Wallet.BeginOID4VCIFinalAuthorization` と `Wallet.ResumeOID4VCIFinalAuthorization`、または `Wallet.ReceiveOID4VCIFinalCredential`（`OID4VCIFinalReceiveRequest`） | Pushed Authorization Request は認可サーバーが広告する場合に使用し、必須なのは HAIP のみです（HAIP §4）。PKCE は常に `S256`、DPoP は `Config.DPoP` と `ClientKey`、`private_key_jwt` は認可サーバーが広告する場合に使用、attestation によるクライアント認証は `Config.ClientAttestation` を使用します。 |
 | Deferred | Implemented | `Wallet.ReceiveOID4VCIFinalCredential`（`DeferredPollAttempts`）、`Wallet.ResumeOID4VCIFinalDeferredCredential` | 広告された interval でポーリングします。interval は 60 秒で頭打ちにし（`MaxDeferredInterval` で上書き可）、`…Context` 版で中断できます。試行回数を使い切ると pending を返します。deferred request は `credential_response_encryption` を再送します（§9.1）。`OID4VCIFinalDeferredRequest` で別プロセスから再開できます。 |
 | Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted`（`OID4VCIFinalNotificationRequest`） | `credential_deleted` を送信します。`credential_accepted` と `credential_failure` は保存の成否後に `storeAndNotifyOID4VCIFinalCredentials` が内部で送信します。 |
@@ -132,16 +132,55 @@ request.AllowSelfDrivenAuthorization = true
 result, err := w.ReceiveOID4VCIFinalCredentialContext(ctx, request)
 ```
 
-```go
+pre-authorized code はブラウザを必要としないため、OpenID4VCI 1.0 §4.1.1 / §6.1
+のフロー全体が 1 回の呼出しで完了します。`ClientID` と `ClientKey` は Final
+では任意（§6.1 はこの grant のクライアント認証を OPTIONAL と定めます）、HAIP
+では必須です。`ClientKey` が無い場合 wallet は匿名クライアントとなり、Bearer
+アクセストークンのみを受け付けます。
 
-saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
-	CredentialOffer: offer,
-	Type:            receiverTypes.Oid4vci,
-	Key:             holder,
-	RequestedFormat: credential.SDJwtVC,
-	TxCode:          txCode,
+```go
+result, err := w.ReceiveOID4VCIFinalPreAuthorizedCredential(ctx, wallet.OID4VCIFinalPreAuthorizedReceiveRequest{
+	CredentialOffer:      offer,
+	Type:                 receiverTypes.Oid4vci,
+	TxCode:               txCode, // offer が tx_code オブジェクトを持つときに限り必須
+	ClientID:             clientID,
+	HolderKey:            holderKey,
+	ClientKey:            clientKey,
+	DeferredPollAttempts: 10,
 })
 ```
+
+#### Key Attestation を別プロセスで署名する
+
+OpenID4VCI 1.0 Appendix D は key attestation を issuer の `c_nonce` に束縛する
+ため、attester が別プロセスにある wallet は事前に署名できません。両フローとも
+その地点で 2 段に分かれます。`AuthorizeOID4VCIFinalToken`（pre-authorized code
+では `AuthorizeOID4VCIFinalPreAuthorizedToken`）が JSON 直列化可能な
+`OID4VCIFinalTokenGrant` を返し、`RequestOID4VCIFinalCredential` がそれを消費
+します。grant はアクセストークンを含むので、暗号化して保存し、ログや trace に
+出さないでください。
+
+```go
+request.ExternalKeyAttestation = true
+grant, err := w.AuthorizeOID4VCIFinalToken(ctx, request, authorization, redirectURLFromBrowser)
+
+result, err := w.RequestOID4VCIFinalCredential(ctx, request, grant)
+var required *wallet.KeyAttestationRequiredError
+if errors.As(err, &required) {
+	// attester の鍵がある場所で、required.HolderKeys を required.CNonce と
+	// required.Audience で key-attestation+jwt に署名します
+	request.KeyAttestation = &wallet.KeyAttestation{JWT: signed}
+	result, err = w.RequestOID4VCIFinalCredential(ctx, request, required.Grant)
+}
+var stale *wallet.KeyAttestationNonceError
+if errors.As(err, &stale) {
+	// issuer が invalid_nonce を返した場合は stale.Grant.CNonce で再署名します
+}
+```
+
+`ResumeOID4VCIFinalAuthorization` と
+`ReceiveOID4VCIFinalPreAuthorizedCredential` はこの 2 つを連続して呼ぶだけなの
+で、`Config.KeyAttestation` をプロセス内に持つ wallet はこの分割を意識しません。
 
 launch URI で提示するか、W3C Digital Credentials API の invocation に応答します。
 

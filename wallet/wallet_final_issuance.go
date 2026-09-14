@@ -258,8 +258,16 @@ type oid4vciFinalFlow struct {
 	authorizationDetailsMode AuthorizationDetailsMode
 	holderKeys               []jose.JSONWebKey
 	keyAttestation           *oid4vciKeyAttestationPlan
-	usePrivateKeyJwt         bool
-	generateClientAssertion  func() (string, error)
+	// suppliedKeyAttestation is an Appendix D key attestation the caller minted
+	// out of process for suppliedKeyAttestationNonce. When it is set the flow
+	// never calls a provider: it embeds this attestation, and a Credential
+	// Endpoint that answers §8.3.1.2 "invalid_nonce" makes the flow stop with
+	// ErrKeyAttestationNonceStale instead, because the caller has to sign the
+	// fresh c_nonce itself.
+	suppliedKeyAttestation      *KeyAttestation
+	suppliedKeyAttestationNonce string
+	usePrivateKeyJwt            bool
+	generateClientAssertion     func() (string, error)
 }
 
 // issuerPolicy is the RFC 9207 expectation the authorization response must meet.
@@ -626,8 +634,14 @@ func (w *Wallet) newOID4VCIFinalFlow(
 
 	// OpenID4VCI 1.0 Appendix D / HAIP §4.5.1: a provider must be available
 	// before anything is sent to the issuer when the selected configuration
-	// requires a key attestation.
-	keyAttestation, err := w.planOID4VCIKeyAttestation(issuerMetadata, credentialConfigurationID, req.IncludeKeyAttestation)
+	// requires a key attestation, unless the caller declared that it mints the
+	// attestation itself.
+	keyAttestation, err := w.planOID4VCIKeyAttestation(
+		issuerMetadata,
+		credentialConfigurationID,
+		req.IncludeKeyAttestation || req.KeyAttestation != nil,
+		req.ExternalKeyAttestation || req.KeyAttestation != nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -687,6 +701,7 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		authorizationDetailsMode:    authorizationDetailsMode,
 		holderKeys:                  holderKeys,
 		keyAttestation:              keyAttestation,
+		suppliedKeyAttestation:      req.KeyAttestation,
 		usePrivateKeyJwt:            usePrivateKeyJwt,
 		generateClientAssertion: func() (string, error) {
 			return w.generateClientAssertion(
@@ -699,6 +714,12 @@ func (w *Wallet) newOID4VCIFinalFlow(
 	}, nil
 }
 
+// resumeOID4VCIFinalAuthorization is the composition of the two halves of the
+// resumed flow: authorizeOID4VCIFinalToken exchanges the code and collects
+// everything the Credential Request needs into an OID4VCIFinalTokenGrant, and
+// requestOID4VCIFinalCredentials spends it. Both halves see the same flow, so
+// running them back to back is exactly what the single call did before they
+// were separable.
 func (w *Wallet) resumeOID4VCIFinalAuthorization(
 	ctx context.Context,
 	req OID4VCIFinalReceiveRequest,
@@ -706,6 +727,24 @@ func (w *Wallet) resumeOID4VCIFinalAuthorization(
 	flow *oid4vciFinalFlow,
 	redirectURL string,
 ) (*OID4VCIFinalReceiveResult, error) {
+	grant, err := w.authorizeOID4VCIFinalToken(ctx, req, auth, flow, redirectURL)
+	if err != nil {
+		return nil, err
+	}
+	return w.requestOID4VCIFinalCredentials(ctx, flow, grant, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, req.MaxDeferredInterval)
+}
+
+// authorizeOID4VCIFinalToken performs everything between the browser redirect
+// and the Credential Request: the RFC 6749 §4.1.2 / RFC 9207 §2.4 checks on the
+// redirect, the §6.1 token exchange, the §6.2 credential_identifier selection
+// and the §7 c_nonce fetch.
+func (w *Wallet) authorizeOID4VCIFinalToken(
+	ctx context.Context,
+	req OID4VCIFinalReceiveRequest,
+	auth *OID4VCIFinalAuthorization,
+	flow *oid4vciFinalFlow,
+	redirectURL string,
+) (*OID4VCIFinalTokenGrant, error) {
 	code, err := validateOID4VCIAuthorizationRedirect(redirectURL, auth.AuthorizationURL, auth.State, req.RedirectURI, flow.issuerPolicy(w.profile.IsHAIP()))
 	if err != nil {
 		return nil, err
@@ -755,21 +794,24 @@ func (w *Wallet) resumeOID4VCIFinalAuthorization(
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
 
-	return w.receiveOID4VCIFinalCredentials(ctx, flow, token, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, req.MaxDeferredInterval)
+	return w.newOID4VCIFinalTokenGrant(ctx, flow, token, req.ClientKey)
 }
 
-// receiveOID4VCIFinalCredentials performs the §8 credential request (with §14.6
+// requestOID4VCIFinalCredentials performs the §8 credential request (with §14.6
 // batch proofs, §8.2 response encryption and §6.2 credential_identifier), the
-// §9 deferred flow and the §11 notification bookkeeping.
-func (w *Wallet) receiveOID4VCIFinalCredentials(
+// §9 deferred flow and the §11 notification bookkeeping. Everything the request
+// needs from the token exchange arrives in grant, so the two stages may be
+// separated by a process restart.
+func (w *Wallet) requestOID4VCIFinalCredentials(
 	ctx context.Context,
 	flow *oid4vciFinalFlow,
-	token *receiverTypes.CredentialIssuanceAccessToken,
+	grant *OID4VCIFinalTokenGrant,
 	clientKey jose.JSONWebKey,
 	encryptionKey *jose.JSONWebKey,
 	deferredPollAttempts int,
 	maxInterval time.Duration,
 ) (*OID4VCIFinalReceiveResult, error) {
+	token := grant.AccessToken
 	issuerMetadata := flow.issuerMetadata
 	// §8.2 / §10: build the credential_response_encryption request parameter and
 	// fail closed when the issuer requires encryption but no key is supplied.
@@ -778,38 +820,47 @@ func (w *Wallet) receiveOID4VCIFinalCredentials(
 		return nil, fmt.Errorf("credential response encryption: %w", err)
 	}
 
-	credentialIdentifier, err := CredentialIdentifierForConfiguration(token, flow.credentialConfigurationID, flow.authorizationDetailsMode)
-	if err != nil {
-		return nil, err
+	// Appendix D: an attestation the wallet can neither mint nor was given
+	// stops the issuance here, before the Credential Request, and hands the
+	// caller the c_nonce and holder keys to attest.
+	if flow.keyAttestation != nil && flow.keyAttestation.provider == nil && flow.suppliedKeyAttestation == nil {
+		return nil, newKeyAttestationRequiredError(grant, flow.keyAttestation.required)
 	}
-	build := oid4vciFinalCredentialRequestBodyFactory(ctx, flow, credentialIdentifier, encryptionParams)
-
-	// §7: the nonce endpoint is OPTIONAL. Only fetch c_nonce when the issuer
-	// advertises one; otherwise the proof is built without a nonce.
-	nonceEndpoint := issuerMetadata.NonceEndpoint
-	initialNonce := ""
-	if nonceEndpoint != nil {
-		nonceResponse, err := flow.receiver.FetchNonceResponse(ctx, *nonceEndpoint)
+	// A caller-minted attestation is bound to one c_nonce, and Appendix F makes
+	// echoing it mandatory once the issuer provided one. Checking the match
+	// here, rather than leaving it to ValidateKeyAttestation on the wire, keeps
+	// a stale attestation from spending the issuer's nonce.
+	if flow.suppliedKeyAttestation != nil {
+		_, claims, err := parseAttestationJWT(flow.suppliedKeyAttestation.JWT)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch credential nonce: %w", err)
+			return nil, fmt.Errorf("key attestation is malformed: %w", err)
 		}
-		initialNonce = nonceResponse.CNonce
+		if grant.CNonce != "" && claims.Nonce != grant.CNonce {
+			return nil, newKeyAttestationNonceError(grant)
+		}
+		flow.suppliedKeyAttestationNonce = grant.CNonce
 	}
+	build := oid4vciFinalCredentialRequestBodyFactory(ctx, flow, grant.CredentialIdentifier, encryptionParams)
 
 	if err := requireOID4VCIContext(ctx, "the credential request"); err != nil {
 		return nil, err
 	}
 	credentialEndpoint := issuerMetadata.CredentialEndpoint
-	rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
+	rawResponse, cNonce, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
 		ctx,
 		credentialEndpoint,
 		*token,
-		nonceEndpoint,
-		initialNonce,
+		issuerMetadata.NonceEndpoint,
+		grant.CNonce,
 		build,
 		oid4vciFinalDpopProofFactory(flow.signer, clientKey, credentialEndpoint, token.Token),
 	)
 	if err != nil {
+		// §8.3.1.2 "invalid_nonce" invalidated a caller-minted attestation: the
+		// fresh c_nonce travels back in the grant so the caller can re-sign.
+		if errors.Is(err, ErrKeyAttestationNonceStale) {
+			return nil, newKeyAttestationNonceError(grant.refreshed(cNonce, flow))
+		}
 		// CredentialEndpointError is retained so callers can branch with
 		// errors.Is (invalid_proof, credential_request_denied, ...).
 		return nil, fmt.Errorf("failed to receive credential: %w", err)
@@ -1197,9 +1248,29 @@ func oid4vciFinalCredentialRequestBodyFactory(
 				Nonce:    cNonce,
 				Audience: issuerMetadata.CredentialIssuer,
 			}
-			attestation, err := flow.keyAttestation.provider.KeyAttestation(ctx, request)
-			if err != nil {
-				return nil, "", fmt.Errorf("failed to obtain key attestation: %w", err)
+			attestation := flow.suppliedKeyAttestation
+			switch {
+			case attestation != nil:
+				// Appendix D attestations are single use and bound to the
+				// c_nonce they were minted for. This factory is called a second
+				// time only after §8.3.1.2 "invalid_nonce", and re-sending the
+				// first attestation under a fresh nonce would just be refused
+				// again, so the flow stops and lets the caller sign once more.
+				if cNonce != flow.suppliedKeyAttestationNonce {
+					return nil, "", fmt.Errorf(
+						"the credential endpoint issued a fresh c_nonce after the key attestation was signed: %w",
+						ErrKeyAttestationNonceStale)
+				}
+			case flow.keyAttestation.provider != nil:
+				provided, err := flow.keyAttestation.provider.KeyAttestation(ctx, request)
+				if err != nil {
+					return nil, "", fmt.Errorf("failed to obtain key attestation: %w", err)
+				}
+				attestation = provided
+			default:
+				return nil, "", fmt.Errorf(
+					"no key attestation provider is configured and the request carries none: %w",
+					ErrKeyAttestationRequired)
 			}
 			if err := ValidateKeyAttestation(ctx, attestation, request, flow.keyAttestation.policy); err != nil {
 				return nil, "", err
@@ -1519,27 +1590,46 @@ func SelectOID4VCIAuthorizationServer(issuerMetadata *receiverTypes.CredentialIs
 // oid4vciKeyAttestationPlan records that a key attestation must be attached to
 // every credential request proof for this issuance.
 type oid4vciKeyAttestationPlan struct {
+	// provider is nil when the caller mints the attestation out of process
+	// (OID4VCIFinalReceiveRequest.ExternalKeyAttestation).
 	provider KeyAttestationProvider
 	// policy authenticates what the provider returns: the attester signature
 	// and, when anchors are configured, the x5c chain.
 	policy AttestationTrustPolicy
+	// required records that the issuer's Credential Configuration advertises
+	// proof_types_supported.jwt.key_attestations_required, as opposed to the
+	// wallet volunteering an attestation through IncludeKeyAttestation.
+	required bool
 }
 
 // planOID4VCIKeyAttestation decides whether a key attestation is needed. It
 // fails before any request is sent when the issuer requires one but the wallet
 // has no provider, naming HAIP §4.5.1 under the HAIP profile.
-func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, include bool) (*oid4vciKeyAttestationPlan, error) {
+//
+// external is the caller's declaration that it mints the attestation itself, at
+// the interruption between AuthorizeOID4VCIFinalToken and
+// RequestOID4VCIFinalCredential. It only moves the fail-closed point: without a
+// provider the plan is still made, and the credential stage refuses to send a
+// request with no attestation (ErrKeyAttestationRequired).
+func (w *Wallet) planOID4VCIKeyAttestation(metadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string, include bool, external bool) (*oid4vciKeyAttestationPlan, error) {
 	required := IssuerRequiresKeyAttestation(metadata, credentialConfigurationID)
-	if required && w.keyAttestation == nil {
+	if required && w.keyAttestation == nil && !external {
 		if w.profile.IsHAIP() {
 			return nil, fmt.Errorf("HAIP §4.5.1 requires wallets to support key attestations: the issuer requires a key attestation but no KeyAttestation provider is configured")
 		}
 		return nil, fmt.Errorf("the issuer requires a key attestation but no KeyAttestation provider is configured")
 	}
-	if w.keyAttestation == nil || (!required && !include) {
+	if !required && !include {
 		return nil, nil
 	}
-	return &oid4vciKeyAttestationPlan{provider: w.keyAttestation, policy: w.attestationPolicyFor(w.keyAttestation)}, nil
+	if w.keyAttestation == nil && !external {
+		return nil, nil
+	}
+	return &oid4vciKeyAttestationPlan{
+		provider: w.keyAttestation,
+		policy:   w.attestationPolicyFor(w.keyAttestation),
+		required: required,
+	}, nil
 }
 
 // IssuerRequiresKeyAttestation reports whether the selected credential

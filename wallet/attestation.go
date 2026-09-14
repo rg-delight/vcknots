@@ -58,10 +58,16 @@ type KeyAttestationProvider interface {
 // the credential issuer identifier the attestation is for: it is genuine
 // provider input and, when the produced attestation carries an aud claim, the
 // value is checked against it.
+//
+// Every member is JSON-serialisable, because a provider need not live in this
+// process: OID4VCIFinalTokenGrant.KeyAttestation and KeyAttestationRequiredError
+// carry exactly this request to a signer on the other side of a process
+// boundary. The keys published that way are public (see publicHolderJWK); an
+// in-process provider is handed the wallet's own holder keys.
 type KeyAttestationRequest struct {
-	Keys     []jose.JSONWebKey // public holder keys to attest, in proof order
-	Nonce    string            // c_nonce when the issuer provides one
-	Audience string            // credential issuer identifier
+	Keys     []jose.JSONWebKey `json:"keys"`     // public holder keys to attest, in proof order
+	Nonce    string            `json:"nonce"`    // c_nonce when the issuer provides one
+	Audience string            `json:"audience"` // credential issuer identifier
 }
 
 // KeyAttestation is a provider-issued key-attestation+jwt.

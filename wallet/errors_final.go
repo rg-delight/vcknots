@@ -114,3 +114,90 @@ var (
 	// a configured trust anchor, which HAIP Section 6.1.1 forbids.
 	ErrHAIPTrustAnchorInX5C = errors.New("HAIP forbids including the trust anchor certificate in the x5c header")
 )
+
+// Sentinel errors of the two-stage OpenID4VCI 1.0 Final issuance API, where
+// AuthorizeOID4VCIFinalToken and RequestOID4VCIFinalCredential are separated by
+// an interruption a caller may cross a process boundary at. Each one is
+// reported through a typed error (*KeyAttestationRequiredError,
+// *KeyAttestationNonceError) that also carries the OID4VCIFinalTokenGrant the
+// caller resumes from, so errors.As recovers the state and errors.Is the
+// condition.
+var (
+	// ErrKeyAttestationRequired reports that the issuance needs an OpenID4VCI
+	// 1.0 Appendix D key attestation the wallet cannot mint itself: the
+	// request set ExternalKeyAttestation and carried no KeyAttestation, and no
+	// Config.KeyAttestation provider is configured. Nothing has been sent to
+	// the Credential Endpoint when it is returned.
+	ErrKeyAttestationRequired = errors.New("credential request requires a key attestation the wallet cannot mint")
+	// ErrKeyAttestationNonceStale reports that a caller-supplied key
+	// attestation was minted for a different c_nonce than the one the
+	// Credential Request must carry: either it never matched the grant, or
+	// OpenID4VCI 1.0 §8.3.1.2 "invalid_nonce" made the Credential Issuer hand
+	// out a fresh one. An attestation is single use; the caller signs a new
+	// one for the c_nonce the accompanying grant now names.
+	ErrKeyAttestationNonceStale = errors.New("key attestation nonce is stale")
+	// ErrNonceEndpointRequired reports that the issuance needs a key
+	// attestation bound to a c_nonce while the Credential Issuer advertises no
+	// nonce_endpoint. HAIP requires one: "If the Issuer supports Credential
+	// Configurations that require key binding, as indicated by the presence of
+	// cryptographic_binding_methods_supported, the nonce_endpoint MUST be
+	// present in the Credential Issuer Metadata."
+	ErrNonceEndpointRequired = errors.New("key attestation requires a c_nonce but the issuer advertises no nonce_endpoint")
+	// ErrPreAuthorizedGrantMissing reports that a Credential Offer handed to
+	// ReceiveOID4VCIFinalPreAuthorizedCredential carries no
+	// urn:ietf:params:oauth:grant-type:pre-authorized_code grant with a
+	// pre-authorized_code (OpenID4VCI 1.0 §4.1.1).
+	ErrPreAuthorizedGrantMissing = errors.New("credential offer carries no pre-authorized_code grant")
+	// ErrTransactionCodeRequired reports that the Credential Offer's
+	// pre-authorized_code grant carries a tx_code object while the request
+	// supplies no Transaction Code. OpenID4VCI 1.0 §6.1: "This value MUST be
+	// present if a tx_code object was present in the Credential Offer
+	// (including if the object was empty)."
+	ErrTransactionCodeRequired = errors.New("credential offer requires a transaction code")
+	// ErrTokenTypeUnsupported reports a Token Response whose token_type is
+	// neither the Bearer scheme of RFC 6750 §2.1 nor the DPoP scheme of RFC
+	// 9449 §7.1, so the wallet holds no way to present the access token.
+	ErrTokenTypeUnsupported = errors.New("token response token_type is not supported")
+	// ErrDPoPKeyMismatch reports that the key offered to
+	// RequestOID4VCIFinalCredential is not the one the DPoP-bound access token
+	// in the grant was issued to, compared by RFC 7638 thumbprint. RFC 9449 §5
+	// binds the token to the proof key, so presenting it with another key
+	// cannot succeed and is refused before the request is sent.
+	ErrDPoPKeyMismatch = errors.New("token grant is bound to a different DPoP key")
+	// ErrClientAttestationNotCarried reports that the wallet holds a Client
+	// Attestation provider for a Pre-Authorized Code token request but the
+	// configured receiver transport has no way to carry the
+	// draft-ietf-oauth-attestation-based-client-auth headers on it. HAIP
+	// §4.4.1 ("Wallets MUST use ... an OAuth2 Client authentication mechanism
+	// at OAuth2 Endpoints that support client authentication") makes sending
+	// the request anonymously the wrong answer, so it fails closed.
+	ErrClientAttestationNotCarried = errors.New("the receiver cannot carry client attestation headers on a pre-authorized_code token request")
+)
+
+// Sentinel errors DecodeOID4VCIFinalCredentialResponse wraps at each of its
+// rejection sites, so a caller can classify a Credential Response failure with
+// errors.Is instead of inspecting its own request options. They are separate
+// from the acceptance sentinels above because they describe the transport and
+// shape of the §8.2 Credential Response, before any credential is parsed.
+var (
+	// ErrCredentialResponsePlaintext reports that the Credential Endpoint
+	// answered with an application/json body while the wallet had required or
+	// requested an encrypted response. §8.2: "Credential Request encryption
+	// MUST be used if the credential_response_encryption parameter is
+	// included, to prevent it being substituted by an attacker." The response
+	// is refused rather than downgraded.
+	ErrCredentialResponsePlaintext = errors.New("credential response was not encrypted")
+	// ErrCredentialResponseDecrypt reports that the Credential Response
+	// carried an application/jwt JWE (§8.2 / §10) the wallet could not turn
+	// back into plaintext: the JWE did not parse under the accepted algorithms,
+	// the configured DecryptionKey was missing, or decryption itself failed.
+	ErrCredentialResponseDecrypt = errors.New("credential response JWE could not be decrypted")
+	// ErrCredentialResponseShape reports that a decoded Credential Response
+	// does not match the OpenID4VCI 1.0 Final shape: it is nil, carries the
+	// removed draft singular credential member, has a credentials element that
+	// is not an object, carries transaction_id together with credential
+	// content, carries more than one credential, or carries neither
+	// credentials nor a transaction_id. §8.2 requires the credentials array to
+	// hold objects and forbids it alongside transaction_id.
+	ErrCredentialResponseShape = errors.New("credential response has an invalid shape")
+)

@@ -28,6 +28,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsRemovedSingularCredential(t
 	body := []byte(`{"credential":"eyJ.abc.def"}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
 	require.ErrorContains(t, err, "singular credential member")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RejectsBareStringCredential pins
@@ -37,6 +38,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsBareStringCredential(t *tes
 	body := []byte(`{"credentials":["eyJ.abc.def"]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
 	require.ErrorContains(t, err, "unsupported credential shape")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RejectsTransactionIDWithCredentials
@@ -46,6 +48,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsTransactionIDWithCredential
 	body := []byte(`{"transaction_id":"tx-1","credentials":[{"credential":"eyJ.abc.def"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
 	require.ErrorContains(t, err, "transaction_id and credential content")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RejectsMultipleCredentials pins the
@@ -55,6 +58,35 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsMultipleCredentials(t *test
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"},{"credential":"eyJ.ghi.jkl"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
 	require.ErrorContains(t, err, "exactly one")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsMissingCredentialsAndTransactionID
+// pins that §8.2's two shapes are exhaustive for this path: a Credential
+// Response carrying neither the credentials array nor a transaction_id holds
+// nothing the wallet can act on and is rejected.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsMissingCredentialsAndTransactionID(t *testing.T) {
+	body := []byte(`{}`)
+	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
+	require.ErrorContains(t, err, "neither credentials nor a transaction_id")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsEmptyCredentialsArray pins
+// that §8.2 "credentials ... Contains an array of one or more issued
+// Credentials": an empty array is the missing-content case, not a valid shape.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsEmptyCredentialsArray(t *testing.T) {
+	body := []byte(`{"credentials":[]}`)
+	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
+	require.ErrorContains(t, err, "neither credentials nor a transaction_id")
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsMalformedJSON pins that a
+// body which is not a Credential Response object at all is a shape failure.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsMalformedJSON(t *testing.T) {
+	_, err := DecodeOID4VCIFinalCredentialResponse([]byte(`not json`), "application/json", CredentialResponseDecodeOptions{})
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RequireEncryptionRejectsPlaintext
@@ -64,6 +96,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RequireEncryptionRejectsPlaintext(
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{RequireEncryption: true})
 	require.ErrorContains(t, err, "unencrypted credential response")
+	require.ErrorIs(t, err, ErrCredentialResponsePlaintext)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_DecryptionKeyRejectsPlaintext pins
@@ -75,6 +108,43 @@ func TestDecodeOID4VCIFinalCredentialResponse_DecryptionKeyRejectsPlaintext(t *t
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{DecryptionKey: &key})
 	require.ErrorContains(t, err, "unencrypted credential response")
+	require.ErrorIs(t, err, ErrCredentialResponsePlaintext)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsEncryptedResponseWithoutKey
+// pins that an application/jwt response is undecryptable when the caller holds
+// no key, classified as ErrCredentialResponseDecrypt rather than as a plaintext
+// downgrade.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsEncryptedResponseWithoutKey(t *testing.T) {
+	_, err := DecodeOID4VCIFinalCredentialResponse([]byte("eyJhbGciOiJFU0..."), "application/jwt", CredentialResponseDecodeOptions{})
+	require.ErrorContains(t, err, "decryption key is required")
+	require.ErrorIs(t, err, ErrCredentialResponseDecrypt)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsMalformedJWE pins that an
+// application/jwt body which is not a parseable JWE is ErrCredentialResponseDecrypt.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsMalformedJWE(t *testing.T) {
+	key := newPrivateJWKForFinalVCITest(t, "response-enc-key-1")
+	_, err := DecodeOID4VCIFinalCredentialResponse([]byte("not-a-jwe"), "application/jwt", CredentialResponseDecodeOptions{DecryptionKey: &key})
+	require.ErrorContains(t, err, "failed to parse credential response JWE")
+	require.ErrorIs(t, err, ErrCredentialResponseDecrypt)
+}
+
+// TestDecodeOID4VCIFinalCredentialResponse_RejectsUndecryptableJWE pins that an
+// application/jwt JWE addressed to another key cannot be decrypted and is
+// classified as ErrCredentialResponseDecrypt.
+func TestDecodeOID4VCIFinalCredentialResponse_RejectsUndecryptableJWE(t *testing.T) {
+	addressee := newPrivateJWKForFinalVCITest(t, "response-enc-key-1")
+	addressee.Algorithm = "ECDH-ES"
+	addressee.Use = "enc"
+	body := encryptOID4VCIFinalCredentialResponseForTest(t, addressee, map[string]any{
+		"credentials": []any{map[string]any{"credential": "eyJ.abc.def"}},
+	})
+	otherKey := newPrivateJWKForFinalVCITest(t, "response-enc-key-2")
+
+	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/jwt", CredentialResponseDecodeOptions{DecryptionKey: &otherKey})
+	require.ErrorContains(t, err, "failed to decrypt credential response JWE")
+	require.ErrorIs(t, err, ErrCredentialResponseDecrypt)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_DecryptsEncryptedResponse is the

@@ -576,3 +576,94 @@ client-authentication and profile validators apply unchanged.
 The `official_driver` adds `receive-code-wallet-initiated` with input
 `{"operation":"receive-code-wallet-initiated","credentialIssuer":"https://issuer.example/","credentialConfigurationId":"eudi_pid"}`
 (no `uri`); its output is identical to `receive-code`.
+
+## Two-stage Final issuance: the key attestation crosses a process boundary
+
+OpenID4VCI 1.0 Appendix D binds a key attestation to the issuer's `c_nonce`, so
+a wallet whose attester is not in this process cannot sign it before the token
+exchange has happened. `ResumeOID4VCIFinalAuthorization` is now the composition
+of two calls that can be separated by that interruption, and behaves exactly as
+before:
+
+- `AuthorizeOID4VCIFinalToken(ctx, req, auth, redirectURL) (*OID4VCIFinalTokenGrant, error)`
+  validates the authorization redirect (RFC 6749 §4.1.2, RFC 9207 `iss`,
+  registered `redirect_uri`), exchanges the code at the §6.1 Token Endpoint,
+  resolves the §6.2 `credential_identifier` and fetches the §7 `c_nonce`.
+- `RequestOID4VCIFinalCredential(ctx, req, grant) (*OID4VCIFinalReceiveResult, error)`
+  performs the §8 Credential Request, the response decode and acceptance, the
+  §9 deferred transaction and the §11 notification.
+
+`OID4VCIFinalTokenGrant` is JSON-serialisable end to end — access token,
+`c_nonce`, credential identifier, issuer and authorization server metadata, the
+exported RFC 9449 §8.2 DPoP nonces and the DPoP key thumbprint — so it can be
+persisted and decoded into another `Wallet`. It carries an access token: encrypt
+it at rest and keep it out of logs and traces.
+
+Two conditions stop the credential stage and hand back state instead of a dead
+end, both reachable with `errors.As`:
+
+- `*KeyAttestationRequiredError{Grant, CNonce, HolderKeys, Audience, IssuerRequired}`
+  when `OID4VCIFinalReceiveRequest.ExternalKeyAttestation` is set, no
+  `Config.KeyAttestation` provider exists and the request carries no
+  `KeyAttestation`. Nothing has been sent. The caller signs a
+  `key-attestation+jwt` over `HolderKeys` (public) with `CNonce` and `Audience`,
+  then repeats the call with `OID4VCIFinalReceiveRequest.KeyAttestation` set.
+- `*KeyAttestationNonceError{Grant}` when the supplied attestation does not
+  match the `c_nonce` the request must carry, including after the Credential
+  Endpoint answered §8.3.1.2 `invalid_nonce`: an in-process provider would have
+  been called a second time, and here the refreshed `Grant` goes back to the
+  caller so it signs once more. Attestations are single use.
+
+`errors.Is` holds for `ErrKeyAttestationRequired` and
+`ErrKeyAttestationNonceStale`. `ErrNonceEndpointRequired` reports a HAIP issuer
+that needs a key attestation while advertising no `nonce_endpoint`;
+`ErrDPoPKeyMismatch` refuses to present a DPoP-bound token with another key.
+
+Without `ExternalKeyAttestation` nothing changes: a wallet with no provider is
+still refused before the Pushed Authorization Request when the issuer requires
+an attestation, and `ReceiveOID4VCIFinalCredential`,
+`ReceiveOID4VCIFinalCredentialContext` and `ResumeOID4VCIFinalAuthorization`
+keep their signatures and their behaviour.
+
+## OpenID4VCI 1.0 Final Pre-Authorized Code Flow
+
+`ReceiveOID4VCIFinalPreAuthorizedCredential(ctx, req OID4VCIFinalPreAuthorizedReceiveRequest)`
+runs the §4.1.1 / §6.1 Pre-Authorized Code Flow against a Final or HAIP issuer.
+It replaces the Draft-13 `ReceiveCredential` path for Final issuers: the §8
+Credential Request stage is literally the one the authorization code flow uses,
+so proofs, key attestation, `credential_response_encryption`, acceptance,
+deferred issuance and notifications behave identically.
+
+- `TxCode` is sent as `tx_code` and is REQUIRED exactly when the offer's grant
+  carries a `tx_code` object (`ErrTransactionCodeRequired`); sending one the
+  offer never declared is refused. Both are checked before the single-use
+  `pre-authorized_code` is spent.
+- `ClientID` is OPTIONAL under Final (§6.1: "authentication of the Client is
+  OPTIONAL"), so an empty value sends an anonymous token request. HAIP §4.4.1
+  requires a client authentication mechanism, so under HAIP a `client_id`, a
+  configured mechanism and a `ClientKey` are all required.
+- `ClientKey` signs the RFC 9449 DPoP proof on the token request and the one
+  RFC 9449 §8 `use_dpop_nonce` retry. Without it the flow is anonymous and only
+  a Bearer token is accepted (`RequireBearerTokenType`, which refuses a
+  DPoP-bound token with `ErrDPoPRequired` rather than downgrading it). With it
+  both schemes are accepted under Final; HAIP refuses anything but DPoP
+  ("Sender-constrained access token: MUST support DPoP"). Any other
+  `token_type` is `ErrTokenTypeUnsupported`.
+- `AuthorizeOID4VCIFinalPreAuthorizedToken` is the same two-stage split as the
+  authorization code flow, returning the same `OID4VCIFinalTokenGrant`, so the
+  key attestation can be minted in another process here too.
+
+Known limitation: attestation-based client authentication (Appendix E) travels
+in `OAuth-Client-Attestation` headers, which `receiver/types.Receiver`'s token
+request cannot carry. Under Final the grant needs no client authentication and
+the request goes out without them; under HAIP, a wallet whose only configured
+mechanism is a `ClientAttestationProvider` fails closed with
+`ErrClientAttestationNotCarried` instead of silently authenticating anonymously.
+Configure `ClientAuth` with `private_key_jwt` for HAIP Pre-Authorized Code
+issuance.
+
+The `official_driver` operation `receive-preauth` now uses this API instead of
+the Draft-13 `ReceiveCredential`, and its output matches `receive-code`:
+`credentialIds`, `verification`, `notificationId`, `transactionId`, plus
+`pending`. It signs DPoP proofs with `clientKeyFile` (as `receive-code` does)
+rather than `dpopKeyFile`.

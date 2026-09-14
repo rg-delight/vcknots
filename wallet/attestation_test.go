@@ -246,8 +246,17 @@ func TestPlanOID4VCIKeyAttestation_HAIPNamesSection(t *testing.T) {
 		},
 	}
 	w := &Wallet{profile: profile.HAIP}
-	_, err := w.planOID4VCIKeyAttestation(metadata, "pid", false)
+	_, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, false)
 	require.ErrorContains(t, err, "§4.5.1")
+
+	// A caller that mints the attestation itself has a provider, just not an
+	// in-process one, so the plan is made and the fail-closed point moves to
+	// the credential request (ErrKeyAttestationRequired).
+	plan, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, true)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.Nil(t, plan.provider)
+	require.True(t, plan.required)
 }
 
 // fixedClientAttestationProvider returns a prebuilt client attestation so tests

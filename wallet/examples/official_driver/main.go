@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -22,7 +23,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
 	"github.com/trustknots/vcknots/wallet/keystore"
@@ -415,6 +415,38 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 	})
 }
 
+// finalReceiveOutput renders an OpenID4VCI 1.0 Final issuance result. A §9
+// deferred transaction the issuer never completed is reported as pending rather
+// than as a failure, because the transaction_id it carries is what resumes it.
+func finalReceiveOutput(result *wallet.OID4VCIFinalReceiveResult, receiveErr error) (any, error) {
+	if result == nil {
+		return nil, receiveErr
+	}
+	credentialIds := make([]string, 0, len(result.SavedCredentials))
+	verification := make([]*wallet.CredentialVerification, 0, len(result.SavedCredentials))
+	for _, saved := range result.SavedCredentials {
+		if saved == nil || saved.Entry == nil {
+			continue
+		}
+		credentialIds = append(credentialIds, saved.Entry.Id)
+		verification = append(verification, saved.Verification)
+	}
+	output := map[string]any{
+		"credentialIds":  credentialIds,
+		"verification":   verification,
+		"notificationId": result.NotificationID,
+		"transactionId":  result.TransactionID,
+	}
+	if receiveErr != nil {
+		if errors.Is(receiveErr, receiverTypes.ErrIssuancePending) {
+			output["pending"] = true
+			return output, nil
+		}
+		return nil, receiveErr
+	}
+	return output, nil
+}
+
 func run(config configuration, request operation) (any, error) {
 	switch request.Name {
 	case "public-keys", "receive-preauth", "receive-code", "receive-code-wallet-initiated", "present", "present-dcapi", "list":
@@ -509,42 +541,38 @@ func run(config configuration, request operation) (any, error) {
 			receiveRequest.CredentialConfigurationID = request.CredentialConfigurationID
 		}
 		result, receiveErr := w.ReceiveOID4VCIFinalCredential(receiveRequest)
-		if result == nil {
-			return nil, receiveErr
-		}
-		credentialIds := make([]string, 0, len(result.SavedCredentials))
-		verification := make([]*wallet.CredentialVerification, 0, len(result.SavedCredentials))
-		for _, saved := range result.SavedCredentials {
-			if saved == nil || saved.Entry == nil {
-				continue
-			}
-			credentialIds = append(credentialIds, saved.Entry.Id)
-			verification = append(verification, saved.Verification)
-		}
-		output := map[string]any{
-			"credentialIds":  credentialIds,
-			"verification":   verification,
-			"notificationId": result.NotificationID,
-			"transactionId":  result.TransactionID,
-		}
-		if receiveErr != nil {
-			if errors.Is(receiveErr, receiverTypes.ErrIssuancePending) {
-				output["pending"] = true
-				return output, nil
-			}
-			return nil, receiveErr
-		}
-		return output, nil
+		return finalReceiveOutput(result, receiveErr)
 	case "receive-preauth":
 		offer, err := wallet.ParseCredentialOfferURL(request.URI)
 		if err != nil {
 			return nil, err
 		}
-		saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{CredentialOffer: offer, Type: receiverTypes.Oid4vci, Key: holder, RequestedFormat: credential.SDJwtVC, TxCode: request.TxCode})
+		holderKey, err := readPrivateJWK(config.HolderKeyFile)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"credentialId": saved.Entry.Id, "verification": saved.Verification}, nil
+		clientKey, err := readPrivateJWK(config.ClientKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		// OpenID4VCI 1.0 §4.1.1 / §6.1 through the Final API. The Draft-13
+		// ReceiveCredential path this used before spoke a different Credential
+		// Request, and this driver only ever runs the final or haip profile.
+		result, receiveErr := w.ReceiveOID4VCIFinalPreAuthorizedCredential(context.Background(), wallet.OID4VCIFinalPreAuthorizedReceiveRequest{
+			CredentialOffer: offer,
+			Type:            receiverTypes.Oid4vci,
+			TxCode:          request.TxCode,
+			// §6.1 makes client_id OPTIONAL for this grant; the driver names
+			// itself whenever the operator configured an identifier, which is
+			// what an authorization server that expects to know the client
+			// needs. HAIP requires it.
+			ClientID:              config.ClientID,
+			HolderKey:             holderKey,
+			ClientKey:             clientKey,
+			IncludeKeyAttestation: config.IncludeKeyAttestation,
+			DeferredPollAttempts:  config.deferredPollAttempts(),
+		})
+		return finalReceiveOutput(result, receiveErr)
 	case "present":
 		redirectURI, err := w.PresentCredential(request.URI, holder, nil)
 		if err != nil {

@@ -670,6 +670,22 @@ type OID4VCIFinalReceiveRequest struct {
 	// proof_types_supported.jwt.key_attestations_required. It is ignored when
 	// no KeyAttestation provider is configured.
 	IncludeKeyAttestation bool
+	// ExternalKeyAttestation declares that the Appendix D key attestation is
+	// minted outside this process, so no Config.KeyAttestation provider is
+	// needed. The two-stage AuthorizeOID4VCIFinalToken /
+	// RequestOID4VCIFinalCredential pair then stops before the Credential
+	// Request with a *KeyAttestationRequiredError carrying the c_nonce and the
+	// public holder keys to attest, and the caller repeats
+	// RequestOID4VCIFinalCredential with KeyAttestation set. Without it a
+	// wallet that has no provider refuses an issuer that requires a key
+	// attestation before anything is sent.
+	ExternalKeyAttestation bool
+	// KeyAttestation is an Appendix D key attestation the caller obtained out
+	// of process for this issuance, answering a *KeyAttestationRequiredError
+	// or a *KeyAttestationNonceError. It takes precedence over a configured
+	// Config.KeyAttestation provider, and its nonce claim must equal the
+	// c_nonce of the OID4VCIFinalTokenGrant it is presented with.
+	KeyAttestation *KeyAttestation
 	// DeferredPollAttempts is the number of §9 deferred credential endpoint
 	// polls. Zero means do not poll and return an IssuancePending result the
 	// caller can resume with ResumeOID4VCIFinalDeferredCredential.

@@ -59,9 +59,15 @@ type CredentialResponseDecodeOptions struct {
 //     "MUST not be used if the credentials parameter is present".
 //   - more than one credential. This build receives exactly one credential per
 //     request (batch issuance is not enabled on this path).
+//   - neither credentials nor a transaction_id. §8.2 issues either the
+//     immediate credentials array or the §9 deferred transaction_id, so an
+//     empty response carries nothing the wallet can act on.
 //
 // A response carrying only a transaction_id (and no credentials) is the §9
 // deferred shape and is accepted.
+//
+// Every rejection wraps ErrCredentialResponseShape, so callers classify the
+// failure with errors.Is rather than matching message text.
 func ValidateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse) error {
 	return validateOID4VCIFinalCredentialResponse(r, false)
 }
@@ -70,31 +76,35 @@ func ValidateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse)
 // allowLegacyShape restores the pre-Final shape the high-level wallet path
 // historically accepted (the singular credential member, a credentials array of
 // bare strings, and more than one credential, which §14.6 batch issuance needs);
-// the transaction_id/credentials exclusivity rule is enforced either way.
+// the transaction_id/credentials exclusivity rule is enforced either way. Each
+// rejection wraps ErrCredentialResponseShape.
 func validateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse, allowLegacyShape bool) error {
 	if r == nil {
-		return fmt.Errorf("credential response is nil")
+		return fmt.Errorf("%w: credential response is nil", ErrCredentialResponseShape)
 	}
 	if r.TransactionID != "" && (r.Credential != nil || len(r.Credentials) > 0) {
-		return fmt.Errorf("credential response contained both transaction_id and credential content")
+		return fmt.Errorf("%w: credential response contained both transaction_id and credential content", ErrCredentialResponseShape)
 	}
 	if allowLegacyShape {
 		return nil
 	}
 	if r.Credential != nil {
-		return fmt.Errorf("credential response used the removed singular credential member; OpenID4VCI 1.0 §8.2 requires the credentials array")
+		return fmt.Errorf("%w: credential response used the removed singular credential member; OpenID4VCI 1.0 §8.2 requires the credentials array", ErrCredentialResponseShape)
 	}
 	if len(r.Credentials) > 1 {
-		return fmt.Errorf("credential response contained %d credentials, but this build receives exactly one", len(r.Credentials))
+		return fmt.Errorf("%w: credential response contained %d credentials, but this build receives exactly one", ErrCredentialResponseShape, len(r.Credentials))
 	}
 	for index, value := range r.Credentials {
 		object, ok := value.(map[string]any)
 		if !ok {
-			return fmt.Errorf("credential response contained an unsupported credential shape at credentials[%d] (%T); §8.2 requires objects", index, value)
+			return fmt.Errorf("%w: credential response contained an unsupported credential shape at credentials[%d] (%T); §8.2 requires objects", ErrCredentialResponseShape, index, value)
 		}
 		if _, ok := object["credential"]; !ok {
-			return fmt.Errorf("credential response object at credentials[%d] does not contain a credential member", index)
+			return fmt.Errorf("%w: credential response object at credentials[%d] does not contain a credential member", ErrCredentialResponseShape, index)
 		}
+	}
+	if r.TransactionID == "" && len(r.Credentials) == 0 {
+		return fmt.Errorf("%w: credential response contained neither credentials nor a transaction_id; OpenID4VCI 1.0 §8.2 issues one or the other", ErrCredentialResponseShape)
 	}
 	return nil
 }
@@ -110,15 +120,21 @@ func validateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse,
 // package's own §14.6 batch path; an integrator receives the strict Final
 // shape. Callers that need to validate an already-decoded response can call
 // ValidateOID4VCIFinalCredentialResponse directly.
+//
+// Every rejection wraps a sentinel: ErrCredentialResponsePlaintext for a
+// plaintext body when encryption was required or requested,
+// ErrCredentialResponseDecrypt for a JWE that cannot be parsed or decrypted,
+// and ErrCredentialResponseShape for a body that does not match the §8.2
+// shape. Callers classify the failure with errors.Is.
 func DecodeOID4VCIFinalCredentialResponse(body []byte, contentType string, opts CredentialResponseDecodeOptions) (*receiverTypes.CredentialResponse, error) {
 	payload := body
 	encrypted := strings.Contains(strings.ToLower(contentType), "application/jwt")
 	if !encrypted && (opts.RequireEncryption || opts.DecryptionKey != nil) {
-		return nil, fmt.Errorf("issuer returned an unencrypted credential response although response encryption was required")
+		return nil, fmt.Errorf("%w: issuer returned an unencrypted credential response although response encryption was required", ErrCredentialResponsePlaintext)
 	}
 	if encrypted {
 		if opts.DecryptionKey == nil {
-			return nil, fmt.Errorf("decryption key is required for encrypted credential response")
+			return nil, fmt.Errorf("%w: decryption key is required for encrypted credential response", ErrCredentialResponseDecrypt)
 		}
 		keyAlgorithms := opts.AllowedKeyAlgorithms
 		if len(keyAlgorithms) == 0 {
@@ -130,16 +146,16 @@ func DecodeOID4VCIFinalCredentialResponse(body []byte, contentType string, opts 
 		}
 		jwe, err := jose.ParseEncrypted(string(body), keyAlgorithms, contentEncryptions)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse credential response JWE: %w", err)
+			return nil, fmt.Errorf("%w: failed to parse credential response JWE: %w", ErrCredentialResponseDecrypt, err)
 		}
 		payload, err = jwe.Decrypt(opts.DecryptionKey.Key)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt credential response JWE: %w", err)
+			return nil, fmt.Errorf("%w: failed to decrypt credential response JWE: %w", ErrCredentialResponseDecrypt, err)
 		}
 	}
 	var response receiverTypes.CredentialResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse credential response JSON: %w", err)
+		return nil, fmt.Errorf("%w: failed to parse credential response JSON: %w", ErrCredentialResponseShape, err)
 	}
 	if err := validateOID4VCIFinalCredentialResponse(&response, opts.allowLegacyCredentialShape); err != nil {
 		return nil, err

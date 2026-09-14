@@ -29,7 +29,7 @@ This Go wallet implements OpenID4VCI 1.0 and OpenID4VP 1.0. HAIP 1.0 is availabl
 
 | Protocol / feature | Status | Public API entry point | Notes |
 | --- | --- | --- | --- |
-| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveCredential` (`ReceiveCredentialRequest`) | Also the legacy Draft 13 entry point. The public driver exposes it as `receive-preauth`. |
+| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveOID4VCIFinalPreAuthorizedCredential` (`OID4VCIFinalPreAuthorizedReceiveRequest`); `Wallet.ReceiveCredential` is the legacy Draft 13 entry point | `tx_code` is required exactly when the offer declares one; `client_id` is optional under Final and required under HAIP; DPoP is used whenever a `ClientKey` is supplied and is mandatory under HAIP. The public driver exposes it as `receive-preauth`. |
 | OpenID4VCI 1.0 authorization code with PAR / PKCE / DPoP / `private_key_jwt` / client attestation | Implemented | `Wallet.BeginOID4VCIFinalAuthorization` + `Wallet.ResumeOID4VCIFinalAuthorization`, or `Wallet.ReceiveOID4VCIFinalCredential` (`OID4VCIFinalReceiveRequest`) | Pushed Authorization Request is used when the authorization server advertises one and is required only under HAIP (HAIP §4); PKCE is always `S256`; DPoP is configured with `Config.DPoP` and `ClientKey`; `private_key_jwt` is used when the authorization server advertises it; attestation-based client authentication uses `Config.ClientAttestation`. |
 | Deferred issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`DeferredPollAttempts`), `Wallet.ResumeOID4VCIFinalDeferredCredential` | Polls at the advertised interval, capped at 60 seconds (`MaxDeferredInterval` overrides it) and cancellable through the `…Context` variants, and returns a pending result when the attempt budget is exhausted. The deferred request repeats `credential_response_encryption` (§9.1). The `OID4VCIFinalDeferredRequest` can resume in another process. |
 | Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted` (`OID4VCIFinalNotificationRequest`) | Sends `credential_deleted`. `credential_accepted` and `credential_failure` are sent internally by `storeAndNotifyOID4VCIFinalCredentials` only after storage has succeeded or failed. |
@@ -134,16 +134,55 @@ request.AllowSelfDrivenAuthorization = true
 result, err := w.ReceiveOID4VCIFinalCredentialContext(ctx, request)
 ```
 
-```go
+A pre-authorized code needs no browser, so the whole OpenID4VCI 1.0 §4.1.1 /
+§6.1 flow runs in one call. `ClientID` and `ClientKey` are optional under Final
+(§6.1 makes client authentication OPTIONAL for this grant) and required under
+HAIP; without a `ClientKey` the wallet is anonymous and only a Bearer access
+token is accepted.
 
-saved, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
-	CredentialOffer: offer,
-	Type:            receiverTypes.Oid4vci,
-	Key:             holder,
-	RequestedFormat: credential.SDJwtVC,
-	TxCode:          txCode,
+```go
+result, err := w.ReceiveOID4VCIFinalPreAuthorizedCredential(ctx, wallet.OID4VCIFinalPreAuthorizedReceiveRequest{
+	CredentialOffer:      offer,
+	Type:                 receiverTypes.Oid4vci,
+	TxCode:               txCode, // required exactly when the offer carries a tx_code object
+	ClientID:             clientID,
+	HolderKey:            holderKey,
+	ClientKey:            clientKey,
+	DeferredPollAttempts: 10,
 })
 ```
+
+#### Signing the key attestation in another process
+
+OpenID4VCI 1.0 Appendix D binds a key attestation to the issuer's `c_nonce`, so
+a wallet whose attester lives elsewhere cannot sign it up front. Both flows
+split at that point: `AuthorizeOID4VCIFinalToken` (or
+`AuthorizeOID4VCIFinalPreAuthorizedToken`) returns a JSON-serialisable
+`OID4VCIFinalTokenGrant`, and `RequestOID4VCIFinalCredential` spends it. The
+grant holds an access token, so persist it encrypted and keep it out of logs.
+
+```go
+request.ExternalKeyAttestation = true
+grant, err := w.AuthorizeOID4VCIFinalToken(ctx, request, authorization, redirectURLFromBrowser)
+
+result, err := w.RequestOID4VCIFinalCredential(ctx, request, grant)
+var required *wallet.KeyAttestationRequiredError
+if errors.As(err, &required) {
+	// sign a key-attestation+jwt over required.HolderKeys with required.CNonce
+	// and required.Audience, wherever the attester key lives
+	request.KeyAttestation = &wallet.KeyAttestation{JWT: signed}
+	result, err = w.RequestOID4VCIFinalCredential(ctx, request, required.Grant)
+}
+var stale *wallet.KeyAttestationNonceError
+if errors.As(err, &stale) {
+	// the issuer answered invalid_nonce: sign once more for stale.Grant.CNonce
+}
+```
+
+`ResumeOID4VCIFinalAuthorization` and
+`ReceiveOID4VCIFinalPreAuthorizedCredential` are those two calls back to back,
+so a wallet with an in-process `Config.KeyAttestation` provider never sees the
+split.
 
 Present through a launch URI, or answer a W3C Digital Credentials API invocation:
 

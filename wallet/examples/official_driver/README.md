@@ -136,8 +136,10 @@ JSON
 JSON
 ```
 
-`receive-preauth` returns the saved `credentialId` plus the library's
-`verification` record for that credential. `receive-code` runs the OpenID4VCI 1.0
+`receive-preauth` runs the OpenID4VCI 1.0 Final Pre-Authorized Code Flow
+(`ReceiveOID4VCIFinalPreAuthorizedCredential`), sending `txCode` as `tx_code`,
+naming the client with `clientId` and signing DPoP proofs with `clientKeyFile`.
+Its output is the same as `receive-code`. `receive-code` runs the OpenID4VCI 1.0
 Final authorization code flow from the offer URI (`credential_offer_uri` is
 resolved), using `clientId`, `redirectUri`, `holderKeyFile` and `clientKeyFile`,
 and returns `credentialIds`, a `verification` array in credential order, plus
