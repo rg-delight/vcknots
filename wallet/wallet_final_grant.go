@@ -208,6 +208,18 @@ func isDPoPAccessToken(token *receiverTypes.CredentialIssuanceAccessToken) bool 
 	return token != nil && strings.EqualFold(strings.TrimSpace(token.TokenType), dpopTokenType)
 }
 
+// requireOID4VCIFinalTokenType applies the §6.1 token_type rule to a Token
+// Response the wallet holds a client key for: the access token is presented
+// either as an RFC 6750 §2.1 Bearer token or as an RFC 9449 §7.1 DPoP-bound
+// one, and any other scheme — including a missing token_type — is
+// ErrTokenTypeUnsupported instead of a silent fallback to Bearer.
+func requireOID4VCIFinalTokenType(token *receiverTypes.CredentialIssuanceAccessToken) error {
+	if isDPoPAccessToken(token) || strings.EqualFold(strings.TrimSpace(token.TokenType), "Bearer") {
+		return nil
+	}
+	return fmt.Errorf("token response returned token_type %q: %w", token.TokenType, ErrTokenTypeUnsupported)
+}
+
 // newOID4VCIFinalTokenGrant collects the Token Response, the §6.2
 // credential_identifier and the §7 c_nonce into the state the credential stage
 // resumes from. The c_nonce is fetched here, before the interruption, because
@@ -220,6 +232,14 @@ func (w *Wallet) newOID4VCIFinalTokenGrant(
 	clientKey jose.JSONWebKey,
 ) (*OID4VCIFinalTokenGrant, error) {
 	issuerMetadata := flow.issuerMetadata
+	// §6.1 makes token_type REQUIRED ("The type of the access token"), and the
+	// wallet can only present the two schemes it holds a presentation rule for:
+	// RFC 6750 §2.1 Bearer and RFC 9449 §7.1 DPoP. Anything else is refused
+	// here rather than silently presented as a Bearer token. HAIP has already
+	// refused everything but DPoP inside the transport.
+	if err := requireOID4VCIFinalTokenType(token); err != nil {
+		return nil, err
+	}
 	credentialIdentifier, err := CredentialIdentifierForConfiguration(token, flow.credentialConfigurationID, flow.authorizationDetailsMode)
 	if err != nil {
 		return nil, err
@@ -786,8 +806,8 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 	// MUST support DPoP"); under Final an unknown token_type is still refused,
 	// because §6.1 makes token_type REQUIRED and the wallet holds no other
 	// scheme to present the token with.
-	if !isDPoPAccessToken(token) && !strings.EqualFold(strings.TrimSpace(token.TokenType), "Bearer") {
-		return nil, fmt.Errorf("token response returned token_type %q: %w", token.TokenType, ErrTokenTypeUnsupported)
+	if err := requireOID4VCIFinalTokenType(token); err != nil {
+		return nil, err
 	}
 	return token, nil
 }

@@ -422,8 +422,54 @@ func TestReceiveOID4VCIFinalPreAuthorizedCredentialRejectsBearerUnderHAIP(t *tes
 	req.ClientKey = fixture.clientKey
 
 	_, err := fixture.wallet.ReceiveOID4VCIFinalPreAuthorizedCredential(context.Background(), req)
-	require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
+	require.ErrorIs(t, err, oid4vci.ErrDPoPRequired)
 	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// The same rule on the two-stage Pre-Authorized Code API: the token stage is
+// where the token_type arrives, so that is where the profile refuses it.
+func TestAuthorizeOID4VCIFinalPreAuthorizedTokenRejectsBearerUnderHAIP(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t, bearerTokenResponse)
+	req := fixture.preAuthorizedRequest(t, nil)
+	req.ClientID = "client-1"
+	req.ClientKey = fixture.clientKey
+
+	_, err := fixture.wallet.AuthorizeOID4VCIFinalPreAuthorizedToken(context.Background(), req)
+	require.ErrorIs(t, err, oid4vci.ErrDPoPRequired)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// And on the authorization code path, where the browser callback is valid and
+// only the Token Response is not what HAIP requires.
+func TestAuthorizeOID4VCIFinalTokenRejectsBearerUnderHAIP(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t, bearerTokenResponse)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization,
+		fixture.authorizeRedirect(fixture.server.URL))
+	require.ErrorIs(t, err, oid4vci.ErrDPoPRequired)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// §6.1 makes token_type REQUIRED and the wallet presents only Bearer and DPoP,
+// so an unknown scheme is refused on the authorization code path too instead of
+// being presented as a Bearer token.
+func TestAuthorizeOID4VCIFinalTokenRejectsUnknownTokenType(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenResponse = map[string]any{"access_token": "access-1", "token_type": "Mac", "expires_in": 3600}
+	})
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization,
+		fixture.authorizeRedirect(fixture.server.URL))
+	require.ErrorIs(t, err, ErrTokenTypeUnsupported)
 	require.Equal(t, 0, fixture.credentialCalls)
 }
 

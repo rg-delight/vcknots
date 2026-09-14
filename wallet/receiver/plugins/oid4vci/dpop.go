@@ -90,10 +90,15 @@ func (o *Oid4vciReceiver) ImportDPoPNonces(nonces map[string]string) {
 
 // requireDPoPTokenType enforces HAIP §4 "Sender-constrained access token: MUST
 // support DPoP" on a parsed token response. A token_type other than DPoP
-// (case-insensitive) cannot bind the access token to the wallet's key.
+// (case-insensitive) cannot bind the access token to the wallet's key, so it is
+// reported as ErrDPoPRequired: under HAIP a plain RFC 6750 Bearer token is not
+// a weaker token the wallet may still present, it is the absence of the
+// sender-constraint the profile requires.
 func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
-	if normalized.IsHAIP() && !strings.EqualFold(strings.TrimSpace(tokenType), "DPoP") {
-		return fmt.Errorf("HAIP requires a DPoP-bound access token")
+	if normalized.IsHAIP() && !strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
+		return fmt.Errorf(
+			"%w: HAIP requires a DPoP-bound access token, the token endpoint issued token_type %q",
+			ErrDPoPRequired, tokenType)
 	}
 	return nil
 }
