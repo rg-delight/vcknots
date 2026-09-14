@@ -775,6 +775,86 @@ admission 時に `request_uri` で署名付き Request Object を取得し、後
 
 `PresentCredentialToDCAPI` は W3C Digital Credentials API の invocation に応答します。`ParseDCAPIRequest` は `openid4vp-v1-unsigned`、`openid4vp-v1-signed`、`openid4vp-v1-multisigned` に対応し、platform が認証した `origin` は呼出し側が渡します（request data からは読みません）。応答は `BuildDCAPIResponse` が返し、`dc_api` は `{"vp_token": {...}}`、`dc_api.jwt` は compact JWE です。KB-JWT の `aud` は `origin:<origin>` です（OID4VP 1.0 Appendix A.4）。library に browser / OS 連携はなく、この経路で HTTP 呼出しもしません。
 
+## エラーコード
+
+このライブラリが公開 API から返すエラーは、すべて自身の条件を安定した機械可読
+コードで表す。アプリケーションは Go のエラーメッセージを文字列照合せずに条件で
+分岐でき、プロセス・トランスポート・言語の境界を越えてもコードはそのまま運べる。
+
+```go
+type CodedError interface {
+    error
+    ErrorCode() string
+}
+
+func ErrorCode(err error) (string, bool)
+```
+
+`wallet.ErrorCode` はチェーンをたどり、最も外側の `CodedError` のコードと、
+見つかったかどうかを返す。ライブラリが分類していないエラー（そのまま通過させる
+トランスポート障害など）は `("", false)` を返すので、呼び出し側はライブラリが
+到達していない判定を報告せず、自前のフォールバックを保てる。最も外側が勝つのは、
+他のエラーを包みつつコードを名乗るエラーは包んだ対象を分類済みだからである。
+`*x509.SigningChainError` は下層の `*x509.CRLCheckError` に委ねるため、失効した
+証明書は汎用の経路失敗ではなく `x509_chain_revoked` になる。
+
+コードは lower_snake_case の ASCII で、ライブラリ全体で一意である。メッセージは
+書き換えてよいが、コードを別の条件に再利用してはならない。メソッド名が `Code`
+ではなく `ErrorCode` なのは、これを実装するエラーのいくつかが `Code` という
+フィールドでプロトコル上の `error` コードを既に持つためである。両者は別物で、
+フィールドは相手が送ってきた値、`ErrorCode` はこのライブラリが下した判断を表す。
+
+センチネルはコードを持ち（`errors.Is` は従来どおり成立する）、型付きエラーは
+報告する条件からコードを導く。
+
+| エラー | コード |
+| --- | --- |
+| `*AuthorizationResponseError` | `authorization_error_response` |
+| `*oid4vci.EndpointError` | `Stage` に応じて `issuer_metadata_fetch_failed` / `authorization_server_metadata_fetch_failed` / `pushed_authorization_request_failed` / `token_endpoint_rejected` / `nonce_request_failed` |
+| `*types.CredentialEndpointError` | `invalid_nonce` の拒否は `credential_nonce_rejected`、それ以外は `credential_endpoint_rejected` |
+| `*oid4vp.AuthorizationRequestError` | `oid4vp_request_rejected` |
+| `*oid4vp.VerifierResponseError` | `verifier_response_rejected` |
+| `*x509.SigningChainError` | 失効エラーを包むときは下記の失効コード、それ以外は `x509_chain_untrusted` |
+| `*x509.CRLCheckError` | `x509_chain_revoked` / `crl_budget_exhausted` / それ以外は `x509_chain_revocation_unknown` |
+
+OpenID4VCI と OpenID4VP の経路が報告するプロトコル条件は次のとおり。
+
+* **認可レスポンス** — `authorization_redirect_invalid`,
+  `authorization_redirect_uri_mismatch`, `authorization_state_mismatch`,
+  `authorization_iss_mismatch`, `authorization_iss_missing`,
+  `authorization_code_missing`, `authorization_request_uri_expired`,
+  `authorization_details_missing`
+* **発行** — `key_attestation_required`, `key_attestation_invalid`,
+  `key_attestation_nonce_stale`, `client_attestation_invalid`,
+  `nonce_endpoint_required`, `token_type_unsupported`, `dpop_required`,
+  `dpop_key_mismatch`, `pre_authorized_grant_missing`,
+  `transaction_code_required`, `unknown_credential_configuration`,
+  `proof_algorithm_not_supported`, `http_redirect_not_allowed`
+* **Credential Response** — `credential_response_plaintext`,
+  `credential_response_decrypt_failed`, `credential_response_shape_invalid`
+* **Issuer メタデータ** — `issuer_metadata_identity_mismatch`,
+  `issuer_metadata_signature_invalid`, `issuer_metadata_signature_required`,
+  `issuer_metadata_subject_mismatch`, `issuer_metadata_leaf_dns_mismatch`,
+  `issuer_metadata_expired`
+* **Credential の受理** — `credential_parse_failed`, `credential_typ_invalid`,
+  `credential_alg_unsupported`, `credential_holder_binding_missing`,
+  `credential_holder_binding_mismatch`,
+  `credential_holder_binding_unsupported`, `issuer_key_unresolved`,
+  `issuer_signature_invalid`, `issuer_dns_binding_failed`,
+  `credential_expired`, `credential_not_yet_valid`,
+  `disclosure_integrity_failed`, `sd_alg_unsupported`, `haip_x5c_required`,
+  `haip_trust_anchor_in_x5c`, `credential_acceptance_policy_required`
+* **Request Object の認証** — `request_object_typ_invalid`,
+  `request_object_signature_invalid`, `request_object_audience_mismatch`,
+  `request_object_expired`, `request_object_client_id_mismatch`,
+  `x509_hash_mismatch`, `haip_request_uri_required`, `response_uri_invalid`,
+  `error_description_invalid`, `pre_registered_client_unknown`,
+  `dcql_selection_unsatisfied`
+
+コンポーネントのパッケージ（`keystore`, `credstore`, `serializer`, `verifier`,
+`presenter`, `idprof`, `clientconfig`）は自身のコードにコンポーネント名を接頭辞
+として付けるため、保存や鍵の失敗がプロトコルの判定と取り違えられることはない。
+
 ## 環境変数
 
 Wallet の実行時挙動は `wallet/env/env.go` で定義された環境変数で制御されます。

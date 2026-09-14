@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,7 +116,7 @@ var oid4vciHTTPClient = &http.Client{Timeout: 15 * time.Second, CheckRedirect: r
 // response chose, and a redirected metadata document substitutes the Credential
 // Issuer's identity for another. The root wallet package cannot be imported from
 // a plugin, so it declares its own alias of this sentinel.
-var ErrHTTPRedirectNotAllowed = errors.New("OID4VCI endpoint redirected; redirects are not followed")
+var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
 
 // rejectOID4VCIRedirect refuses to follow a redirect on any OpenID4VCI request,
 // metadata retrieval included. Credential Issuer Metadata is fetched from the

@@ -2,28 +2,29 @@ package types
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/credential"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // Sentinel errors for credential store operations
 var (
-	ErrCredentialNotFound     = errors.New("credential not found")
-	ErrInvalidCredentialID    = errors.New("invalid credential ID")
-	ErrCredentialExists       = errors.New("credential already exists")
-	ErrInvalidCredentialEntry = errors.New("invalid credential entry")
-	ErrStorageFailed          = errors.New("storage operation failed")
-	ErrRetrievalFailed        = errors.New("credential retrieval failed")
-	ErrSerializationFailed    = errors.New("credential serialization failed")
-	ErrDeserializationFailed  = errors.New("credential deserialization failed")
-	ErrInvalidLocation        = errors.New("invalid storage location")
-	ErrInvalidMimeType        = errors.New("invalid or unsupported MIME type")
-	ErrStorageCorrupted       = errors.New("storage data corrupted")
-	ErrPluginNotFound         = errors.New("credential store plugin not found")
-	ErrNilPlugin              = errors.New("credential store plugin cannot be nil")
+	ErrCredentialNotFound     = common.NewCodedError("credstore_credential_not_found", "credential not found")
+	ErrInvalidCredentialID    = common.NewCodedError("credstore_invalid_credential_id", "invalid credential ID")
+	ErrCredentialExists       = common.NewCodedError("credstore_credential_exists", "credential already exists")
+	ErrInvalidCredentialEntry = common.NewCodedError("credstore_invalid_credential_entry", "invalid credential entry")
+	ErrStorageFailed          = common.NewCodedError("credstore_storage_failed", "storage operation failed")
+	ErrRetrievalFailed        = common.NewCodedError("credstore_retrieval_failed", "credential retrieval failed")
+	ErrSerializationFailed    = common.NewCodedError("credstore_serialization_failed", "credential serialization failed")
+	ErrDeserializationFailed  = common.NewCodedError("credstore_deserialization_failed", "credential deserialization failed")
+	ErrInvalidLocation        = common.NewCodedError("credstore_invalid_location", "invalid storage location")
+	ErrInvalidMimeType        = common.NewCodedError("credstore_invalid_mime_type", "invalid or unsupported MIME type")
+	ErrStorageCorrupted       = common.NewCodedError("credstore_storage_corrupted", "storage data corrupted")
+	ErrPluginNotFound         = common.NewCodedError("credstore_plugin_not_found", "credential store plugin not found")
+	ErrNilPlugin              = common.NewCodedError("credstore_nil_plugin", "credential store plugin cannot be nil")
 )
 
 // CredStoreError represents an error during credential store operations

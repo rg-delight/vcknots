@@ -7,11 +7,11 @@ import (
 
 // Common error types that can be used across all components
 var (
-	ErrNotImplemented = errors.New("not implemented")
-	ErrInvalidInput   = errors.New("invalid input")
-	ErrInternalError  = errors.New("internal error")
-	ErrTimeout        = errors.New("operation timeout")
-	ErrCancelled      = errors.New("operation cancelled")
+	ErrNotImplemented = NewCodedError("not_implemented", "not implemented")
+	ErrInvalidInput   = NewCodedError("invalid_input", "invalid input")
+	ErrInternalError  = NewCodedError("internal_error", "internal error")
+	ErrTimeout        = NewCodedError("timeout", "operation timeout")
+	ErrCancelled      = NewCodedError("cancelled", "operation cancelled")
 )
 
 // ComponentError represents a generic error for any component

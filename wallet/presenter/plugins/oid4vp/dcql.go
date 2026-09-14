@@ -70,6 +70,13 @@ func (e *AuthorizationRequestError) Error() string {
 	return fmt.Sprintf("%s: %v", e.Code, e.Err)
 }
 
+// ErrorCode names the outcome: the Wallet terminated request processing and
+// answered the Verifier with an OAuth 2.0 Authorization Error Response. Code
+// carries the OID4VP error the Verifier is told; this names what happened.
+func (e *AuthorizationRequestError) ErrorCode() string {
+	return "oid4vp_request_rejected"
+}
+
 func (e *AuthorizationRequestError) Unwrap() error {
 	return e.Err
 }

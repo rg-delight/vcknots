@@ -1,23 +1,24 @@
 package types
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // Sentinel errors for presentation operations
 var (
-	ErrUnsupportedProtocol  = errors.New("unsupported presentation protocol")
-	ErrInvalidEndpoint      = errors.New("invalid presentation endpoint")
-	ErrInvalidPresentation  = errors.New("invalid presentation data")
-	ErrPresentationFailed   = errors.New("presentation submission failed")
-	ErrNetworkFailed        = errors.New("network request failed")
-	ErrInvalidResponse      = errors.New("invalid response from verifier")
-	ErrTimeoutExpired       = errors.New("presentation request timeout expired")
-	ErrAuthenticationFailed = errors.New("authentication failed")
-	ErrPluginNotFound       = errors.New("presenter plugin not found")
-	ErrNilPlugin            = errors.New("presenter plugin cannot be nil")
+	ErrUnsupportedProtocol  = common.NewCodedError("presenter_unsupported_protocol", "unsupported presentation protocol")
+	ErrInvalidEndpoint      = common.NewCodedError("presenter_invalid_endpoint", "invalid presentation endpoint")
+	ErrInvalidPresentation  = common.NewCodedError("presenter_invalid_presentation", "invalid presentation data")
+	ErrPresentationFailed   = common.NewCodedError("presenter_presentation_failed", "presentation submission failed")
+	ErrNetworkFailed        = common.NewCodedError("presenter_network_failed", "network request failed")
+	ErrInvalidResponse      = common.NewCodedError("presenter_invalid_response", "invalid response from verifier")
+	ErrTimeoutExpired       = common.NewCodedError("presenter_timeout_expired", "presentation request timeout expired")
+	ErrAuthenticationFailed = common.NewCodedError("presenter_authentication_failed", "authentication failed")
+	ErrPluginNotFound       = common.NewCodedError("presenter_plugin_not_found", "presenter plugin not found")
+	ErrNilPlugin            = common.NewCodedError("presenter_nil_plugin", "presenter plugin cannot be nil")
 )
 
 // PresenterError represents an error during presentation operations

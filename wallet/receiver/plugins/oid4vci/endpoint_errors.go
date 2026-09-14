@@ -75,6 +75,30 @@ func (e *EndpointError) Error() string {
 	return prefix + ": " + e.Err.Error()
 }
 
+// ErrorCode names the endpoint that did not answer with the document the flow
+// needs. The stage is the classification: a caller reports which step of the
+// issuance the Credential Issuer or the authorization server refused without
+// keeping its own record of the requests this package performed.
+func (e *EndpointError) ErrorCode() string {
+	if e == nil {
+		return "oid4vci_endpoint_failed"
+	}
+	switch e.Stage {
+	case StageIssuerMetadata:
+		return "issuer_metadata_fetch_failed"
+	case StageAuthorizationServerMetadata:
+		return "authorization_server_metadata_fetch_failed"
+	case StagePAR:
+		return "pushed_authorization_request_failed"
+	case StageToken:
+		return "token_endpoint_rejected"
+	case StageNonce:
+		return "nonce_request_failed"
+	default:
+		return "oid4vci_endpoint_failed"
+	}
+}
+
 func (e *EndpointError) Unwrap() error {
 	if e == nil {
 		return nil

@@ -751,6 +751,90 @@ This entry point receives no `request_uri_method` and echoes no `wallet_nonce`, 
 
 `PresentCredentialToDCAPI` answers a W3C Digital Credentials API invocation. `ParseDCAPIRequest` accepts `openid4vp-v1-unsigned`, `openid4vp-v1-signed` and `openid4vp-v1-multisigned`; the caller supplies the platform-authenticated `origin`, which is never read from the request data. The response is returned by `BuildDCAPIResponse`: `{"vp_token": {...}}` for `dc_api`, or a compact JWE for `dc_api.jwt`. The Key Binding JWT `aud` is `origin:<origin>` (OID4VP 1.0 Appendix A.4). The library makes no browser or OS integration and no HTTP call in this path.
 
+## Error codes
+
+Every error this library returns from a public API names its own condition with
+a stable, machine-readable code, so an application can branch on it — or carry
+it across a process, transport or language boundary — without matching Go error
+text:
+
+```go
+type CodedError interface {
+    error
+    ErrorCode() string
+}
+
+func ErrorCode(err error) (string, bool)
+```
+
+`wallet.ErrorCode` walks the chain and returns the code of the outermost
+`CodedError` it finds, and whether it found one. An error the library did not
+classify — a transport failure it passes through unchanged — reports `("",
+false)`, so a caller keeps its own fallback instead of reporting a verdict the
+library did not reach. The outermost code wins because an error that wraps
+another and still names a code has classified what it wraps:
+`*x509.SigningChainError` defers to the `*x509.CRLCheckError` underneath it, so
+a revoked certificate is `x509_chain_revoked` rather than a generic path
+failure.
+
+Codes are lower_snake_case ASCII and unique across the library. A message may be
+reworded; a code may not be reused for another condition. The method is
+`ErrorCode` rather than `Code` because several of the errors that implement it
+already carry a protocol `error` code in a field named `Code` — those two values
+are not the same thing: the field is what the peer sent, `ErrorCode` is what
+this library concluded.
+
+Sentinels carry their code (`errors.Is` still holds), and the typed errors
+derive theirs from the condition they report:
+
+| Error | Code |
+| --- | --- |
+| `*AuthorizationResponseError` | `authorization_error_response` |
+| `*oid4vci.EndpointError` | `issuer_metadata_fetch_failed`, `authorization_server_metadata_fetch_failed`, `pushed_authorization_request_failed`, `token_endpoint_rejected`, `nonce_request_failed` (by `Stage`) |
+| `*types.CredentialEndpointError` | `credential_nonce_rejected` for an `invalid_nonce` refusal, otherwise `credential_endpoint_rejected` |
+| `*oid4vp.AuthorizationRequestError` | `oid4vp_request_rejected` |
+| `*oid4vp.VerifierResponseError` | `verifier_response_rejected` |
+| `*x509.SigningChainError` | the revocation code below when it wraps one, otherwise `x509_chain_untrusted` |
+| `*x509.CRLCheckError` | `x509_chain_revoked`, `crl_budget_exhausted`, otherwise `x509_chain_revocation_unknown` |
+
+The protocol conditions the OpenID4VCI and OpenID4VP paths report:
+
+* **Authorization response** — `authorization_redirect_invalid`,
+  `authorization_redirect_uri_mismatch`, `authorization_state_mismatch`,
+  `authorization_iss_mismatch`, `authorization_iss_missing`,
+  `authorization_code_missing`, `authorization_request_uri_expired`,
+  `authorization_details_missing`.
+* **Issuance** — `key_attestation_required`, `key_attestation_invalid`,
+  `key_attestation_nonce_stale`, `client_attestation_invalid`,
+  `nonce_endpoint_required`, `token_type_unsupported`, `dpop_required`,
+  `dpop_key_mismatch`, `pre_authorized_grant_missing`,
+  `transaction_code_required`, `unknown_credential_configuration`,
+  `proof_algorithm_not_supported`, `http_redirect_not_allowed`.
+* **Credential Response** — `credential_response_plaintext`,
+  `credential_response_decrypt_failed`, `credential_response_shape_invalid`.
+* **Issuer metadata** — `issuer_metadata_identity_mismatch`,
+  `issuer_metadata_signature_invalid`, `issuer_metadata_signature_required`,
+  `issuer_metadata_subject_mismatch`, `issuer_metadata_leaf_dns_mismatch`,
+  `issuer_metadata_expired`.
+* **Credential acceptance** — `credential_parse_failed`,
+  `credential_typ_invalid`, `credential_alg_unsupported`,
+  `credential_holder_binding_missing`, `credential_holder_binding_mismatch`,
+  `credential_holder_binding_unsupported`, `issuer_key_unresolved`,
+  `issuer_signature_invalid`, `issuer_dns_binding_failed`,
+  `credential_expired`, `credential_not_yet_valid`,
+  `disclosure_integrity_failed`, `sd_alg_unsupported`, `haip_x5c_required`,
+  `haip_trust_anchor_in_x5c`, `credential_acceptance_policy_required`.
+* **Request Object authentication** — `request_object_typ_invalid`,
+  `request_object_signature_invalid`, `request_object_audience_mismatch`,
+  `request_object_expired`, `request_object_client_id_mismatch`,
+  `x509_hash_mismatch`, `haip_request_uri_required`, `response_uri_invalid`,
+  `error_description_invalid`, `pre_registered_client_unknown`,
+  `dcql_selection_unsatisfied`.
+
+The component packages (`keystore`, `credstore`, `serializer`, `verifier`,
+`presenter`, `idprof`, `clientconfig`) prefix their own codes with the component
+name, so a storage or key failure is never mistaken for a protocol verdict.
+
 ## Environment variables
 
 The wallet runtime behaviour is controlled by environment variables defined in `wallet/env/env.go`.

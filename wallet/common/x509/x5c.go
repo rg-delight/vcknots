@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // maxX5CCertificates bounds a JOSE x5c chain. It is the bound
@@ -19,7 +21,7 @@ const maxX5CCertificates = 16
 // ErrX5CInvalid classifies every malformed x5c header this package rejects, so
 // a caller can tell a decoding failure from an authentication failure with
 // errors.Is instead of matching error text.
-var ErrX5CInvalid = errors.New("x5c header is invalid")
+var ErrX5CInvalid = common.NewCodedError("x5c_invalid", "x5c header is invalid")
 
 // DecodeX5CChain decodes a JOSE x5c header value into its certificate chain,
 // leaf first. raw is the value as it appears in a decoded JOSE header: either

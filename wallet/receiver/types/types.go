@@ -16,21 +16,21 @@ import (
 
 // Sentinel errors for credential receiving operations
 var (
-	ErrInvalidMetadata           = errors.New("invalid credential issuer metadata")
-	ErrUnsupportedProtocol       = errors.New("unsupported receiving protocol")
-	ErrCredentialRequestFailed   = errors.New("credential request failed")
-	ErrInvalidCredentialResponse = errors.New("invalid credential response")
-	ErrAuthorizationFailed       = errors.New("authorization failed")
-	ErrTokenRequestFailed        = errors.New("token request failed")
-	ErrInvalidTokenResponse      = errors.New("invalid token response")
-	ErrNonceResponseInvalid      = errors.New("invalid nonce response")
-	ErrProofGenerationFailed     = errors.New("proof generation failed")
-	ErrUseDPoPNonce              = errors.New("use DPoP nonce")
-	ErrInvalidProofType          = errors.New("invalid or unsupported proof type")
-	ErrNetworkFailed             = errors.New("network request failed")
-	ErrTimeoutExpired            = errors.New("request timeout expired")
-	ErrPluginNotFound            = errors.New("receiver plugin not found")
-	ErrNilPlugin                 = errors.New("receiver plugin cannot be nil")
+	ErrInvalidMetadata           = common.NewCodedError("receiver_metadata_invalid", "invalid credential issuer metadata")
+	ErrUnsupportedProtocol       = common.NewCodedError("receiver_protocol_unsupported", "unsupported receiving protocol")
+	ErrCredentialRequestFailed   = common.NewCodedError("credential_request_failed", "credential request failed")
+	ErrInvalidCredentialResponse = common.NewCodedError("credential_response_invalid", "invalid credential response")
+	ErrAuthorizationFailed       = common.NewCodedError("authorization_failed", "authorization failed")
+	ErrTokenRequestFailed        = common.NewCodedError("token_request_failed", "token request failed")
+	ErrInvalidTokenResponse      = common.NewCodedError("token_response_invalid", "invalid token response")
+	ErrNonceResponseInvalid      = common.NewCodedError("nonce_response_invalid", "invalid nonce response")
+	ErrProofGenerationFailed     = common.NewCodedError("proof_generation_failed", "proof generation failed")
+	ErrUseDPoPNonce              = common.NewCodedError("dpop_nonce_required", "use DPoP nonce")
+	ErrInvalidProofType          = common.NewCodedError("proof_type_unsupported", "invalid or unsupported proof type")
+	ErrNetworkFailed             = common.NewCodedError("network_request_failed", "network request failed")
+	ErrTimeoutExpired            = common.NewCodedError("request_timeout_expired", "request timeout expired")
+	ErrPluginNotFound            = common.NewCodedError("receiver_plugin_not_found", "receiver plugin not found")
+	ErrNilPlugin                 = common.NewCodedError("receiver_plugin_nil", "receiver plugin cannot be nil")
 )
 
 // ReceiverError represents an error during credential receiving operations
@@ -121,13 +121,24 @@ type CredentialEndpointError struct {
 // codes. The sentinel's message is exactly the wire value so that Error's Is
 // method can match it.
 var (
-	ErrInvalidNonce                = errors.New("invalid_nonce")
-	ErrInvalidProof                = errors.New("invalid_proof")
-	ErrIssuancePending             = errors.New("issuance_pending")
-	ErrInvalidTransactionID        = errors.New("invalid_transaction_id")
-	ErrUnknownCredentialIdentifier = errors.New("unknown_credential_identifier")
-	ErrCredentialRequestDenied     = errors.New("credential_request_denied")
+	ErrInvalidNonce                = common.NewCodedError("credential_endpoint_invalid_nonce", "invalid_nonce")
+	ErrInvalidProof                = common.NewCodedError("credential_endpoint_invalid_proof", "invalid_proof")
+	ErrIssuancePending             = common.NewCodedError("credential_endpoint_issuance_pending", "issuance_pending")
+	ErrInvalidTransactionID        = common.NewCodedError("credential_endpoint_invalid_transaction_id", "invalid_transaction_id")
+	ErrUnknownCredentialIdentifier = common.NewCodedError("credential_endpoint_unknown_credential_identifier", "unknown_credential_identifier")
+	ErrCredentialRequestDenied     = common.NewCodedError("credential_endpoint_credential_request_denied", "credential_request_denied")
 )
+
+// ErrorCode names the Credential Endpoint refusal. An "invalid_nonce" refusal
+// is a condition of its own because the Section 7 nonce refresh has already
+// been attempted by the time it reaches a caller: the request carried a proof
+// the issuer would not accept and no fresh c_nonce made it accepted.
+func (e *CredentialEndpointError) ErrorCode() string {
+	if e != nil && e.Code == ErrInvalidNonce.Error() {
+		return "credential_nonce_rejected"
+	}
+	return "credential_endpoint_rejected"
+}
 
 func (e *CredentialEndpointError) Error() string {
 	if e == nil {

@@ -18,7 +18,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -28,6 +27,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"github.com/trustknots/vcknots/wallet/common"
 
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -36,7 +36,7 @@ import (
 // of the algorithms the Credential Issuer published in
 // proof_signing_alg_values_supported. Callers use errors.Is to tell this apart
 // from a signing failure.
-var ErrProofAlgorithmNotSupported = errors.New("no proof signing algorithm shared with the issuer")
+var ErrProofAlgorithmNotSupported = common.NewCodedError("proof_algorithm_not_supported", "no proof signing algorithm shared with the issuer")
 
 // defaultAttestationLifetime is the validity applied to a client attestation
 // JWT when the caller passes no explicit lifetime.

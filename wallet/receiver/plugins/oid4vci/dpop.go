@@ -1,7 +1,6 @@
 package oid4vci
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,6 +8,8 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // dpopNonceServerKey identifies the server an RFC 9449 Section 8.2 DPoP nonce
@@ -134,7 +135,7 @@ type DPoPProofFactory = types.DPoPProofFactory
 // the fail-closed answer for a client that holds no DPoP key: continuing would
 // either replay the request without the proof the resource server asked for or
 // invent one the wallet cannot sign.
-var ErrDPoPRequired = errors.New("credential endpoint requires DPoP")
+var ErrDPoPRequired = common.NewCodedError("dpop_required", "credential endpoint requires DPoP")
 
 // dpopBoundToken adapts the access token string the established signatures take.
 // Those entry points predate the token_type being plumbed through, and every one

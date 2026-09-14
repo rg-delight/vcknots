@@ -1,8 +1,7 @@
 package wallet
 
 import (
-	"errors"
-
+	"github.com/trustknots/vcknots/wallet/common"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 )
@@ -14,11 +13,11 @@ var (
 	// ErrCredentialAcceptancePolicyRequired reports that a flow which must
 	// authenticate the issuer before storing a credential ran without a
 	// configured Config.CredentialAcceptance.
-	ErrCredentialAcceptancePolicyRequired = errors.New("credential acceptance policy is required")
+	ErrCredentialAcceptancePolicyRequired = common.NewCodedError("credential_acceptance_policy_required", "credential acceptance policy is required")
 	// ErrUnknownCredentialConfiguration reports that the requested
 	// credential_configuration_id is absent from the Credential Issuer's
 	// credential_configurations_supported metadata.
-	ErrUnknownCredentialConfiguration = errors.New("credential_configuration_id is not offered by the issuer")
+	ErrUnknownCredentialConfiguration = common.NewCodedError("unknown_credential_configuration", "credential_configuration_id is not offered by the issuer")
 	// ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered
 	// with a redirect. Redirects are refused rather than followed, so that a
 	// bound request body and its Authorization header never reach an origin
@@ -65,7 +64,7 @@ var (
 // cnf."x5t#S256". Only a confirmation carrying the key itself lets the wallet
 // prove possession of it in a Key Binding JWT, so such a credential is
 // rejected instead of stored with a binding the wallet cannot exercise.
-var ErrHolderBindingConfirmationUnsupported = errors.New("credential cnf confirmation method is not supported; only cnf.jwk is accepted")
+var ErrHolderBindingConfirmationUnsupported = common.NewCodedError("credential_holder_binding_unsupported", "credential cnf confirmation method is not supported; only cnf.jwk is accepted")
 
 // Sentinel errors the credential acceptance path wraps at each failure site.
 // They exist so an integrator can branch on the condition that stopped a
@@ -83,56 +82,56 @@ var (
 	// the requested serialization: it does not deserialize, its issuer JWT is
 	// not three base64url parts, or one of its parts is not the JSON it must
 	// be. Nothing about the issuer has been checked when it is returned.
-	ErrCredentialParse = errors.New("credential could not be parsed")
+	ErrCredentialParse = common.NewCodedError("credential_parse_failed", "credential could not be parsed")
 	// ErrCredentialTypInvalid reports that the issuer JWT's typ header does
 	// not name a media type the requested serialization allows. SD-JWT VC
 	// (draft-ietf-oauth-sd-jwt-vc Section 3.1) allows dc+sd-jwt and the
 	// earlier vc+sd-jwt.
-	ErrCredentialTypInvalid = errors.New("credential typ header is not supported")
+	ErrCredentialTypInvalid = common.NewCodedError("credential_typ_invalid", "credential typ header is not supported")
 	// ErrCredentialAlgUnsupported reports that the issuer JWT's alg header is
 	// missing, is the unsigned "none" of RFC 7515 Section 3.6, is absent from
 	// the acceptance policy's SigningAlgorithms, or names an algorithm no
 	// registered verifier plugin implements.
-	ErrCredentialAlgUnsupported = errors.New("credential signing algorithm is not accepted")
+	ErrCredentialAlgUnsupported = common.NewCodedError("credential_alg_unsupported", "credential signing algorithm is not accepted")
 	// ErrHolderBindingMissing reports that the policy requires holder binding
 	// and the wallet cannot establish one: the credential carries no cnf claim,
 	// or it carries a cnf confirmation key while the acceptance call supplied
 	// no holder key to compare it against.
-	ErrHolderBindingMissing = errors.New("credential does not contain a cnf holder binding")
+	ErrHolderBindingMissing = common.NewCodedError("credential_holder_binding_missing", "credential does not contain a cnf holder binding")
 	// ErrHolderBindingMismatch reports that the credential's cnf.jwk is not
 	// the holder key the flow used, compared by RFC 7638 thumbprint.
-	ErrHolderBindingMismatch = errors.New("credential is bound to a different holder key")
+	ErrHolderBindingMismatch = common.NewCodedError("credential_holder_binding_mismatch", "credential is bound to a different holder key")
 	// ErrIssuerKeyUnresolved reports that no issuer public key could be
 	// obtained to verify the signature with: the policy configures neither
 	// x5c trust nor a resolution hook, the hook failed, or it returned no key.
 	// The credential's signature has not been checked when it is returned.
-	ErrIssuerKeyUnresolved = errors.New("issuer key could not be resolved")
+	ErrIssuerKeyUnresolved = common.NewCodedError("issuer_key_unresolved", "issuer key could not be resolved")
 	// ErrIssuerSignatureInvalid reports that every candidate issuer key failed
 	// to verify the credential's signature.
-	ErrIssuerSignatureInvalid = errors.New("issuer signature could not be verified")
+	ErrIssuerSignatureInvalid = common.NewCodedError("issuer_signature_invalid", "issuer signature could not be verified")
 	// ErrIssuerDNSBindingFailed reports that RequireIssuerDNSBinding is set and
 	// the leaf certificate carries no dNSName SAN equal to the host of an https
 	// iss. This is ecosystem policy rather than an SD-JWT VC requirement.
-	ErrIssuerDNSBindingFailed = errors.New("issuer certificate is not bound to the issuer host")
+	ErrIssuerDNSBindingFailed = common.NewCodedError("issuer_dns_binding_failed", "issuer certificate is not bound to the issuer host")
 	// ErrCredentialExpired reports that the credential's exp claim is in the
 	// past, measured against the policy clock and ClockSkew.
-	ErrCredentialExpired = errors.New("credential has expired")
+	ErrCredentialExpired = common.NewCodedError("credential_expired", "credential has expired")
 	// ErrCredentialNotYetValid reports that the credential's nbf claim is in
 	// the future, measured the same way.
-	ErrCredentialNotYetValid = errors.New("credential is not yet valid")
+	ErrCredentialNotYetValid = common.NewCodedError("credential_not_yet_valid", "credential is not yet valid")
 	// ErrDisclosureIntegrity reports that an SD-JWT disclosure is not covered
 	// by exactly one digest of the issuer-signed payload, which would let a
 	// disclosure be added or replayed without invalidating the signature.
-	ErrDisclosureIntegrity = errors.New("SD-JWT disclosure integrity check failed")
+	ErrDisclosureIntegrity = common.NewCodedError("disclosure_integrity_failed", "SD-JWT disclosure integrity check failed")
 	// ErrSDAlgUnsupported reports that the credential's _sd_alg is not a
 	// string or names a hash outside AcceptedSDAlgorithms.
-	ErrSDAlgUnsupported = errors.New("credential _sd_alg is not supported")
+	ErrSDAlgUnsupported = common.NewCodedError("sd_alg_unsupported", "credential _sd_alg is not supported")
 	// ErrHAIPX5CRequired reports that the wallet runs the HAIP profile and an
 	// SD-JWT VC arrived without the x5c header HAIP Section 6.1.1 requires.
-	ErrHAIPX5CRequired = errors.New("HAIP requires the issuer signing certificate in the x5c header")
+	ErrHAIPX5CRequired = common.NewCodedError("haip_x5c_required", "HAIP requires the issuer signing certificate in the x5c header")
 	// ErrHAIPTrustAnchorInX5C reports that the credential's x5c chain contains
 	// a configured trust anchor, which HAIP Section 6.1.1 forbids.
-	ErrHAIPTrustAnchorInX5C = errors.New("HAIP forbids including the trust anchor certificate in the x5c header")
+	ErrHAIPTrustAnchorInX5C = common.NewCodedError("haip_trust_anchor_in_x5c", "HAIP forbids including the trust anchor certificate in the x5c header")
 )
 
 // Sentinel errors of the two-stage OpenID4VCI 1.0 Final issuance API, where
@@ -148,42 +147,42 @@ var (
 	// request set ExternalKeyAttestation and carried no KeyAttestation, and no
 	// Config.KeyAttestation provider is configured. Nothing has been sent to
 	// the Credential Endpoint when it is returned.
-	ErrKeyAttestationRequired = errors.New("credential request requires a key attestation the wallet cannot mint")
+	ErrKeyAttestationRequired = common.NewCodedError("key_attestation_required", "credential request requires a key attestation the wallet cannot mint")
 	// ErrKeyAttestationNonceStale reports that a caller-supplied key
 	// attestation was minted for a different c_nonce than the one the
 	// Credential Request must carry: either it never matched the grant, or
 	// OpenID4VCI 1.0 §8.3.1.2 "invalid_nonce" made the Credential Issuer hand
 	// out a fresh one. An attestation is single use; the caller signs a new
 	// one for the c_nonce the accompanying grant now names.
-	ErrKeyAttestationNonceStale = errors.New("key attestation nonce is stale")
+	ErrKeyAttestationNonceStale = common.NewCodedError("key_attestation_nonce_stale", "key attestation nonce is stale")
 	// ErrNonceEndpointRequired reports that the issuance needs a key
 	// attestation bound to a c_nonce while the Credential Issuer advertises no
 	// nonce_endpoint. HAIP requires one: "If the Issuer supports Credential
 	// Configurations that require key binding, as indicated by the presence of
 	// cryptographic_binding_methods_supported, the nonce_endpoint MUST be
 	// present in the Credential Issuer Metadata."
-	ErrNonceEndpointRequired = errors.New("key attestation requires a c_nonce but the issuer advertises no nonce_endpoint")
+	ErrNonceEndpointRequired = common.NewCodedError("nonce_endpoint_required", "key attestation requires a c_nonce but the issuer advertises no nonce_endpoint")
 	// ErrPreAuthorizedGrantMissing reports that a Credential Offer handed to
 	// ReceiveOID4VCIFinalPreAuthorizedCredential carries no
 	// urn:ietf:params:oauth:grant-type:pre-authorized_code grant with a
 	// pre-authorized_code (OpenID4VCI 1.0 §4.1.1).
-	ErrPreAuthorizedGrantMissing = errors.New("credential offer carries no pre-authorized_code grant")
+	ErrPreAuthorizedGrantMissing = common.NewCodedError("pre_authorized_grant_missing", "credential offer carries no pre-authorized_code grant")
 	// ErrTransactionCodeRequired reports that the Credential Offer's
 	// pre-authorized_code grant carries a tx_code object while the request
 	// supplies no Transaction Code. OpenID4VCI 1.0 §6.1: "This value MUST be
 	// present if a tx_code object was present in the Credential Offer
 	// (including if the object was empty)."
-	ErrTransactionCodeRequired = errors.New("credential offer requires a transaction code")
+	ErrTransactionCodeRequired = common.NewCodedError("transaction_code_required", "credential offer requires a transaction code")
 	// ErrTokenTypeUnsupported reports a Token Response whose token_type is
 	// neither the Bearer scheme of RFC 6750 §2.1 nor the DPoP scheme of RFC
 	// 9449 §7.1, so the wallet holds no way to present the access token.
-	ErrTokenTypeUnsupported = errors.New("token response token_type is not supported")
+	ErrTokenTypeUnsupported = common.NewCodedError("token_type_unsupported", "token response token_type is not supported")
 	// ErrDPoPKeyMismatch reports that the key offered to
 	// RequestOID4VCIFinalCredential is not the one the DPoP-bound access token
 	// in the grant was issued to, compared by RFC 7638 thumbprint. RFC 9449 §5
 	// binds the token to the proof key, so presenting it with another key
 	// cannot succeed and is refused before the request is sent.
-	ErrDPoPKeyMismatch = errors.New("token grant is bound to a different DPoP key")
+	ErrDPoPKeyMismatch = common.NewCodedError("dpop_key_mismatch", "token grant is bound to a different DPoP key")
 )
 
 // Sentinel errors DecodeOID4VCIFinalCredentialResponse wraps at each of its
@@ -198,12 +197,12 @@ var (
 	// MUST be used if the credential_response_encryption parameter is
 	// included, to prevent it being substituted by an attacker." The response
 	// is refused rather than downgraded.
-	ErrCredentialResponsePlaintext = errors.New("credential response was not encrypted")
+	ErrCredentialResponsePlaintext = common.NewCodedError("credential_response_plaintext", "credential response was not encrypted")
 	// ErrCredentialResponseDecrypt reports that the Credential Response
 	// carried an application/jwt JWE (§8.2 / §10) the wallet could not turn
 	// back into plaintext: the JWE did not parse under the accepted algorithms,
 	// the configured DecryptionKey was missing, or decryption itself failed.
-	ErrCredentialResponseDecrypt = errors.New("credential response JWE could not be decrypted")
+	ErrCredentialResponseDecrypt = common.NewCodedError("credential_response_decrypt_failed", "credential response JWE could not be decrypted")
 	// ErrCredentialResponseShape reports that a decoded Credential Response
 	// does not match the OpenID4VCI 1.0 Final shape: it is nil, carries the
 	// removed draft singular credential member, has a credentials element that
@@ -211,7 +210,7 @@ var (
 	// content, carries more than one credential, or carries neither
 	// credentials nor a transaction_id. §8.2 requires the credentials array to
 	// hold objects and forbids it alongside transaction_id.
-	ErrCredentialResponseShape = errors.New("credential response has an invalid shape")
+	ErrCredentialResponseShape = common.NewCodedError("credential_response_shape_invalid", "credential response has an invalid shape")
 )
 
 // Sentinel errors the RFC 6749 §4.1.2 / RFC 9207 §2.4 checks on the
@@ -230,35 +229,35 @@ var (
 	// handed back is not a URL, or that it is relative and the authorization
 	// request it answers is not a URL either, so no parameter of the
 	// authorization response can be read.
-	ErrAuthorizationRedirectInvalid = errors.New("authorization redirect could not be read")
+	ErrAuthorizationRedirectInvalid = common.NewCodedError("authorization_redirect_invalid", "authorization redirect could not be read")
 	// ErrAuthorizationRedirectURIMismatch reports that the redirect was not
 	// delivered to the registered redirect_uri of this authorization request,
 	// compared by scheme, host and path. A redirect to any other target is not
 	// this request's response, whatever parameters it carries.
-	ErrAuthorizationRedirectURIMismatch = errors.New("authorization redirect does not match the registered redirect_uri")
+	ErrAuthorizationRedirectURIMismatch = common.NewCodedError("authorization_redirect_uri_mismatch", "authorization redirect does not match the registered redirect_uri")
 	// ErrAuthorizationStateMismatch reports that the redirect does not echo the
 	// RFC 6749 §4.1.1 state of the authorization request it is presented
 	// against, which is what binds the response to the request.
-	ErrAuthorizationStateMismatch = errors.New("authorization redirect state does not match the authorization request")
+	ErrAuthorizationStateMismatch = common.NewCodedError("authorization_state_mismatch", "authorization redirect state does not match the authorization request")
 	// ErrAuthorizationIssMismatch reports that the redirect carries an RFC 9207
 	// iss parameter that is not the issuer identifier of the authorization
 	// server the request was sent to, or carries it more than once. §2.4: the
 	// client "MUST compare" the value and reject a mismatch, which is what
 	// stops a mix-up attack from replaying a code from another server.
-	ErrAuthorizationIssMismatch = errors.New("authorization redirect iss does not identify the authorization server")
+	ErrAuthorizationIssMismatch = common.NewCodedError("authorization_iss_mismatch", "authorization redirect iss does not identify the authorization server")
 	// ErrAuthorizationIssMissing reports that the redirect carries no iss
 	// parameter while one is required: the authorization server advertises
 	// authorization_response_iss_parameter_supported, or the wallet runs the
 	// HAIP profile, whose FAPI 2.0 §5.3.2.2 base requires clients to check iss.
-	ErrAuthorizationIssMissing = errors.New("authorization redirect is missing the required iss parameter")
+	ErrAuthorizationIssMissing = common.NewCodedError("authorization_iss_missing", "authorization redirect is missing the required iss parameter")
 	// ErrAuthorizationCodeMissing reports a redirect that is neither an error
 	// response nor carries the RFC 6749 §4.1.2 code parameter, so there is
 	// nothing to exchange at the token endpoint.
-	ErrAuthorizationCodeMissing = errors.New("authorization redirect carries no authorization code")
+	ErrAuthorizationCodeMissing = common.NewCodedError("authorization_code_missing", "authorization redirect carries no authorization code")
 	// ErrAuthorizationRequestURIExpired reports that the RFC 9126 §2.2
 	// request_uri of a Pushed Authorization Request is no longer usable at the
 	// authorization endpoint, measured against OID4VCIFinalAuthorization.ExpiresAt.
-	ErrAuthorizationRequestURIExpired = errors.New("pushed authorization request_uri has expired")
+	ErrAuthorizationRequestURIExpired = common.NewCodedError("authorization_request_uri_expired", "pushed authorization request_uri has expired")
 )
 
 // Sentinel errors the attestation validation of HAIP §4.4 wraps. The wallet
@@ -274,10 +273,10 @@ var (
 	// authenticated against the configured trust material, or its typ, sub,
 	// cnf.jwk, aud or exp does not match the wallet instance and the
 	// authorization server the request is for.
-	ErrClientAttestationInvalid = errors.New("client attestation is not valid for this wallet instance")
+	ErrClientAttestationInvalid = common.NewCodedError("client_attestation_invalid", "client attestation is not valid for this wallet instance")
 	// ErrKeyAttestationInvalid reports the same for an Appendix D key
 	// attestation: empty, malformed, unauthenticated, or not attesting the
 	// holder keys, the c_nonce, the audience or a future exp the Credential
 	// Request needs.
-	ErrKeyAttestationInvalid = errors.New("key attestation is not valid for this credential request")
+	ErrKeyAttestationInvalid = common.NewCodedError("key_attestation_invalid", "key attestation is not valid for this credential request")
 )

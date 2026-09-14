@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -42,6 +41,13 @@ type AuthorizationResponseError struct {
 	// request", so it is reported here for a caller that dispatched several
 	// requests and attributes the failure to one of them.
 	State string
+}
+
+// ErrorCode names the outcome: the authorization server answered the
+// authorization request with an RFC 6749 Section 4.1.2.1 error redirect. Code
+// carries the error the server reported; this names what happened.
+func (e *AuthorizationResponseError) ErrorCode() string {
+	return "authorization_error_response"
 }
 
 func (e *AuthorizationResponseError) Error() string {
@@ -375,7 +381,7 @@ const (
 // `credential_configuration_id` unusable once a `credential_identifiers` array
 // was returned, so a request that falls back to the configuration id would be
 // rejected by the issuer anyway.
-var ErrAuthorizationDetailsMissing = errors.New("token response carries no usable authorization_details")
+var ErrAuthorizationDetailsMissing = common.NewCodedError("authorization_details_missing", "token response carries no usable authorization_details")
 
 // CredentialIdentifierForConfiguration selects the credential_identifier to put
 // in the Credential Request. OpenID4VCI 1.0 §6.2 binds each

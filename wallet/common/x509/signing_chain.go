@@ -47,6 +47,19 @@ type SigningChainError struct {
 func (e *SigningChainError) Error() string { return fmt.Sprintf("x509 %s: %v", e.Kind, e.Err) }
 func (e *SigningChainError) Unwrap() error { return e.Err }
 
+// ErrorCode names why the signing certificate was not accepted. A revocation
+// failure is reported as a path failure that joins the underlying
+// *CRLCheckError, so the revocation verdict is the more specific answer and
+// this error defers to it; everything else is a chain that does not reach a
+// configured trust anchor.
+func (e *SigningChainError) ErrorCode() string {
+	var revocationError *CRLCheckError
+	if errors.As(e.Err, &revocationError) {
+		return revocationError.ErrorCode()
+	}
+	return "x509_chain_untrusted"
+}
+
 // VerifySigningCertificateChain verifies a signing certificate before consulting
 // its authenticated revocation locations. It does not impose DNS identity:
 // x509_hash, DNS-based verifier identifiers and credential issuers bind identity

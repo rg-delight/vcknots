@@ -2,10 +2,11 @@ package oid4vp
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // Sentinel errors the OID4VP Final Request Object authentication path returns.
@@ -18,37 +19,37 @@ var (
 	// ErrRequestObjectTypInvalid reports that the Request Object JWT does not
 	// carry exactly one protected header or its typ header is not
 	// "oauth-authz-req+jwt" (OID4VP 1.0 §5.10.1, RFC 9101 §5.2).
-	ErrRequestObjectTypInvalid = errors.New("request object typ header is not oauth-authz-req+jwt")
+	ErrRequestObjectTypInvalid = common.NewCodedError("request_object_typ_invalid", "request object typ header is not oauth-authz-req+jwt")
 	// ErrRequestObjectSignatureInvalid reports that the Request Object
 	// signature could not be verified with the certificate the client
 	// identifier authenticates.
-	ErrRequestObjectSignatureInvalid = errors.New("request object signature could not be verified")
+	ErrRequestObjectSignatureInvalid = common.NewCodedError("request_object_signature_invalid", "request object signature could not be verified")
 	// ErrRequestObjectAudienceMismatch reports that the Request Object audience
 	// does not identify this Wallet (OID4VP 1.0 §5.10.1).
-	ErrRequestObjectAudienceMismatch = errors.New("request object audience does not identify this wallet")
+	ErrRequestObjectAudienceMismatch = common.NewCodedError("request_object_audience_mismatch", "request object audience does not identify this wallet")
 	// ErrRequestObjectExpired reports that the Request Object is outside its
 	// exp/nbf validity window, is missing an exp the configured policy
 	// requires, or exceeds the configured maximum lifetime.
-	ErrRequestObjectExpired = errors.New("request object is outside its validity")
+	ErrRequestObjectExpired = common.NewCodedError("request_object_expired", "request object is outside its validity")
 	// ErrRequestObjectClientIDMismatch reports that the authenticated Request
 	// Object's client identifier does not bind to the outer Authorization
 	// Request or to the response endpoint (OID4VP 1.0 §5.9.3, §5.10.1).
-	ErrRequestObjectClientIDMismatch = errors.New("request object client_id does not match the authenticated request")
+	ErrRequestObjectClientIDMismatch = common.NewCodedError("request_object_client_id_mismatch", "request object client_id does not match the authenticated request")
 	// ErrX509HashMismatch reports that the x509_hash Client Identifier does not
 	// match the leaf certificate that signed the Request Object (OID4VP 1.0
 	// §5.9.3).
-	ErrX509HashMismatch = errors.New("request object x509_hash client_id does not match the signing certificate")
+	ErrX509HashMismatch = common.NewCodedError("x509_hash_mismatch", "request object x509_hash client_id does not match the signing certificate")
 	// ErrHAIPRequestURIRequired reports that the HAIP profile requires a signed
 	// Authorization Request delivered through request_uri, and this request did
 	// not arrive that way (HAIP 1.0 §5.1).
-	ErrHAIPRequestURIRequired = errors.New("HAIP requires the Authorization Request delivered by request_uri")
+	ErrHAIPRequestURIRequired = common.NewCodedError("haip_request_uri_required", "HAIP requires the Authorization Request delivered by request_uri")
 	// ErrResponseURIInvalid reports that a response_uri is not a usable
 	// Response Endpoint: absent, unparseable, without an authority, or not
 	// https while the presenter does not allow plain http.
-	ErrResponseURIInvalid = errors.New("response_uri is not a usable Response Endpoint")
+	ErrResponseURIInvalid = common.NewCodedError("response_uri_invalid", "response_uri is not a usable Response Endpoint")
 	// ErrErrorDescriptionInvalid reports an error_description outside the
 	// character set RFC 6749 §4.1.2.1 defines for it.
-	ErrErrorDescriptionInvalid = errors.New("error_description is outside the RFC 6749 4.1.2.1 character set")
+	ErrErrorDescriptionInvalid = common.NewCodedError("error_description_invalid", "error_description is outside the RFC 6749 4.1.2.1 character set")
 )
 
 // ErrDCQLSelectionUnsatisfied reports that credentials chosen outside this
@@ -58,7 +59,7 @@ var (
 // answered option (Section 6.2), or a credential outside every answered option
 // would be disclosed. A caller branches on it with errors.Is to tell a consent
 // decision the request cannot accept from a transport or serialization failure.
-var ErrDCQLSelectionUnsatisfied = errors.New("DCQL credential selection does not satisfy the query")
+var ErrDCQLSelectionUnsatisfied = common.NewCodedError("dcql_selection_unsatisfied", "DCQL credential selection does not satisfy the query")
 
 // VerifierResponseError reports a non-200 response from the Verifier's
 // Response Endpoint. It deliberately retains only the HTTP status and the
@@ -80,6 +81,13 @@ func (e *VerifierResponseError) Error() string {
 		return fmt.Sprintf("verifier returned status %d", e.StatusCode)
 	}
 	return fmt.Sprintf("verifier returned status %d (%s)", e.StatusCode, e.OAuthError)
+}
+
+// ErrorCode names the outcome: the Verifier's Response Endpoint refused the
+// Authorization Response. OAuthError carries the error the Verifier reported;
+// this names what happened.
+func (e *VerifierResponseError) ErrorCode() string {
+	return "verifier_response_rejected"
 }
 
 // maxOAuthErrorCodeLength bounds the OAuth error code retained from a Verifier

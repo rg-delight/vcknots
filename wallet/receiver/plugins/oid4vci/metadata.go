@@ -36,7 +36,7 @@ const (
 // string comparison with no normalization), the data contained in the response
 // MUST NOT be used." The root wallet package cannot import a plugin, so it
 // declares its own alias of this sentinel.
-var ErrIssuerIdentifierMismatch = errors.New("credential_issuer does not match the requested Credential Issuer Identifier")
+var ErrIssuerIdentifierMismatch = common.NewCodedError("issuer_metadata_identity_mismatch", "credential_issuer does not match the requested Credential Issuer Identifier")
 
 // Sentinel errors of OpenID4VCI 1.0 Section 12.2.3 signed Credential Issuer
 // Metadata. They exist so a caller can branch on why a signed document was not
@@ -57,32 +57,36 @@ var (
 	// every check that establishes that trust — the typ and alg JOSE headers,
 	// the x5c chain to a configured anchor, the signature itself, and the
 	// registered claims below — reports its failure through this error.
-	ErrIssuerMetadataSignatureInvalid = errors.New("signed issuer metadata was not accepted")
+	ErrIssuerMetadataSignatureInvalid = common.NewCodedError("issuer_metadata_signature_invalid", "signed issuer metadata was not accepted")
 	// ErrIssuerMetadataSubjectMismatch reports that the sub claim, which
 	// Section 12.2.3 defines as "REQUIRED. String matching the Credential
 	// Issuer Identifier", names another identifier than the one the metadata
 	// was requested from.
-	ErrIssuerMetadataSubjectMismatch = fmt.Errorf(
-		"signed issuer metadata sub is not the requested Credential Issuer Identifier: %w",
+	ErrIssuerMetadataSubjectMismatch = common.WrapCoded(
+		"issuer_metadata_subject_mismatch",
+		"signed issuer metadata sub is not the requested Credential Issuer Identifier",
 		ErrIssuerMetadataSignatureInvalid)
 	// ErrIssuerMetadataLeafDNSMismatch reports that the signing certificate
 	// carries no dNSName Subject Alternative Name equal to the DNS name the
 	// signer was required to be bound to. It is reachable only when the caller
 	// asks for that binding through IssuerMetadataSigningOptions.
-	ErrIssuerMetadataLeafDNSMismatch = fmt.Errorf(
-		"signed issuer metadata signer is not bound to the expected DNS name: %w",
+	ErrIssuerMetadataLeafDNSMismatch = common.WrapCoded(
+		"issuer_metadata_leaf_dns_mismatch",
+		"signed issuer metadata signer is not bound to the expected DNS name",
 		ErrIssuerMetadataSignatureInvalid)
 	// ErrIssuerMetadataExpired reports that the optional exp claim of Section
 	// 12.2.3 is not in the future of the verification clock.
-	ErrIssuerMetadataExpired = fmt.Errorf(
-		"signed issuer metadata has expired: %w", ErrIssuerMetadataSignatureInvalid)
+	ErrIssuerMetadataExpired = common.WrapCoded(
+		"issuer_metadata_expired",
+		"signed issuer metadata has expired",
+		ErrIssuerMetadataSignatureInvalid)
 	// ErrIssuerMetadataSignatureRequired reports that signed metadata was
 	// demanded and none was obtained: the Credential Issuer answered with the
 	// unsigned application/json document Section 12.2.2 lets it publish, or the
 	// demand was made without the trust material Section 12.2.3 needs to
 	// authenticate a signer. It is a policy outcome, not a rejected signature,
 	// and therefore does not satisfy ErrIssuerMetadataSignatureInvalid.
-	ErrIssuerMetadataSignatureRequired = errors.New("signed issuer metadata is required")
+	ErrIssuerMetadataSignatureRequired = common.NewCodedError("issuer_metadata_signature_required", "signed issuer metadata is required")
 )
 
 // requireMatchingCredentialIssuer enforces the OpenID4VCI 1.0 Section 12.2.4

@@ -41,6 +41,23 @@ func (e *CRLCheckError) Error() string {
 
 func (e *CRLCheckError) Unwrap() error { return e.Err }
 
+// ErrorCode names the revocation verdict this check reached. Only a revoked
+// certificate and an exhausted fetch budget are conditions of their own: every
+// other kind — no usable distribution point, a download, parse, issuer,
+// signature, staleness or scope failure — means the status could not be
+// established, which is a different answer from "revoked" and is reported as
+// such.
+func (e *CRLCheckError) ErrorCode() string {
+	switch e.Kind {
+	case CRLErrorRevoked:
+		return "x509_chain_revoked"
+	case CRLErrorBudget:
+		return "crl_budget_exhausted"
+	default:
+		return "x509_chain_revocation_unknown"
+	}
+}
+
 // CRLCheckResult does not describe certificates without mechanisms as checked.
 type CRLCheckResult struct {
 	CheckedCertificates     int

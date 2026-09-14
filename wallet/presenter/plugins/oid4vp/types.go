@@ -2,10 +2,11 @@ package oid4vp
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // PresentationDefinition is used only by the explicit Draft24 entrypoint.
@@ -212,7 +213,7 @@ func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) 
 // The root wallet package declares a sentinel of the same name; this package
 // cannot import it (the root imports this plugin), so the root value is
 // intended to become an alias of this one.
-var ErrPreRegisteredClientUnknown = errors.New("pre-registered client_id is not in the wallet registry")
+var ErrPreRegisteredClientUnknown = common.NewCodedError("pre_registered_client_unknown", "pre-registered client_id is not in the wallet registry")
 
 // PreRegisteredClient is a Verifier this wallet knows before an Authorization
 // Request arrives. OpenID4VP 1.0 Section 5.9.2: "If a `:` character is not
