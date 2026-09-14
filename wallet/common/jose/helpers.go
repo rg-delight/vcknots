@@ -8,11 +8,43 @@ import (
 	"encoding/base64"
 	"fmt"
 	"hash"
+	"slices"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/serializer/types"
 )
+
+// acceptedSignatureAlgorithms is the canonical list of JWS signature
+// algorithms this wallet accepts when parsing a credential or presentation.
+// It holds the ECDSA family of RFC 7518 Section 3.4 (ES256, ES384, ES512), the
+// RSASSA-PKCS1-v1_5 family of Section 3.3 (RS256, RS384, RS512), the
+// RSASSA-PSS family of Section 3.5 (PS256, PS384, PS512) and EdDSA over Ed25519
+// (RFC 8037).
+//
+// The MAC algorithms of RFC 7518 Section 3.2 and the unsigned "none" of RFC
+// 7515 Section 3.6 are deliberately absent: neither authenticates an issuer to
+// a wallet holding only public keys. Callers must not modify this slice; use
+// AcceptedSignatureAlgorithms for a copy.
+var acceptedSignatureAlgorithms = []jose.SignatureAlgorithm{
+	jose.ES256, jose.ES384, jose.ES512,
+	jose.RS256, jose.RS384, jose.RS512,
+	jose.PS256, jose.PS384, jose.PS512,
+	jose.EdDSA,
+}
+
+// AcceptedSignatureAlgorithms returns a copy of the canonical list of JWS
+// signature algorithms a wallet may parse a credential or presentation with: the
+// ECDSA family ES256/ES384/ES512 (RFC 7518 Section 3.4), the RSASSA-PKCS1-v1_5
+// family RS256/RS384/RS512 (Section 3.3), the RSASSA-PSS family
+// PS256/PS384/PS512 (Section 3.5) and EdDSA (RFC 8037).
+//
+// The MAC algorithms of RFC 7518 Section 3.2 and the unsigned "none" of RFC
+// 7515 Section 3.6 are never included. The returned slice is a copy, so callers
+// may modify it without affecting the canonical list or each other.
+func AcceptedSignatureAlgorithms() []jose.SignatureAlgorithm {
+	return slices.Clone(acceptedSignatureAlgorithms)
+}
 
 // ReconstructJWT reconstructs a complete JWT string from a CredentialProof
 // The proof contains:
@@ -35,23 +67,25 @@ func ReconstructJWT(proof *credential.CredentialProof) string {
 }
 
 // ParseAlgorithm converts an algorithm name string to the corresponding jose.SignatureAlgorithm.
-// It returns the matching jose.SignatureAlgorithm for recognized names ("ES256", "ES384", "ES512", "EdDSA", "RS256").
-// If algStr is not supported it returns an empty algorithm and an error wrapped with types.ErrUnsupportedAlgorithm.
+// It returns the matching jose.SignatureAlgorithm for the digital signature
+// algorithms this wallet verifies: the ECDSA family "ES256", "ES384" and
+// "ES512" (RFC 7518 Section 3.4), the RSASSA families "RS256", "RS384",
+// "RS512" (Section 3.3) and "PS256", "PS384", "PS512" (Section 3.5), and
+// "EdDSA" (RFC 8037). The comparison is case sensitive, as the "alg" values of
+// RFC 7515 Section 4.1.1 are.
+//
+// The accepted set is AcceptedSignatureAlgorithms, so the parser and the
+// algorithm lists handed to go-jose can never disagree. The MAC algorithms of
+// RFC 7518 Section 3.2 and the unsigned "none" of RFC 7515 Section 3.6 are
+// deliberately absent: neither authenticates an issuer to a wallet holding only
+// public keys. If algStr is not supported it returns an empty algorithm and an
+// error wrapped with types.ErrUnsupportedAlgorithm.
 func ParseAlgorithm(algStr string) (jose.SignatureAlgorithm, error) {
-	switch algStr {
-	case "ES256":
-		return jose.ES256, nil
-	case "ES384":
-		return jose.ES384, nil
-	case "ES512":
-		return jose.ES512, nil
-	case "EdDSA":
-		return jose.EdDSA, nil
-	case "RS256":
-		return jose.RS256, nil
-	default:
-		return "", fmt.Errorf("unsupported algorithm %s: %w", algStr, types.ErrUnsupportedAlgorithm)
+	alg := jose.SignatureAlgorithm(algStr)
+	if slices.Contains(acceptedSignatureAlgorithms, alg) {
+		return alg, nil
 	}
+	return "", fmt.Errorf("unsupported algorithm %s: %w", algStr, types.ErrUnsupportedAlgorithm)
 }
 
 // EqualPublicKey reports whether two JWKs represent the same public key
@@ -71,14 +105,15 @@ func EqualPublicKey(a, b jose.JSONWebKey) (bool, error) {
 }
 
 // NewHashFromAlgorithm selects a hash.Hash implementation appropriate for the provided jose.SignatureAlgorithm.
-// ES256 and RS256 use SHA-256; ES384 uses SHA-384; ES512 and EdDSA use SHA-512. If the algorithm is unrecognized, SHA-256 is used.
+// ES256, RS256 and PS256 use SHA-256; ES384, RS384 and PS384 use SHA-384; ES512, RS512, PS512 and EdDSA use SHA-512.
+// If the algorithm is unrecognized, SHA-256 is used.
 func NewHashFromAlgorithm(alg jose.SignatureAlgorithm) hash.Hash {
 	switch alg {
-	case jose.ES256, jose.RS256:
+	case jose.ES256, jose.RS256, jose.PS256:
 		return sha256.New()
-	case jose.ES384:
+	case jose.ES384, jose.RS384, jose.PS384:
 		return sha512.New384()
-	case jose.ES512:
+	case jose.ES512, jose.RS512, jose.PS512:
 		return sha512.New()
 	case jose.EdDSA:
 		return sha512.New()
