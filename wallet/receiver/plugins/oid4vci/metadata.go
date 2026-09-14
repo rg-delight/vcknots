@@ -81,12 +81,12 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	// report the Final endpoint missing. Never retry malformed or forbidden metadata,
 	// and never repeat the same URL. Each attempt decodes into a fresh value.
 	endpointURL := url.URL(endpoint)
-	var statusError *metadataHTTPStatusError
+	var statusError *httpStatusError
 	if !o.AllowHTTP || !strings.EqualFold(endpointURL.Scheme, "http") ||
 		strings.Trim(endpointURL.Path, "/") == "" ||
 		strings.Contains(endpointURL.Path, "/.well-known/openid-credential-issuer") ||
-		!errors.As(err, &statusError) || statusError.statusCode != http.StatusNotFound {
-		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+		!errors.As(err, &statusError) || !statusError.isNotFound() {
+		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
 	}
 	var metadata types.CredentialIssuerMetadata
 	legacyURL := endpointURL
@@ -94,7 +94,7 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 		legacyURL = *legacyURL.JoinPath(wellKnownCredentialIssuer)
 	}
 	if err := o.fetchIssuerMetadataDocument(ctx, legacyURL, identifier, signing, normalized, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
+		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
 	}
 
 	return &metadata, nil
@@ -133,15 +133,6 @@ func credentialIssuerIdentifier(endpointURL url.URL) string {
 		identifier.Path = rest
 	}
 	return identifier.String()
-}
-
-type metadataHTTPStatusError struct {
-	statusCode int
-	body       string
-}
-
-func (e *metadataHTTPStatusError) Error() string {
-	return fmt.Sprintf("unexpected status code: %d, body: %s", e.statusCode, e.body)
 }
 
 func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(ctx context.Context, endpoint common.URIField, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile, target *types.CredentialIssuerMetadata) error {
@@ -248,7 +239,7 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 		return fmt.Errorf("failed to read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return &metadataHTTPStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
+		return &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
 	}
 	if len(bodyBytes) == 0 {
 		return fmt.Errorf("empty response body")
@@ -412,7 +403,7 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 
 	var metadata types.AuthorizationServerMetadata
 	if err := o.doRequest(context.Background(), "GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
+		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf("failed to fetch authorization server metadata: %w", err))
 	}
 
 	return &metadata, nil

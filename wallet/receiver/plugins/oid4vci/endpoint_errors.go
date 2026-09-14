@@ -1,0 +1,122 @@
+package oid4vci
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+)
+
+// Stage names the endpoint an OpenID4VCI 1.0 issuance was talking to when it
+// failed. It exists so a caller can report which step of the flow the issuer or
+// the authorization server refused — the wallet's own report to the holder, and
+// often the only actionable part of a failure — without parsing error text or
+// keeping its own record of the requests the library performed.
+type Stage string
+
+const (
+	// StageIssuerMetadata is the Section 12.2.2 Credential Issuer Metadata
+	// document.
+	StageIssuerMetadata Stage = "issuer_metadata"
+	// StageAuthorizationServerMetadata is the RFC 8414 authorization server
+	// metadata document of the Section 12.3 selected authorization server.
+	StageAuthorizationServerMetadata Stage = "authorization_server_metadata"
+	// StagePAR is the RFC 9126 Pushed Authorization Request endpoint.
+	StagePAR Stage = "pushed_authorization_request"
+	// StageToken is the Section 6.1 Token Endpoint, for both the authorization
+	// code and the pre-authorized code grant.
+	StageToken Stage = "token"
+	// StageNonce is the Section 7 Nonce Endpoint.
+	StageNonce Stage = "nonce"
+)
+
+// EndpointError reports that one endpoint of an issuance did not answer with
+// the document the flow needs: it refused the request with an HTTP status, or
+// the request never produced a usable response at all.
+//
+// The Section 8 Credential Endpoint and the Section 9 Deferred Credential
+// Endpoint are not reported through this type. Their refusals carry the
+// Section 8.3.1.2 error code the wallet acts on — a fresh c_nonce, a retry, a
+// terminal failure — so they arrive as *types.CredentialEndpointError instead.
+//
+// The issuer's response body is deliberately not kept: it is attacker-influenced
+// text of unbounded size, and a wallet that logs or renders a failure must be
+// able to do so from the fields of this error alone. Err keeps the underlying
+// cause, so errors.Is still finds the sentinels of this package (for example
+// ErrHTTPRedirectNotAllowed or ErrIssuerIdentifierMismatch) and the transport
+// errors underneath them.
+type EndpointError struct {
+	// Stage is the endpoint that failed.
+	Stage Stage
+	// StatusCode is the HTTP status the endpoint answered with, or 0 when the
+	// failure happened before a response was read — a transport error, a
+	// refused redirect, or a body that did not decode.
+	StatusCode int
+	// OAuthError is the RFC 6749 Section 5.2 `error` member of the response
+	// body, when the endpoint returned one. Empty otherwise.
+	OAuthError string
+	// Err is the underlying cause.
+	Err error
+}
+
+func (e *EndpointError) Error() string {
+	if e == nil {
+		return "OpenID4VCI endpoint error"
+	}
+	prefix := fmt.Sprintf("%s endpoint failed", e.Stage)
+	switch {
+	case e.StatusCode != 0 && e.OAuthError != "":
+		prefix = fmt.Sprintf("%s endpoint returned HTTP %d %s", e.Stage, e.StatusCode, e.OAuthError)
+	case e.StatusCode != 0:
+		prefix = fmt.Sprintf("%s endpoint returned HTTP %d", e.Stage, e.StatusCode)
+	}
+	if e.Err == nil {
+		return prefix
+	}
+	return prefix + ": " + e.Err.Error()
+}
+
+func (e *EndpointError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// stageError tags err with the endpoint it came from. An error that already
+// names a stage is returned unchanged, so the outermost public method does not
+// relabel a failure a nested one already classified.
+func stageError(stage Stage, err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *EndpointError
+	if errors.As(err, &already) {
+		return err
+	}
+	endpointError := &EndpointError{Stage: stage, Err: err}
+	var statusError *httpStatusError
+	if errors.As(err, &statusError) {
+		endpointError.StatusCode = statusError.statusCode
+		endpointError.OAuthError = tokenErrorCode([]byte(statusError.body))
+	}
+	return endpointError
+}
+
+// httpStatusError is the unexpected HTTP status of a request this package made,
+// kept typed so the public methods can report the status code and the RFC 6749
+// `error` code structurally instead of only in their message.
+type httpStatusError struct {
+	statusCode int
+	body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("unexpected status code: %d, body: %s", e.statusCode, e.body)
+}
+
+// isNotFound reports the one status the issuer metadata discovery fallback
+// distinguishes: a Credential Issuer that answers the Final well-known URL with
+// 404 may still publish the legacy document.
+func (e *httpStatusError) isNotFound() bool {
+	return e != nil && e.statusCode == http.StatusNotFound
+}

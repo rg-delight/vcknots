@@ -208,7 +208,7 @@ func (o *Oid4vciReceiver) doRequestURL(ctx context.Context, method string, endpo
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return &metadataHTTPStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
+		return &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
 	}
 
 	if len(bodyBytes) == 0 {
@@ -266,7 +266,7 @@ func (o *Oid4vciReceiver) doFinalRequestWithResponseHeader(ctx context.Context, 
 		return resp.Header, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.Header, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(bodyBytes))
+		return resp.Header, &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
 	}
 	if target == nil || len(bodyBytes) == 0 {
 		return resp.Header, nil

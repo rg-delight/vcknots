@@ -177,7 +177,7 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 
 	var response types.PushedAuthorizationResponse
 	if err := o.doFinalRequest(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", headersToMap(headers), &response); err != nil {
-		return nil, fmt.Errorf("failed to push authorization request: %w", err)
+		return nil, stageError(StagePAR, fmt.Errorf("failed to push authorization request: %w", err))
 	}
 	return &response, nil
 }
@@ -207,7 +207,7 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 
 	var response types.CredentialIssuanceAccessToken
 	if err := o.doFinalRequest(context.Background(), http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
-		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
+		return nil, stageError(StageToken, fmt.Errorf("failed to exchange authorization code: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
 		return nil, err
@@ -258,7 +258,7 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(c
 
 	var response types.CredentialIssuanceAccessToken
 	if err := o.doFormRequestWithDpopAndAttestationRetry(ctx, endpoint, buildBody, headersFactory, proofFactory, &response); err != nil {
-		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
+		return nil, stageError(StageToken, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
 		return nil, err
@@ -340,7 +340,7 @@ func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(c
 
 	var response types.CredentialIssuanceAccessToken
 	if err := o.doFormRequestWithDpopAndAttestationRetry(ctx, common.URIField(*resolvedURL), buildBody, headersFactory, proofFactory, &response); err != nil {
-		return nil, fmt.Errorf("failed to exchange the pre-authorized code with DPoP retry: %w", err)
+		return nil, stageError(StageToken, fmt.Errorf("failed to exchange the pre-authorized code with DPoP retry: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
 		return nil, err
@@ -451,7 +451,7 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(ctx context.Conte
 			dpopNonce = nonce
 			continue
 		}
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(respBody))
+		return &httpStatusError{statusCode: resp.StatusCode, body: string(respBody)}
 	}
 
 	return fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())

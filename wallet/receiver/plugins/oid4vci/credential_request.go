@@ -114,7 +114,7 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 	var response types.NonceResponse
 	responseHeader, err := o.doFinalRequestWithResponseHeader(ctx, http.MethodPost, endpoint, nil, "", nil, &response)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
+		return nil, stageError(StageNonce, fmt.Errorf("failed to fetch nonce: %w", err))
 	}
 	// OpenID4VCI 1.0 §7.2: "c_nonce: REQUIRED. String containing a challenge to
 	// be used when creating a proof of possession of the key." A 2xx Nonce
