@@ -137,12 +137,20 @@ type CredentialPresentationRequest struct {
 	// it is not accepted from or serialized into authorization request data.
 	RequestObjectVerification *RequestObjectVerification `json:"-"`
 	PresentationDefinition    *PresentationDefinition    `json:"presentation_definition,omitempty"`
-	DcqlQuery                 *DcqlQuery                 `json:"dcql_query"`                            // required
-	ClientMetadata            *VerifierMetadata          `json:"client_metadata,omitempty"`             // optional
-	TransactionData           []string                   `json:"transaction_data,omitempty"`            // optional, to be implemented
-	TransactionDataHashesAlg  string                     `json:"transaction_data_hashes_alg,omitempty"` // optional, hash algorithm for transaction_data_hashes
-	VerifierInfo              []any                      `json:"verifier_info,omitempty"`               // optional, to be implemented
-	ResponseURI               string                     `json:"response_uri,omitempty"`                // optional
+	// RawPresentationDefinition is the presentation_definition parameter of a
+	// Draft 24 Authorization Request exactly as it arrived, before this library
+	// reduced it to the id it uses. Presentation Exchange is not modelled here,
+	// so a caller that has to show or forward the Verifier's own definition
+	// reads it from this value. It is nil on the Final path, which refuses
+	// presentation_definition outright, and it is never serialized back into an
+	// authorization request.
+	RawPresentationDefinition json.RawMessage   `json:"-"`
+	DcqlQuery                 *DcqlQuery        `json:"dcql_query"`                            // required
+	ClientMetadata            *VerifierMetadata `json:"client_metadata,omitempty"`             // optional
+	TransactionData           []string          `json:"transaction_data,omitempty"`            // optional, to be implemented
+	TransactionDataHashesAlg  string            `json:"transaction_data_hashes_alg,omitempty"` // optional, hash algorithm for transaction_data_hashes
+	VerifierInfo              []any             `json:"verifier_info,omitempty"`               // optional, to be implemented
+	ResponseURI               string            `json:"response_uri,omitempty"`                // optional
 	// ResponseAudience is the audience for a DC API response. OID4VP 1.0
 	// Appendix A.4: "The audience for the response (for example, the aud value
 	// in a Key Binding JWT) MUST be the Origin, prefixed with origin:". It is

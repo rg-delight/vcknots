@@ -14,12 +14,42 @@ import (
 )
 
 // buildDCQLVPToken finishes selection and serialization for every required
-// query before the caller can submit any credential to the verifier.
+// query before the caller can submit any credential to the verifier. The
+// library chooses the credentials and claim sets here; a caller whose Holder
+// made that choice goes through buildDCQLVPTokenFromSelections instead.
 func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key IKeyEntry, callerOptions serializerTypes.SerializePresentationOptions) (map[string][]string, error) {
 	credentials, selections, err := w.selectCredentialsForDCQL(req.DcqlQuery)
 	if err != nil {
 		return nil, err
 	}
+	return w.serializeDCQLSelections(req, key, callerOptions, credentials, selections)
+}
+
+// buildDCQLVPTokenFromSelections serializes credentials the caller chose, after
+// validating that the choice answers the request. An empty selection is the
+// Holder answering no credential query at all, which OID4VP 1.0 Section 8.1
+// carries as the empty vp_token object rather than as an error.
+func (w *Wallet) buildDCQLVPTokenFromSelections(req *oid4vp.CredentialPresentationRequest, key IKeyEntry, selections []oid4vp.DCQLCredentialSelection, callerOptions serializerTypes.SerializePresentationOptions) (map[string][]string, error) {
+	if req == nil || req.DcqlQuery == nil {
+		return nil, fmt.Errorf("dcql_query is required to present a DCQL selection")
+	}
+	if len(selections) == 0 {
+		return map[string][]string{}, nil
+	}
+	credentials, candidates, err := w.dcqlCandidates()
+	if err != nil {
+		return nil, err
+	}
+	if err := oid4vp.ValidateDCQLCredentialSelections(req.DcqlQuery, candidates, selections); err != nil {
+		return nil, err
+	}
+	return w.serializeDCQLSelections(req, key, callerOptions, credentials, selections)
+}
+
+// serializeDCQLSelections is the single vp_token builder both selection paths
+// share, so transaction data assignment, disclosure limits and key binding do
+// not depend on who chose the credentials.
+func (w *Wallet) serializeDCQLSelections(req *oid4vp.CredentialPresentationRequest, key IKeyEntry, callerOptions serializerTypes.SerializePresentationOptions, credentials map[string]*SavedCredential, selections []oid4vp.DCQLCredentialSelection) (map[string][]string, error) {
 	// OID4VP 1.0 Final Section 5.1: "If there is more than one element in the
 	// array, the Wallet MUST use only one of the referenced Credentials for
 	// transaction authorization." This pre-pass assigns every transaction_data
@@ -31,7 +61,10 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 	}
 	vpToken := make(map[string][]string, len(selections))
 	for _, selection := range selections {
-		saved := credentials[selection.CandidateID]
+		saved, stored := credentials[selection.CandidateID]
+		if !stored {
+			return nil, fmt.Errorf("selected credential %s is not stored in this wallet", selection.CandidateID)
+		}
 		flavor, err := saved.Entry.SerializationFlavor()
 		if err != nil {
 			return nil, fmt.Errorf("failed to detect selected credential format: %w", err)
@@ -108,6 +141,68 @@ func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, key
 		vpToken[selection.QueryID] = append(vpToken[selection.QueryID], string(serialized))
 	}
 	return vpToken, nil
+}
+
+// dcqlCandidates renders every stored credential this wallet can present as a
+// DCQL matching candidate, together with the stored credentials keyed by the
+// candidate id. It is the single view both the library's own selection and the
+// validation of a caller's selection match the request against, so a credential
+// that cannot be matched cannot be presented either.
+func (w *Wallet) dcqlCandidates() (map[string]*SavedCredential, []oid4vp.DCQLCredentialCandidate, error) {
+	entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{
+		Offset: 0,
+		Limit:  nil,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get credential entries: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil, newAccessDeniedError("no credentials available for presentation")
+	}
+
+	credentialsByID := map[string]*SavedCredential{}
+	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(entries))
+	for _, entry := range entries {
+		flavor, err := entry.Entry.SerializationFlavor()
+		if err != nil {
+			continue
+		}
+		vcFormat, _, err := flavor.OID4VPFormatIdentifier()
+		if err != nil {
+			continue
+		}
+		claimNames := []string{}
+		claimValues := map[string]any{}
+		claimObject := map[string]any{}
+		if entry.Credential.Claims != nil {
+			for name, value := range *entry.Credential.Claims {
+				claimNames = append(claimNames, name)
+				claimValues[name] = value
+				claimObject[name] = value
+			}
+		}
+		if flavor == credential.SDJwtVC {
+			if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(entry.Entry.Raw)); reconstructErr == nil {
+				claimObject = reconstructed
+			}
+		}
+		vct := ""
+		if len(entry.Credential.Types) > 0 {
+			vct = entry.Credential.Types[0]
+		}
+		credentialsByID[entry.Entry.Id] = entry
+		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
+			ID:              entry.Entry.Id,
+			Format:          vcFormat,
+			VCT:             vct,
+			Claims:          claimNames,
+			ClaimValues:     claimValues,
+			ClaimObject:     claimObject,
+			HolderBound:     boolPointer(credentialHasHolderBinding(flavor, entry)),
+			AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(entry.Entry.Raw)),
+		})
+	}
+	return credentialsByID, candidates, nil
 }
 
 // SDJWTCarriesConfirmation reports whether the SD-JWT VC wire value's issuer

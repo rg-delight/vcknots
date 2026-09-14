@@ -53,7 +53,6 @@ import (
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
-	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -1813,6 +1812,40 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 	return redirectURI, nil
 }
 
+// PresentDCQLSelection submits an OID4VP authorization response built from
+// credentials the caller already chose, for a request the caller already
+// parsed. It exists because OID4VP 1.0 leaves two choices to the Wallet that
+// belong to the person giving consent rather than to a library: which of a
+// credential query's claim_sets to disclose (Section 6.3) and which option of a
+// credential_set to answer (Section 6.2). PresentCredential and
+// PresentCredentialWithOptions keep making both choices in the library.
+//
+// The selections are validated against the request before anything is
+// serialized: a selection the request cannot accept fails with an error that
+// wraps oid4vp.ErrDCQLSelectionUnsatisfied and nothing is sent. An empty
+// selection is the Holder answering no credential query, and is sent as the
+// empty vp_token object of OID4VP 1.0 Section 8.1. Transaction data assignment
+// and response encryption are identical to PresentCredentialWithOptions.
+//
+// The returned value is the redirect_uri the Verifier answered with, if any.
+func (w *Wallet) PresentDCQLSelection(req *oid4vp.CredentialPresentationRequest, endpoint url.URL, key IKeyEntry, selections []oid4vp.DCQLCredentialSelection, options serializerTypes.SerializePresentationOptions) (string, error) {
+	if req == nil {
+		return "", fmt.Errorf("authorization request is required to present a DCQL selection")
+	}
+	if err := validateTransactionDataHolderBinding(req); err != nil {
+		return "", err
+	}
+	vpToken, err := w.buildDCQLVPTokenFromSelections(req, key, selections, options)
+	if err != nil {
+		return "", err
+	}
+	return w.presenter.PresentDCQL(presenterTypes.Oid4vp, endpoint, vpToken, &presenterTypes.PresentationRequest{
+		State:          req.State,
+		ResponseMode:   string(req.ResponseMode),
+		ClientMetadata: req.ClientMetadata,
+	})
+}
+
 // BuildOID4VPFinalAuthorizationResponse builds an OID4VP Final DCQL
 // authorization response from credentials already stored in the wallet. The
 // returned value is ready to encrypt with Oid4vpPresenter.CreateEncryptedAuthorizationResponse
@@ -1936,58 +1969,9 @@ func (w *Wallet) selectCredentialsForPresentation(req *oid4vp.CredentialPresenta
 }
 
 func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*SavedCredential, []oid4vp.DCQLCredentialSelection, error) {
-	entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{
-		Offset: 0,
-		Limit:  nil,
-	})
+	credentialsByID, candidates, err := w.dcqlCandidates()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get credential entries: %w", err)
-	}
-	if len(entries) == 0 {
-		return nil, nil, newAccessDeniedError("no credentials available for presentation")
-	}
-
-	credentialsByID := map[string]*SavedCredential{}
-	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(entries))
-	for _, entry := range entries {
-		flavor, err := entry.Entry.SerializationFlavor()
-		if err != nil {
-			continue
-		}
-		vcFormat, _, err := flavor.OID4VPFormatIdentifier()
-		if err != nil {
-			continue
-		}
-		claimNames := []string{}
-		claimValues := map[string]any{}
-		claimObject := map[string]any{}
-		if entry.Credential.Claims != nil {
-			for name, value := range *entry.Credential.Claims {
-				claimNames = append(claimNames, name)
-				claimValues[name] = value
-				claimObject[name] = value
-			}
-		}
-		if flavor == credential.SDJwtVC {
-			if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(entry.Entry.Raw)); reconstructErr == nil {
-				claimObject = reconstructed
-			}
-		}
-		vct := ""
-		if len(entry.Credential.Types) > 0 {
-			vct = entry.Credential.Types[0]
-		}
-		credentialsByID[entry.Entry.Id] = entry
-		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
-			ID:              entry.Entry.Id,
-			Format:          vcFormat,
-			VCT:             vct,
-			Claims:          claimNames,
-			ClaimValues:     claimValues,
-			ClaimObject:     claimObject,
-			HolderBound:     boolPointer(credentialHasHolderBinding(flavor, entry)),
-			AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(entry.Entry.Raw)),
-		})
+		return nil, nil, err
 	}
 
 	selections, err := oid4vp.ResolveSatisfiableDCQLCredentials(query, candidates)

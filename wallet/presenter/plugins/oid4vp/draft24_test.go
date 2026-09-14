@@ -182,3 +182,40 @@ func TestDraft24RetainsSyntacticDCQLParsing(t *testing.T) {
 	_, err = p.ParsePresentationRequest("openid4vp://present?" + params.Encode())
 	require.Error(t, err)
 }
+
+// TestParseDraft24KeepsRawPresentationDefinition pins that the Verifier's own
+// Presentation Exchange definition survives parsing. This library models only
+// its id, so a caller that has to render the requested input descriptors on a
+// consent screen, or forward the definition, reads the wire value instead of
+// re-encoding a lossy copy. It is request state, never an outgoing parameter.
+func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
+	definition := `{"id":"definition","input_descriptors":[{"id":"identity","constraints":{"fields":[{"path":["$.vct"]}]}}]}`
+	p := &Oid4vpPresenter{}
+	params := url.Values{
+		"client_id":     {"redirect_uri:https://verifier.example/response"},
+		"response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"nonce"},
+		"presentation_definition": {definition},
+	}
+	request, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+	require.NoError(t, err)
+	require.Equal(t, "definition", request.PresentationDefinition.ID)
+	require.JSONEq(t, definition, string(request.RawPresentationDefinition))
+	encoded, err := json.Marshal(request)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "input_descriptors")
+
+	// A signed Request Object carries the definition as a JSON object rather
+	// than as a query parameter string, and must round-trip the same way.
+	f := newRequestObjectFixture(t, "verifier.example")
+	signed, err := f.presenter().ParseDraft24PresentationRequest(draft24RequestURI(t, f, draft24X509Claims(f)))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"id":"pd-1","input_descriptors":[{"id":"pid"}]}`, string(signed.RawPresentationDefinition))
+
+	// The Final path refuses presentation_definition outright, so it never
+	// holds one.
+	params.Del("presentation_definition")
+	params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"dc+sd-jwt","meta":{"vct_values":["urn:identity"]}}]}`)
+	final, err := p.ParsePresentationRequest("openid4vp://present?" + params.Encode())
+	require.NoError(t, err)
+	require.Nil(t, final.RawPresentationDefinition)
+}

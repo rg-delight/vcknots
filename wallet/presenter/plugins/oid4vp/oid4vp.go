@@ -1224,6 +1224,11 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 				return
 			}
 			b.req.PresentationDefinition = &definition
+			// The library keeps only the definition id. A caller that has to
+			// render or forward the Verifier's own Presentation Exchange
+			// definition keeps the wire value instead of re-encoding a lossy
+			// copy of it.
+			b.req.RawPresentationDefinition = json.RawMessage(bytes.Clone(data))
 		}
 	} else {
 		// Final uses DCQL. Keep Presentation Exchange behind the explicit Draft24 API.

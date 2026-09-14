@@ -46,39 +46,67 @@ type DCQLCredentialSelection struct {
 	RequestedClaims []string
 }
 
-func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLCredentialSelection, error) {
+// dcqlQueryPlan is the validated structure of one DCQL query: every credential
+// query by id, and the claim set options each of them offers. Choosing
+// credentials for the request and validating a choice made outside this library
+// share it, so both apply the same structural rules to the same request.
+type dcqlQueryPlan struct {
+	queries      map[string]DCQLCredentialQuery
+	claimOptions map[string][][]DCQLClaimQuery
+}
+
+// planDCQLQuery validates the request structure defined in OID4VP 1.0 Sections
+// 6.1 to 6.3 - credential query ids, claims, claim_sets and credential_sets -
+// and returns the plan the selection paths work from.
+func planDCQLQuery(query *DCQLQuery) (dcqlQueryPlan, error) {
 	if query == nil {
-		return nil, fmt.Errorf("dcql_query is required")
+		return dcqlQueryPlan{}, fmt.Errorf("dcql_query is required")
 	}
 	if len(query.Credentials) == 0 {
-		return nil, fmt.Errorf("dcql_query.credentials must not be empty")
+		return dcqlQueryPlan{}, fmt.Errorf("dcql_query.credentials must not be empty")
 	}
 
+	plan := dcqlQueryPlan{
+		queries:      make(map[string]DCQLCredentialQuery, len(query.Credentials)),
+		claimOptions: make(map[string][][]DCQLClaimQuery, len(query.Credentials)),
+	}
 	ids := map[string]bool{}
-	claimOptions := map[string][][]DCQLClaimQuery{}
 	for _, credentialQuery := range query.Credentials {
 		if !credentialQueryIDPattern.MatchString(credentialQuery.ID) || ids[credentialQuery.ID] {
-			return nil, fmt.Errorf("DCQL credential query ids must be valid and unique")
+			return dcqlQueryPlan{}, fmt.Errorf("DCQL credential query ids must be valid and unique")
 		}
 		ids[credentialQuery.ID] = true
 		options, err := dcqlClaimOptions(credentialQuery)
 		if err != nil {
-			return nil, err
+			return dcqlQueryPlan{}, err
 		}
-		claimOptions[credentialQuery.ID] = options
+		plan.queries[credentialQuery.ID] = credentialQuery
+		plan.claimOptions[credentialQuery.ID] = options
 	}
 	if query.CredentialSets != nil && len(query.CredentialSets) == 0 {
-		return nil, fmt.Errorf("DCQL credential_sets must not be empty")
+		return dcqlQueryPlan{}, fmt.Errorf("DCQL credential_sets must not be empty")
 	}
 	for _, set := range query.CredentialSets {
 		if err := validateDCQLTypedOptions(set.Options, ids, false); err != nil {
-			return nil, fmt.Errorf("invalid DCQL credential_set: %w", err)
+			return dcqlQueryPlan{}, fmt.Errorf("invalid DCQL credential_set: %w", err)
 		}
+	}
+	return plan, nil
+}
+
+// ResolveSatisfiableDCQLCredentials chooses, for every credential query the
+// request requires, the stored credentials that satisfy it. The library decides
+// the claim set here; a Wallet that lets its Holder decide validates that
+// decision with ValidateDCQLCredentialSelections instead.
+func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLCredentialSelection, error) {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return nil, err
 	}
 
 	satisfiable := map[string][]DCQLCredentialSelection{}
 	for _, credentialQuery := range query.Credentials {
-		selections := resolveDCQLCredentialQuery(credentialQuery, claimOptions[credentialQuery.ID], candidates)
+		selections := resolveDCQLCredentialQuery(credentialQuery, plan.claimOptions[credentialQuery.ID], candidates)
 		if len(selections) > 0 {
 			satisfiable[credentialQuery.ID] = selections
 		}
@@ -123,6 +151,153 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 		}
 	}
 	return selections, nil
+}
+
+// ValidateDCQLCredentialSelections reports whether credentials chosen outside
+// this library - by the Holder on a consent screen - answer the DCQL query.
+//
+// OID4VP 1.0 Section 6.3 leaves the choice between the claim_sets of a
+// credential query to the Wallet ("the Wallet MUST return one of the sets that
+// it can satisfy"), and Section 6.2 leaves the choice between the options of a
+// credential_set to the Wallet in the same way. Deciding that in the library
+// would take the decision away from the person giving consent, so this function
+// only checks the decision: every selected credential must satisfy its
+// credential query, the disclosed claims must be exactly one claim set that
+// query offers, every required credential_set must have a fully answered
+// option, and nothing may be presented that no answered option asked for.
+//
+// A selection the request cannot accept is reported as an error that wraps
+// ErrDCQLSelectionUnsatisfied. A malformed request is reported as a plain
+// structural error, which no selection could have repaired.
+func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredentialCandidate, selections []DCQLCredentialSelection) error {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]DCQLCredentialCandidate, len(candidates))
+	for _, candidate := range candidates {
+		byID[candidate.ID] = candidate
+	}
+
+	presented := map[string][]DCQLCredentialSelection{}
+	for _, selection := range selections {
+		credentialQuery, requested := plan.queries[selection.QueryID]
+		if !requested {
+			return fmt.Errorf("%w: selection references credential query %q, which the request does not contain", ErrDCQLSelectionUnsatisfied, selection.QueryID)
+		}
+		candidate, stored := byID[selection.CandidateID]
+		if !stored {
+			return fmt.Errorf("%w: selection references credential %q, which this wallet cannot present", ErrDCQLSelectionUnsatisfied, selection.CandidateID)
+		}
+		for _, earlier := range presented[selection.QueryID] {
+			if earlier.CandidateID == selection.CandidateID {
+				return fmt.Errorf("%w: credential %q is selected twice for credential query %q", ErrDCQLSelectionUnsatisfied, selection.CandidateID, selection.QueryID)
+			}
+		}
+		// OID4VP 1.0 Section 6.1: multiple defaults to false, and "only one
+		// Credential will be returned" for such a Credential Query.
+		if !credentialQuery.Multiple && len(presented[selection.QueryID]) > 0 {
+			return fmt.Errorf("%w: credential query %q does not accept more than one credential", ErrDCQLSelectionUnsatisfied, selection.QueryID)
+		}
+		if err := validateDCQLSelectedCandidate(credentialQuery, plan.claimOptions[selection.QueryID], candidate, selection); err != nil {
+			return err
+		}
+		presented[selection.QueryID] = append(presented[selection.QueryID], selection)
+	}
+	return validateDCQLPresentedSets(query, presented)
+}
+
+// validateDCQLSelectedCandidate applies one credential query's own constraints
+// to one selected credential, and requires its disclosed claims to be exactly
+// one of the claim sets that query offers.
+func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidate DCQLCredentialCandidate, selection DCQLCredentialSelection) error {
+	vctValues, validMeta := dcqlVCTValues(query.Meta)
+	if !validMeta {
+		return fmt.Errorf("credential query %q has an invalid meta.vct_values", query.ID)
+	}
+	switch {
+	case candidate.Format != query.Format:
+		return fmt.Errorf("%w: credential %q is in format %q, and credential query %q requests %q", ErrDCQLSelectionUnsatisfied, candidate.ID, candidate.Format, query.ID, query.Format)
+	case len(vctValues) > 0 && !containsString(vctValues, candidate.VCT):
+		return fmt.Errorf("%w: credential %q does not carry a vct credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case selection.Format != "" && selection.Format != candidate.Format,
+		selection.VCT != "" && selection.VCT != candidate.VCT:
+		return fmt.Errorf("%w: the selection for credential query %q does not describe credential %q", ErrDCQLSelectionUnsatisfied, query.ID, candidate.ID)
+	case query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() && candidate.HolderBound != nil && !*candidate.HolderBound:
+		// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder Binding
+		// (i.e., do not have a cnf Claim) cannot be returned in this case."
+		return fmt.Errorf("%w: credential %q has no cryptographic holder binding, which credential query %q requires", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate):
+		// OID4VP 1.0 Section 6.4.2: "Credentials not matching the respective
+		// constraints ... are treated as if they would not exist in the Wallet."
+		return fmt.Errorf("%w: credential %q is outside the trusted authorities credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	}
+	for _, claims := range claimOptions {
+		resolved, satisfied := matchDCQLClaims(claims, candidate)
+		if satisfied && sameDCQLClaimSelection(resolved, selection.RequestedClaims) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the claims selected for credential query %q are not one of the claim sets it offers", ErrDCQLSelectionUnsatisfied, query.ID)
+}
+
+// sameDCQLClaimSelection compares a resolved claim set with the claims a
+// selection carries, ignoring order: a consent screen may present the claims of
+// a claim set in any order, but must not add or drop one.
+func sameDCQLClaimSelection(resolved, selected []string) bool {
+	if len(resolved) != len(selected) {
+		return false
+	}
+	for _, name := range resolved {
+		if !containsString(selected, name) {
+			return false
+		}
+	}
+	for _, name := range selected {
+		if !containsString(resolved, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// validateDCQLPresentedSets applies the request's requirement structure to the
+// credential queries the selection answered. Without credential_sets every
+// credential query is required (OID4VP 1.0 Section 6.4.2); with them, every
+// required set needs one fully answered option, and a credential query that no
+// answered option contains would disclose a credential the request never asked
+// for in that combination.
+func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCredentialSelection) error {
+	if len(query.CredentialSets) == 0 {
+		for _, credentialQuery := range query.Credentials {
+			if len(presented[credentialQuery.ID]) == 0 {
+				return fmt.Errorf("%w: required DCQL credential query %q is not answered", ErrDCQLSelectionUnsatisfied, credentialQuery.ID)
+			}
+		}
+		return nil
+	}
+	answered := map[string]bool{}
+	for _, credentialSet := range query.CredentialSets {
+		matched := false
+		for _, option := range credentialSet.Options {
+			if !everyDCQLCredentialIDSatisfiable(option, presented) {
+				continue
+			}
+			matched = true
+			for _, id := range option {
+				answered[id] = true
+			}
+		}
+		if !matched && (credentialSet.Required == nil || *credentialSet.Required) {
+			return fmt.Errorf("%w: no option of a required DCQL credential_set is answered", ErrDCQLSelectionUnsatisfied)
+		}
+	}
+	for _, credentialQuery := range query.Credentials {
+		if len(presented[credentialQuery.ID]) > 0 && !answered[credentialQuery.ID] {
+			return fmt.Errorf("%w: credential query %q is not part of any answered credential_set option", ErrDCQLSelectionUnsatisfied, credentialQuery.ID)
+		}
+	}
+	return nil
 }
 
 // resolveDCQLCredentialQuery returns all candidates that satisfy the query for

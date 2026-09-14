@@ -543,3 +543,182 @@ func TestDCQLTransactionDataRejectsUnmatchedEntry(t *testing.T) {
 	_, err := presentWithTransactionData(t, fixture, query, []string{entry})
 	require.ErrorContains(t, err, "transaction_data entry 0 references no selected credential (invalid_transaction_data)")
 }
+
+// parsedPresentationRequest parses an Authorization Request the way an
+// application does before it renders a consent screen and hands the Holder's
+// decision back to the wallet.
+func parsedPresentationRequest(t *testing.T, fixture sdjwtPresentationFixture, uri string) (*oid4vp.CredentialPresentationRequest, url.URL) {
+	t.Helper()
+	req, err := fixture.wallet.presenter.ParseRequestURI(uri)
+	require.NoError(t, err)
+	endpoint, err := url.Parse(req.ResponseURI)
+	require.NoError(t, err)
+	return req, *endpoint
+}
+
+// storedCredentialID returns the wallet credential id a consent screen shows
+// for a vct, which is the CandidateID of a DCQL selection.
+func storedCredentialID(t *testing.T, controller *Wallet, vct string) string {
+	t.Helper()
+	entries, _, err := controller.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if len(entry.Credential.Types) > 0 && entry.Credential.Types[0] == vct {
+			return entry.Entry.Id
+		}
+	}
+	t.Fatalf("no stored credential with vct %q", vct)
+	return ""
+}
+
+// claimSetsDCQLQuery offers the same credential under two alternative claim
+// sets, so the disclosure depends entirely on which one is chosen.
+const claimSetsDCQLQuery = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
+	`"claims":[{"id":"given","path":["given_name"]},{"id":"family","path":["family_name"]}],"claim_sets":[["given"],["family"]]}]}`
+
+// OID4VP 1.0 Section 6.3: "the Wallet MUST return one of the sets that it can
+// satisfy". The library's own selection always takes the first satisfiable set
+// (TestWallet_PublicDCQLPresentation), so a Holder who chose the second one
+// needs PresentDCQLSelection to reach the Verifier with that choice intact.
+func TestWallet_PresentDCQLSelectionDisclosesTheChosenClaimSet(t *testing.T) {
+	for _, claims := range [][]string{{"given_name"}, {"family_name"}} {
+		t.Run(claims[0], func(t *testing.T) {
+			fixture := newSDJWTPresentationFixture(t)
+			holder := fixture.key.PublicKey()
+			fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
+			req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, claimSetsDCQLQuery))
+
+			redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, []oid4vp.DCQLCredentialSelection{{
+				QueryID:         "pid",
+				CandidateID:     storedCredentialID(t, fixture.wallet, "urn:test:identity"),
+				Format:          "dc+sd-jwt",
+				VCT:             "urn:test:identity",
+				RequestedClaims: claims,
+			}}, nil)
+			require.NoError(t, err)
+			require.Equal(t, fixture.baseURL+"/done", redirect)
+
+			select {
+			case form := <-fixture.posted:
+				require.Equal(t, "state-to-preserve", form.Get("state"))
+				var tokens map[string][]string
+				require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+				require.Len(t, tokens["pid"], 1)
+				require.Equal(t, claims, disclosedNames(t, tokens["pid"][0]))
+			default:
+				t.Fatal("no presentation submitted")
+			}
+		})
+	}
+}
+
+// A consent decision the request cannot accept must fail before anything is
+// serialized, and must be distinguishable from a transport failure.
+func TestWallet_PresentDCQLSelectionRejectsUnsatisfyingSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		query      string
+		selections func(identity, address string) []oid4vp.DCQLCredentialSelection
+	}{
+		{
+			name:  "claims outside every claim set",
+			query: claimSetsDCQLQuery,
+			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
+				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: identity, RequestedClaims: []string{"given_name", "family_name"}}}
+			},
+		},
+		{
+			name:  "credential the credential query does not accept",
+			query: claimSetsDCQLQuery,
+			selections: func(_, address string) []oid4vp.DCQLCredentialSelection {
+				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: address, RequestedClaims: []string{"given_name"}}}
+			},
+		},
+		{
+			name:  "credential query the request does not contain",
+			query: claimSetsDCQLQuery,
+			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
+				return []oid4vp.DCQLCredentialSelection{{QueryID: "passport", CandidateID: identity, RequestedClaims: []string{"given_name"}}}
+			},
+		},
+		{
+			name:  "required credential query left unanswered",
+			query: twoCredentialDCQLQuery,
+			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
+				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: identity, RequestedClaims: []string{"given_name"}}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSDJWTPresentationFixture(t)
+			holder := fixture.key.PublicKey()
+			fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
+			fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
+			req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, tc.query))
+
+			_, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, tc.selections(
+				storedCredentialID(t, fixture.wallet, "urn:test:identity"),
+				storedCredentialID(t, fixture.wallet, "urn:test:address"),
+			), nil)
+			require.ErrorIs(t, err, oid4vp.ErrDCQLSelectionUnsatisfied)
+			select {
+			case <-fixture.posted:
+				t.Fatal("rejected selection still disclosed credentials")
+			default:
+			}
+		})
+	}
+}
+
+// OID4VP 1.0 Section 6.4.2 lets the Holder decline an optional credential_set,
+// and Section 8.1 defines the vp_token as an object, so the answer to declining
+// everything is the empty object rather than an error or an absent parameter.
+func TestWallet_PresentDCQLSelectionSendsEmptyVPTokenWhenNothingIsSelected(t *testing.T) {
+	fixture := newSDJWTPresentationFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
+	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}],` +
+		`"credential_sets":[{"options":[["pid"]],"required":false}]}`
+	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+
+	redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.baseURL+"/done", redirect)
+
+	select {
+	case form := <-fixture.posted:
+		require.Equal(t, "{}", form.Get("vp_token"))
+		require.Equal(t, "state-to-preserve", form.Get("state"))
+	default:
+		t.Fatal("no presentation submitted")
+	}
+}
+
+// The caller-chosen path must assign transaction_data exactly as the
+// library-chosen path does: OID4VP 1.0 Final Section 5.1 allows only one of the
+// referenced Credentials to authorize the transaction, and Section 8.4 puts the
+// hash in that Credential's presentation alone.
+func TestWallet_PresentDCQLSelectionKeepsTransactionDataAssignment(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["addr","pid"]}`)
+	req, endpoint := parsedPresentationRequest(t, fixture,
+		presentationURIWithTransactionData(t, fixture.baseURL, twoCredentialDCQLQuery, []string{entry}))
+
+	redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, []oid4vp.DCQLCredentialSelection{
+		{QueryID: "pid", CandidateID: storedCredentialID(t, fixture.wallet, "urn:test:identity"), RequestedClaims: []string{"given_name"}},
+		{QueryID: "addr", CandidateID: storedCredentialID(t, fixture.wallet, "urn:test:address"), RequestedClaims: []string{"street_address"}},
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.baseURL+"/done", redirect)
+
+	select {
+	case form := <-fixture.posted:
+		var tokens map[string][]string
+		require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+		digest := sha256.Sum256([]byte(entry))
+		require.Equal(t, []string{base64.RawURLEncoding.EncodeToString(digest[:])}, transactionDataHashesOf(t, tokens["addr"][0]))
+		require.Empty(t, transactionDataHashesOf(t, tokens["pid"][0]))
+	default:
+		t.Fatal("no presentation submitted")
+	}
+}
