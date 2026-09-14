@@ -11,9 +11,9 @@ import (
 
 // CredentialResponseDecodeOptions tunes DecodeOID4VCIFinalCredentialResponse.
 type CredentialResponseDecodeOptions struct {
-	// RequireEncryption makes a plaintext Credential Response an error. It
-	// carries the ADR-0062 strictness setting: a holder who requires an
-	// encrypted response (OpenID4VCI 1.0 §8.2) is never served a plaintext one,
+	// RequireEncryption makes a plaintext Credential Response an error: a
+	// holder who requires an encrypted response (OpenID4VCI 1.0 §8.2) is never
+	// served a plaintext one,
 	// not even when the exchange never managed to ask for encryption.
 	RequireEncryption bool
 	// DecryptionKey is the private key the wallet advertised in the Credential
@@ -43,9 +43,8 @@ type CredentialResponseDecodeOptions struct {
 }
 
 // ValidateOID4VCIFinalCredentialResponse enforces the OpenID4VCI 1.0 Final
-// Credential Response shape that a single-credential wallet accepts. It moves
-// the ADR-0032 pre-merge hardening into the library wire so every consumer,
-// not only the sidecar, fails closed on a nonconformant issuer.
+// Credential Response shape that a single-credential wallet accepts, at the
+// library wire, so every integrator fails closed on a nonconformant issuer.
 //
 // It rejects:
 //

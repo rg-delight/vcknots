@@ -680,7 +680,7 @@ func (w *Wallet) newOID4VCIFinalFlow(
 	// the Token Response is judged against the §6.2 mode that matches the
 	// request that produced it. The mode is derived here, from the same
 	// oid4vciAuthorizationRequestParameters decision the PAR uses, rather than
-	// being stored on the serialisable authorization sidecar.
+	// being stored on the serialisable authorization state.
 	_, authorizationDetails, err := oid4vciAuthorizationRequestParameters(req.AuthorizationRequestType, credentialConfigurationID, config, w.profile.IsHAIP())
 	if err != nil {
 		return nil, err
@@ -1343,7 +1343,7 @@ func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTra
 		DecryptionKey: key,
 		// The high-level wallet path still accepts the pre-Final shape and
 		// §14.6 batch issuance; the exported validator is the strict single
-		// credential contract for the sidecar wire (ADR-0032 / ADR-0062).
+		// credential contract integrators apply at their own wire.
 		allowLegacyCredentialShape: true,
 	})
 	if err != nil {
@@ -1442,7 +1442,7 @@ var ErrAuthorizationDetailsMissing = errors.New("token response carries no usabl
 // mode is AuthorizationDetailsOptional; under AuthorizationDetailsRequired that
 // absence, a foreign configuration, an empty credential_identifiers array or
 // more than one identifier is ErrAuthorizationDetailsMissing. It is exported so
-// integrators migrating the sidecar can apply the library's single
+// integrators can apply the library's single
 // implementation of the §6.2 mapping instead of copying it.
 func CredentialIdentifierForConfiguration(accessToken *receiverTypes.CredentialIssuanceAccessToken, credentialConfigurationID string, mode AuthorizationDetailsMode) (*string, error) {
 	if accessToken == nil {
