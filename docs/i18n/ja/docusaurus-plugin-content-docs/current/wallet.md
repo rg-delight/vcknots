@@ -664,6 +664,10 @@ result, err := w.ResumeOID4VCIFinalAuthorization(ctx, request, authorization, re
 
 `BeginOID4VCIFinalAuthorization` は user agent が関与する前の処理（メタデータ探索、credential configuration の検証、認可サーバーが広告する場合の RFC 9126 Pushed Authorization Request）を行います。`ResumeOID4VCIFinalAuthorization` は保持した state に対して RFC 6749 / RFC 9207 の認可応答を検証し、token endpoint で code を交換して credential request を実行します。
 
+認可応答の検査はそれぞれ固有の条件を返すため、Wallet は「発行に失敗した」ではなく原因を holder に伝えられます。`ErrAuthorizationRedirectURIMismatch`、`ErrAuthorizationStateMismatch`、`ErrAuthorizationIssMismatch`、`ErrAuthorizationIssMissing`、`ErrAuthorizationCodeMissing`、`ErrAuthorizationRedirectInvalid` は `errors.Is` で判定し、`error=` を伴うリダイレクトは error code・description・echo された state を持つ `*AuthorizationResponseError` として届きます。`OID4VCIFinalAuthorization.RequestURIExpired(now)` は RFC 9126 §2.2 の `request_uri` 有効期限を返します。ライブラリはこれを認可エンドポイントに対して適用し（`ErrAuthorizationRequestURIExpired`）、開始済みの発行をどれだけ再開可能にしておくかは呼び出し側の方針に委ねます。issuer での holder のログインは、ブラウザが既に消費した `request_uri` の寿命より長くなりうるからです。
+
+issuer や認可サーバーによる拒否は、どのエンドポイントで起きたかを名前で示します。metadata、PAR、token、nonce の各リクエストは `Stage`（`StageIssuerMetadata`、`StageAuthorizationServerMetadata`、`StagePAR`、`StageToken`、`StageNonce`）、HTTP ステータス、RFC 6749 の `error` code を持つ `oid4vci.EndpointError` を返し、応答本文は保持しません。Credential / Deferred Credential エンドポイントは §8.3.1.2 の error code を持つ `types.CredentialEndpointError` を返し続けます。Wallet が提示できない Token Response は `ErrTokenTypeUnsupported`、HAIP で DPoP 以外の `token_type` は `oid4vci.ErrDPoPRequired` です。
+
 ユーザー操作を必要とせず authorization endpoint が code redirect を返すテスト / 適合性試験の issuer は、`AllowSelfDrivenAuthorization` を設定して `ReceiveOID4VCIFinalCredentialContext` を 1 回呼ぶだけで実行できます。ユーザーのいる Wallet は設定してはいけません。既定は `false` で、未設定のまま `ReceiveOID4VCIFinalCredential` を呼ぶと拒否されます。
 
 Wallet 起点の発行にも対応します。`CredentialOffer` を nil にし、`CredentialIssuer` と `CredentialConfigurationID`（どちらも必須）を設定すると、offer 無しで同じフローを開始できます。
@@ -689,7 +693,7 @@ library は attester の秘密鍵を持ちません。`Config.ClientAttestation`
 * `ClientAttestationProvider` は発行ごとに 1 回、選択した認可サーバー識別子とともに呼び出され、typ `oauth-client-attestation+jwt`、`sub` = `ClientID`、`cnf.jwk` = Wallet instance 鍵の compact JWS を返す必要があります。
 * `KeyAttestationProvider` は holder 鍵と `c_nonce` とともに呼び出され、`attested_keys` にすべての holder 鍵を含む `key-attestation+jwt` を返す必要があります。
 
-使用前に Wallet は attester 署名を検証せずに provider の結果を検証します（`typ`、`sub`、RFC 7638 `cnf.jwk` thumbprint、未来の `exp`）。HAIP では header に非 self-signed の `x5c` leaf も必要です。`StaticClientAttester` と `StaticKeyAttester` はテストと単独運用者専用の自己発行で、非推奨の `OID4VCIFinalReceiveRequest.AttesterKey` / `AttesterIssuer` はリクエスト単位で静的 attester をラップします。
+使用前に Wallet は attester 署名を検証せずに provider の結果を検証します（`typ`、`sub`、RFC 7638 `cnf.jwk` thumbprint、未来の `exp`）。HAIP では header に非 self-signed の `x5c` leaf も必要です。Wallet が提示できない provider の結果は、失敗した検査を包んだ `ErrClientAttestationInvalid` / `ErrKeyAttestationInvalid` で拒否されます。`StaticClientAttester` と `StaticKeyAttester` はテストと単独運用者専用の自己発行で、非推奨の `OID4VCIFinalReceiveRequest.AttesterKey` / `AttesterIssuer` はリクエスト単位で静的 attester をラップします。
 
 ### Transport と signer
 
