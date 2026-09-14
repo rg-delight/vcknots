@@ -342,6 +342,7 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 		ClientID: b.req.ClientID, CertificateSHA256: chainResult.Fingerprints,
 		RevocationChecked:      chainResult.Revocation.CheckedCertificates,
 		RevocationUnadvertised: chainResult.Revocation.NoMechanismCertificates,
+		ExpiresAt:              requestObjectExpiry(commonJOSE.Claims(verified)),
 	}
 	return b.req, nil
 }

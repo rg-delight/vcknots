@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
@@ -198,4 +199,71 @@ func TestWallet_PresentDraft24SelectionRejectsEmptySelection(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fixture.wallet.PresentDraft24Selection(request, *endpoint, fixture.key, nil, nil)
 	require.ErrorContains(t, err, "at least one credential selection is required")
+}
+
+// buildDraft24DescriptorMap decides two things the vp_token shape depends on:
+// an SD-JWT VC Presentation holds one credential, so several of them are a JSON
+// array the path indexes, while a JWT Verifiable Presentation holds them all and
+// stays a single token at "$" whose path_nested distinguishes them.
+func TestBuildDraft24DescriptorMapPathsFollowTheVPTokenShape(t *testing.T) {
+	wallet := &Wallet{}
+	credentials := []*SavedCredential{{}, {}}
+	for _, tc := range []struct {
+		name       string
+		flavor     credential.SupportedSerializationFlavor
+		paths      []string
+		nested     []string
+		vpFormat   string
+		descriptor [][]string
+		wantIDs    []string
+	}{
+		{
+			name:       "sd-jwt vc indexes the vp_token array",
+			flavor:     credential.SDJwtVC,
+			paths:      []string{"$[0]", "$[0]", "$[1]"},
+			vpFormat:   "dc+sd-jwt",
+			descriptor: [][]string{{"identity", "identity-backup"}, {"address"}},
+			wantIDs:    []string{"identity", "identity-backup", "address"},
+		},
+		{
+			name:       "jwt vc indexes inside one presentation",
+			flavor:     credential.JwtVc,
+			paths:      []string{"$", "$", "$"},
+			nested:     []string{"$.vp.verifiableCredential[0]", "$.vp.verifiableCredential[0]", "$.vp.verifiableCredential[1]"},
+			vpFormat:   "jwt_vp_json",
+			descriptor: [][]string{{"identity", "identity-backup"}, {"address"}},
+			wantIDs:    []string{"identity", "identity-backup", "address"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flavor := tc.flavor
+			descriptorMap, err := wallet.buildDraft24DescriptorMap(credentials, &flavor, tc.descriptor)
+			require.NoError(t, err)
+			require.Len(t, descriptorMap, len(tc.wantIDs))
+			for index, item := range descriptorMap {
+				require.Equal(t, tc.wantIDs[index], item.ID)
+				require.Equal(t, tc.vpFormat, item.Format)
+				require.Equal(t, tc.paths[index], item.Path)
+				if len(tc.nested) == 0 {
+					require.Nil(t, item.PathNested)
+					continue
+				}
+				require.NotNil(t, item.PathNested)
+				require.Equal(t, tc.nested[index], item.PathNested.Path)
+				require.Equal(t, tc.wantIDs[index], item.PathNested.ID)
+			}
+		})
+	}
+}
+
+// An entry without caller descriptor ids keeps the legacy invented id, so the
+// single-credential PresentDraft24Credential flow is unchanged.
+func TestBuildDraft24DescriptorMapInventsIDWhenCallerNamesNone(t *testing.T) {
+	wallet := &Wallet{}
+	flavor := credential.SDJwtVC
+	descriptorMap, err := wallet.buildDraft24DescriptorMap([]*SavedCredential{{}}, &flavor, nil)
+	require.NoError(t, err)
+	require.Len(t, descriptorMap, 1)
+	require.NotEmpty(t, descriptorMap[0].ID)
+	require.Equal(t, "$", descriptorMap[0].Path)
 }

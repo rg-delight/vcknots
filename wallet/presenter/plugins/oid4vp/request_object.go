@@ -91,6 +91,23 @@ type RequestObjectVerification struct {
 	// was accepted for the HAIP delivery check, letting a request= Request
 	// Object satisfy the request_uri requirement.
 	DeliveryAttested bool
+	// ExpiresAt is the exp claim of the authenticated Request Object, in UTC.
+	// It is the zero value when the Request Object carried no exp, which the
+	// RequireExpiry policy decides whether to accept. A Wallet that has to show
+	// or store how long the Verifier's request stays valid reads it here rather
+	// than decoding the Request Object a second time.
+	ExpiresAt time.Time
+}
+
+// requestObjectExpiry reads the exp claim of already validated Request Object
+// claims as a UTC time, or the zero time when it is absent or unusable.
+func requestObjectExpiry(claims commonJOSE.Claims) time.Time {
+	value, err := requestObjectNumericDate(claims, "exp")
+	if err != nil || value == nil {
+		return time.Time{}
+	}
+	seconds, _ := value.Float64()
+	return time.Unix(0, int64(seconds*float64(time.Second))).UTC()
 }
 
 // WithRequestObjectValidation configures the public builder before loading a
@@ -366,6 +383,7 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 		RevocationChecked:      result.Revocation.CheckedCertificates,
 		RevocationUnadvertised: result.Revocation.NoMechanismCertificates,
 		WalletNonce:            b.sentWalletNonce,
+		ExpiresAt:              requestObjectExpiry(verified),
 	}
 	return nil
 }

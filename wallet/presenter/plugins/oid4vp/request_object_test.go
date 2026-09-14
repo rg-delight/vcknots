@@ -527,3 +527,35 @@ func signedRequestURI(clientID, token string) string {
 		"request":   {token},
 	}.Encode()
 }
+
+// A Wallet that shows or stores how long the Verifier's request stays valid
+// must read exp from the library's own authentication record, not by decoding
+// the Request Object a second time.
+func TestRequestObjectVerificationReportsExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+		want   int64
+	}{
+		{name: "integer exp", claims: map[string]any{"exp": json.Number("1700000000")}, want: 1700000000},
+		{name: "fractional exp", claims: map[string]any{"exp": json.Number("1700000000.5")}, want: 1700000000},
+		{name: "absent exp", claims: map[string]any{}},
+		{name: "unusable exp", claims: map[string]any{"exp": "soon"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expiry := requestObjectExpiry(tc.claims)
+			if tc.want == 0 {
+				if !expiry.IsZero() {
+					t.Fatalf("expiry = %v, want zero", expiry)
+				}
+				return
+			}
+			if expiry.Unix() != tc.want {
+				t.Fatalf("expiry = %d, want %d", expiry.Unix(), tc.want)
+			}
+			if expiry.Location() != time.UTC {
+				t.Fatalf("expiry location = %v, want UTC", expiry.Location())
+			}
+		})
+	}
+}

@@ -99,10 +99,6 @@ func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavo
 		if i < len(descriptorIDs) && len(descriptorIDs[i]) > 0 {
 			ids = descriptorIDs[i]
 		}
-		descriptorPath := "$"
-		if len(credentials) > 1 {
-			descriptorPath = fmt.Sprintf("$[%d]", i)
-		}
 		for _, descriptionItemID := range ids {
 			// Temporary compatibility workaround:
 			// the current verifier/request-object flow still requires
@@ -112,6 +108,12 @@ func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavo
 			// should be removed or moved once the verifier/request-object flow is
 			// reorganized around DCQL.
 			if vpFormat == "dc+sd-jwt" {
+				// An SD-JWT VC Presentation holds one credential, so several of
+				// them travel as a JSON array the path indexes.
+				descriptorPath := "$"
+				if len(credentials) > 1 {
+					descriptorPath = fmt.Sprintf("$[%d]", i)
+				}
 				descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
 					ID:     descriptionItemID,
 					Format: vpFormat,
@@ -123,7 +125,10 @@ func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavo
 			descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
 				ID:     descriptionItemID,
 				Format: vpFormat,
-				Path:   descriptorPath,
+				// One JWT Verifiable Presentation carries every credential, so
+				// the vp_token is a single token at "$" and the nested path is
+				// what distinguishes the credentials inside it.
+				Path: "$",
 				PathNested: &presenterTypes.DescriptorMapItem{
 					ID:     descriptionItemID,
 					Format: vcFormat,
