@@ -513,6 +513,43 @@ func TestValidateClientAttestationAuthenticatesTheAttester(t *testing.T) {
 	})
 }
 
+// Every rejection of an attestation the wallet was handed reports the same
+// condition, so a caller can tell "the attester gave me something unusable"
+// from an issuer or authorization server refusal without reading messages.
+func TestValidateAttestationsWrapTheirSentinels(t *testing.T) {
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	clientRequest := ClientAttestationRequest{ClientID: "client-1", ClientKey: clientKey, AuthorizationServer: "https://as.example"}
+	keyRequest := KeyAttestationRequest{Keys: []jose.JSONWebKey{holderKey}, Nonce: "cnonce-1"}
+
+	require.ErrorIs(t, ValidateClientAttestation(t.Context(), nil, clientRequest, AttestationTrustPolicy{}), ErrClientAttestationInvalid)
+	require.ErrorIs(t, ValidateClientAttestation(t.Context(), &ClientAttestation{JWT: "not-a-jwt"}, clientRequest, AttestationTrustPolicy{}), ErrClientAttestationInvalid)
+	require.ErrorIs(t, ValidateKeyAttestation(t.Context(), nil, keyRequest, AttestationTrustPolicy{}), ErrKeyAttestationInvalid)
+
+	// An attestation bound to another client: authenticated, and still not this
+	// wallet instance's credential.
+	attester := &StaticClientAttester{Key: attesterKey, Issuer: "https://attester.example"}
+	otherClient, err := attester.ClientAttestation(context.Background(), ClientAttestationRequest{
+		ClientID:            "someone-else",
+		ClientKey:           newPrivateJWKForFinalVCITest(t, "other-client-key-1"),
+		AuthorizationServer: "https://as.example",
+	})
+	require.NoError(t, err)
+	err = ValidateClientAttestation(t.Context(), otherClient, clientRequest, AttestationTrustPolicy{
+		ResolveKey: func(AttestationJOSEHeader) (any, error) { return attesterKey.Public().Key, nil },
+	})
+	require.ErrorIs(t, err, ErrClientAttestationInvalid)
+
+	keyAttester := &StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}
+	staleNonce, err := keyAttester.KeyAttestation(context.Background(), KeyAttestationRequest{Keys: []jose.JSONWebKey{holderKey}, Nonce: "stale"})
+	require.NoError(t, err)
+	err = ValidateKeyAttestation(t.Context(), staleNonce, keyRequest, AttestationTrustPolicy{
+		ResolveKey: func(AttestationJOSEHeader) (any, error) { return attesterKey.Public().Key, nil },
+	})
+	require.ErrorIs(t, err, ErrKeyAttestationInvalid)
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(value)

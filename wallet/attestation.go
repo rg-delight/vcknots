@@ -203,6 +203,16 @@ func (a *StaticKeyAttester) KeyAttestation(_ context.Context, request KeyAttesta
 // the trust anchor, used to validate the signature on the Wallet Attestation
 // MUST be included in the x5c JOSE header of the Client Attestation JWT".
 func ValidateClientAttestation(ctx context.Context, attestation *ClientAttestation, request ClientAttestationRequest, policy AttestationTrustPolicy) error {
+	if err := authenticateClientAttestation(ctx, attestation, request, policy); err != nil {
+		return fmt.Errorf("%w: %w", ErrClientAttestationInvalid, err)
+	}
+	return nil
+}
+
+// authenticateClientAttestation is the body of ValidateClientAttestation, which
+// exists separately only so every rejection it can reach wraps
+// ErrClientAttestationInvalid exactly once.
+func authenticateClientAttestation(ctx context.Context, attestation *ClientAttestation, request ClientAttestationRequest, policy AttestationTrustPolicy) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("client attestation provider returned an empty attestation")
 	}
@@ -281,6 +291,15 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 // included in the x5c JOSE header of the key attestation. The X.509 certificate
 // signing the key attestation MUST NOT be self-signed."
 func ValidateKeyAttestation(ctx context.Context, attestation *KeyAttestation, request KeyAttestationRequest, policy AttestationTrustPolicy) error {
+	if err := authenticateKeyAttestation(ctx, attestation, request, policy); err != nil {
+		return fmt.Errorf("%w: %w", ErrKeyAttestationInvalid, err)
+	}
+	return nil
+}
+
+// authenticateKeyAttestation is the body of ValidateKeyAttestation, split off
+// for the same reason as authenticateClientAttestation.
+func authenticateKeyAttestation(ctx context.Context, attestation *KeyAttestation, request KeyAttestationRequest, policy AttestationTrustPolicy) error {
 	if attestation == nil || strings.TrimSpace(attestation.JWT) == "" {
 		return fmt.Errorf("key attestation provider returned an empty attestation")
 	}
