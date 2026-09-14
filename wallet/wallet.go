@@ -85,6 +85,18 @@ type Wallet struct {
 	// bypass the root policy.
 	profile profile.Profile
 
+	// clientAttestation and keyAttestation are the caller-selected attestation
+	// providers. A nil clientAttestation falls back to a StaticClientAttester
+	// built from a per-request AttesterKey for compatibility.
+	clientAttestation ClientAttestationProvider
+	keyAttestation    KeyAttestationProvider
+
+	// attestationTrust authenticates what those providers return. The zero
+	// value carries no trust material, which is enough for the bundled static
+	// attesters (the wallet holds their key) and for an attester that ships its
+	// certificate chain in x5c.
+	attestationTrust AttestationTrustPolicy
+
 	credentialAcceptance *CredentialAcceptancePolicy
 }
 
@@ -120,6 +132,27 @@ type Config struct {
 	// CredentialAcceptance configures the minimum credential verification rules
 	// applied before a received credential is stored.
 	CredentialAcceptance *CredentialAcceptancePolicy
+
+	// ClientAttestation supplies the OAuth 2.0 Client Attestation JWT for this
+	// wallet instance. When nil, a per-request AttesterKey is wrapped into a
+	// StaticClientAttester for compatibility.
+	ClientAttestation ClientAttestationProvider
+
+	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
+	// the issuer requires them or the caller opts in.
+	KeyAttestation KeyAttestationProvider
+
+	// AttestationTrust authenticates the attestation JWTs those providers
+	// return, before any request carrying one leaves the wallet: which key
+	// signed it and, when trust anchors are configured, whether its x5c chain
+	// is trusted. Its RequireX5C is raised by the HAIP profile on its own, so a
+	// deployment only sets this to configure trust anchors, a key resolver for
+	// a provider that does not use x5c, or a revocation policy.
+	//
+	// A remote provider that returns an attestation without an x5c chain needs
+	// a ResolveKey here: an attestation this wallet cannot authenticate is
+	// refused rather than forwarded.
+	AttestationTrust AttestationTrustPolicy
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -348,6 +381,10 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		clientAuth: config.ClientAuth,
 
 		profile: normalizedProfile,
+
+		clientAttestation: config.ClientAttestation,
+		keyAttestation:    config.KeyAttestation,
+		attestationTrust:  config.AttestationTrust,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
