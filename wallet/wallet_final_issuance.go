@@ -154,7 +154,7 @@ func (w *Wallet) restoreOID4VCIFinalFlow(req OID4VCIFinalReceiveRequest, auth *O
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	return w.newOID4VCIFinalFlow(req, finalReceiver, auth.IssuerMetadata, auth.AuthorizationServerMetadata, auth.CredentialConfigurationID)
+	return w.newOID4VCIFinalFlow(req, finalReceiver, auth.IssuerMetadata, auth.AuthorizationServerMetadata, auth.CredentialConfigurationID, true)
 }
 
 // resumeOID4VCIFinalAuthorization is the composition of the two halves of the
@@ -375,7 +375,7 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	holderKeys, err := resolveOID4VCIFinalHolderKeys(OID4VCIFinalReceiveRequest{
 		HolderKey:            req.HolderKey,
 		AdditionalHolderKeys: req.AdditionalHolderKeys,
-	})
+	}, true)
 	if err != nil {
 		return nil, err
 	}

@@ -152,14 +152,18 @@ func requireOfferedCredentialConfiguration(issuerMetadata *receiverTypes.Credent
 // newOID4VCIFinalFlow validates the selected Credential Configuration against
 // the wallet profile, plans the key attestation and resolves how the client
 // authenticates at the PAR and token endpoints.
+// holderKeysRequired says whether the stage this flow is built for needs the
+// holder keys. Only the §8 Credential Request and the Appendix D key attestation
+// it may carry use them, so the §5 authorization stage passes false.
 func (w *Wallet) newOID4VCIFinalFlow(
 	req OID4VCIFinalReceiveRequest,
 	finalReceiver receiverTypes.OID4VCIFinalTransport,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
 	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata,
 	credentialConfigurationID string,
+	holderKeysRequired bool,
 ) (*oid4vciFinalFlow, error) {
-	holderKeys, err := resolveOID4VCIFinalHolderKeys(req)
+	holderKeys, err := resolveOID4VCIFinalHolderKeys(req, holderKeysRequired)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +272,19 @@ func (w *Wallet) newOID4VCIFinalFlow(
 }
 
 func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {
+	if req.HolderKey.Key == nil {
+		return fmt.Errorf("holder key is required")
+	}
+	return validateOID4VCIFinalAuthorizationRequest(req)
+}
+
+// validateOID4VCIFinalAuthorizationRequest is the part of the request every
+// stage needs: the receiving type, the client identity and redirect_uri that
+// identify this wallet to the authorization server, and the credential to ask
+// for. It is what BeginOID4VCIFinalAuthorization checks, because the §5
+// authorization request carries no holder key — that one is only needed once the
+// §8 Credential Request is built, which is after the browser has returned.
+func validateOID4VCIFinalAuthorizationRequest(req OID4VCIFinalReceiveRequest) error {
 	if req.Type != receiverTypes.Oid4vci {
 		return fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
 	}
@@ -276,9 +293,6 @@ func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {
 	}
 	if req.RedirectURI == "" {
 		return fmt.Errorf("redirect URI is required")
-	}
-	if req.HolderKey.Key == nil {
-		return fmt.Errorf("holder key is required")
 	}
 	if req.ClientKey.Key == nil {
 		return fmt.Errorf("client key is required")

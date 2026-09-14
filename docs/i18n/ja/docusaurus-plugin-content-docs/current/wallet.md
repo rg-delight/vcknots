@@ -672,6 +672,8 @@ issuer や認可サーバーによる拒否は、どのエンドポイントで�
 
 Wallet 起点の発行にも対応します。`CredentialOffer` を nil にし、`CredentialIssuer` と `CredentialConfigurationID`（どちらも必須）を設定すると、offer 無しで同じフローを開始できます。
 
+`BeginOID4VCIFinalAuthorization` に `HolderKey` は不要です。§5 の認可リクエストは holder key で何も署名しないため、ブラウザから戻った後に holder key を生成する Wallet は `AuthorizeOID4VCIFinalToken` / `ResumeOID4VCIFinalAuthorization` に渡せばよく、この 2 つは引き続き必須とします。
+
 `AuthorizationRequestType` は credential configuration の要求方法を選びます。空値は configuration が `scope` を広告していれば `scope`、そうでなければ `authorization_details` を使います。`"scope"` は広告された scope を必須とし、`"authorization_details"` は `openid_credential` の authorization detail を送ります。HAIP では `scope` のみを受け付けます。
 
 ### Deferred

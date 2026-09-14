@@ -108,7 +108,7 @@ func (f *oid4vciFinalFlow) issuerPolicy(haip bool) authorizationResponseIssuerPo
 }
 
 func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest) (*OID4VCIFinalAuthorization, *oid4vciFinalFlow, error) {
-	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
+	if err := validateOID4VCIFinalAuthorizationRequest(req); err != nil {
 		return nil, nil, err
 	}
 	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
@@ -203,7 +203,7 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 			authorizationServerMetadata.Issuer.String(), authorizationServerEndpoint.String())
 	}
 
-	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, issuerMetadata, authorizationServerMetadata, credentialConfigurationID)
+	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, issuerMetadata, authorizationServerMetadata, credentialConfigurationID, false)
 	if err != nil {
 		return nil, nil, err
 	}

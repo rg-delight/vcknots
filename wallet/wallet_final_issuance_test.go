@@ -1834,6 +1834,34 @@ func TestResumeOID4VCIFinalAuthorizationReportsAuthorizationErrorState(t *testin
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 
+// The §5 authorization request carries no holder key, so a wallet that creates
+// the key once the browser has returned can still start the authorization. The
+// credential stage, which signs the §8.2.1.1 proofs with it, still requires one.
+func TestBeginOID4VCIFinalAuthorizationWithoutAHolderKey(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	req.HolderKey = jose.JSONWebKey{}
+
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+	require.NotEmpty(t, authorization.AuthorizationURL)
+	require.NotEmpty(t, authorization.State)
+	require.Equal(t, 1, fixture.parCalls)
+
+	// The grant stage needs the key the proofs are signed with.
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization,
+		fixture.authorizeRedirect(fixture.server.URL))
+	require.ErrorContains(t, err, "holder key is required")
+	require.Equal(t, 0, fixture.tokenCalls)
+
+	// Supplying it resumes the same authorization.
+	req.HolderKey = fixture.holderKey
+	result, err := fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		fixture.authorizeRedirect(fixture.server.URL))
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+}
+
 // A callback delivered anywhere but the registered redirect_uri is not this
 // request's authorization response, whatever parameters it carries.
 func TestAuthorizeOID4VCIFinalTokenRejectsForeignRedirectURI(t *testing.T) {

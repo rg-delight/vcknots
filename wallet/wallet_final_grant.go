@@ -425,7 +425,7 @@ func (w *Wallet) newOID4VCIFinalCredentialFlow(
 	holderKeys, err := resolveOID4VCIFinalHolderKeys(OID4VCIFinalReceiveRequest{
 		HolderKey:            in.holderKey,
 		AdditionalHolderKeys: in.additionalHolderKeys,
-	})
+	}, true)
 	if err != nil {
 		return nil, err
 	}

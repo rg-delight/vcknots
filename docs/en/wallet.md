@@ -648,6 +648,8 @@ A test or conformance issuer that answers the authorization endpoint with the co
 
 Wallet-initiated issuance is supported: with `CredentialOffer` nil, set `CredentialIssuer` and `CredentialConfigurationID` (both required) to start the same flow without an offer.
 
+`BeginOID4VCIFinalAuthorization` needs no `HolderKey`: nothing in the §5 authorization request is signed with it, so a wallet that creates the holder key once the browser has returned supplies it to `AuthorizeOID4VCIFinalToken` / `ResumeOID4VCIFinalAuthorization` instead. Those two still require it.
+
 `AuthorizationRequestType` selects how the credential configuration is requested: the empty value uses `scope` when the configuration advertises one and `authorization_details` otherwise; `"scope"` requires an advertised scope; `"authorization_details"` sends an `openid_credential` authorization detail. Under HAIP only `scope` is accepted.
 
 ### Deferred issuance

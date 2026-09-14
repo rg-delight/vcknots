@@ -168,9 +168,19 @@ func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTra
 	return response, nil
 }
 
-func resolveOID4VCIFinalHolderKeys(req OID4VCIFinalReceiveRequest) ([]jose.JSONWebKey, error) {
+func resolveOID4VCIFinalHolderKeys(req OID4VCIFinalReceiveRequest, required bool) ([]jose.JSONWebKey, error) {
 	if req.HolderKey.Key == nil {
-		return nil, fmt.Errorf("holder key is required")
+		if required {
+			return nil, fmt.Errorf("holder key is required")
+		}
+		// The §5 authorization stage signs nothing with a holder key: the key
+		// proofs of §8.2.1.1 and the Appendix D attestation are built after the
+		// token exchange. A wallet whose holder key is created once the browser
+		// comes back therefore starts an authorization without one.
+		if len(req.AdditionalHolderKeys) > 0 {
+			return nil, fmt.Errorf("additional holder keys were supplied without a holder key")
+		}
+		return nil, nil
 	}
 	keys := make([]jose.JSONWebKey, 0, 1+len(req.AdditionalHolderKeys))
 	keys = append(keys, req.HolderKey)
