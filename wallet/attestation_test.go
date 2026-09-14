@@ -17,6 +17,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // testLeafCertificate builds a certificate for key. When selfSigned is true the
@@ -230,6 +232,85 @@ func mustSignKeyAttestation(t *testing.T, attesterKey, holderKey jose.JSONWebKey
 	})
 	require.NoError(t, err)
 	return &KeyAttestation{JWT: token}
+}
+
+func TestPlanOID4VCIKeyAttestation_HAIPNamesSection(t *testing.T) {
+	metadata := &receiverTypes.CredentialIssuerMetadata{
+		CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+			"pid": {
+				Format: "dc+sd-jwt",
+				ProofTypesSupported: &map[string]receiverTypes.ProofType{
+					"jwt": {KeyAttestationsRequired: &receiverTypes.KeyAttestationsRequired{}},
+				},
+			},
+		},
+	}
+	w := &Wallet{profile: profile.HAIP}
+	_, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, false)
+	require.ErrorContains(t, err, "§4.5.1")
+
+	// A caller that mints the attestation itself has a provider, just not an
+	// in-process one, so the plan is made and the fail-closed point moves to
+	// the credential request (ErrKeyAttestationRequired).
+	plan, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, true)
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	require.Nil(t, plan.provider)
+	require.True(t, plan.required)
+}
+
+// fixedClientAttestationProvider returns a prebuilt client attestation so tests
+// can model an invalid provider result without a network round trip.
+type fixedClientAttestationProvider struct {
+	attestation *ClientAttestation
+}
+
+func (p fixedClientAttestationProvider) ClientAttestation(context.Context, ClientAttestationRequest) (*ClientAttestation, error) {
+	return p.attestation, nil
+}
+
+// The attestation is validated before the receiver is touched: a nil receiver
+// would panic if validation did not run first, so each case proves the provider
+// result is rejected before any network call.
+func TestCreateOID4VCIAttestationHeaders_RejectsBeforeNetwork(t *testing.T) {
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	otherKey := newPrivateJWKForFinalVCITest(t, "other-client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+
+	expired := clientAttestationClaimsFor(clientKey)
+	expired["exp"] = time.Now().Add(-time.Minute).Unix()
+
+	cases := map[string]struct {
+		typ      string
+		claims   map[string]any
+		unsigned bool
+		wantErr  string
+	}{
+		"wrong sub":     {typ: clientAttestationJWTType, claims: map[string]any{"sub": "someone-else"}, wantErr: "does not match client_id"},
+		"other cnf key": {typ: clientAttestationJWTType, claims: clientAttestationClaimsFor(otherKey), wantErr: "cnf.jwk does not match"},
+		"expired":       {typ: clientAttestationJWTType, claims: expired, wantErr: "expired"},
+		"wrong typ":     {typ: "JWT", claims: clientAttestationClaimsFor(clientKey), wantErr: "typ must be"},
+		// An attestation this wallet cannot authenticate is refused before its
+		// claims are read, and still before any network call.
+		"unauthenticatable": {typ: clientAttestationJWTType, claims: clientAttestationClaimsFor(clientKey), unsigned: true, wantErr: "cannot be authenticated"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			token, err := signAttestationJWT(attesterKey, tc.typ, tc.claims)
+			require.NoError(t, err)
+			w := &Wallet{clientAttestation: fixedClientAttestationProvider{attestation: &ClientAttestation{JWT: token}}}
+			if !tc.unsigned {
+				// The provider is not one of the bundled attesters, so the
+				// wallet is told which key signs its attestations.
+				w.attestationTrust = AttestationTrustPolicy{ResolveKey: func(AttestationJOSEHeader) (any, error) {
+					return attesterKey.Public().Key, nil
+				}}
+			}
+			req := OID4VCIFinalReceiveRequest{ClientID: "client-1", ClientKey: clientKey}
+			_, _, err = w.createOID4VCIAttestationHeaders(t.Context(), nil, req, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
 // HAIP §4.3.1: "Wallet Attestations MUST NOT be reused across different

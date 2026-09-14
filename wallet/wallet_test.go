@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,29 @@ type mockKeyEntry struct {
 
 func (m *mockKeyEntry) ID() string {
 	return m.id
+}
+
+type realSigningKeyEntry struct {
+	id  string
+	key *ecdsa.PrivateKey
+}
+
+func (r *realSigningKeyEntry) ID() string {
+	return r.id
+}
+
+func (r *realSigningKeyEntry) PublicKey() jose.JSONWebKey {
+	return jose.JSONWebKey{
+		Key:       &r.key.PublicKey,
+		KeyID:     r.id,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
+}
+
+func (r *realSigningKeyEntry) Sign(data []byte) ([]byte, error) {
+	digest := sha256.Sum256(data)
+	return ecdsa.SignASN1(rand.Reader, r.key, digest[:])
 }
 
 func (m *mockKeyEntry) PublicKey() jose.JSONWebKey {
@@ -164,12 +188,126 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 	return controller
 }
 
+// createTestControllerWithAcceptance builds a wallet with an explicit
+// Config.CredentialAcceptance, which the OpenID4VCI Final and HAIP issuance
+// paths require before a credential may be stored.
+func createTestControllerWithAcceptance(t *testing.T, policy *CredentialAcceptancePolicy) *Wallet {
+	t.Helper()
+	tempConfigDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
+	t.Setenv("HOME", tempConfigDir)
+
+	controller, err := NewWalletWithConfig(Config{CredentialAcceptance: policy})
+	require.NoError(t, err)
+	return controller
+}
+
+// acceptIssuerKeyPolicy authenticates credentials signed by issuerKey. SD-JWT
+// VC §3.5 leaves issuer key resolution to ecosystem policy, so the tests model
+// a wallet that holds the issuer key out of band.
+func acceptIssuerKeyPolicy(issuerKey *ecdsa.PrivateKey) *CredentialAcceptancePolicy {
+	return &CredentialAcceptancePolicy{
+		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, Algorithm: "ES256"}}, nil
+		},
+	}
+}
+
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	t.Helper()
 
 	parsed, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return parsed
+}
+
+// serverObservations records what a test's httptest handler observed about the
+// requests the wallet sent. The testing package requires t.FailNow — which
+// every require.* helper calls — to run on the goroutine running the test, so a
+// handler must never assert directly: on a server goroutine require.* only ends
+// that goroutine, and the wallet sees a truncated response instead of the real
+// reason. A handler therefore asserts against the recorder (every assert.*
+// helper accepts it and reports whether the expectation held) and answers the
+// request with the status a real server would return. check reports the verdict
+// from the test goroutine.
+type serverObservations struct {
+	mu       sync.Mutex
+	failures []string
+	calls    map[string]int
+	captured map[string]any
+	expected []string
+}
+
+// newServerObservations registers a recorder whose verdict is reported when the
+// test finishes. expectedEndpoints names the endpoints the test requires the
+// wallet to exercise, so an in-handler expectation that never ran fails the
+// test instead of proving nothing in silence.
+func newServerObservations(t *testing.T, expectedEndpoints ...string) *serverObservations {
+	t.Helper()
+	obs := &serverObservations{
+		calls:    make(map[string]int),
+		captured: make(map[string]any),
+		expected: expectedEndpoints,
+	}
+	t.Cleanup(func() { obs.check(t) })
+	return obs
+}
+
+// Errorf records a failed expectation, which makes *serverObservations an
+// assert.TestingT: a handler can use the same assert.* helpers as the test body
+// and branch on their bool result instead of calling t.FailNow off-goroutine.
+func (o *serverObservations) Errorf(format string, args ...any) {
+	message := strings.TrimSpace(fmt.Sprintf(format, args...))
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.failures = append(o.failures, message)
+}
+
+// called records that a request reached endpoint and returns how many requests
+// that endpoint has served, including this one.
+func (o *serverObservations) called(endpoint string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls[endpoint]++
+	return o.calls[endpoint]
+}
+
+// callCount reports how many requests reached endpoint.
+func (o *serverObservations) callCount(endpoint string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.calls[endpoint]
+}
+
+// set stores a value a handler captured from a request so the test body, or a
+// later request, can read it back under the same lock.
+func (o *serverObservations) set(key string, value any) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.captured[key] = value
+}
+
+// get returns a value stored by set.
+func (o *serverObservations) get(key string) any {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.captured[key]
+}
+
+// check fails t with every recorded failure and with every expected endpoint
+// that no request ever reached. It must run on the goroutine running the test.
+func (o *serverObservations) check(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, failure := range o.failures {
+		t.Errorf("server observed: %s", failure)
+	}
+	for _, endpoint := range o.expected {
+		if o.calls[endpoint] == 0 {
+			t.Errorf("server observed no request for expected endpoint %q", endpoint)
+		}
+	}
 }
 
 func newReceiveCredentialTestServer(t *testing.T) (*url.URL, <-chan url.Values, func()) {
@@ -476,10 +614,10 @@ func TestController_ReceiveCredential_EmptyConfigurationIDs_Integration(t *testi
 }
 
 func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -513,10 +651,10 @@ func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
 }
 
 func TestController_ReceiveCredential_TxCodeProvided_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -771,6 +909,661 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 	require.NoError(t, err)
 	require.NotNil(t, endpoint)
 	assert.Equal(t, "http", endpoint.Scheme)
+}
+
+func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
+		dcqlQuery,
+	)
+
+	req, endpoint, err := controller.parseAuthorizationRequest(uri)
+	require.NoError(t, err)
+	require.NotNil(t, endpoint)
+	require.NotNil(t, req.DcqlQuery)
+	// VP §5.9.3: the Client Identifier binds response_uri, and the wallet
+	// keeps the value there rather than in redirect_uri.
+	assert.Equal(t, "https://example.com/response", req.ResponseURI)
+	assert.Empty(t, req.RedirectURI)
+	assert.Equal(t, "https://example.com/response", endpoint.String())
+	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
+}
+
+func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
+	controller := createTestControllerWithDefaults(t)
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	key := &realSigningKeyEntry{id: "holder-key-1", key: privateKey}
+
+	rawCredential := buildTestSDJWTVC(t, key.PublicKey(), map[string]string{
+		"given_name":  "TARO",
+		"family_name": "TEST",
+		"birthdate":   "2000-01-01",
+	})
+	err = controller.credStore.SaveCredentialEntry(credstoreTypes.CredentialEntry{
+		Id:         "credential-1",
+		ReceivedAt: time.Now(),
+		Raw:        []byte(rawCredential),
+		MimeType:   string(credential.SDJwtVC),
+	}, 0)
+	require.NoError(t, err)
+
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1",
+		dcqlQuery,
+	)
+
+	response, err := controller.BuildOID4VPFinalAuthorizationResponse(uri, key)
+	require.NoError(t, err)
+	assert.Equal(t, "state-1", response["state"])
+	vpToken, ok := response["vp_token"].(map[string][]string)
+	require.True(t, ok)
+	require.Len(t, vpToken["pid"], 1)
+
+	presentation := vpToken["pid"][0]
+	assert.Contains(t, presentation, ".")
+	assert.Contains(t, presentation, "~")
+	assert.Contains(t, presentation, "ey")
+
+	parts := strings.Split(presentation, "~")
+	disclosureNames := map[string]bool{}
+	for _, part := range parts[1:] {
+		if part == "" || strings.Count(part, ".") == 2 {
+			continue
+		}
+		var disclosure []any
+		decoded, err := base64.RawURLEncoding.DecodeString(part)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(decoded, &disclosure))
+		if len(disclosure) == 3 {
+			if name, ok := disclosure[1].(string); ok {
+				disclosureNames[name] = true
+			}
+		}
+	}
+	assert.True(t, disclosureNames["given_name"])
+	assert.True(t, disclosureNames["family_name"])
+	assert.False(t, disclosureNames["birthdate"])
+
+	kbJwt := parts[len(parts)-1]
+	assert.Equal(t, 2, strings.Count(kbJwt, "."))
+}
+
+func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
+	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	holderKey := &realSigningKeyEntry{id: "holder-key-1", key: holderPrivateKey}
+
+	rawCredential := buildTestSDJWTVC(t, holderKey.PublicKey(), map[string]string{
+		"given_name":  "TARO",
+		"family_name": "TEST",
+		"birthdate":   "2000-01-01",
+	})
+	err = controller.credStore.SaveCredentialEntry(credstoreTypes.CredentialEntry{
+		Id:         "credential-1",
+		ReceivedAt: time.Now(),
+		Raw:        []byte(rawCredential),
+		MimeType:   string(credential.SDJwtVC),
+	}, 0)
+	require.NoError(t, err)
+
+	encryptionPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	obs := newServerObservations(t, "response_uri")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		obs.called("response_uri")
+		if !assert.Equal(obs, http.MethodPost, r.Method) {
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		if !assert.NoError(obs, r.ParseForm()) {
+			http.Error(w, "malformed authorization response form", http.StatusBadRequest)
+			return
+		}
+		encryptedResponse := r.Form.Get("response")
+		if !assert.NotEmpty(obs, encryptedResponse) {
+			http.Error(w, "missing response parameter", http.StatusBadRequest)
+			return
+		}
+
+		jwe, err := jose.ParseEncrypted(encryptedResponse, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A128GCM})
+		if !assert.NoError(obs, err) {
+			http.Error(w, "response is not a JWE the verifier accepts", http.StatusBadRequest)
+			return
+		}
+		plaintext, err := jwe.Decrypt(encryptionPrivateKey)
+		if !assert.NoError(obs, err) {
+			http.Error(w, "response cannot be decrypted", http.StatusBadRequest)
+			return
+		}
+		var payload map[string]any
+		if !assert.NoError(obs, json.Unmarshal(plaintext, &payload)) {
+			http.Error(w, "response payload is not JSON", http.StatusBadRequest)
+			return
+		}
+		obs.set("decrypted_payload", payload)
+		_, _ = w.Write([]byte(`{"redirect_uri":"https://example.com/done"}`))
+	}))
+	defer server.Close()
+
+	clientMetadataBytes, err := json.Marshal(map[string]any{
+		"jwks": map[string]any{
+			"keys": []jose.JSONWebKey{{
+				Key:       &encryptionPrivateKey.PublicKey,
+				KeyID:     "enc-key-1",
+				Algorithm: "ECDH-ES",
+				Use:       "enc",
+			}},
+		},
+		"encrypted_response_enc_values_supported": []string{"A128GCM"},
+	})
+	require.NoError(t, err)
+
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]}]}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=%s&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=%s&state=state-1&client_metadata=%s",
+		url.QueryEscape("redirect_uri:"+server.URL),
+		dcqlQuery,
+		url.QueryEscape(server.URL),
+		url.QueryEscape(string(clientMetadataBytes)),
+	)
+
+	body, err := controller.SubmitOID4VPFinalAuthorizationResponse(uri, holderKey)
+	require.NoError(t, err)
+	assert.Contains(t, body, "redirect_uri")
+	decryptedPayload, _ := obs.get("decrypted_payload").(map[string]any)
+	assert.Equal(t, "state-1", decryptedPayload["state"])
+	vpToken, ok := decryptedPayload["vp_token"].(map[string]any)
+	require.True(t, ok)
+	require.NotEmpty(t, vpToken["pid"])
+}
+
+func TestParseCredentialOfferURL(t *testing.T) {
+	offer := map[string]any{
+		"credential_issuer":            "https://issuer.example",
+		"credential_configuration_ids": []string{"pid"},
+		"grants": map[string]*CredentialOfferGrant{
+			"authorization_code": {IssuerState: "issuer-state-1"},
+		},
+	}
+	offerJSON, err := json.Marshal(offer)
+	require.NoError(t, err)
+
+	parsed, err := ParseCredentialOfferURL("openid-credential-offer://?credential_offer=" + url.QueryEscape(string(offerJSON)))
+	require.NoError(t, err)
+	require.Equal(t, "https://issuer.example", parsed.CredentialIssuer.String())
+	require.Equal(t, []string{"pid"}, parsed.CredentialConfigurationIDs)
+	require.Equal(t, "issuer-state-1", parsed.Grants["authorization_code"].IssuerState)
+}
+
+func TestParseCredentialOfferURL_TransactionCodeRoundTrip(t *testing.T) {
+	wantGrant := &CredentialOfferGrant{
+		PreAuthorizedCode: "pre-authorized-code",
+		TxCode: &TransactionCode{
+			InputMode:   "numeric",
+			Length:      6,
+			Description: "Enter the code shown by the issuer",
+		},
+	}
+	offerJSON, err := json.Marshal(map[string]any{
+		"credential_issuer":            "https://issuer.example",
+		"credential_configuration_ids": []string{"pid"},
+		"grants": map[string]*CredentialOfferGrant{
+			"urn:ietf:params:oauth:grant-type:pre-authorized_code": wantGrant,
+		},
+	})
+	require.NoError(t, err)
+
+	parsed, err := ParseCredentialOfferURL("openid-credential-offer://?credential_offer=" + url.QueryEscape(string(offerJSON)))
+	require.NoError(t, err)
+	parsedGrant := parsed.Grants["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+	require.Equal(t, wantGrant, parsedGrant)
+
+	roundTripJSON, err := json.Marshal(parsedGrant)
+	require.NoError(t, err)
+	var roundTripped CredentialOfferGrant
+	require.NoError(t, json.Unmarshal(roundTripJSON, &roundTripped))
+	require.Equal(t, *wantGrant, roundTripped)
+}
+
+func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
+	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(httpAllowed)
+	env.SetHTTPAllowed(true)
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	controller := createTestControllerWithAcceptance(t, acceptIssuerKeyPolicy(issuerKey))
+
+	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
+	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
+	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
+	responseEncryptionKey := newPrivateJWKForFinalVCITest(t, "credential-response-enc-key-1")
+	responseEncryptionKey.Algorithm = "ECDH-ES"
+	responseEncryptionKey.Use = "enc"
+	// OpenID4VCI Final §8.1: "Credential Request encryption MUST be used if the
+	// credential_response_encryption parameter is included, to prevent it being
+	// substituted by an attacker", so an issuer that requires response
+	// encryption also advertises credential_request_encryption.
+	requestEncryptionKey := newPrivateJWKForFinalVCITest(t, "credential-request-enc-key-1")
+	requestEncryptionKey.Algorithm = "ECDH-ES"
+	requestEncryptionKey.Use = "enc"
+
+	issuedCredential := buildTestSDJWTVCWithIssuerKey(t, issuerKey, holderKey, map[string]string{"given_name": "Taro"})
+
+	var server *httptest.Server
+	obs := newServerObservations(t,
+		"issuer-metadata",
+		"as-metadata",
+		"challenge",
+		"par",
+		"authorize",
+		"token",
+		"nonce",
+		"credential",
+		"deferred",
+		"notification",
+	)
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-credential-issuer":
+			obs.called("issuer-metadata")
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credential_issuer":            server.URL,
+				"credential_endpoint":          server.URL + "/credential",
+				"nonce_endpoint":               server.URL + "/nonce",
+				"deferred_credential_endpoint": server.URL + "/deferred",
+				"notification_endpoint":        server.URL + "/notification",
+				"authorization_servers":        []string{server.URL},
+				"credential_response_encryption": map[string]any{
+					"alg_values_supported": []string{"ECDH-ES"},
+					"enc_values_supported": []string{"A128GCM"},
+					"encryption_required":  true,
+				},
+				"credential_request_encryption": map[string]any{
+					"jwks":                 map[string]any{"keys": []any{requestEncryptionKey.Public()}},
+					"alg_values_supported": []string{"ECDH-ES"},
+					"enc_values_supported": []string{"A128GCM"},
+					"encryption_required":  true,
+				},
+				"credential_configurations_supported": map[string]any{
+					"pid": map[string]any{
+						"format": "dc+sd-jwt",
+						"scope":  "pid-scope",
+					},
+				},
+			})
+		case "/.well-known/oauth-authorization-server":
+			obs.called("as-metadata")
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"issuer":                                server.URL,
+				"authorization_endpoint":                server.URL + "/authorize",
+				"pushed_authorization_request_endpoint": server.URL + "/par",
+				"token_endpoint":                        server.URL + "/token",
+				"challenge_endpoint":                    server.URL + "/challenge",
+				"pre-authorized_grant_anonymous_access_supported": true,
+				"response_types_supported":                        []string{"code"},
+			})
+		case "/challenge":
+			obs.called("challenge")
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"attestation_challenge": "challenge-1"})
+		case "/par":
+			obs.called("par")
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation")) {
+				http.Error(w, "missing OAuth-Client-Attestation", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation-PoP")) {
+				http.Error(w, "missing OAuth-Client-Attestation-PoP", http.StatusBadRequest)
+				return
+			}
+			if !assert.NoError(obs, r.ParseForm()) {
+				http.Error(w, "malformed pushed authorization request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "code", r.Form.Get("response_type")) {
+				http.Error(w, "unsupported_response_type", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "client-1", r.Form.Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "openid-credential-offer://callback", r.Form.Get("redirect_uri")) {
+				http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "pid-scope", r.Form.Get("scope")) {
+				http.Error(w, "invalid_scope", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "S256", r.Form.Get("code_challenge_method")) {
+				http.Error(w, "invalid code_challenge_method", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "issuer-state-1", r.Form.Get("issuer_state")) {
+				http.Error(w, "invalid issuer_state", http.StatusBadRequest)
+				return
+			}
+			pushedState := r.Form.Get("state")
+			if !assert.NotEmpty(obs, pushedState) {
+				http.Error(w, "missing state", http.StatusBadRequest)
+				return
+			}
+			obs.set("pushed_state", pushedState)
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
+		case "/authorize":
+			obs.called("authorize")
+			if !assert.Equal(obs, "client-1", r.URL.Query().Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "urn:request:1", r.URL.Query().Get("request_uri")) {
+				http.Error(w, "invalid_request_uri", http.StatusBadRequest)
+				return
+			}
+			pushedState, _ := obs.get("pushed_state").(string)
+			w.Header().Set("Location", "openid-credential-offer://callback?code=code-1&state="+url.QueryEscape(pushedState))
+			w.WriteHeader(http.StatusFound)
+		case "/token":
+			tokenAttempts := obs.called("token")
+			if !assert.NotEmpty(obs, r.Header.Get("DPoP")) {
+				http.Error(w, "missing DPoP proof", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("OAuth-Client-Attestation")) {
+				http.Error(w, "missing OAuth-Client-Attestation", http.StatusBadRequest)
+				return
+			}
+			if !assert.NoError(obs, r.ParseForm()) {
+				http.Error(w, "malformed token request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "authorization_code", r.Form.Get("grant_type")) {
+				http.Error(w, "unsupported_grant_type", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "code-1", r.Form.Get("code")) {
+				http.Error(w, "invalid_grant", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "client-1", r.Form.Get("client_id")) {
+				http.Error(w, "invalid_client", http.StatusBadRequest)
+				return
+			}
+			if tokenAttempts == 1 {
+				w.Header().Set("DPoP-Nonce", "token-nonce-1")
+				http.Error(w, "use nonce", http.StatusUnauthorized)
+				return
+			}
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
+		case "/nonce":
+			obs.called("nonce")
+			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"c_nonce": "credential-nonce-1"})
+		case "/credential":
+			credentialAttempts := obs.called("credential")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
+			if !assert.NotEmpty(obs, r.Header.Get("DPoP")) {
+				http.Error(w, "missing DPoP proof", http.StatusBadRequest)
+				return
+			}
+			if credentialAttempts == 1 {
+				w.Header().Set("DPoP-Nonce", "credential-nonce-1")
+				http.Error(w, "use nonce", http.StatusUnauthorized)
+				return
+			}
+			body, decoded := decodeObservedCredentialRequest(obs, r, requestEncryptionKey)
+			if !decoded {
+				http.Error(w, "malformed credential request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "pid", body["credential_configuration_id"]) {
+				http.Error(w, "invalid credential_configuration_id", http.StatusBadRequest)
+				return
+			}
+			proofs, ok := body["proofs"].(map[string]any)
+			if !assert.True(obs, ok) {
+				http.Error(w, "invalid_proof", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotEmpty(obs, proofs["jwt"]) {
+				http.Error(w, "invalid_proof", http.StatusBadRequest)
+				return
+			}
+			responseEncryption, ok := body["credential_response_encryption"].(map[string]any)
+			if !assert.True(obs, ok) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			// OID4VCI Final §8.2: credential_response_encryption carries jwk+enc,
+			// with no top-level alg.
+			_, hasAlg := responseEncryption["alg"]
+			if !assert.False(obs, hasAlg) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotNil(obs, responseEncryption["jwk"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "A128GCM", responseEncryption["enc"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]string{"transaction_id": "tx-1"})
+		case "/deferred":
+			obs.called("deferred")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
+			// §9.1: "Deferred Credential Request encryption MUST be used if
+			// the credential_response_encryption parameter is included."
+			body, decoded := decodeObservedCredentialRequest(obs, r, requestEncryptionKey)
+			if !decoded {
+				http.Error(w, "malformed deferred credential request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "tx-1", body["transaction_id"]) {
+				http.Error(w, "invalid_transaction_id", http.StatusBadRequest)
+				return
+			}
+			deferredEncryption, ok := body["credential_response_encryption"].(map[string]any)
+			if !assert.True(obs, ok, "deferred request is missing credential_response_encryption: %#v", body) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.NotNil(obs, deferredEncryption["jwk"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "A128GCM", deferredEncryption["enc"]) {
+				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
+				return
+			}
+			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]string{
+				"credential":      issuedCredential,
+				"notification_id": "notification-1",
+			})
+		case "/notification":
+			obs.called("notification")
+			if !assert.Equal(obs, "DPoP access-1", r.Header.Get("Authorization")) {
+				http.Error(w, "invalid_token", http.StatusUnauthorized)
+				return
+			}
+			var body receiverTypes.NotificationRequest
+			if !assert.NoError(obs, json.NewDecoder(r.Body).Decode(&body)) {
+				http.Error(w, "malformed notification request", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "notification-1", body.NotificationID) {
+				http.Error(w, "invalid_notification_id", http.StatusBadRequest)
+				return
+			}
+			if !assert.Equal(obs, "credential_accepted", body.Event) {
+				http.Error(w, "invalid_notification_request", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	issuerURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	result, err := controller.ReceiveOID4VCIFinalCredential(OID4VCIFinalReceiveRequest{
+		AllowSelfDrivenAuthorization: true,
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer:           issuerURL,
+			CredentialConfigurationIDs: []string{"pid"},
+			Grants: map[string]*CredentialOfferGrant{
+				"authorization_code": {IssuerState: "issuer-state-1"},
+			},
+		},
+		Type:                            receiverTypes.Oid4vci,
+		ClientID:                        "client-1",
+		RedirectURI:                     "openid-credential-offer://callback",
+		HolderKey:                       holderKey,
+		ClientKey:                       clientKey,
+		AttesterKey:                     attesterKey,
+		AttesterIssuer:                  "https://client-attester.example.org/",
+		DeferredPollAttempts:            2,
+		CredentialResponseEncryptionKey: &responseEncryptionKey,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.CredentialResponse)
+	require.Equal(t, issuedCredential, result.CredentialResponse.Credential)
+	require.Len(t, result.SavedCredentials, 1)
+	require.Equal(t, []byte(issuedCredential), result.SavedCredentials[0].Entry.Raw)
+	require.Equal(t, string(credential.SDJwtVC), result.SavedCredentials[0].Entry.MimeType)
+	require.Equal(t, 2, obs.callCount("token"))
+	require.Equal(t, 2, obs.callCount("credential"))
+	require.Equal(t, 1, obs.callCount("notification"))
+}
+
+// decodeObservedCredentialRequest decodes a Credential Request body that the
+// wallet encrypted to the issuer's credential_request_encryption key
+// (OpenID4VCI Final §8.1), or a plain JSON body when the issuer advertises no
+// request encryption. It records every decoding failure instead of asserting,
+// so it is safe to call from an httptest handler goroutine, and reports whether
+// the body decoded.
+func decodeObservedCredentialRequest(obs *serverObservations, r *http.Request, key jose.JSONWebKey) (map[string]any, bool) {
+	raw, err := io.ReadAll(r.Body)
+	if !assert.NoError(obs, err) {
+		return nil, false
+	}
+	plaintext := raw
+	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/jwt") {
+		encrypted, err := jose.ParseEncryptedCompact(
+			string(raw),
+			[]jose.KeyAlgorithm{jose.ECDH_ES},
+			[]jose.ContentEncryption{jose.A128GCM, jose.A256GCM},
+		)
+		if !assert.NoError(obs, err) {
+			return nil, false
+		}
+		plaintext, err = encrypted.Decrypt(key.Key)
+		if !assert.NoError(obs, err) {
+			return nil, false
+		}
+	}
+	var body map[string]any
+	if !assert.NoError(obs, json.Unmarshal(plaintext, &body)) {
+		return nil, false
+	}
+	return body, true
+}
+
+// writeObservedFinalCredentialResponse writes an encrypted Credential Response
+// (OpenID4VCI Final §8.2) from a handler goroutine, recording an encryption
+// failure instead of asserting on it.
+func writeObservedFinalCredentialResponse(obs *serverObservations, w http.ResponseWriter, key jose.JSONWebKey, payload any) {
+	plaintext, err := json.Marshal(payload)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot serialize credential response", http.StatusInternalServerError)
+		return
+	}
+	encrypter, err := jose.NewEncrypter(
+		jose.A128GCM,
+		jose.Recipient{Algorithm: jose.ECDH_ES, Key: key.Public().Key, KeyID: key.KeyID},
+		(&jose.EncrypterOptions{}).WithContentType("json"),
+	)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot encrypt credential response", http.StatusInternalServerError)
+		return
+	}
+	encrypted, err := encrypter.Encrypt(plaintext)
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot encrypt credential response", http.StatusInternalServerError)
+		return
+	}
+	serialized, err := encrypted.CompactSerialize()
+	if !assert.NoError(obs, err) {
+		http.Error(w, "cannot serialize encrypted credential response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/jwt")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(serialized))
+}
+
+func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return jose.JSONWebKey{
+		Key:       privateKey,
+		KeyID:     keyID,
+		Algorithm: "ES256",
+		Use:       "sig",
+	}
+}
+
+func buildTestSDJWTVC(t *testing.T, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
+	t.Helper()
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	return buildTestSDJWTVCWithIssuerKey(t, issuerKey, holderPublicKey, claims)
+}
+
+// buildTestSDJWTVCWithIssuerKey signs the credential with a caller-supplied
+// issuer key, so a test can configure a CredentialAcceptancePolicy that
+// resolves it.
+func buildTestSDJWTVCWithIssuerKey(t *testing.T, issuerKey *ecdsa.PrivateKey, holderPublicKey jose.JSONWebKey, claims map[string]string) string {
+	t.Helper()
+	disclosures := make([]string, 0, len(claims))
+	hashes := make([]string, 0, len(claims))
+	for name, value := range claims {
+		disclosureBytes, err := json.Marshal([]any{"salt-" + name, name, value})
+		require.NoError(t, err)
+		encoded := base64.RawURLEncoding.EncodeToString(disclosureBytes)
+		disclosures = append(disclosures, encoded)
+		hash := sha256.Sum256([]byte(encoded))
+		hashes = append(hashes, base64.RawURLEncoding.EncodeToString(hash[:]))
+	}
+	payload := map[string]any{
+		"iss": "https://issuer.example.test", "vct": "urn:eudi:pid:1",
+		"cnf": map[string]any{"jwk": holderPublicKey.Public()},
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+		"_sd": hashes, "_sd_alg": "sha-256",
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
+	require.NoError(t, err)
+	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
+	require.NoError(t, err)
+	return strings.Join(append([]string{signed}, disclosures...), "~") + "~"
 }
 
 func TestController_PresentCredential_MissingRequiredFields_Integration(t *testing.T) {
@@ -1044,13 +1837,13 @@ func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.
 		accessTokenValue = "dpop-access-token"
 	)
 
-	var tokenRequests int
+	obs := newServerObservations(t, "token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/token" {
 			http.NotFound(w, r)
 			return
 		}
-		tokenRequests++
+		tokenRequests := obs.called("token")
 		dpopProof := r.Header.Get("DPoP")
 		if dpopProof == "" {
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
@@ -1112,7 +1905,7 @@ func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, token)
 	assert.Equal(t, accessTokenValue, token.Token)
-	assert.Equal(t, 2, tokenRequests)
+	assert.Equal(t, 2, obs.callCount("token"))
 }
 
 func extractPayloadField(t *testing.T, compactJWT string, field string) any {
@@ -1128,17 +1921,27 @@ func extractPayloadField(t *testing.T, compactJWT string, field string) any {
 	return value
 }
 
-func extractHeaderField(t *testing.T, compactJWT string, field string) any {
-	t.Helper()
+// observedHeaderField reads a compact JWT header field on behalf of an httptest
+// handler, recording a malformed proof instead of asserting on the server
+// goroutine, and reports whether the field was found.
+func observedHeaderField(obs *serverObservations, compactJWT string, field string) (any, bool) {
 	parts := strings.Split(compactJWT, ".")
-	require.Len(t, parts, 3)
+	if !assert.Len(obs, parts, 3) {
+		return nil, false
+	}
 	b, err := base64.RawURLEncoding.DecodeString(parts[0])
-	require.NoError(t, err)
+	if !assert.NoError(obs, err) {
+		return nil, false
+	}
 	var header map[string]any
-	require.NoError(t, json.Unmarshal(b, &header))
+	if !assert.NoError(obs, json.Unmarshal(b, &header)) {
+		return nil, false
+	}
 	value, ok := header[field]
-	require.True(t, ok, "field %q not found in header", field)
-	return value
+	if !assert.True(obs, ok, "field %q not found in header", field) {
+		return nil, false
+	}
+	return value, true
 }
 
 func TestWallet_generateDPoPProof_SignatureVerifies(t *testing.T) {
@@ -2340,10 +3143,10 @@ func TestController_fetchCredentialNonce_ReturnsNilWhenNoNonceSource(t *testing.
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://127.0.0.1:1/nonce")
 	require.NoError(t, err)
@@ -2359,10 +3162,10 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(
 }
 
 func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://example.com/nonce")
 	require.NoError(t, err)
@@ -2377,10 +3180,10 @@ func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing
 }
 
 func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceValue := "nonce-from-endpoint"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2406,10 +3209,10 @@ func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t 
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFallback(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary failure", http.StatusInternalServerError)
@@ -2429,10 +3232,10 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFal
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLarge(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2455,10 +3258,10 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLar
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithoutFallback(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2479,62 +3282,11 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithout
 	assert.Contains(t, err.Error(), "nonce endpoint response exceeds")
 }
 
-func TestController_fetchDPoPNonce_ReturnsHeaderValue(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		w.Header().Set("DPoP-Nonce", "dpop-nonce")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
-	}))
-	defer server.Close()
-
-	nonceEndpoint, err := common.ParseURIField(server.URL)
-	require.NoError(t, err)
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
-	require.NoError(t, err)
-	require.NotNil(t, nonce)
-	assert.Equal(t, "dpop-nonce", *nonce)
-}
-
-func TestController_fetchDPoPNonce_ReturnsErrorWhenEndpointMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{})
-	require.Error(t, err)
-	require.Nil(t, nonce)
-	assert.Contains(t, err.Error(), "nonce endpoint")
-}
-
-func TestController_fetchDPoPNonce_ReturnsErrorWhenHeaderMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
-	}))
-	defer server.Close()
-
-	nonceEndpoint, err := common.ParseURIField(server.URL)
-	require.NoError(t, err)
-	nonce, err := controller.fetchDPoPNonce(&receiverTypes.CredentialIssuerMetadata{NonceEndpoint: nonceEndpoint})
-	require.Error(t, err)
-	require.Nil(t, nonce)
-	assert.Contains(t, err.Error(), "DPoP-Nonce")
-}
-
 func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -2547,10 +3299,11 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 		dpopNonce        = "issuer-dpop-nonce"
 	)
 
-	var credentialRequests int
+	obs := newServerObservations(t, "nonce", "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nonce":
+			obs.called("nonce")
 			if r.Method != http.MethodPost {
 				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 				return
@@ -2559,7 +3312,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"c_nonce":"credential-proof-nonce"}`))
 		case "/credential":
-			credentialRequests++
+			credentialRequests := obs.called("credential")
 			if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 				http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 				return
@@ -2598,6 +3351,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 					http.Error(w, "first DPoP proof should not include nonce", http.StatusBadRequest)
 					return
 				}
+				w.Header().Set("DPoP-Nonce", dpopNonce)
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{
 					"error": "use_dpop_nonce",
 				})
@@ -2648,14 +3402,14 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.NoError(t, err)
 	require.NotNil(t, credential)
-	assert.Equal(t, 2, credentialRequests)
+	assert.Equal(t, 2, obs.callCount("credential"))
 }
 
 func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
@@ -2667,11 +3421,13 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 
 	const accessTokenValue = "dpop-access-token"
 
+	obs := newServerObservations(t, "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/credential" {
 			http.NotFound(w, r)
 			return
 		}
+		obs.called("credential")
 		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 			return
@@ -2681,8 +3437,16 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
 			return
 		}
-		jwk, ok := extractHeaderField(t, dpopProof, "jwk").(map[string]any)
-		require.True(t, ok)
+		headerJWK, found := observedHeaderField(obs, dpopProof, "jwk")
+		if !found {
+			http.Error(w, "DPoP proof has no jwk header", http.StatusBadRequest)
+			return
+		}
+		jwk, ok := headerJWK.(map[string]any)
+		if !assert.True(obs, ok) {
+			http.Error(w, "DPoP proof jwk header is not an object", http.StatusBadRequest)
+			return
+		}
 		if got := jwk["kid"]; got != dpopKey.ID() {
 			http.Error(w, fmt.Sprintf("DPoP proof kid = %v", got), http.StatusBadRequest)
 			return
@@ -2723,11 +3487,11 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 	require.NotNil(t, credential)
 }
 
-func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
+func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredentialNonce(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -2741,10 +3505,15 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 		nonceEndpointDPoPNonce = "nonce-endpoint-dpop-nonce"
 	)
 
-	var credentialRequests int
+	obs := newServerObservations(t, "nonce", "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/nonce":
+			obs.called("nonce")
+			if !assert.Zero(obs, obs.callCount("credential"), "c_nonce must be fetched before requesting the credential") {
+				http.Error(w, "c_nonce must be fetched before requesting the credential", http.StatusBadRequest)
+				return
+			}
 			if r.Method != http.MethodPost {
 				http.Error(w, "invalid method", http.StatusMethodNotAllowed)
 				return
@@ -2759,7 +3528,7 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 			return
 		}
 
-		credentialRequests++
+		credentialRequests := obs.called("credential")
 		dpopProof := r.Header.Get("DPoP")
 		if dpopProof == "" {
 			http.Error(w, "missing DPoP header", http.StatusBadRequest)
@@ -2787,7 +3556,7 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 			return
 		}
 
-		if payload["nonce"] != nonceEndpointDPoPNonce {
+		if payload["nonce"] != credentialHeaderNonce {
 			http.Error(w, "retry DPoP proof missing nonce", http.StatusBadRequest)
 			return
 		}
@@ -2827,14 +3596,15 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.NoError(t, err)
 	require.NotNil(t, credential)
-	assert.Equal(t, 2, credentialRequests)
+	assert.Equal(t, 2, obs.callCount("credential"))
+	assert.Equal(t, 1, obs.callCount("nonce"))
 }
 
-func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
+func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -2844,13 +3614,13 @@ func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.
 
 	const accessTokenValue = "dpop-access-token"
 
-	var credentialRequests int
+	obs := newServerObservations(t, "credential")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/credential" {
 			http.NotFound(w, r)
 			return
 		}
-		credentialRequests++
+		obs.called("credential")
 		if got := r.Header.Get("Authorization"); got != "DPoP "+accessTokenValue {
 			http.Error(w, "invalid authorization header: "+got, http.StatusBadRequest)
 			return
@@ -2891,9 +3661,8 @@ func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.
 	credential, err := controller.requestCredential(req, issuerMetadata, accessToken, "test-config", nil)
 	require.Error(t, err)
 	require.Nil(t, credential)
-	assert.Contains(t, err.Error(), "failed to fetch DPoP nonce")
-	assert.Contains(t, err.Error(), "nonce endpoint")
-	assert.Equal(t, 1, credentialRequests)
+	assert.ErrorIs(t, err, receiverTypes.ErrUseDPoPNonce)
+	assert.Equal(t, 2, obs.callCount("credential"))
 }
 
 func TestAccessTokenCredentialIdentifier(t *testing.T) {
@@ -3252,10 +4021,10 @@ func newCredentialIssuanceMockServer(t *testing.T, opts credentialIssuanceMockSe
 }
 
 func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	sdJwtCredential := createWalletTestSDJWT()
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
@@ -3343,10 +4112,10 @@ func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *
 }
 
 func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMethodsSupported(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -3399,10 +4168,10 @@ func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMetho
 }
 
 func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNilKey(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -3451,6 +4220,9 @@ func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNil
 }
 
 func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
+	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
+	defer env.SetHTTPAllowed(http_allowed)
+	env.SetHTTPAllowed(true)
 	// Create mock HTTP server
 	server := createMockOID4VCIServer()
 	defer server.Close()
@@ -3479,9 +4251,6 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 	}
 
 	// First test metadata fetch to debug
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Fatalf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -4350,9 +5119,12 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			controller, key := receiveCredentialForPresentationTest(t)
 			captured := make(chan url.Values, 1)
+			obs := newServerObservations(t, "response_uri")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if err := r.ParseForm(); err != nil {
-					t.Error(err)
+				obs.called("response_uri")
+				if !assert.NoError(obs, r.ParseForm()) {
+					http.Error(w, "malformed authorization response form", http.StatusBadRequest)
+					return
 				}
 				captured <- r.PostForm
 				w.Header().Set("Content-Type", "application/json")
@@ -4409,17 +5181,5 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 			require.True(t, ok)
 			require.Len(t, vp["verifiableCredential"], 1)
 		})
-	}
-}
-
-func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {
-	t.Helper()
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	return jose.JSONWebKey{
-		Key:       privateKey,
-		KeyID:     keyID,
-		Algorithm: "ES256",
-		Use:       "sig",
 	}
 }
