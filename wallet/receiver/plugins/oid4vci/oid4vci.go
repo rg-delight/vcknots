@@ -237,6 +237,10 @@ const (
 	wellKnownAuthorizationServer = "/.well-known/oauth-authorization-server"
 )
 
+// preAuthorizedCodeGrantType is the OpenID4VCI 1.0 §4.1.1 grant type of the
+// Pre-Authorized Code Flow, registered in §16.4.
+const preAuthorizedCodeGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+
 type credentialNonceResponse struct {
 	CNonce *string `json:"c_nonce"`
 	Nonce  *string `json:"nonce"`
@@ -817,18 +821,10 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 
-	// A client assertion proves possession of the registered client key, and
-	// RFC 6749 section 10.8 requires client credentials never to travel in the
-	// clear. VCKNOTS_WALLET_HTTP_ALLOWED exists so that the local samples can
-	// talk to a development server on this machine, which is why loopback
-	// stays permitted; it is not a licence to send the assertion across a
-	// network unprotected.
-	if requestConfig.ClientAssertion != "" &&
-		!strings.EqualFold(endpointURL.Scheme, "https") &&
-		!common.IsLoopbackHost(endpointURL.Hostname()) {
-		return nil, fmt.Errorf(
-			"refusing to send a client assertion to %q over %q: https is required for any host other than loopback",
-			endpointURL.Host, endpointURL.Scheme)
+	if requestConfig.ClientAssertion != "" {
+		if err := requireSecureClientAssertionTransport(*endpointURL); err != nil {
+			return nil, err
+		}
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -1078,6 +1074,88 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(c
 	var response types.CredentialIssuanceAccessToken
 	if err := o.doFormRequestWithDpopAndAttestationRetry(ctx, endpoint, buildBody, headersFactory, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code with DPoP retry: %w", err)
+	}
+	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// ExchangePreAuthorizedCodeWithDpopAndAttestationRetry exchanges the
+// Section 4.1.1 pre-authorized_code at the Section 6.1 Token Endpoint. It is the
+// Pre-Authorized Code counterpart of
+// ExchangeAuthorizationCodeWithDpopAndAttestationRetry and owns the same RFC
+// 9449 Section 8 DPoP nonce retry: both factories are called once per attempt,
+// so a re-sent request carries a freshly signed proof, freshly built
+// OAuth-Client-Attestation headers and a fresh client_assertion rather than a
+// replayed jti. ctx bounds every attempt.
+//
+// Section 6.1 makes client authentication OPTIONAL for this grant
+// ("authentication of the Client is OPTIONAL"), so a nil headersFactory sends
+// no attestation headers and a nil proofFactory sends no DPoP proof.
+func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request types.PreAuthorizedCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
+	normalized, err := o.normalizedProfile()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.PreAuthorizedCode) == "" {
+		return nil, fmt.Errorf("pre-authorized_code is required")
+	}
+	// Metadata token_endpoint values are complete URLs; resolving here keeps
+	// the transport guards and the request itself on the same normalized URL.
+	resolvedURL, err := url.Parse(types.ResolveTokenEndpointURL(endpoint))
+	if err != nil {
+		return nil, fmt.Errorf("invalid token endpoint URL: %w", err)
+	}
+	if request.ClientAssertion != "" || request.ClientAssertionFactory != nil {
+		// private_key_jwt identifies the client by client_id, and an empty one
+		// would only be rejected at the authorization server, where the cause
+		// is far harder to see.
+		if strings.TrimSpace(request.ClientID) == "" {
+			return nil, fmt.Errorf("client_id is required when a client assertion is sent")
+		}
+		if err := requireSecureClientAssertionTransport(*resolvedURL); err != nil {
+			return nil, err
+		}
+	}
+	// The form is rebuilt for every attempt so a fresh client_assertion
+	// (unique jti, RFC 7523 §3) accompanies each re-sent request.
+	buildBody := func() ([]byte, error) {
+		assertion := request.ClientAssertion
+		if request.ClientAssertionFactory != nil {
+			fresh, err := request.ClientAssertionFactory()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
+			}
+			assertion = fresh
+		}
+		formData := url.Values{}
+		formData.Set("grant_type", preAuthorizedCodeGrantType)
+		formData.Set("pre-authorized_code", request.PreAuthorizedCode)
+		if request.TxCode != "" {
+			formData.Set("tx_code", request.TxCode)
+		}
+		// Sent for both authenticated and unauthenticated requests: client_id
+		// is OPTIONAL for this grant, so it is included whenever the caller
+		// configured one and omitted otherwise.
+		if clientID := strings.TrimSpace(request.ClientID); clientID != "" {
+			formData.Set("client_id", clientID)
+		}
+		setClientAssertionForm(formData, assertion, request.ClientAssertionType)
+		return []byte(formData.Encode()), nil
+	}
+	if headersFactory == nil {
+		headersFactory = func() (types.OAuthClientAttestationHeaders, error) {
+			return types.OAuthClientAttestationHeaders{}, nil
+		}
+	}
+	if proofFactory == nil {
+		proofFactory = func(string) (string, error) { return "", nil }
+	}
+
+	var response types.CredentialIssuanceAccessToken
+	if err := o.doFormRequestWithDpopAndAttestationRetry(ctx, common.URIField(*resolvedURL), buildBody, headersFactory, proofFactory, &response); err != nil {
+		return nil, fmt.Errorf("failed to exchange the pre-authorized code with DPoP retry: %w", err)
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
 		return nil, err
@@ -1733,7 +1811,12 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(ctx context.Conte
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("DPoP", dpopProof)
+		// An empty proof is how a caller says the request carries no DPoP: the
+		// Pre-Authorized Code grant of OpenID4VCI 1.0 §6.1 may go out without
+		// one, and an empty DPoP header is not a proof a server could accept.
+		if dpopProof != "" {
+			req.Header.Set("DPoP", dpopProof)
+		}
 		for key, value := range headers {
 			if value != "" {
 				req.Header.Set(key, value)
@@ -1771,6 +1854,22 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(ctx context.Conte
 	}
 
 	return fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+}
+
+// requireSecureClientAssertionTransport refuses to send a client assertion over
+// an unprotected connection. The assertion proves possession of the registered
+// client key, and RFC 6749 §10.8 requires client credentials never to travel in
+// the clear. The AllowHTTP escape (VCKNOTS_WALLET_HTTP_ALLOWED) exists so that
+// the local samples can talk to a development server on this machine, which is
+// why loopback stays permitted; it is not a licence to send the assertion
+// across a network unprotected.
+func requireSecureClientAssertionTransport(endpointURL url.URL) error {
+	if strings.EqualFold(endpointURL.Scheme, "https") || common.IsLoopbackHost(endpointURL.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to send a client assertion to %q over %q: https is required for any host other than loopback",
+		endpointURL.Host, endpointURL.Scheme)
 }
 
 // setClientAssertionForm adds the RFC 7523 §2.2 private_key_jwt client

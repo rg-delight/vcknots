@@ -164,14 +164,6 @@ var (
 	// binds the token to the proof key, so presenting it with another key
 	// cannot succeed and is refused before the request is sent.
 	ErrDPoPKeyMismatch = errors.New("token grant is bound to a different DPoP key")
-	// ErrClientAttestationNotCarried reports that the wallet holds a Client
-	// Attestation provider for a Pre-Authorized Code token request but the
-	// configured receiver transport has no way to carry the
-	// draft-ietf-oauth-attestation-based-client-auth headers on it. HAIP
-	// §4.4.1 ("Wallets MUST use ... an OAuth2 Client authentication mechanism
-	// at OAuth2 Endpoints that support client authentication") makes sending
-	// the request anonymously the wrong answer, so it fails closed.
-	ErrClientAttestationNotCarried = errors.New("the receiver cannot carry client attestation headers on a pre-authorized_code token request")
 )
 
 // Sentinel errors DecodeOID4VCIFinalCredentialResponse wraps at each of its

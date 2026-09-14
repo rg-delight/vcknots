@@ -652,15 +652,18 @@ deferred issuance and notifications behave identically.
 - `AuthorizeOID4VCIFinalPreAuthorizedToken` is the same two-stage split as the
   authorization code flow, returning the same `OID4VCIFinalTokenGrant`, so the
   key attestation can be minted in another process here too.
-
-Known limitation: attestation-based client authentication (Appendix E) travels
-in `OAuth-Client-Attestation` headers, which `receiver/types.Receiver`'s token
-request cannot carry. Under Final the grant needs no client authentication and
-the request goes out without them; under HAIP, a wallet whose only configured
-mechanism is a `ClientAttestationProvider` fails closed with
-`ErrClientAttestationNotCarried` instead of silently authenticating anonymously.
-Configure `ClientAuth` with `private_key_jwt` for HAIP Pre-Authorized Code
-issuance.
+- Attestation-based client authentication (Appendix E) works on this grant as
+  it does on the authorization code flow: with a `Config.ClientAttestation`
+  provider the token request carries the `OAuth-Client-Attestation` and
+  `OAuth-Client-Attestation-PoP` headers, and the RFC 9449 §8 `use_dpop_nonce`
+  retry rebuilds both the DPoP proof and the PoP rather than replaying a jti.
+  The attestation is the client authentication, so no `client_assertion` is
+  sent, the authorization server need not advertise `private_key_jwt`, and the
+  request is not the anonymous one
+  `pre-authorized_grant_anonymous_access_supported` speaks about. Configure
+  `ClientAuth` with `private_key_jwt` instead when the deployment authenticates
+  that way; the two are alternatives, and the attestation takes precedence when
+  both are configured.
 
 The `official_driver` operation `receive-preauth` now uses this API instead of
 the Draft-13 `ReceiveCredential`, and its output matches `receive-code`:

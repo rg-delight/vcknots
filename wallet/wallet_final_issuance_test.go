@@ -121,7 +121,11 @@ type finalIssuanceFixture struct {
 	parForm             url.Values
 	parHeaders          http.Header
 	tokenHeaders        http.Header
-	tokenForms          []url.Values
+	// tokenHeaderList records the headers of every token request, not only the
+	// last one, so a test can compare what an RFC 9449 §8 retry re-signed with
+	// what the first attempt carried.
+	tokenHeaderList []http.Header
+	tokenForms      []url.Values
 }
 
 func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) *finalIssuanceFixture {
@@ -371,6 +375,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		_ = r.ParseForm()
 		f.tokenForms = append(f.tokenForms, r.Form)
 		f.tokenHeaders = r.Header.Clone()
+		f.tokenHeaderList = append(f.tokenHeaderList, f.tokenHeaders)
 		if f.tokenHandler != nil {
 			f.tokenHandler(w, r)
 			return

@@ -41,6 +41,21 @@ type OID4VCIIssuerConfig struct {
 	RequireClientAssertion bool
 	ClientAuthPublicKey    *jose.JSONWebKey
 	ExpectedClientID       string
+
+	// RequireClientAttestation, when true, makes /token require the
+	// attestation-based client authentication of
+	// draft-ietf-oauth-attestation-based-client-auth (OpenID4VCI 1.0 Appendix
+	// E) on every grant it accepts, the Pre-Authorized Code grant included. The
+	// headers are validated, not merely counted: the OAuth-Client-Attestation
+	// JWT must be signed by ClientAttesterPublicKey, name ExpectedClientID in
+	// sub and carry the wallet instance key in cnf.jwk, and the
+	// OAuth-Client-Attestation-PoP JWT must be signed by that instance key,
+	// name the client in iss and this server's issuer identifier in aud.
+	RequireClientAttestation bool
+	// ClientAttesterPublicKey verifies the Client Attestation signature. It is
+	// registration data: an attestation that is only checked against a key
+	// taken from itself proves nothing.
+	ClientAttesterPublicKey *jose.JSONWebKey
 	// ClientAssertionAudience is the registered aud value that client_assertion
 	// must carry. It must be set before a token request is validated. Deriving
 	// it from the incoming request would make the aud check tautological,
@@ -153,10 +168,11 @@ type OID4VCIIssuerServer struct {
 
 	// mu guards the recorded requests, which the handlers write from the
 	// server's goroutine while the test reads them from its own.
-	mu                 sync.Mutex
-	tokenRequests      []url.Values
-	credentialRequests []CredentialEndpointRequest
-	nonceRequests      int
+	mu                  sync.Mutex
+	tokenRequests       []url.Values
+	tokenRequestHeaders []http.Header
+	credentialRequests  []CredentialEndpointRequest
+	nonceRequests       int
 	// tokenDPoPNonceSent records that the RFC 9449 §8 use_dpop_nonce challenge
 	// has already been issued once, so the retry is answered rather than
 	// challenged again.
@@ -294,6 +310,16 @@ func (is *OID4VCIIssuerServer) TokenRequests() []url.Values {
 	return slices.Clone(is.tokenRequests)
 }
 
+// TokenRequestHeaders returns the headers of every token request the server has
+// received, in arrival order, so a test can assert on what travelled outside
+// the form: the RFC 9449 DPoP proof and the Appendix E
+// OAuth-Client-Attestation headers.
+func (is *OID4VCIIssuerServer) TokenRequestHeaders() []http.Header {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	return slices.Clone(is.tokenRequestHeaders)
+}
+
 // CredentialRequests returns every Credential Endpoint request the server has
 // received, in arrival order.
 func (is *OID4VCIIssuerServer) CredentialRequests() []CredentialEndpointRequest {
@@ -324,6 +350,7 @@ func (is *OID4VCIIssuerServer) handleToken(w http.ResponseWriter, r *http.Reques
 	}
 	is.mu.Lock()
 	is.tokenRequests = append(is.tokenRequests, r.PostForm)
+	is.tokenRequestHeaders = append(is.tokenRequestHeaders, r.Header.Clone())
 	is.mu.Unlock()
 
 	if err := is.validateGrant(r); err != nil {
@@ -336,6 +363,20 @@ func (is *OID4VCIIssuerServer) handleToken(w http.ResponseWriter, r *http.Reques
 
 	if is.config.RequireClientAssertion {
 		if err := is.validateClientAssertion(r); err != nil {
+			JSONResponse(w, http.StatusBadRequest, map[string]interface{}{
+				"error":             "invalid_client",
+				"error_description": err.Error(),
+			})
+			return
+		}
+	}
+
+	// The Appendix E headers authenticate the client whichever grant the
+	// request carries, so the check is not conditioned on grant_type: an issuer
+	// that accepts an attested client on the authorization code grant and an
+	// anonymous one on the pre-authorized code grant would authenticate nothing.
+	if is.config.RequireClientAttestation {
+		if err := is.validateClientAttestation(r); err != nil {
 			JSONResponse(w, http.StatusBadRequest, map[string]interface{}{
 				"error":             "invalid_client",
 				"error_description": err.Error(),
@@ -524,6 +565,123 @@ func (is *OID4VCIIssuerServer) validateClientAssertion(r *http.Request) error {
 	}
 
 	return nil
+}
+
+// Attestation-based client authentication typ values from
+// draft-ietf-oauth-attestation-based-client-auth Section 4, which OpenID4VCI
+// 1.0 Appendix E profiles.
+const (
+	clientAttestationJWTType    = "oauth-client-attestation+jwt"
+	clientAttestationPopJWTType = "oauth-client-attestation-pop+jwt"
+)
+
+// validateClientAttestation validates the OAuth-Client-Attestation and
+// OAuth-Client-Attestation-PoP headers of a token request the way an
+// authorization server does: the attestation is signed by the registered
+// attester and binds a wallet instance key to the registered client_id, and the
+// PoP is signed by exactly that instance key and addressed to this server. A
+// PoP verified against a key taken from the request alone would prove nothing,
+// which is why the attester key is registration data on the config.
+func (is *OID4VCIIssuerServer) validateClientAttestation(r *http.Request) error {
+	attestation := strings.TrimSpace(r.Header.Get("OAuth-Client-Attestation"))
+	if attestation == "" {
+		return fmt.Errorf("OAuth-Client-Attestation header is required")
+	}
+	pop := strings.TrimSpace(r.Header.Get("OAuth-Client-Attestation-PoP"))
+	if pop == "" {
+		return fmt.Errorf("OAuth-Client-Attestation-PoP header is required")
+	}
+	expectedID := strings.TrimSpace(is.config.ExpectedClientID)
+	if expectedID == "" {
+		return fmt.Errorf("ExpectedClientID must be configured to validate the client attestation")
+	}
+	if is.config.ClientAttesterPublicKey == nil {
+		return fmt.Errorf("server has no client attester public key configured")
+	}
+
+	attestationToken, err := jose.ParseSigned(attestation, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		return fmt.Errorf("failed to parse the client attestation: %w", err)
+	}
+	if typ := jwtTypeHeader(attestationToken); typ != clientAttestationJWTType {
+		return fmt.Errorf("client attestation typ must be %q, got %q", clientAttestationJWTType, typ)
+	}
+	attestationPayload, err := attestationToken.Verify(is.config.ClientAttesterPublicKey)
+	if err != nil {
+		return fmt.Errorf("client attestation signature verification failed: %w", err)
+	}
+	var attestationClaims struct {
+		ISS string `json:"iss"`
+		SUB string `json:"sub"`
+		AUD string `json:"aud"`
+		EXP int64  `json:"exp"`
+		CNF struct {
+			JWK *jose.JSONWebKey `json:"jwk"`
+		} `json:"cnf"`
+	}
+	if err := json.Unmarshal(attestationPayload, &attestationClaims); err != nil {
+		return fmt.Errorf("failed to parse the client attestation claims: %w", err)
+	}
+	if attestationClaims.SUB != expectedID {
+		return fmt.Errorf("client attestation sub must be the registered client_id")
+	}
+	if attestationClaims.CNF.JWK == nil {
+		return fmt.Errorf("client attestation cnf.jwk is required")
+	}
+	now := time.Now().Unix()
+	if attestationClaims.EXP == 0 || attestationClaims.EXP <= now {
+		return fmt.Errorf("client attestation is expired or carries no exp")
+	}
+	// HAIP Section 4.4.1: "Wallet Attestations MUST NOT be reused across
+	// different Issuers." An audience-restricted attestation naming another
+	// server is exactly the reuse that restriction exists to catch.
+	if attestationClaims.AUD != "" && attestationClaims.AUD != is.server.URL() {
+		return fmt.Errorf("client attestation aud %q was not minted for this authorization server", attestationClaims.AUD)
+	}
+
+	popToken, err := jose.ParseSigned(pop, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		return fmt.Errorf("failed to parse the client attestation PoP: %w", err)
+	}
+	if typ := jwtTypeHeader(popToken); typ != clientAttestationPopJWTType {
+		return fmt.Errorf("client attestation PoP typ must be %q, got %q", clientAttestationPopJWTType, typ)
+	}
+	popPayload, err := popToken.Verify(attestationClaims.CNF.JWK)
+	if err != nil {
+		return fmt.Errorf("client attestation PoP signature verification failed: %w", err)
+	}
+	var popClaims struct {
+		ISS string `json:"iss"`
+		AUD string `json:"aud"`
+		JTI string `json:"jti"`
+		EXP int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(popPayload, &popClaims); err != nil {
+		return fmt.Errorf("failed to parse the client attestation PoP claims: %w", err)
+	}
+	if popClaims.ISS != expectedID {
+		return fmt.Errorf("client attestation PoP iss must be the registered client_id")
+	}
+	if popClaims.AUD != is.server.URL() {
+		return fmt.Errorf("client attestation PoP aud %q is not this authorization server", popClaims.AUD)
+	}
+	if strings.TrimSpace(popClaims.JTI) == "" {
+		return fmt.Errorf("client attestation PoP jti is required")
+	}
+	if popClaims.EXP == 0 || popClaims.EXP <= now {
+		return fmt.Errorf("client attestation PoP is expired or carries no exp")
+	}
+	return nil
+}
+
+// jwtTypeHeader returns the typ header of a parsed JWS, empty when it carries
+// none.
+func jwtTypeHeader(token *jose.JSONWebSignature) string {
+	if len(token.Signatures) == 0 {
+		return ""
+	}
+	typ, _ := token.Signatures[0].Header.ExtraHeaders[jose.HeaderType].(string)
+	return typ
 }
 
 // handleNonce handles the nonce endpoint

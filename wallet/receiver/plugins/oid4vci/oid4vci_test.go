@@ -1,6 +1,7 @@
 package oid4vci
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -2593,4 +2594,135 @@ func TestOid4vciReceiverSatisfiesTransportAndSigner(t *testing.T) {
 	response, err := transport.DecodeCredentialResponse([]byte(`{"credential":"credential-1"}`), "application/json", nil)
 	require.NoError(t, err)
 	require.Equal(t, "credential-1", response.Credential)
+}
+
+// preAuthorizedAttestationIssuer is a mock issuer that requires the Appendix E
+// client authentication on its token endpoint, with the keys the wallet side of
+// the test signs with.
+func preAuthorizedAttestationIssuer(t *testing.T, configure func(*mockserver.OID4VCIIssuerConfig)) (*mockserver.OID4VCIIssuerServer, jose.JSONWebKey, jose.JSONWebKey) {
+	t.Helper()
+	clientPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	attesterPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	clientKey := jose.JSONWebKey{Key: clientPrivateKey, KeyID: "client-key-1", Algorithm: string(jose.ES256), Use: "sig"}
+	attesterKey := jose.JSONWebKey{Key: attesterPrivateKey, KeyID: "attester-key-1", Algorithm: string(jose.ES256), Use: "sig"}
+
+	config := mockserver.DefaultOID4VCIIssuerConfig()
+	config.RequireClientAttestation = true
+	config.ExpectedClientID = "client-1"
+	attesterPublic := attesterKey.Public()
+	config.ClientAttesterPublicKey = &attesterPublic
+	config.RequireDPoP = true
+	config.TokenResponse = map[string]interface{}{
+		"access_token": "access-1",
+		"token_type":   "DPoP",
+		"expires_in":   3600,
+	}
+	if configure != nil {
+		configure(config)
+	}
+	issuer := mockserver.NewOID4VCIIssuerServer(config)
+	t.Cleanup(issuer.Close)
+	return issuer, clientKey, attesterKey
+}
+
+// The §6.1 Pre-Authorized Code token request carries attestation-based client
+// authentication in its headers, and an issuer that requires it accepts the
+// request. OpenID4VCI 1.0 Appendix E profiles
+// draft-ietf-oauth-attestation-based-client-auth for exactly this purpose, and
+// HAIP §4.4.1 requires "an OAuth2 Client authentication mechanism at OAuth2
+// Endpoints that support client authentication".
+func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_CarriesAttestationHeaders(t *testing.T) {
+	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, nil)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	tokenEndpoint := issuer.URL() + "/token"
+
+	token, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
+		context.Background(),
+		mustURIField(t, tokenEndpoint),
+		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", TxCode: "493536", ClientID: "client-1"},
+		attestationHeadersFactory(t, receiver, clientKey, attesterKey, issuer.URL()),
+		func(nonce string) (string, error) {
+			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "access-1", token.Token)
+
+	forms := issuer.TokenRequests()
+	require.Len(t, forms, 1)
+	require.Equal(t, "urn:ietf:params:oauth:grant-type:pre-authorized_code", forms[0].Get("grant_type"))
+	require.Equal(t, "pre-auth-code-1", forms[0].Get("pre-authorized_code"))
+	require.Equal(t, "493536", forms[0].Get("tx_code"))
+	require.Equal(t, "client-1", forms[0].Get("client_id"))
+
+	headers := issuer.TokenRequestHeaders()
+	require.Len(t, headers, 1)
+	require.NotEmpty(t, headers[0].Get("OAuth-Client-Attestation"))
+	require.NotEmpty(t, headers[0].Get("OAuth-Client-Attestation-PoP"))
+}
+
+// RFC 9449 §8: the retry the transport owns rebuilds the attestation headers
+// for the second attempt, so the issuer sees a fresh PoP rather than a replayed
+// one.
+func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_RebuildsHeadersOnNonceChallenge(t *testing.T) {
+	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, func(config *mockserver.OID4VCIIssuerConfig) {
+		config.TokenDPoPNonce = "token-nonce-1"
+	})
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	tokenEndpoint := issuer.URL() + "/token"
+
+	token, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
+		context.Background(),
+		mustURIField(t, tokenEndpoint),
+		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"},
+		attestationHeadersFactory(t, receiver, clientKey, attesterKey, issuer.URL()),
+		func(nonce string) (string, error) {
+			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "access-1", token.Token)
+
+	headers := issuer.TokenRequestHeaders()
+	require.Len(t, headers, 2)
+	require.NotEmpty(t, headers[1].Get("OAuth-Client-Attestation-PoP"))
+	require.NotEqual(t, headers[0].Get("OAuth-Client-Attestation-PoP"), headers[1].Get("OAuth-Client-Attestation-PoP"))
+	require.NotEqual(t, headers[0].Get("DPoP"), headers[1].Get("DPoP"))
+}
+
+// An issuer that requires attestation-based client authentication refuses the
+// same request sent without the headers, which is what makes the acceptance
+// above evidence.
+func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_IssuerRefusesMissingHeaders(t *testing.T) {
+	issuer, clientKey, _ := preAuthorizedAttestationIssuer(t, nil)
+	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	tokenEndpoint := issuer.URL() + "/token"
+
+	_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
+		context.Background(),
+		mustURIField(t, tokenEndpoint),
+		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"},
+		nil,
+		func(nonce string) (string, error) {
+			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		},
+	)
+	require.ErrorContains(t, err, "invalid_client")
+}
+
+// attestationHeadersFactory mints a Client Attestation once and a fresh PoP for
+// every attempt, the way a wallet holding a Client Attestation provider does.
+func attestationHeadersFactory(t *testing.T, receiver *Oid4vciReceiver, clientKey, attesterKey jose.JSONWebKey, authorizationServer string) OAuthClientAttestationHeadersFactory {
+	t.Helper()
+	attestation, err := receiver.CreateClientAttestation(clientKey, attesterKey, "https://client-attester.example", "client-1", time.Minute)
+	require.NoError(t, err)
+	return func() (types.OAuthClientAttestationHeaders, error) {
+		pop, err := receiver.CreateClientAttestationPop(clientKey, "client-1", authorizationServer, "", time.Minute)
+		if err != nil {
+			return types.OAuthClientAttestationHeaders{}, err
+		}
+		return types.OAuthClientAttestationHeaders{ClientAttestation: attestation, ClientAttestationPop: pop}, nil
+	}
 }

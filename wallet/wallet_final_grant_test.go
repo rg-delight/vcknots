@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -523,4 +524,146 @@ func TestReceiveOID4VCIFinalPreAuthorizedCredentialRejectsDPoPWithoutClientKey(t
 	_, err := fixture.wallet.ReceiveOID4VCIFinalPreAuthorizedCredential(context.Background(), fixture.preAuthorizedRequest(t, nil))
 	require.True(t, errors.Is(err, oid4vci.ErrDPoPRequired), "expected ErrDPoPRequired, got %v", err)
 	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// verifyFinalClientAttestationHeaders authenticates the Appendix E headers the
+// way an authorization server does — the attestation is signed by the attester
+// and binds the wallet instance key to the client_id, the PoP is signed by that
+// instance key and addressed to the authorization server — and returns both
+// sets of claims.
+func verifyFinalClientAttestationHeaders(
+	t *testing.T,
+	headers http.Header,
+	attesterKey jose.JSONWebKey,
+	clientKey jose.JSONWebKey,
+	clientID string,
+	authorizationServer string,
+) (attestationClaims map[string]any, popClaims map[string]any) {
+	t.Helper()
+	attestation := headers.Get("OAuth-Client-Attestation")
+	require.NotEmpty(t, attestation)
+	pop := headers.Get("OAuth-Client-Attestation-PoP")
+	require.NotEmpty(t, pop)
+
+	attestationClaims = verifySignedJWTClaims(t, attestation, attesterKey)
+	require.Equal(t, clientID, attestationClaims["sub"])
+	cnf, ok := attestationClaims["cnf"].(map[string]any)
+	require.True(t, ok)
+	require.NotNil(t, cnf["jwk"])
+
+	popClaims = verifySignedJWTClaims(t, pop, clientKey)
+	require.Equal(t, clientID, popClaims["iss"])
+	require.Equal(t, authorizationServer, popClaims["aud"])
+	require.NotEmpty(t, popClaims["jti"])
+	return attestationClaims, popClaims
+}
+
+// verifySignedJWTClaims verifies a compact JWS with key and returns its claims.
+func verifySignedJWTClaims(t *testing.T, token string, key jose.JSONWebKey) map[string]any {
+	t.Helper()
+	signature, err := jose.ParseSigned(token, []jose.SignatureAlgorithm{jose.ES256})
+	require.NoError(t, err)
+	payload, err := signature.Verify(key.Public())
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+// haipPreAuthorizedAttestationFixture is a HAIP issuer whose wallet holds a
+// Client Attestation provider and nothing else: the case HAIP §4.4.1 requires
+// a client authentication mechanism for, and the one the Pre-Authorized Code
+// grant used to have no way to carry.
+func haipPreAuthorizedAttestationFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) (*finalIssuanceFixture, jose.JSONWebKey) {
+	t.Helper()
+	attesterKey := newPrivateJWKForFinalVCITest(t, "client-attester-1")
+	// HAIP §4.4.1 requires the attester's certificate in the x5c header, and
+	// the leaf must not be self-signed.
+	attesterKey.Certificates = []*x509.Certificate{testLeafCertificate(t, attesterKey, false)}
+	fixture := newHAIPIssuanceFixture(t, opts...)
+	// private_key_jwt is removed so the attestation is the only mechanism left.
+	fixture.wallet.clientAuth = ClientAuthConfig{}
+	fixture.wallet.clientAttestation = &StaticClientAttester{Key: attesterKey, Issuer: "https://attester.example"}
+	return fixture, attesterKey
+}
+
+// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication mechanism
+// at OAuth2 Endpoints that support client authentication (such as the PAR and
+// Token Endpoints)." Attestation-based client authentication (OpenID4VCI 1.0
+// Appendix E) satisfies it on the §6.1 Pre-Authorized Code token request, whose
+// headers carry the Client Attestation and its PoP.
+func TestReceiveOID4VCIFinalPreAuthorizedCredentialCarriesClientAttestationUnderHAIP(t *testing.T) {
+	fixture, attesterKey := haipPreAuthorizedAttestationFixture(t)
+	req := fixture.preAuthorizedRequest(t, nil)
+	req.ClientID = "client-1"
+	req.ClientKey = fixture.clientKey
+
+	grant, err := fixture.wallet.AuthorizeOID4VCIFinalPreAuthorizedToken(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, "DPoP", grant.AccessToken.TokenType)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, preAuthorizedCodeGrantType, fixture.tokenForms[0].Get("grant_type"))
+	require.NotEmpty(t, fixture.tokenHeaders.Get("DPoP"))
+
+	verifyFinalClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
+	// Appendix E is an alternative to private_key_jwt, not an addition: the
+	// form carries no client_assertion.
+	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
+	require.Empty(t, fixture.tokenForms[0].Get("client_assertion_type"))
+}
+
+// RFC 9449 §8: a token endpoint that answers "use_dpop_nonce" has rejected the
+// proof only because it lacks its nonce. The retry re-signs the DPoP proof for
+// that nonce and, because
+// draft-ietf-oauth-attestation-based-client-auth §4 gives every PoP a unique
+// jti, mints a new Client Attestation PoP rather than replaying the first one.
+func TestReceiveOID4VCIFinalPreAuthorizedCredentialRefreshesAttestationOnDPoPNonceRetry(t *testing.T) {
+	var fixture *finalIssuanceFixture
+	fixture, attesterKey := haipPreAuthorizedAttestationFixture(t, func(f *finalIssuanceFixture) {
+		f.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+			if f.tokenCalls == 1 {
+				w.Header().Set("DPoP-Nonce", "token-nonce-1")
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_dpop_nonce"})
+				return
+			}
+			mockserver.JSONResponse(w, http.StatusOK, f.tokenResponseValue())
+		}
+	})
+	req := fixture.preAuthorizedRequest(t, nil)
+	req.ClientID = "client-1"
+	req.ClientKey = fixture.clientKey
+
+	grant, err := fixture.wallet.AuthorizeOID4VCIFinalPreAuthorizedToken(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, "DPoP", grant.AccessToken.TokenType)
+	require.Equal(t, 2, fixture.tokenCalls)
+	require.Len(t, fixture.tokenHeaderList, 2)
+
+	_, firstPop := verifyFinalClientAttestationHeaders(t, fixture.tokenHeaderList[0], attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
+	_, secondPop := verifyFinalClientAttestationHeaders(t, fixture.tokenHeaderList[1], attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
+	require.NotEqual(t, firstPop["jti"], secondPop["jti"])
+
+	// The re-sent proof carries the nonce the authorization server named, with
+	// its own jti (RFC 9449 §4.2).
+	firstProof := verifySignedJWTClaims(t, fixture.tokenHeaderList[0].Get("DPoP"), fixture.clientKey)
+	secondProof := verifySignedJWTClaims(t, fixture.tokenHeaderList[1].Get("DPoP"), fixture.clientKey)
+	require.Empty(t, firstProof["nonce"])
+	require.Equal(t, "token-nonce-1", secondProof["nonce"])
+	require.NotEqual(t, firstProof["jti"], secondProof["jti"])
+}
+
+// Without a Client Attestation provider the Final Pre-Authorized Code request
+// is unchanged: §6.1 makes client authentication OPTIONAL, so an anonymous
+// wallet sends neither the Appendix E headers nor a client_assertion.
+func TestReceiveOID4VCIFinalPreAuthorizedCredentialSendsNoAttestationWithoutProvider(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, bearerTokenResponse)
+	result, err := fixture.wallet.ReceiveOID4VCIFinalPreAuthorizedCredential(context.Background(), fixture.preAuthorizedRequest(t, nil))
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Empty(t, fixture.tokenHeaders.Get("OAuth-Client-Attestation"))
+	require.Empty(t, fixture.tokenHeaders.Get("OAuth-Client-Attestation-PoP"))
+	require.Empty(t, fixture.tokenHeaders.Get("DPoP"))
+	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
+	require.Empty(t, fixture.tokenForms[0].Get("client_id"))
 }

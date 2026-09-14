@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -627,7 +626,7 @@ func (w *Wallet) authorizeOID4VCIFinalPreAuthorizedToken(ctx context.Context, re
 	if err := requireOID4VCIContext(ctx, "the token request"); err != nil {
 		return nil, nil, err
 	}
-	token, err := w.fetchOID4VCIFinalPreAuthorizedToken(flow, req, grantParameters.PreAuthorizedCode, haip)
+	token, err := w.fetchOID4VCIFinalPreAuthorizedToken(ctx, flow, req, grantParameters.PreAuthorizedCode)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -675,77 +674,97 @@ func validateOID4VCIFinalPreAuthorizedRequest(req OID4VCIFinalPreAuthorizedRecei
 	return grantParameters, req.CredentialOffer.CredentialConfigurationIDs[0], nil
 }
 
-// fetchOID4VCIFinalPreAuthorizedToken performs the §6.1 token request. It owns
-// the one RFC 9449 §8 "use_dpop_nonce" retry, re-signing the proof with the
-// nonce the authorization server named, and decides what token_type the
-// response may carry.
+// fetchOID4VCIFinalPreAuthorizedToken performs the §6.1 token request through
+// the Final transport, which owns the one RFC 9449 §8 "use_dpop_nonce" retry,
+// and decides what token_type the response may carry. The transport calls the
+// two factories again on the retry, so the re-sent request carries a freshly
+// signed DPoP proof, a fresh Client Attestation PoP and a fresh
+// client_assertion instead of a replayed jti.
 func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
+	ctx context.Context,
 	flow *oid4vciFinalFlow,
 	req OID4VCIFinalPreAuthorizedReceiveRequest,
 	preAuthorizedCode string,
-	haip bool,
 ) (*receiverTypes.CredentialIssuanceAccessToken, error) {
 	tokenEndpoint := *flow.authorizationServerMetadata.TokenEndpoint
 	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
 
-	// Attestation-based client authentication (Appendix E) travels in the
-	// OAuth-Client-Attestation headers, which the Receiver token request cannot
-	// carry. Sending the request anonymously instead would silently drop the
-	// authentication HAIP §4.4.1 requires, so it fails closed there; under
-	// Final the grant needs no client authentication at all (§6.1) and the
-	// request goes out without it.
-	if haip && w.clientAttestation != nil && !clientAuthenticationConfigured(w.clientAuth) {
-		return nil, ErrClientAttestationNotCarried
+	// Appendix E: attestation-based client authentication travels in the
+	// OAuth-Client-Attestation headers the transport carries, so the §6.1 token
+	// request authenticates the client the same way the §6.1 authorization code
+	// request does. HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client
+	// authentication mechanism at OAuth2 Endpoints that support client
+	// authentication (such as the PAR and Token Endpoints)."
+	attestationHeaders, attestationChallenge, err := w.preAuthorizedClientAttestationHeaders(ctx, flow, req)
+	if err != nil {
+		return nil, err
+	}
+	attestationInUse := attestationHeaders.ClientAttestation != ""
+
+	tokenRequest := receiverTypes.PreAuthorizedCodeTokenRequest{
+		PreAuthorizedCode: preAuthorizedCode,
+		TxCode:            req.TxCode,
+		ClientID:          strings.TrimSpace(req.ClientID),
+	}
+	// Attestation-based client authentication and private_key_jwt are
+	// alternative mechanisms; a wallet uses one per issuance. An attestation
+	// authenticates the client on its own, so no client_assertion is sent, the
+	// authorization server need not advertise private_key_jwt, and the request
+	// is not the anonymous one pre-authorized_grant_anonymous_access_supported
+	// speaks about.
+	if !attestationInUse {
+		authMethod, ok := resolveClientAuthMethod(w.clientAuth, flow.authorizationServerMetadata)
+		if !ok {
+			return nil, errNoUsableClientAuthMethod
+		}
+		if authMethod == receiverTypes.PrivateKeyJwt {
+			clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, flow.authorizationServerMetadata, tokenEndpointURL)
+			tokenRequest.ClientID = w.clientAuth.ClientID
+			tokenRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+			// RFC 7523 §3 requires a unique jti, so the factory signs a new
+			// assertion for every attempt instead of replaying the first one.
+			tokenRequest.ClientAssertionFactory = func() (string, error) {
+				return w.generateClientAssertion(
+					w.clientAuth.Key,
+					w.clientAuth.ClientID,
+					clientAssertionAudience,
+					w.clientAuth.signatureAlgorithm(),
+				)
+			}
+		}
 	}
 
-	authMethod, ok := resolveClientAuthMethod(w.clientAuth, flow.authorizationServerMetadata)
-	if !ok {
-		return nil, errNoUsableClientAuthMethod
-	}
-	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, flow.authorizationServerMetadata, tokenEndpointURL)
 	// RFC 9449 §5 binds the access token to the proof key. A proof is sent
 	// whenever the wallet holds a key for it: a server that does not implement
 	// DPoP ignores the header and issues a Bearer token, and HAIP §4 requires
 	// the sender-constrained token the proof makes possible.
 	useDPoP := req.ClientKey.Key != nil
-
-	fetch := func(dpopNonce string) (*receiverTypes.CredentialIssuanceAccessToken, error) {
-		var options []receiverTypes.TokenRequestOption
-		switch authMethod {
-		case receiverTypes.PrivateKeyJwt:
-			// RFC 7523 §3 requires a unique jti, so every attempt signs a new
-			// assertion instead of replaying the first one.
-			assertion, err := w.generateClientAssertion(
-				w.clientAuth.Key,
-				w.clientAuth.ClientID,
-				clientAssertionAudience,
-				w.clientAuth.signatureAlgorithm(),
-			)
+	var proofFactory receiverTypes.DPoPProofFactory
+	if useDPoP {
+		proofFactory = func(nonce string) (string, error) {
+			proof, err := flow.signer.CreateDpopProof(req.ClientKey, http.MethodPost, tokenEndpointURL, nonce, "")
 			if err != nil {
-				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
+				return "", fmt.Errorf("failed to create the token request DPoP proof: %w", err)
 			}
-			options = append(options, receiverTypes.WithClientAssertion(w.clientAuth.ClientID, assertion))
-		default:
-			if clientID := strings.TrimSpace(req.ClientID); clientID != "" {
-				options = append(options, receiverTypes.WithClientID(clientID))
-			}
-		}
-		if useDPoP {
-			proof, err := flow.signer.CreateDpopProof(req.ClientKey, http.MethodPost, tokenEndpointURL, dpopNonce, "")
-			if err != nil {
-				return nil, fmt.Errorf("failed to create the token request DPoP proof: %w", err)
-			}
-			options = append(options, receiverTypes.WithDPoPProof(proof))
-		}
-		return flow.receiver.FetchAccessToken(req.Type, tokenEndpoint, preAuthorizedCode, req.TxCode, options...)
-	}
-
-	token, err := fetch(oid4vciDPoPNonceFor(flow, tokenEndpointURL, useDPoP))
-	if err != nil && useDPoP {
-		if nonce, retry := receiverTypes.DPoPNonceFromError(err); retry && nonce != "" {
-			token, err = fetch(nonce)
+			return proof, nil
 		}
 	}
+	var headersFactory receiverTypes.OAuthClientAttestationHeadersFactory
+	if attestationInUse {
+		headersFactory = func() (receiverTypes.OAuthClientAttestationHeaders, error) {
+			// draft-ietf-oauth-attestation-based-client-auth §4 gives every PoP
+			// a unique jti, so each attempt signs its own.
+			pop, err := flow.signer.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
+			if err != nil {
+				return receiverTypes.OAuthClientAttestationHeaders{}, err
+			}
+			refreshed := attestationHeaders
+			refreshed.ClientAttestationPop = pop
+			return refreshed, nil
+		}
+	}
+
+	token, err := flow.receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx, tokenEndpoint, tokenRequest, headersFactory, proofFactory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange the pre-authorized code: %w", err)
 	}
@@ -773,17 +792,21 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 	return token, nil
 }
 
-// oid4vciDPoPNonceFor seeds the first token request proof with the RFC 9449
-// §8.2 nonce the receiver already holds for that server, sparing the challenge
-// round trip Section 8.2 exists to avoid.
-func oid4vciDPoPNonceFor(flow *oid4vciFinalFlow, endpointURL string, useDPoP bool) string {
-	if !useDPoP {
-		return ""
-	}
-	parsed, err := url.Parse(endpointURL)
-	if err != nil {
-		return ""
-	}
-	server := strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
-	return exportOID4VCIDPoPNonces(flow)[server]
+// preAuthorizedClientAttestationHeaders builds the Appendix E Client
+// Attestation headers for the §6.1 Pre-Authorized Code token request, and
+// returns the challenge they were bound to so a retry can re-sign the PoP for
+// it. It reuses createOID4VCIAttestationHeaders, which reads exactly the client
+// identity this grant has: the client_id and the wallet instance key. The
+// Pre-Authorized Code request carries no attester of its own, so the provider
+// is always Config.ClientAttestation and the returned headers are empty when
+// none is configured.
+func (w *Wallet) preAuthorizedClientAttestationHeaders(
+	ctx context.Context,
+	flow *oid4vciFinalFlow,
+	req OID4VCIFinalPreAuthorizedReceiveRequest,
+) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+	return w.createOID4VCIAttestationHeaders(ctx, flow.receiver, OID4VCIFinalReceiveRequest{
+		ClientID:  req.ClientID,
+		ClientKey: req.ClientKey,
+	}, flow.authorizationServerMetadata, flow.authorizationServerIssuer)
 }

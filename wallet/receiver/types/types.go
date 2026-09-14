@@ -554,11 +554,42 @@ func ResolveTokenEndpointURL(endpoint common.URIField) string {
 	return endpointURL.String()
 }
 
-// PreAuthorizedCodeTokenRequest holds the legacy pre-authorized token request parameters.
-// Deprecated: FetchAccessToken now accepts authzCode, txCode and TokenRequestOption arguments.
+// PreAuthorizedCodeTokenRequest is the OpenID4VCI 1.0 §6.1 Token Request of the
+// Pre-Authorized Code Flow: the single-use pre-authorized_code, the Transaction
+// Code the Credential Offer asked for, and the client authentication the
+// authorization server expects in the request body.
+//
+// It is the request of
+// OID4VCIFinalTransport.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry.
+// The attestation-based client authentication of
+// draft-ietf-oauth-attestation-based-client-auth (OpenID4VCI 1.0 Appendix E) is
+// not a member: it travels in the OAuth-Client-Attestation headers, which that
+// method takes separately.
 type PreAuthorizedCodeTokenRequest struct {
+	// PreAuthorizedCode is the §4.1.1 pre-authorized_code taken from the
+	// Credential Offer grant. §6.1 makes it REQUIRED for this grant type.
 	PreAuthorizedCode string `json:"pre-authorized_code"`
-	TxCode            string `json:"tx_code,omitempty"`
+	// TxCode is the §6.1 tx_code: "This value MUST be present if a tx_code
+	// object was present in the Credential Offer (including if the object was
+	// empty)". An empty value omits the parameter.
+	TxCode string `json:"tx_code,omitempty"`
+	// ClientID names the client. §6.1: "the client_id parameter is only needed
+	// when a form of Client Authentication that relies on this parameter is
+	// used", so an empty value omits the parameter and the request is
+	// anonymous unless another mechanism authenticates it.
+	ClientID string `json:"client_id,omitempty"`
+	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
+	// private_key_jwt client authentication. An empty value omits the
+	// parameter.
+	ClientAssertion string `json:"-"`
+	// ClientAssertionType is the matching client_assertion_type. Empty omits
+	// the parameter.
+	ClientAssertionType string `json:"-"`
+	// ClientAssertionFactory, when set, is called once per HTTP attempt to
+	// obtain a fresh client_assertion; it takes precedence over
+	// ClientAssertion. The retry wrappers use it so a DPoP nonce retry never
+	// replays the same jti.
+	ClientAssertionFactory ClientAssertionFactory `json:"-"`
 }
 
 type PushedAuthorizationRequest struct {
@@ -798,6 +829,22 @@ type OID4VCIFinalTransport interface {
 	// retry re-signs the DPoP proof and rebuilds the Client Attestation headers
 	// instead of replaying the first ones.
 	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
+	// ExchangePreAuthorizedCodeWithDpopAndAttestationRetry exchanges the
+	// Section 4.1.1 pre-authorized_code at the Token Endpoint (Section 6.1). It
+	// is the Pre-Authorized Code counterpart of
+	// ExchangeAuthorizationCodeWithDpopAndAttestationRetry and owns the same
+	// retry policy: both factories are invoked once per HTTP attempt, so an RFC
+	// 9449 Section 8 "use_dpop_nonce" retry re-signs the DPoP proof and rebuilds
+	// the Client Attestation headers instead of replaying the first ones.
+	//
+	// Section 6.1 makes client authentication OPTIONAL for this grant, so both
+	// factories are optional: a nil headersFactory sends no
+	// OAuth-Client-Attestation headers and a nil proofFactory sends no DPoP
+	// proof, which is the anonymous Pre-Authorized Code request Final 1.0
+	// permits. HAIP Section 4.4.1 requires a client authentication mechanism
+	// and Section 4 a sender-constrained access token, so a HAIP wallet
+	// supplies both.
+	ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request PreAuthorizedCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
 	// FetchClientAttestationChallenge fetches a challenge from the
 	// authorization server's challenge endpoint so the Client Attestation PoP
 	// can be bound to it.

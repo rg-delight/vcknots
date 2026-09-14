@@ -135,7 +135,9 @@ JSON
 `receive-preauth` は OpenID4VCI 1.0 Final の Pre-Authorized Code フロー
 （`ReceiveOID4VCIFinalPreAuthorizedCredential`）を実行し、`txCode` を `tx_code`
 として送り、`clientId` でクライアントを名乗り、`clientKeyFile` で DPoP proof に
-署名します。出力は `receive-code` と同じ形です。`receive-code` は offer URI から OpenID4VCI 1.0
+署名します。`attesterKeyFile` を設定すると、token request は `receive-code` と同じ
+`OAuth-Client-Attestation` header を運ぶので、クライアント認証を要求する HAIP issuer
+でも受理されます。出力は `receive-code` と同じ形です。`receive-code` は offer URI から OpenID4VCI 1.0
 Final authorization code フローを実行し（`credential_offer_uri` は解決されます）、
 `clientId`、`redirectUri`、`holderKeyFile`、`clientKeyFile` を使い、`credentialIds`、
 credential 順の `verification` 配列、`notificationId`、`transactionId` を返します。

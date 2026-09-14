@@ -139,6 +139,9 @@ JSON
 `receive-preauth` runs the OpenID4VCI 1.0 Final Pre-Authorized Code Flow
 (`ReceiveOID4VCIFinalPreAuthorizedCredential`), sending `txCode` as `tx_code`,
 naming the client with `clientId` and signing DPoP proofs with `clientKeyFile`.
+With `attesterKeyFile` configured the token request carries the same
+`OAuth-Client-Attestation` headers `receive-code` sends, so a HAIP issuer that
+requires client authentication accepts it.
 Its output is the same as `receive-code`. `receive-code` runs the OpenID4VCI 1.0
 Final authorization code flow from the offer URI (`credential_offer_uri` is
 resolved), using `clientId`, `redirectUri`, `holderKeyFile` and `clientKeyFile`,
