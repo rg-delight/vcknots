@@ -19,7 +19,27 @@ import (
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-type Oid4vciReceiver struct{}
+type Oid4vciReceiver struct {
+	// HTTPClient overrides the client used for every OpenID4VCI request. A
+	// caller needs it to reach a Credential Issuer whose TLS trust is not the
+	// system pool, and to apply its own timeouts or transport. A nil value
+	// keeps the package defaults. The redirect policy of the default client for
+	// the request being made is always preserved.
+	HTTPClient *http.Client
+}
+
+// httpClient returns the caller-configured client, or fallback when none is
+// configured. The redirect policy of fallback is kept either way, so an
+// injected client never gains permission to follow a redirect the protocol
+// refuses.
+func (o *Oid4vciReceiver) httpClient(fallback *http.Client) *http.Client {
+	if o.HTTPClient == nil {
+		return fallback
+	}
+	client := *o.HTTPClient
+	client.CheckRedirect = fallback.CheckRedirect
+	return &client
+}
 
 const (
 	wellKnownCredentialIssuer    = "/.well-known/openid-credential-issuer"
@@ -120,7 +140,7 @@ func (o *Oid4vciReceiver) doRequest(method string, endpoint common.URIField, pat
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 
-	resp, err := oid4vciHTTPClient.Do(req)
+	resp, err := o.httpClient(oid4vciHTTPClient).Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -240,7 +260,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	if requestConfig.DPoPProof != "" {
 		req.Header.Set("DPoP", requestConfig.DPoPProof)
 	}
-	resp, err := tokenHTTPClient.Do(req)
+	resp, err := o.httpClient(tokenHTTPClient).Do(req)
 
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -299,7 +319,7 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := nonceHTTPClient.Do(req)
+	resp, err := o.httpClient(nonceHTTPClient).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
 	}
@@ -397,7 +417,7 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	req.ContentLength = int64(len(reqBodyBytes))
 
 	// Execute request
-	resp, err := oid4vciHTTPClient.Do(req)
+	resp, err := o.httpClient(oid4vciHTTPClient).Do(req)
 	if err != nil {
 		return nil, err
 	}

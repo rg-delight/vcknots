@@ -19,6 +19,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -84,6 +85,8 @@ type Wallet struct {
 	// propagated to every registered protocol plugin so no lower-level API can
 	// bypass the root policy.
 	profile profile.Profile
+
+	credentialAcceptance *CredentialAcceptancePolicy
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -110,6 +113,10 @@ type Config struct {
 	// every protocol plugin carrying the same profile or NewWalletWithConfig
 	// fails.
 	Profile profile.Profile
+
+	// CredentialAcceptance configures the minimum credential verification rules
+	// applied before a received credential is stored.
+	CredentialAcceptance *CredentialAcceptancePolicy
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -337,6 +344,8 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		clientAuth: config.ClientAuth,
 
 		profile: normalizedProfile,
+
+		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
 }
 
@@ -468,7 +477,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 	}
 
 	result, err := w.verifier.Verify(credential.Proof, &pubKey)
-	return err != nil && result
+	return err == nil && result
 }
 
 // DIDCreateOptions holds options for DID creation.
@@ -517,6 +526,9 @@ type GetCredentialEntriesRequest struct {
 type SavedCredential struct {
 	Credential *credential.Credential
 	Entry      *types.CredentialEntry
+	// Verification records what the wallet authenticated before storing this
+	// credential. It is nil for credentials loaded from storage.
+	Verification *CredentialVerification
 }
 
 // RedirectHandler is called when the verifier returns a redirect URI.
@@ -1052,7 +1064,16 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 		return nil, err
 	}
 
-	return w.storeAndParseCredential(credentialJWT, serializationFlavor)
+	var holderKey *jose.JSONWebKey
+	if req.Key != nil {
+		publicKey := req.Key.PublicKey()
+		holderKey = &publicKey
+	}
+
+	// OpenID4VCI Draft 13 keeps Config.CredentialAcceptance optional, as
+	// SD-JWT VC §3.5 leaves issuer key resolution to ecosystem policy. HAIP is
+	// opt-in, so the policy is mandatory there.
+	return w.storeAndParseCredential(context.Background(), credentialJWT, serializationFlavor, holderKey, w.profile.IsHAIP())
 }
 
 // validateCredentialOffer validates the credential offer and extracts pre-authorization code.
@@ -1549,10 +1570,17 @@ func (w *Wallet) requestCredential(
 	return credentialJWT, nil
 }
 
-// storeAndParseCredential stores the credential and parses it for return.
-func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor) (*SavedCredential, error) {
+// storeAndParseCredential verifies the credential for acceptance, stores it and
+// parses it for return. Nothing is stored when verification fails.
+// requirePolicy makes Config.CredentialAcceptance mandatory for this call.
+func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*SavedCredential, error) {
 	if serializationFlavor == "" {
 		serializationFlavor = credential.JwtVc
+	}
+
+	parsedCredential, verification, verificationErr := w.verifyCredentialForAcceptanceContext(ctx, []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
+	if verificationErr != nil {
+		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}
 
 	credentialEntry := types.CredentialEntry{
@@ -1566,20 +1594,19 @@ func (w *Wallet) storeAndParseCredential(credentialJWT *string, serializationFla
 		return nil, fmt.Errorf("failed to save credential entry: %w", err)
 	}
 
-	f, err := credentialEntry.SerializationFlavor()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential: %w", err)
-	}
-
-	credential, err := w.serializer.DeserializeCredential(f, credentialEntry.Raw)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential: %w", err)
-	}
-
 	return &SavedCredential{
-		Credential: credential,
-		Entry:      &credentialEntry,
+		Credential:   parsedCredential,
+		Entry:        &credentialEntry,
+		Verification: verification,
 	}, nil
+}
+
+func randomBase64URL(size int) (string, error) {
+	buffer := make([]byte, size)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
 // PresentCredential orchestrates the credential presentation flow.
