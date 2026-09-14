@@ -1,0 +1,724 @@
+package oid4vp
+
+import (
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"strings"
+)
+
+// DCQLCredentialCandidate describes a wallet credential that may satisfy a DCQL request.
+type DCQLCredentialCandidate struct {
+	ID     string
+	Format string
+	VCT    string
+	Claims []string
+	// ClaimValues contains the actual top-level claim values used for values
+	// restrictions. Existing callers can omit it for queries without values;
+	// a restricted claim with no supplied value cannot satisfy the query.
+	// Supply json.Number for integers beyond the exact float range.
+	ClaimValues map[string]any
+	// ClaimObject is the decoded credential root object with all selectively
+	// disclosable claims applied, including nested object properties and array
+	// element disclosures. When non-nil it is the authoritative source for
+	// claims path pointer evaluation; Claims and ClaimValues remain the legacy
+	// single-segment fallback.
+	ClaimObject map[string]any
+	// HolderBound reports whether the credential carries a cryptographic holder
+	// binding key (SD-JWT VC cnf claim). A nil value means the caller did not
+	// evaluate holder binding and the credential is not excluded for backward
+	// compatibility. A query that requires holder binding must not be satisfied
+	// by a candidate explicitly marked unbound (OID4VP 1.0 Appendix B.3).
+	HolderBound *bool
+	// AuthorityKeyIDs lists the base64url-encoded Authority Key Identifiers of
+	// the X.509 certificates in the credential's issuer chain. It is matched
+	// against aki trusted_authorities queries (OID4VP 1.0 Section 6.1.1.1).
+	AuthorityKeyIDs []string
+}
+
+// DCQLCredentialSelection describes the concrete wallet credential and claims
+// selected for one DCQL credential query.
+type DCQLCredentialSelection struct {
+	QueryID         string
+	CandidateID     string
+	Format          string
+	VCT             string
+	RequestedClaims []string
+}
+
+// dcqlQueryPlan is the validated structure of one DCQL query: every credential
+// query by id, and the claim set options each of them offers. Choosing
+// credentials for the request and validating a choice made outside this library
+// share it, so both apply the same structural rules to the same request.
+type dcqlQueryPlan struct {
+	queries      map[string]DCQLCredentialQuery
+	claimOptions map[string][][]DCQLClaimQuery
+}
+
+// planDCQLQuery validates the request structure defined in OID4VP 1.0 Sections
+// 6.1 to 6.3 - credential query ids, claims, claim_sets and credential_sets -
+// and returns the plan the selection paths work from.
+func planDCQLQuery(query *DCQLQuery) (dcqlQueryPlan, error) {
+	if query == nil {
+		return dcqlQueryPlan{}, fmt.Errorf("dcql_query is required")
+	}
+	if len(query.Credentials) == 0 {
+		return dcqlQueryPlan{}, fmt.Errorf("dcql_query.credentials must not be empty")
+	}
+
+	plan := dcqlQueryPlan{
+		queries:      make(map[string]DCQLCredentialQuery, len(query.Credentials)),
+		claimOptions: make(map[string][][]DCQLClaimQuery, len(query.Credentials)),
+	}
+	ids := map[string]bool{}
+	for _, credentialQuery := range query.Credentials {
+		if !credentialQueryIDPattern.MatchString(credentialQuery.ID) || ids[credentialQuery.ID] {
+			return dcqlQueryPlan{}, fmt.Errorf("DCQL credential query ids must be valid and unique")
+		}
+		ids[credentialQuery.ID] = true
+		options, err := dcqlClaimOptions(credentialQuery)
+		if err != nil {
+			return dcqlQueryPlan{}, err
+		}
+		plan.queries[credentialQuery.ID] = credentialQuery
+		plan.claimOptions[credentialQuery.ID] = options
+	}
+	if query.CredentialSets != nil && len(query.CredentialSets) == 0 {
+		return dcqlQueryPlan{}, fmt.Errorf("DCQL credential_sets must not be empty")
+	}
+	for _, set := range query.CredentialSets {
+		if err := validateDCQLTypedOptions(set.Options, ids, false); err != nil {
+			return dcqlQueryPlan{}, fmt.Errorf("invalid DCQL credential_set: %w", err)
+		}
+	}
+	return plan, nil
+}
+
+// ResolveSatisfiableDCQLCredentials chooses, for every credential query the
+// request requires, the stored credentials that satisfy it. The library decides
+// the claim set here; a Wallet that lets its Holder decide validates that
+// decision with ValidateDCQLCredentialSelections instead.
+func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLCredentialSelection, error) {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return nil, err
+	}
+
+	satisfiable := map[string][]DCQLCredentialSelection{}
+	for _, credentialQuery := range query.Credentials {
+		selections := resolveDCQLCredentialQuery(credentialQuery, plan.claimOptions[credentialQuery.ID], candidates)
+		if len(selections) > 0 {
+			satisfiable[credentialQuery.ID] = selections
+		}
+	}
+
+	if len(query.CredentialSets) == 0 {
+		selections := make([]DCQLCredentialSelection, 0, len(satisfiable))
+		for _, credentialQuery := range query.Credentials {
+			if querySelections, ok := satisfiable[credentialQuery.ID]; ok {
+				selections = append(selections, querySelections...)
+			} else {
+				return nil, fmt.Errorf("required DCQL credential query %q cannot be satisfied", credentialQuery.ID)
+			}
+		}
+		return selections, nil
+	}
+
+	selected := map[string][]DCQLCredentialSelection{}
+	for _, credentialSet := range query.CredentialSets {
+		matchingOption := []string(nil)
+		for _, option := range credentialSet.Options {
+			if everyDCQLCredentialIDSatisfiable(option, satisfiable) {
+				matchingOption = option
+				break
+			}
+		}
+		if matchingOption == nil {
+			if credentialSet.Required == nil || *credentialSet.Required {
+				return nil, fmt.Errorf("required DCQL credential_set cannot be satisfied")
+			}
+			continue
+		}
+		for _, queryID := range matchingOption {
+			selected[queryID] = satisfiable[queryID]
+		}
+	}
+
+	selections := make([]DCQLCredentialSelection, 0, len(selected))
+	for _, credentialQuery := range query.Credentials {
+		if querySelections, ok := selected[credentialQuery.ID]; ok {
+			selections = append(selections, querySelections...)
+		}
+	}
+	return selections, nil
+}
+
+// ValidateDCQLCredentialSelections reports whether credentials chosen outside
+// this library - by the Holder on a consent screen - answer the DCQL query.
+//
+// OID4VP 1.0 Section 6.3 leaves the choice between the claim_sets of a
+// credential query to the Wallet ("the Wallet MUST return one of the sets that
+// it can satisfy"), and Section 6.2 leaves the choice between the options of a
+// credential_set to the Wallet in the same way. Deciding that in the library
+// would take the decision away from the person giving consent, so this function
+// only checks the decision: every selected credential must satisfy its
+// credential query, the disclosed claims must be exactly one claim set that
+// query offers, every required credential_set must have a fully answered
+// option, and nothing may be presented that no answered option asked for.
+//
+// A selection the request cannot accept is reported as an error that wraps
+// ErrDCQLSelectionUnsatisfied. A malformed request is reported as a plain
+// structural error, which no selection could have repaired.
+func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredentialCandidate, selections []DCQLCredentialSelection) error {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]DCQLCredentialCandidate, len(candidates))
+	for _, candidate := range candidates {
+		byID[candidate.ID] = candidate
+	}
+
+	presented := map[string][]DCQLCredentialSelection{}
+	for _, selection := range selections {
+		credentialQuery, requested := plan.queries[selection.QueryID]
+		if !requested {
+			return fmt.Errorf("%w: selection references credential query %q, which the request does not contain", ErrDCQLSelectionUnsatisfied, selection.QueryID)
+		}
+		candidate, stored := byID[selection.CandidateID]
+		if !stored {
+			return fmt.Errorf("%w: selection references credential %q, which this wallet cannot present", ErrDCQLSelectionUnsatisfied, selection.CandidateID)
+		}
+		for _, earlier := range presented[selection.QueryID] {
+			if earlier.CandidateID == selection.CandidateID {
+				return fmt.Errorf("%w: credential %q is selected twice for credential query %q", ErrDCQLSelectionUnsatisfied, selection.CandidateID, selection.QueryID)
+			}
+		}
+		// OID4VP 1.0 Section 6.1: multiple defaults to false, and "only one
+		// Credential will be returned" for such a Credential Query.
+		if !credentialQuery.Multiple && len(presented[selection.QueryID]) > 0 {
+			return fmt.Errorf("%w: credential query %q does not accept more than one credential", ErrDCQLSelectionUnsatisfied, selection.QueryID)
+		}
+		if err := validateDCQLSelectedCandidate(credentialQuery, plan.claimOptions[selection.QueryID], candidate, selection); err != nil {
+			return err
+		}
+		presented[selection.QueryID] = append(presented[selection.QueryID], selection)
+	}
+	return validateDCQLPresentedSets(query, presented)
+}
+
+// validateDCQLSelectedCandidate applies one credential query's own constraints
+// to one selected credential, and requires its disclosed claims to be exactly
+// one of the claim sets that query offers.
+func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidate DCQLCredentialCandidate, selection DCQLCredentialSelection) error {
+	vctValues, validMeta := dcqlVCTValues(query.Meta)
+	if !validMeta {
+		return fmt.Errorf("credential query %q has an invalid meta.vct_values", query.ID)
+	}
+	switch {
+	case candidate.Format != query.Format:
+		return fmt.Errorf("%w: credential %q is in format %q, and credential query %q requests %q", ErrDCQLSelectionUnsatisfied, candidate.ID, candidate.Format, query.ID, query.Format)
+	case len(vctValues) > 0 && !containsString(vctValues, candidate.VCT):
+		return fmt.Errorf("%w: credential %q does not carry a vct credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case selection.Format != "" && selection.Format != candidate.Format,
+		selection.VCT != "" && selection.VCT != candidate.VCT:
+		return fmt.Errorf("%w: the selection for credential query %q does not describe credential %q", ErrDCQLSelectionUnsatisfied, query.ID, candidate.ID)
+	case query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() && candidate.HolderBound != nil && !*candidate.HolderBound:
+		// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder Binding
+		// (i.e., do not have a cnf Claim) cannot be returned in this case."
+		return fmt.Errorf("%w: credential %q has no cryptographic holder binding, which credential query %q requires", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate):
+		// OID4VP 1.0 Section 6.4.2: "Credentials not matching the respective
+		// constraints ... are treated as if they would not exist in the Wallet."
+		return fmt.Errorf("%w: credential %q is outside the trusted authorities credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	}
+	for _, claims := range claimOptions {
+		resolved, satisfied := matchDCQLClaims(claims, candidate)
+		if satisfied && sameDCQLClaimSelection(resolved, selection.RequestedClaims) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: the claims selected for credential query %q are not one of the claim sets it offers", ErrDCQLSelectionUnsatisfied, query.ID)
+}
+
+// sameDCQLClaimSelection compares a resolved claim set with the claims a
+// selection carries, ignoring order: a consent screen may present the claims of
+// a claim set in any order, but must not add or drop one.
+func sameDCQLClaimSelection(resolved, selected []string) bool {
+	if len(resolved) != len(selected) {
+		return false
+	}
+	for _, name := range resolved {
+		if !containsString(selected, name) {
+			return false
+		}
+	}
+	for _, name := range selected {
+		if !containsString(resolved, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// validateDCQLPresentedSets applies the request's requirement structure to the
+// credential queries the selection answered. Without credential_sets every
+// credential query is required (OID4VP 1.0 Section 6.4.2); with them, every
+// required set needs one fully answered option, and a credential query that no
+// answered option contains would disclose a credential the request never asked
+// for in that combination.
+func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCredentialSelection) error {
+	if len(query.CredentialSets) == 0 {
+		for _, credentialQuery := range query.Credentials {
+			if len(presented[credentialQuery.ID]) == 0 {
+				return fmt.Errorf("%w: required DCQL credential query %q is not answered", ErrDCQLSelectionUnsatisfied, credentialQuery.ID)
+			}
+		}
+		return nil
+	}
+	answered := map[string]bool{}
+	for _, credentialSet := range query.CredentialSets {
+		matched := false
+		for _, option := range credentialSet.Options {
+			if !everyDCQLCredentialIDSatisfiable(option, presented) {
+				continue
+			}
+			matched = true
+			for _, id := range option {
+				answered[id] = true
+			}
+		}
+		if !matched && (credentialSet.Required == nil || *credentialSet.Required) {
+			return fmt.Errorf("%w: no option of a required DCQL credential_set is answered", ErrDCQLSelectionUnsatisfied)
+		}
+	}
+	for _, credentialQuery := range query.Credentials {
+		if len(presented[credentialQuery.ID]) > 0 && !answered[credentialQuery.ID] {
+			return fmt.Errorf("%w: credential query %q is not part of any answered credential_set option", ErrDCQLSelectionUnsatisfied, credentialQuery.ID)
+		}
+	}
+	return nil
+}
+
+// resolveDCQLCredentialQuery returns all candidates that satisfy the query for
+// the first satisfiable claim set. When query.Multiple is false only the first
+// matching candidate is returned (OID4VP 1.0 Section 6.1/8.1); otherwise every
+// matching candidate is returned so it can be presented separately.
+func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidates []DCQLCredentialCandidate) []DCQLCredentialSelection {
+	vctValues, validMeta := dcqlVCTValues(query.Meta)
+	if !validMeta {
+		return nil
+	}
+	// Prefer the first satisfiable claim set across all candidates, rather than
+	// selecting a later claim set merely because its credential appeared first.
+	for _, claims := range claimOptions {
+		selections := []DCQLCredentialSelection{}
+		for _, candidate := range candidates {
+			if candidate.Format != query.Format || (len(vctValues) > 0 && !containsString(vctValues, candidate.VCT)) {
+				continue
+			}
+			if query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() &&
+				candidate.HolderBound != nil && !*candidate.HolderBound {
+				// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder
+				// Binding (i.e., do not have a cnf Claim) cannot be returned in
+				// this case." Treat an unbound credential as absent so another
+				// credential can satisfy the query.
+				continue
+			}
+			if !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate) {
+				// OID4VP 1.0 Section 6.4.2: "Credentials not matching the
+				// respective constraints ... are treated as if they would not
+				// exist in the Wallet."
+				continue
+			}
+			requestedClaims, ok := matchDCQLClaims(claims, candidate)
+			if !ok {
+				continue
+			}
+			selections = append(selections, DCQLCredentialSelection{
+				QueryID:         query.ID,
+				CandidateID:     candidate.ID,
+				Format:          candidate.Format,
+				VCT:             candidate.VCT,
+				RequestedClaims: requestedClaims,
+			})
+			if !query.Multiple {
+				break
+			}
+		}
+		if len(selections) > 0 {
+			return selections
+		}
+	}
+	return nil
+}
+
+func matchDCQLClaims(claimQueries []DCQLClaimQuery, candidate DCQLCredentialCandidate) ([]string, bool) {
+	claims := make([]string, 0, len(claimQueries))
+	for _, claim := range claimQueries {
+		elements, satisfied := candidate.selectDCQLClaimElements(claim.Path)
+		if !satisfied {
+			return nil, false
+		}
+		if claim.Values != nil {
+			matches := false
+			for _, value := range elements {
+				for _, expected := range claim.Values {
+					if dcqlClaimValuesEqual(value, expected) {
+						matches = true
+						break
+					}
+				}
+				if matches {
+					break
+				}
+			}
+			if !matches {
+				return nil, false
+			}
+		}
+		encoded := encodeDCQLClaimPath(claim.Path)
+		if !containsString(claims, encoded) {
+			claims = append(claims, encoded)
+		}
+	}
+	return claims, true
+}
+
+// selectDCQLClaimElements applies a claims path pointer (OID4VP 1.0 Section 7.1.1)
+// to the candidate. With a decoded ClaimObject the full nested path semantics
+// apply; the legacy Claims/ClaimValues representation supports one-segment
+// string paths only.
+func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]any, bool) {
+	if candidate.ClaimObject != nil {
+		return evaluateDCQLClaimPath(candidate.ClaimObject, path)
+	}
+	if len(path) != 1 {
+		return nil, false
+	}
+	name, ok := path[0].(string)
+	if !ok || name == "" || !containsString(candidate.Claims, name) {
+		return nil, false
+	}
+	if candidate.ClaimValues == nil {
+		return []any{}, true
+	}
+	value, exists := candidate.ClaimValues[name]
+	if !exists {
+		return []any{}, true
+	}
+	return []any{value}, true
+}
+
+// evaluateDCQLClaimPath processes a claims path pointer from left to right over
+// a decoded JSON credential root. It returns the selected elements and reports
+// whether any element was selected.
+func evaluateDCQLClaimPath(root map[string]any, path []any) ([]any, bool) {
+	current := []any{root}
+	for _, component := range path {
+		next := []any{}
+		switch value := component.(type) {
+		case string:
+			for _, element := range current {
+				object, ok := element.(map[string]any)
+				if !ok {
+					continue
+				}
+				if selected, exists := object[value]; exists {
+					next = append(next, selected)
+				}
+			}
+		case nil:
+			for _, element := range current {
+				array, ok := element.([]any)
+				if !ok {
+					continue
+				}
+				next = append(next, array...)
+			}
+		default:
+			index, ok := dcqlPathIndex(value)
+			if !ok {
+				return nil, false
+			}
+			for _, element := range current {
+				array, ok := element.([]any)
+				if !ok {
+					continue
+				}
+				if index < int64(len(array)) {
+					next = append(next, array[index])
+				}
+			}
+		}
+		if len(next) == 0 {
+			return nil, false
+		}
+		current = next
+	}
+	return current, true
+}
+
+// encodeDCQLClaimPath serializes a path for the serializer's disclosure
+// selector. A single string component keeps its plain name for backward
+// compatibility; anything else is JSON-encoded, e.g. ["address","postal_code"]
+// or ["degrees",null,"type"] or ["nationalities",1].
+func encodeDCQLClaimPath(path []any) string {
+	if len(path) == 1 {
+		if name, ok := path[0].(string); ok {
+			return name
+		}
+	}
+	encoded, err := json.Marshal(path)
+	if err != nil {
+		return fmt.Sprintf("%v", path)
+	}
+	return string(encoded)
+}
+
+// dcqlPathIndex returns a non-negative integer path component. It accepts the
+// json.Number produced by the DCQL decoder and the Go integer types used by
+// programmatically constructed queries.
+func dcqlPathIndex(value any) (int64, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		index, err := number.Int64()
+		if err != nil || index < 0 {
+			return 0, false
+		}
+		return index, true
+	case float64:
+		if number < 0 || number != float64(int64(number)) {
+			return 0, false
+		}
+		return int64(number), true
+	case int:
+		if number < 0 {
+			return 0, false
+		}
+		return int64(number), true
+	case int64:
+		if number < 0 {
+			return 0, false
+		}
+		return number, true
+	case int32:
+		if number < 0 {
+			return 0, false
+		}
+		return int64(number), true
+	default:
+		return 0, false
+	}
+}
+
+// candidateMatchesTrustedAuthorities applies the OID4VP 1.0 Section 6.1.1
+// matching rule: a credential matches when it matches one of the values of one
+// of the entries. This wallet supports the HAIP 1.0 section 5 "aki" type; other
+// types cannot be evaluated and are ignored. A query whose entries are all of an
+// unknown type therefore places no constraint.
+func candidateMatchesTrustedAuthorities(authorities []TrustedAuthority, candidate DCQLCredentialCandidate) bool {
+	if len(authorities) == 0 {
+		return true
+	}
+	supported := 0
+	for _, authority := range authorities {
+		if authority.Type != "aki" {
+			continue
+		}
+		supported++
+		for _, value := range authority.Values {
+			if containsString(candidate.AuthorityKeyIDs, value) {
+				return true
+			}
+		}
+	}
+	return supported == 0
+}
+
+func dcqlClaimOptions(query DCQLCredentialQuery) ([][]DCQLClaimQuery, error) {
+	if query.Claims != nil && len(query.Claims) == 0 {
+		return nil, fmt.Errorf("DCQL claims must not be empty")
+	}
+	if query.Claims == nil && query.ClaimSets != nil {
+		return nil, fmt.Errorf("DCQL claim_sets requires claims")
+	}
+	ids := map[string]bool{}
+	byID := map[string]DCQLClaimQuery{}
+	for _, claim := range query.Claims {
+		if claim.ID != "" || query.ClaimSets != nil {
+			if !credentialQueryIDPattern.MatchString(claim.ID) || ids[claim.ID] {
+				return nil, fmt.Errorf("DCQL claim ids must be valid and unique")
+			}
+			ids[claim.ID] = true
+			byID[claim.ID] = claim
+		}
+		if len(claim.Path) == 0 || (claim.Values != nil && len(claim.Values) == 0) {
+			return nil, fmt.Errorf("DCQL claim paths and values must not be empty")
+		}
+		for _, value := range claim.Values {
+			if !isDCQLClaimValue(value) {
+				return nil, fmt.Errorf("DCQL values must be strings, integers or booleans")
+			}
+		}
+	}
+	if query.ClaimSets == nil {
+		return [][]DCQLClaimQuery{query.Claims}, nil
+	}
+	if err := validateDCQLTypedOptions(query.ClaimSets, ids, true); err != nil {
+		return nil, fmt.Errorf("invalid DCQL claim_sets: %w", err)
+	}
+	options := make([][]DCQLClaimQuery, 0, len(query.ClaimSets))
+	for _, option := range query.ClaimSets {
+		claims := make([]DCQLClaimQuery, 0, len(option))
+		for _, id := range option {
+			claims = append(claims, byID[id])
+		}
+		options = append(options, claims)
+	}
+	return options, nil
+}
+
+func validateDCQLTypedOptions(options [][]string, ids map[string]bool, allowEmptyOption bool) error {
+	if len(options) == 0 {
+		return fmt.Errorf("options must not be empty")
+	}
+	for _, option := range options {
+		if option == nil {
+			return fmt.Errorf("each option must be an array, not null")
+		}
+		if !allowEmptyOption && len(option) == 0 {
+			return fmt.Errorf("each option must not be empty")
+		}
+		for _, id := range option {
+			if !ids[id] {
+				return fmt.Errorf("option references undefined identifier %q", id)
+			}
+		}
+	}
+	return nil
+}
+
+func isDCQLClaimValue(value any) bool {
+	switch value.(type) {
+	case string, bool:
+		return true
+	default:
+		_, ok := dcqlIntegerValue(value)
+		return ok
+	}
+}
+
+func dcqlClaimValuesEqual(actual, expected any) bool {
+	switch expected := expected.(type) {
+	case string:
+		actual, ok := actual.(string)
+		return ok && actual == expected
+	case bool:
+		actual, ok := actual.(bool)
+		return ok && actual == expected
+	default:
+		expectedNumber, validExpected := dcqlIntegerValue(expected)
+		actualNumber, validActual := dcqlIntegerValue(actual)
+		return validExpected && validActual && expectedNumber == actualNumber
+	}
+}
+
+// dcqlIntegerValue returns an exact coefficient/exponent representation of a
+// JSON integer. Decimal exponents stay symbolic, so a short wire value such as
+// 1e1000000000 never allocates a billion-digit integer. json.Number avoids
+// rounding large input integers through float64.
+func dcqlIntegerValue(value any) (string, bool) {
+	switch number := value.(type) {
+	case float64:
+		// A decoder may already have rounded a large integer. Such a value
+		// cannot safely prove equality with the original credential claim.
+		if number < -(1<<53-1) || number > 1<<53-1 {
+			return "", false
+		}
+	case float32:
+		if number < -(1<<24-1) || number > 1<<24-1 {
+			return "", false
+		}
+	case json.Number, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	default:
+		return "", false
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	mantissa := string(encoded)
+	exponent := new(big.Int)
+	if i := strings.IndexAny(mantissa, "eE"); i >= 0 {
+		if _, ok := exponent.SetString(mantissa[i+1:], 10); !ok {
+			return "", false
+		}
+		mantissa = mantissa[:i]
+	}
+	negative := strings.HasPrefix(mantissa, "-")
+	mantissa = strings.TrimPrefix(mantissa, "-")
+	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
+		exponent.Sub(exponent, big.NewInt(int64(len(mantissa)-i-1)))
+		mantissa = mantissa[:i] + mantissa[i+1:]
+	}
+	mantissa = strings.TrimLeft(mantissa, "0")
+	if mantissa == "" {
+		return "0", true
+	}
+	coefficient := strings.TrimRight(mantissa, "0")
+	exponent.Add(exponent, big.NewInt(int64(len(mantissa)-len(coefficient))))
+	if exponent.Sign() < 0 {
+		return "", false
+	}
+	if negative {
+		coefficient = "-" + coefficient
+	}
+	return coefficient + "e" + exponent.String(), true
+}
+
+func everyDCQLCredentialIDSatisfiable(ids []string, satisfiable map[string][]DCQLCredentialSelection) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		selections, ok := satisfiable[id]
+		if !ok || len(selections) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+// dcqlVCTValues handles both a directly constructed Go query and decoded JSON.
+func dcqlVCTValues(meta map[string]any) ([]string, bool) {
+	raw, exists := meta["vct_values"]
+	if !exists {
+		return nil, true
+	}
+	switch values := raw.(type) {
+	case []string:
+		return values, true
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, text)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}

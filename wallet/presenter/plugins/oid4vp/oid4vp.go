@@ -890,6 +890,30 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	return b.WithRequestObject(string(body))
 }
 
+// AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority
+// Key Identifiers of the certificates in a credential's x5c header, which the
+// DCQL trusted_authorities type "aki" of OID4VP 1.0 Section 6.1.1 matches
+// against. A credential with no x5c header or no AKI extension matches no
+// authority and yields an empty result.
+func AuthorityKeyIdentifiersFromCredential(rawCredential string) []string {
+	issuerJWT := rawCredential
+	if separator := strings.IndexByte(issuerJWT, '~'); separator >= 0 {
+		issuerJWT = issuerJWT[:separator]
+	}
+	certificates, err := commonX509.DecodeX5CFromJWTHeader(issuerJWT)
+	if err != nil {
+		return nil
+	}
+	identifiers := make([]string, 0, len(certificates))
+	for _, certificate := range certificates {
+		if len(certificate.AuthorityKeyId) == 0 {
+			continue
+		}
+		identifiers = append(identifiers, base64.RawURLEncoding.EncodeToString(certificate.AuthorityKeyId))
+	}
+	return identifiers
+}
+
 func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
