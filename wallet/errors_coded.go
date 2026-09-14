@@ -23,3 +23,14 @@ type CodedError = common.CodedError
 func ErrorCode(err error) (string, bool) {
 	return common.CodeOf(err)
 }
+
+// ErrorCodes reports every code in err's chain, most specific first: the codes
+// of the errors a wrapper was built around come before the wrapper's own.
+//
+// A consumer that keeps its own table of the conditions it renders reads this
+// and takes the first code its table holds, which is the most specific verdict
+// it can express. ErrorCode answers the simpler question and returns the
+// outermost code only.
+func ErrorCodes(err error) []string {
+	return common.Codes(err)
+}

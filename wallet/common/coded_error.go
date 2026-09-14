@@ -58,6 +58,44 @@ type wrappedCodedError struct {
 
 func (e *wrappedCodedError) Unwrap() error { return e.cause }
 
+// Codes reports every code in err's chain, most specific first: the codes of
+// the errors a wrapper was built around come before the wrapper's own.
+//
+// It exists because a wrapper and what it wraps can both name a condition, and
+// which of them a consumer wants depends on the consumer. An *oid4vci.EndpointError
+// says which endpoint of an issuance failed; the error inside it may say the
+// metadata document named another issuer. A consumer that renders both reads the
+// inner one; a consumer that renders only the endpoint reads on until it finds a
+// code it knows. CodeOf answers the simpler question and returns the outermost.
+//
+// The order is a post-order walk of the chain, which is a tree when an error
+// was built with more than one %w.
+func Codes(err error) []string {
+	var codes []string
+	appendCodes(&codes, err)
+	return codes
+}
+
+func appendCodes(codes *[]string, err error) {
+	if err == nil {
+		return
+	}
+	switch unwrapped := err.(type) {
+	case interface{ Unwrap() error }:
+		appendCodes(codes, unwrapped.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, child := range unwrapped.Unwrap() {
+			appendCodes(codes, child)
+		}
+	}
+	if coded, ok := err.(CodedError); ok {
+		code := coded.ErrorCode()
+		if len(*codes) == 0 || (*codes)[len(*codes)-1] != code {
+			*codes = append(*codes, code)
+		}
+	}
+}
+
 // CodeOf reports the stable code of the outermost CodedError in err's chain.
 // The outermost one wins because an error that wraps another and still names a
 // code has classified what it wraps: *x509.SigningChainError defers to the

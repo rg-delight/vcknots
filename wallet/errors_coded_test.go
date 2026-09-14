@@ -319,3 +319,23 @@ func calledFunctionName(expression ast.Expr) string {
 	}
 	return ""
 }
+
+// TestErrorCodesReportsTheMostSpecificConditionFirst pins the order a consumer
+// with its own table of conditions depends on.
+func TestErrorCodesReportsTheMostSpecificConditionFirst(t *testing.T) {
+	endpoint := &receiverOid4vci.EndpointError{
+		Stage: receiverOid4vci.StageIssuerMetadata,
+		Err:   receiverOid4vci.ErrIssuerIdentifierMismatch,
+	}
+	codes := ErrorCodes(endpoint)
+	want := []string{"issuer_metadata_identity_mismatch", "issuer_metadata_fetch_failed"}
+	if len(codes) != len(want) || codes[0] != want[0] || codes[1] != want[1] {
+		t.Fatalf("ErrorCodes(endpoint) = %v, want %v", codes, want)
+	}
+	if code, _ := ErrorCode(endpoint); code != "issuer_metadata_fetch_failed" {
+		t.Errorf("ErrorCode(endpoint) = %q, want the outermost issuer_metadata_fetch_failed", code)
+	}
+	if got := ErrorCodes(errUncoded); len(got) != 0 {
+		t.Errorf("ErrorCodes(uncoded) = %v, want none", got)
+	}
+}
