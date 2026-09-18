@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/credential"
+	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
@@ -20,6 +21,11 @@ import (
 type Draft24CredentialSelection struct {
 	// CredentialID is the stored credential entry id.
 	CredentialID string
+	// Credential carries the credential by value instead of naming one in the
+	// wallet store. It is required on a wallet built with Config.Storeless and
+	// optional otherwise, where it takes precedence over the store lookup: the
+	// Holder consented to this credential, so it is the one presented.
+	Credential *credstoreTypes.CredentialEntry
 	// InputDescriptorIDs are the presentation_definition input_descriptor ids
 	// this credential answers. An empty list makes the library invent a
 	// descriptor id, which only matches a Verifier that ignores it.
@@ -108,18 +114,30 @@ func (w *Wallet) PresentDraft24Selection(
 // wallet store, keeping the caller's order so descriptor_map paths and the
 // vp_token array agree.
 func (w *Wallet) draft24SelectedCredentials(selections []Draft24CredentialSelection) ([]*SavedCredential, error) {
-	entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{Offset: 0, Limit: nil})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get credential entries: %w", err)
-	}
-	stored := make(map[string]*SavedCredential, len(entries))
-	for _, entry := range entries {
-		if entry != nil && entry.Entry != nil {
-			stored[entry.Entry.Id] = entry
+	stored := map[string]*SavedCredential{}
+	// The store is only read when a selection needs it, so a wallet that
+	// carries every credential by value never touches one (Config.Storeless).
+	if draft24SelectionsNeedTheStore(selections) {
+		entries, _, err := w.GetCredentialEntries(GetCredentialEntriesRequest{Offset: 0, Limit: nil})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get credential entries: %w", err)
+		}
+		for _, entry := range entries {
+			if entry != nil && entry.Entry != nil {
+				stored[entry.Entry.Id] = entry
+			}
 		}
 	}
 	credentials := make([]*SavedCredential, 0, len(selections))
 	for _, selection := range selections {
+		if selection.Credential != nil {
+			saved, err := w.convertEntryToSavedCredential(*selection.Credential)
+			if err != nil {
+				return nil, fmt.Errorf("selected credential %s cannot be presented: %w", selection.CredentialID, err)
+			}
+			credentials = append(credentials, saved)
+			continue
+		}
 		saved, found := stored[selection.CredentialID]
 		if !found {
 			return nil, fmt.Errorf("selected credential %s is not stored in this wallet", selection.CredentialID)
@@ -127,6 +145,17 @@ func (w *Wallet) draft24SelectedCredentials(selections []Draft24CredentialSelect
 		credentials = append(credentials, saved)
 	}
 	return credentials, nil
+}
+
+// draft24SelectionsNeedTheStore reports whether any selection names a
+// credential the wallet has to read out of its own store.
+func draft24SelectionsNeedTheStore(selections []Draft24CredentialSelection) bool {
+	for _, selection := range selections {
+		if selection.Credential == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // serializeDraft24Selection renders the vp_token of a Presentation Exchange

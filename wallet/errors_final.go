@@ -211,6 +211,21 @@ var (
 	// credentials nor a transaction_id. §8.2 requires the credentials array to
 	// hold objects and forbids it alongside transaction_id.
 	ErrCredentialResponseShape = common.NewCodedError("credential_response_shape_invalid", "credential response has an invalid shape")
+	// ErrCredentialResponseMultipleCredentials reports a §8.2 Credential
+	// Response carrying more than one credential to an issuance that asked for
+	// one. It is separate from ErrCredentialResponseShape because the response
+	// is well formed: it simply answers a batch the caller did not request, and
+	// a wallet reports that to its holder differently from a malformed body.
+	ErrCredentialResponseMultipleCredentials = common.NewCodedError("credential_response_multiple_credentials", "credential response carries more than one credential")
+	// ErrCredentialEncryptionUnavailable reports that the Holder's
+	// CredentialEncryptionPolicy requires §8.1 request or §8.2 response
+	// encryption and the Credential Issuer advertises none.
+	ErrCredentialEncryptionUnavailable = common.NewCodedError("credential_encryption_unavailable", "the credential issuer does not offer the credential encryption this wallet requires")
+	// ErrCredentialEncryptionDisallowed reports that the Holder's
+	// CredentialEncryptionPolicy disables an encryption the Credential Issuer
+	// makes mandatory. The two policies cannot both be satisfied, so the
+	// issuance is refused rather than downgraded.
+	ErrCredentialEncryptionDisallowed = common.NewCodedError("credential_encryption_disallowed", "the credential issuer requires a credential encryption this wallet disabled")
 )
 
 // Sentinel errors the RFC 6749 §4.1.2 / RFC 9207 §2.4 checks on the

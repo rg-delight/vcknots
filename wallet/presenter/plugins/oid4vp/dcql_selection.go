@@ -134,7 +134,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 			}
 		}
 		if matchingOption == nil {
-			if credentialSet.Required == nil || *credentialSet.Required {
+			if credentialSet.IsRequired() {
 				return nil, fmt.Errorf("required DCQL credential_set cannot be satisfied")
 			}
 			continue
@@ -288,7 +288,7 @@ func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCred
 				answered[id] = true
 			}
 		}
-		if !matched && (credentialSet.Required == nil || *credentialSet.Required) {
+		if !matched && credentialSet.IsRequired() {
 			return fmt.Errorf("%w: no option of a required DCQL credential_set is answered", ErrDCQLSelectionUnsatisfied)
 		}
 	}

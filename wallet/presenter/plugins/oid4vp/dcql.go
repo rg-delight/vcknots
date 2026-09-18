@@ -58,6 +58,16 @@ type CredentialSetQuery struct {
 	Required *bool      `json:"required,omitempty"`
 }
 
+// IsRequired reports the OID4VP 1.0 Section 6.2 default for this Credential Set
+// Query: "If omitted, the default value is true", so a set that names no
+// `required` member must be answered. Callers read the default here instead of
+// re-deriving it, which is what makes a Wallet's own selection screen agree
+// with ValidateDCQLCredentialSelections about which sets it may leave
+// unanswered.
+func (s CredentialSetQuery) IsRequired() bool {
+	return s.Required == nil || *s.Required
+}
+
 // AuthorizationRequestError is a validation failure of an OID4VP Authorization
 // Request. It carries the OAuth 2.0 / OID4VP error code that should be sent
 // back to the Verifier in the authorization error response.

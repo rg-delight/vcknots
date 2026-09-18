@@ -33,15 +33,17 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	if storeErr != nil {
 		// §11: a credential that failed verification/storage is reported with
 		// credential_failure (best effort); the original failure is returned.
-		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
-			return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
+		if !flow.policy.skipNotification {
+			if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
+				return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
+			}
 		}
 		return nil, storeErr
 	}
 	result.SavedCredentials = savedCredentials
 	// §11: credential_accepted MUST only be sent after the credential was
 	// successfully stored.
-	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil {
+	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil && !flow.policy.skipNotification {
 		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
 			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
 		}
@@ -154,13 +156,13 @@ func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clien
 	}
 }
 
-func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
+func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey, strictShape bool) (*receiverTypes.CredentialResponse, error) {
 	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
 		DecryptionKey: key,
-		// The high-level wallet path still accepts the pre-Final shape and
-		// §14.6 batch issuance; the exported validator is the strict single
-		// credential contract integrators apply at their own wire.
-		allowLegacyCredentialShape: true,
+		// The high-level wallet path accepts the pre-Final shape and §14.6
+		// batch issuance unless the issuance asked for the strict single
+		// credential contract with RequireSingleCredential.
+		allowLegacyCredentialShape: !strictShape,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential response: %w", err)
@@ -388,9 +390,14 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 		})
 	}
 
-	for _, savedCredential := range saved {
-		if err := w.credStore.SaveCredentialEntry(*savedCredential.Entry, credstoreTypes.SupportedCredStoreTypes(0)); err != nil {
-			return nil, fmt.Errorf("failed to save credential entry: %w", err)
+	// A storeless wallet verified the credentials and hands them back in the
+	// result; the process that owns the durable state persists them
+	// (Config.Storeless).
+	if w.credStore != nil {
+		for _, savedCredential := range saved {
+			if err := w.credStore.SaveCredentialEntry(*savedCredential.Entry, credstoreTypes.SupportedCredStoreTypes(0)); err != nil {
+				return nil, fmt.Errorf("failed to save credential entry: %w", err)
+			}
 		}
 	}
 	return saved, nil

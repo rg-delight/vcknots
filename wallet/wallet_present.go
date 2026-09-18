@@ -96,6 +96,14 @@ func (w *Wallet) PresentDCQLSelection(req *oid4vp.CredentialPresentationRequest,
 	if err != nil {
 		return "", err
 	}
+	return w.presentDCQLVPToken(req, endpoint, vpToken)
+}
+
+// presentDCQLVPToken submits a built vp_token to the Verifier's Response
+// Endpoint. It is the single submission both DCQL selection entry points share,
+// so the response mode and the verifier metadata are read the same way whichever
+// vocabulary named the credentials.
+func (w *Wallet) presentDCQLVPToken(req *oid4vp.CredentialPresentationRequest, endpoint url.URL, vpToken map[string][]string) (string, error) {
 	return w.presenter.PresentDCQL(presenterTypes.Oid4vp, endpoint, vpToken, &presenterTypes.PresentationRequest{
 		State:          req.State,
 		ResponseMode:   string(req.ResponseMode),
@@ -245,9 +253,6 @@ func (w *Wallet) selectCredentialsForDCQL(query *oid4vp.DcqlQuery) (map[string]*
 // error so callers can send an authorization error response.
 func newAccessDeniedError(format string, args ...any) *oid4vp.AuthorizationRequestError {
 	return &oid4vp.AuthorizationRequestError{Code: oid4vp.AccessDeniedError, Err: fmt.Errorf(format, args...)}
-}
-func boolPointer(value bool) *bool {
-	return &value
 }
 
 // credentialHasHolderBinding reports whether a stored credential carries a

@@ -259,7 +259,12 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		holderKeys:                  holderKeys,
 		keyAttestation:              keyAttestation,
 		suppliedKeyAttestation:      req.KeyAttestation,
-		usePrivateKeyJwt:            usePrivateKeyJwt,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:              req.CredentialEncryption,
+			skipNotification:        req.SkipNotification,
+			requireSingleCredential: req.RequireSingleCredential,
+		},
+		usePrivateKeyJwt: usePrivateKeyJwt,
 		generateClientAssertion: func() (string, error) {
 			return w.generateClientAssertion(
 				w.clientAuth.Key,

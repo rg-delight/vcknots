@@ -121,9 +121,33 @@ type OID4VCIFinalReceiveRequest struct {
 	// MaxDeferredInterval caps the §9.2 deferred polling interval, including
 	// one the issuer names in its issuance_pending response. Zero uses the
 	// library's 60 second cap.
-	MaxDeferredInterval             time.Duration
+	MaxDeferredInterval time.Duration
+	// CredentialResponseEncryptionKey is the §8.2 response encryption key the
+	// Credential Response is addressed to. Leave it nil to let
+	// CredentialEncryption generate an ephemeral one for the issuances that
+	// ask for encryption; supply one to keep the key material in the caller's
+	// own store.
 	CredentialResponseEncryptionKey *jose.JSONWebKey
-	HTTPClient                      *http.Client
+	// CredentialEncryption is the Holder's own §8.1 / §8.2 credential
+	// encryption policy. The zero value follows the Credential Issuer Metadata,
+	// which is what the specification defines.
+	CredentialEncryption CredentialEncryptionPolicy
+	// SkipNotification suppresses the §11 Notification Endpoint calls this
+	// issuance would otherwise make. A wallet whose credentials are stored by
+	// another process is the one that can say whether the issuance was
+	// accepted, so it sends credential_accepted itself rather than having this
+	// one report a storage it did not perform.
+	SkipNotification bool
+	// RequireSingleCredential applies the strict OpenID4VCI 1.0 Final
+	// Credential Response shape of ValidateOID4VCIFinalCredentialResponse to
+	// this issuance: the removed singular `credential` member is refused
+	// (ErrCredentialResponseShape) and so is a `credentials` array holding more
+	// than one credential (ErrCredentialResponseMultipleCredentials). Use it
+	// for a wallet that receives exactly one credential per issuance, so a
+	// second one is never silently stored. It is incompatible with §14.6 batch
+	// issuance through AdditionalHolderKeys.
+	RequireSingleCredential bool
+	HTTPClient              *http.Client
 	// AllowSelfDrivenAuthorization lets ReceiveOID4VCIFinalCredential drive the
 	// §5.2 authorization endpoint itself, by issuing a bare GET and reading the
 	// Location header. Only an issuer that needs no user interaction answers

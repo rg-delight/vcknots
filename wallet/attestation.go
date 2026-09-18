@@ -73,6 +73,13 @@ type KeyAttestationRequest struct {
 // KeyAttestation is a provider-issued key-attestation+jwt.
 type KeyAttestation struct {
 	JWT string
+	// ExpiresAt is the lifetime the attester reported for this attestation,
+	// which may be shorter than its own exp claim: a remote attester that
+	// rotates its keys, or a caller that minted the attestation for one
+	// Credential Request, binds it here. Zero means the exp claim alone
+	// decides. An attestation past this instant is refused with
+	// ErrKeyAttestationInvalid before it is embedded in any key proof.
+	ExpiresAt time.Time
 }
 
 // StaticClientAttester self-issues attestations with a locally held attester
@@ -328,7 +335,11 @@ func validateKeyAttestation(attestation *KeyAttestation, request KeyAttestationR
 	if claims.Exp == nil {
 		return fmt.Errorf("key attestation is missing exp")
 	}
-	if !now.Before(time.Unix(int64(*claims.Exp), 0)) {
+	expiry := time.Unix(int64(*claims.Exp), 0)
+	if !attestation.ExpiresAt.IsZero() && attestation.ExpiresAt.Before(expiry) {
+		expiry = attestation.ExpiresAt
+	}
+	if !now.Before(expiry) {
 		return fmt.Errorf("key attestation is expired")
 	}
 	if request.Nonce != "" && claims.Nonce != request.Nonce {

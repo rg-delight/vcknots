@@ -13,12 +13,15 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-// maxDeferredInterval caps the §9.2 deferred credential polling interval the
-// Credential Issuer chooses. The specification puts no upper bound on the
-// interval member, so without a cap an issuer could hold a polling goroutine
-// for an arbitrary time. OID4VCIFinalDeferredRequest.MaxInterval overrides it
-// per request.
-const maxDeferredInterval = 60 * time.Second
+// MaxDeferredInterval is the single upper bound this library places on the
+// §9.2 deferred credential polling interval a Credential Issuer chooses. The
+// specification puts no upper bound on the interval member, so without a cap an
+// issuer could pin a polling goroutine — or an application's own polling
+// schedule — for an arbitrary time. It bounds both the wait between this
+// library's own polls and the interval reported back to a caller that polls on
+// its own schedule. OID4VCIFinalDeferredRequest.MaxInterval and
+// OID4VCIFinalReceiveRequest.MaxDeferredInterval lower it per request.
+const MaxDeferredInterval = 60 * time.Second
 
 // defaultDeferredInterval is the wait between §9 deferred polls when neither
 // the issuer nor the caller named one.
@@ -52,8 +55,13 @@ type OID4VCIFinalDeferredRequest struct {
 	DeferredPollAttempts            int
 	Interval                        time.Duration
 	// MaxInterval caps the polling interval, including one the issuer names in
-	// its §9.2 issuance_pending response. Zero uses maxDeferredInterval.
+	// its §9.2 issuance_pending response. Zero uses MaxDeferredInterval.
 	MaxInterval time.Duration
+	// CredentialEncryption, SkipNotification and RequireSingleCredential
+	// behave as the identically named members of OID4VCIFinalReceiveRequest.
+	CredentialEncryption    CredentialEncryptionPolicy
+	SkipNotification        bool
+	RequireSingleCredential bool
 }
 
 func (w *Wallet) handleOID4VCIFinalDeferredResponse(
@@ -70,6 +78,10 @@ func (w *Wallet) handleOID4VCIFinalDeferredResponse(
 	if flow.issuerMetadata.DeferredCredentialEndpoint == nil {
 		return nil, fmt.Errorf("deferred credential endpoint is missing on credential issuer")
 	}
+	// The interval an application polls on is bounded by the same
+	// MaxDeferredInterval this library waits by, so a caller that owns the
+	// schedule does not need a second cap of its own.
+	credentialResponse.Interval = ClampDeferredIntervalSeconds(credentialResponse.Interval, maxInterval)
 	if deferredPollAttempts <= 0 {
 		// §9: do not report success with zero credentials. Hand the caller the
 		// transaction_id and access token so it can resume after a restart.
@@ -170,7 +182,7 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 		if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
 			return nil, fmt.Errorf("credential response encryption was requested but the deferred credential endpoint returned %q", rawResponse.ContentType)
 		}
-		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey)
+		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey, flow.policy.requireSingleCredential)
 		if err != nil {
 			return nil, err
 		}
@@ -207,15 +219,31 @@ func waitForDeferredInterval(ctx context.Context, interval time.Duration) error 
 // clampDeferredInterval bounds a polling interval that the Credential Issuer
 // chose. OpenID4VCI 1.0 §9.2 lets the issuer name the interval and sets no
 // upper bound, so an issuer could otherwise pin a polling goroutine for an
-// arbitrary time. maxInterval of zero or less uses maxDeferredInterval.
+// arbitrary time. maxInterval of zero or less uses MaxDeferredInterval.
 func clampDeferredInterval(interval, maxInterval time.Duration) time.Duration {
 	if maxInterval <= 0 {
-		maxInterval = maxDeferredInterval
+		maxInterval = MaxDeferredInterval
 	}
 	if interval > maxInterval {
 		return maxInterval
 	}
 	return interval
+}
+
+// ClampDeferredIntervalSeconds bounds a §9.1 / §9.2 polling interval an issuer
+// named, in seconds, by the same rule this library applies to its own polling.
+// A non-positive interval is returned unchanged, so "the issuer named none"
+// stays distinguishable from a capped one. maxInterval of zero or less uses
+// MaxDeferredInterval.
+//
+// It exists for an application that polls the Deferred Credential Endpoint on
+// its own schedule: the interval it reports to its scheduler is capped by the
+// library's value rather than by a second one it has to choose and document.
+func ClampDeferredIntervalSeconds(seconds int, maxInterval time.Duration) int {
+	if seconds <= 0 {
+		return seconds
+	}
+	return int(clampDeferredInterval(time.Duration(seconds)*time.Second, maxInterval) / time.Second)
 }
 
 func credentialHasNoCredentials(response *receiverTypes.CredentialResponse) bool {

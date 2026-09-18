@@ -43,6 +43,17 @@ type oid4vciFinalFlow struct {
 	suppliedKeyAttestationNonce string
 	usePrivateKeyJwt            bool
 	generateClientAssertion     func() (string, error)
+	// policy is the Holder's own §8 credential request policy, carried on the
+	// flow so the immediate and the §9 deferred paths apply the same one.
+	policy oid4vciFinalCredentialPolicy
+}
+
+// oid4vciFinalCredentialPolicy collects the Holder-owned switches of the §8
+// Credential Request that the OpenID4VCI 1.0 metadata cannot express.
+type oid4vciFinalCredentialPolicy struct {
+	encryption              CredentialEncryptionPolicy
+	skipNotification        bool
+	requireSingleCredential bool
 }
 
 // ReceiveOID4VCIFinalCredential implements the OpenID4VCI 1.0 Final/HAIP
@@ -256,6 +267,13 @@ func (w *Wallet) requestOID4VCIFinalCredentials(
 ) (*OID4VCIFinalReceiveResult, error) {
 	token := grant.AccessToken
 	issuerMetadata := flow.issuerMetadata
+	// The Holder's own policy decides first whether this issuance may be
+	// encrypted at all, and generates the ephemeral §8.2 key when the caller
+	// supplied none.
+	encryptionKey, err := flow.policy.encryption.resolveCredentialResponseEncryptionKey(issuerMetadata, encryptionKey)
+	if err != nil {
+		return nil, err
+	}
 	// §8.2 / §10: build the credential_response_encryption request parameter and
 	// fail closed when the issuer requires encryption but no key is supplied.
 	encryptionParams, err := receiverOid4vci.CredentialResponseEncryptionParameters(issuerMetadata, encryptionKey)
@@ -311,7 +329,7 @@ func (w *Wallet) requestOID4VCIFinalCredentials(
 	if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
 		return nil, fmt.Errorf("credential response encryption was requested but the credential endpoint returned %q", rawResponse.ContentType)
 	}
-	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey)
+	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey, flow.policy.requireSingleCredential)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +401,11 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 		return nil, fmt.Errorf("requested %d credentials but the issuer batch_size is %d", len(holderKeys), issuerMetadata.BatchSize())
 	}
 
-	encryptionParams, err := receiverOid4vci.CredentialResponseEncryptionParameters(issuerMetadata, req.CredentialResponseEncryptionKey)
+	encryptionKey, err := req.CredentialEncryption.resolveCredentialResponseEncryptionKey(issuerMetadata, req.CredentialResponseEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	encryptionParams, err := receiverOid4vci.CredentialResponseEncryptionParameters(issuerMetadata, encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("credential response encryption: %w", err)
 	}
@@ -403,8 +425,13 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 		credentialConfigurationID: req.CredentialConfigurationID,
 		credentialConfiguration:   issuerMetadata.CredentialConfigurationSupported[req.CredentialConfigurationID],
 		holderKeys:                holderKeys,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:              req.CredentialEncryption,
+			skipNotification:        req.SkipNotification,
+			requireSingleCredential: req.RequireSingleCredential,
+		},
 	}
-	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, req.CredentialResponseEncryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)
+	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, encryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)
 }
 
 // NotifyOID4VCIFinalCredentialDeleted sends the §11 credential_deleted

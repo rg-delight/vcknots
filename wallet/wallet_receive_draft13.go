@@ -533,6 +533,9 @@ func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *str
 		MimeType:   string(serializationFlavor),
 	}
 
+	if w.credStore == nil {
+		return nil, ErrNoCredentialStore
+	}
 	if err := w.credStore.SaveCredentialEntry(credentialEntry, types.SupportedCredStoreTypes(0)); err != nil {
 		return nil, fmt.Errorf("failed to save credential entry: %w", err)
 	}

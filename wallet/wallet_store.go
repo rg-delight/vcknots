@@ -3,6 +3,7 @@ package wallet
 import (
 	"fmt"
 
+	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore/types"
 )
@@ -42,8 +43,16 @@ func (w *Wallet) convertEntryToSavedCredential(entry types.CredentialEntry) (*Sa
 	}, nil
 }
 
+// ErrNoCredentialStore reports an operation that needs the wallet's credential
+// store on a wallet built with Config.Storeless. Such a wallet presents the
+// credentials the caller names by value and persists nothing.
+var ErrNoCredentialStore = common.NewCodedError("no_credential_store", "this wallet holds no credential store")
+
 // GetCredentialEntries retrieves credential entries with optional filtering.
 func (w *Wallet) GetCredentialEntries(req GetCredentialEntriesRequest) ([]*SavedCredential, int, error) {
+	if w.credStore == nil {
+		return nil, 0, ErrNoCredentialStore
+	}
 	if req.Filter != nil {
 		result, err := w.credStore.GetCredentialEntries(0, nil, types.SupportedCredStoreTypes(0))
 		if err != nil {
@@ -103,6 +112,9 @@ func (w *Wallet) GetCredentialEntries(req GetCredentialEntriesRequest) ([]*Saved
 
 // GetCredentialEntry retrieves a single credential entry by ID.
 func (w *Wallet) GetCredentialEntry(id string) (*SavedCredential, error) {
+	if w.credStore == nil {
+		return nil, ErrNoCredentialStore
+	}
 	entry, err := w.credStore.GetCredentialEntry(id, types.SupportedCredStoreTypes(0))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get credential entry: %w", err)

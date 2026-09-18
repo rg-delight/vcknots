@@ -56,8 +56,9 @@ type CredentialResponseDecodeOptions struct {
 //   - a response carrying both transaction_id and credentials. §8.2: "It MUST
 //     NOT be used if the transaction_id parameter is present" and transaction_id
 //     "MUST not be used if the credentials parameter is present".
-//   - more than one credential. This build receives exactly one credential per
-//     request (batch issuance is not enabled on this path).
+//   - more than one credential, with ErrCredentialResponseMultipleCredentials.
+//     This contract receives exactly one credential per request (batch issuance
+//     is not enabled on this path).
 //   - neither credentials nor a transaction_id. §8.2 issues either the
 //     immediate credentials array or the §9 deferred transaction_id, so an
 //     empty response carries nothing the wallet can act on.
@@ -65,8 +66,9 @@ type CredentialResponseDecodeOptions struct {
 // A response carrying only a transaction_id (and no credentials) is the §9
 // deferred shape and is accepted.
 //
-// Every rejection wraps ErrCredentialResponseShape, so callers classify the
-// failure with errors.Is rather than matching message text.
+// Every rejection wraps ErrCredentialResponseShape, except the batch answer
+// above which wraps ErrCredentialResponseMultipleCredentials, so callers
+// classify the failure with errors.Is rather than matching message text.
 func ValidateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse) error {
 	return validateOID4VCIFinalCredentialResponse(r, false)
 }
@@ -91,7 +93,10 @@ func validateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse,
 		return fmt.Errorf("%w: credential response used the removed singular credential member; OpenID4VCI 1.0 §8.2 requires the credentials array", ErrCredentialResponseShape)
 	}
 	if len(r.Credentials) > 1 {
-		return fmt.Errorf("%w: credential response contained %d credentials, but this build receives exactly one", ErrCredentialResponseShape, len(r.Credentials))
+		// A well-formed response that simply answers a batch this issuance did
+		// not ask for: reported with its own sentinel so a wallet can tell the
+		// holder that, rather than that the issuer sent something malformed.
+		return fmt.Errorf("%w: credential response contained %d credentials, but this issuance receives exactly one", ErrCredentialResponseMultipleCredentials, len(r.Credentials))
 	}
 	for index, value := range r.Credentials {
 		object, ok := value.(map[string]any)

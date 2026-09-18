@@ -121,6 +121,21 @@ type Config struct {
 	// applied before a received credential is stored.
 	CredentialAcceptance *CredentialAcceptancePolicy
 
+	// Storeless builds a wallet that holds no credential store at all. Nothing
+	// it receives is persisted — the credentials it verified are returned in
+	// OID4VCIFinalReceiveResult.SavedCredentials and it is the caller that
+	// keeps them — and every presentation names its credentials by value
+	// through PresentDCQLHolderSelection or Draft24CredentialSelection.Credential.
+	//
+	// It exists for a wallet whose durable state lives in another process: the
+	// default store writes a credential database to the user's configuration
+	// directory, so without this a component that only performs one protocol
+	// exchange would leave a copy of every credential behind. CredStore must be
+	// nil, and GetCredentialEntries, GetCredentialEntry and every presentation
+	// that resolves a credential through the store report
+	// ErrNoCredentialStore.
+	Storeless bool
+
 	// ClientAttestation supplies the OAuth 2.0 Client Attestation JWT for this
 	// wallet instance. When nil, a per-request AttesterKey is wrapped into a
 	// StaticClientAttester for compatibility.
@@ -276,6 +291,15 @@ func NewWallet() (*Wallet, error) {
 	return NewWalletWithConfig(config)
 }
 
+// NewWalletWithoutStore creates a Wallet that persists nothing: it is
+// NewWalletWithConfig with Config.Storeless set, for a component that performs
+// one OpenID4VCI or OpenID4VP exchange and hands the result to whatever owns
+// the durable state. See Config.Storeless.
+func NewWalletWithoutStore(config Config) (*Wallet, error) {
+	config.Storeless = true
+	return NewWalletWithConfig(config)
+}
+
 // NewWallet creates a Wallet with custom dispatcher configurations.
 //
 // This allows injection of custom dispatcher implementations or configurations.
@@ -303,7 +327,10 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	receiverInjected := config.Receiver != nil
 	presenterInjected := config.Presenter != nil
 
-	if config.CredStore == nil {
+	if config.Storeless && config.CredStore != nil {
+		return nil, fmt.Errorf("a storeless wallet cannot be configured with a credential store")
+	}
+	if config.CredStore == nil && !config.Storeless {
 		credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default credential store: %w", err)

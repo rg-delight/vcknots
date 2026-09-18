@@ -163,44 +163,14 @@ func (w *Wallet) dcqlCandidates() (map[string]*SavedCredential, []oid4vp.DCQLCre
 	credentialsByID := map[string]*SavedCredential{}
 	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(entries))
 	for _, entry := range entries {
-		flavor, err := entry.Entry.SerializationFlavor()
+		// A credential this wallet cannot describe to the matcher cannot be
+		// presented either, so it is skipped rather than failing the request.
+		candidate, err := dcqlCandidateFromSavedCredential(entry)
 		if err != nil {
 			continue
-		}
-		vcFormat, _, err := flavor.OID4VPFormatIdentifier()
-		if err != nil {
-			continue
-		}
-		claimNames := []string{}
-		claimValues := map[string]any{}
-		claimObject := map[string]any{}
-		if entry.Credential.Claims != nil {
-			for name, value := range *entry.Credential.Claims {
-				claimNames = append(claimNames, name)
-				claimValues[name] = value
-				claimObject[name] = value
-			}
-		}
-		if flavor == credential.SDJwtVC {
-			if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(entry.Entry.Raw)); reconstructErr == nil {
-				claimObject = reconstructed
-			}
-		}
-		vct := ""
-		if len(entry.Credential.Types) > 0 {
-			vct = entry.Credential.Types[0]
 		}
 		credentialsByID[entry.Entry.Id] = entry
-		candidates = append(candidates, oid4vp.DCQLCredentialCandidate{
-			ID:              entry.Entry.Id,
-			Format:          vcFormat,
-			VCT:             vct,
-			Claims:          claimNames,
-			ClaimValues:     claimValues,
-			ClaimObject:     claimObject,
-			HolderBound:     boolPointer(credentialHasHolderBinding(flavor, entry)),
-			AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(entry.Entry.Raw)),
-		})
+		candidates = append(candidates, candidate)
 	}
 	return credentialsByID, candidates, nil
 }

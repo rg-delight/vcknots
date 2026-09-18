@@ -58,7 +58,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsMultipleCredentials(t *test
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"},{"credential":"eyJ.ghi.jkl"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
 	require.ErrorContains(t, err, "exactly one")
-	require.ErrorIs(t, err, ErrCredentialResponseShape)
+	require.ErrorIs(t, err, ErrCredentialResponseMultipleCredentials)
 }
 
 // TestDecodeOID4VCIFinalCredentialResponse_RejectsMissingCredentialsAndTransactionID

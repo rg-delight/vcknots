@@ -341,6 +341,11 @@ func (w *Wallet) RequestOID4VCIFinalCredential(ctx context.Context, req OID4VCIF
 		includeKeyAttestation:  req.IncludeKeyAttestation,
 		externalKeyAttestation: req.ExternalKeyAttestation,
 		keyAttestation:         req.KeyAttestation,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:              req.CredentialEncryption,
+			skipNotification:        req.SkipNotification,
+			requireSingleCredential: req.RequireSingleCredential,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -383,6 +388,8 @@ type oid4vciFinalCredentialInputs struct {
 	includeKeyAttestation  bool
 	externalKeyAttestation bool
 	keyAttestation         *KeyAttestation
+	// policy is the Holder's own §8 Credential Request policy.
+	policy oid4vciFinalCredentialPolicy
 }
 
 // restoreOID4VCIFinalCredentialFlow rebuilds the non-serialisable half of an
@@ -471,6 +478,7 @@ func (w *Wallet) newOID4VCIFinalCredentialFlow(
 		holderKeys:                holderKeys,
 		keyAttestation:            keyAttestation,
 		suppliedKeyAttestation:    in.keyAttestation,
+		policy:                    in.policy,
 	}, nil
 }
 
@@ -520,6 +528,11 @@ type OID4VCIFinalPreAuthorizedReceiveRequest struct {
 	// library's 60 second cap.
 	MaxDeferredInterval             time.Duration
 	CredentialResponseEncryptionKey *jose.JSONWebKey
+	// CredentialEncryption, SkipNotification and RequireSingleCredential
+	// behave as the identically named members of OID4VCIFinalReceiveRequest.
+	CredentialEncryption    CredentialEncryptionPolicy
+	SkipNotification        bool
+	RequireSingleCredential bool
 }
 
 // ReceiveOID4VCIFinalPreAuthorizedCredential runs the whole OpenID4VCI 1.0
@@ -631,6 +644,11 @@ func (w *Wallet) authorizeOID4VCIFinalPreAuthorizedToken(ctx context.Context, re
 		includeKeyAttestation:  req.IncludeKeyAttestation,
 		externalKeyAttestation: req.ExternalKeyAttestation,
 		keyAttestation:         req.KeyAttestation,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:              req.CredentialEncryption,
+			skipNotification:        req.SkipNotification,
+			requireSingleCredential: req.RequireSingleCredential,
+		},
 	})
 	if err != nil {
 		return nil, nil, err
