@@ -50,6 +50,18 @@ var (
 	// ErrErrorDescriptionInvalid reports an error_description outside the
 	// character set RFC 6749 §4.1.2.1 defines for it.
 	ErrErrorDescriptionInvalid = common.NewCodedError("error_description_invalid", "error_description is outside the RFC 6749 4.1.2.1 character set")
+	// ErrClientIDPrefixReserved reports a Client Identifier whose Client
+	// Identifier Prefix only the Wallet itself may mint: "origin", which
+	// OID4VP 1.0 §5.9.3 forbids a Wallet to accept in requests, and
+	// "web-origin", the effective identifier a Wallet derives for itself from
+	// the platform-authenticated Origin of an unsigned Digital Credentials API
+	// request (Appendix A.2).
+	ErrClientIDPrefixReserved = common.NewCodedError("client_id_prefix_reserved", "client_id prefix is reserved for the wallet and is not accepted in requests")
+	// ErrRequestObjectSignatureRequired reports an Authorization Request whose
+	// Client Identifier Prefix is authenticated by the certificate that signed
+	// a Request Object ("x509_san_dns", "x509_hash"), delivered in plain query
+	// parameters with no Request Object to authenticate it (OID4VP 1.0 §5.9.3).
+	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "X.509 client identifiers require a signed Request Object")
 )
 
 // ErrDCQLSelectionUnsatisfied reports that credentials chosen outside this

@@ -24,16 +24,48 @@ const (
 	OID4VPClientIDPrefixPreRegistered OID4VPClientIDPrefix = "pre-registered"
 )
 
-// parseOID4VPClientID parses and validates a client_id that arrived over the
+// ParseOID4VPClientID parses and validates a client_id that arrived over the
 // wire, from any delivery: query parameters, a request= Request Object, a
 // request_uri Request Object, a signed DC API request or the Draft24 paths. It
-// never accepts a Client Identifier Prefix that only the Wallet itself is
-// allowed to mint, so the prefixes "origin" and "web-origin" are both refused
-// here. Use (*requestBuilder).parseClientID to parse a Client Identifier while
-// building a request, which adds back the single exception the unsigned
-// Digital Credentials API path needs.
-func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
+// is the same parse every entry point of this package applies, exported so an
+// application that has to know which Client Identifier Prefix it is talking to
+// - to render it, or to decide what evidence the prefix demands - reads it from
+// the Client Identifier syntax of OID4VP 1.0 Section 5.9.2 rather than from a
+// second copy of the rules.
+//
+// A Client Identifier with no ":" is a pre-registered client and reports
+// OID4VPClientIDPrefixPreRegistered. A Client Identifier Prefix that only the
+// Wallet itself is allowed to mint is refused with ErrClientIDPrefixReserved:
+// "origin" (Section 5.9.3) and "web-origin" (Appendix A.2). Every other
+// unknown prefix is refused as a plain syntax error.
+func ParseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 	return parseOID4VPClientIDAllowingWebOrigin(clientID, false)
+}
+
+// Prefix reports the Client Identifier Prefix this Client Identifier carries,
+// or OID4VPClientIDPrefixPreRegistered when it carries none.
+func (c *OID4VPClientID) Prefix() OID4VPClientIDPrefix {
+	return c.prefix
+}
+
+// Original reports the <orig_client_id> part of the Client Identifier: the
+// value after the prefix, or the whole identifier for a pre-registered client.
+func (c *OID4VPClientID) Original() string {
+	return c.original
+}
+
+// RequiresRequestObjectSignature reports whether this Client Identifier can
+// only be authenticated by the X.509 certificate that signed a Request Object
+// (OID4VP 1.0 Section 5.9.3 "x509_san_dns" and "x509_hash"). A request carrying
+// such an identifier in plain query parameters authenticates nothing, and the
+// parse entry points refuse it with ErrRequestObjectSignatureRequired.
+func (c *OID4VPClientID) RequiresRequestObjectSignature() bool {
+	return c.prefix == OID4VPClientIDPrefixX509SanDNS || c.prefix == OID4VPClientIDPrefixX509Hash
+}
+
+// parseOID4VPClientID is the package-internal spelling of ParseOID4VPClientID.
+func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
+	return ParseOID4VPClientID(clientID)
 }
 
 // parseClientID parses a client_id in the context of the delivery this builder
@@ -104,7 +136,7 @@ func parseOID4VPClientIDAllowingWebOrigin(clientID string, allowWebOrigin bool) 
 		// endpoint binding, which is what Section 5.9.3 forbids for the
 		// companion "origin" prefix.
 		if !allowWebOrigin {
-			return nil, fmt.Errorf("client_id prefix 'web-origin' is reserved for the Wallet's own unsigned Digital Credentials API identifier and is not allowed in requests")
+			return nil, fmt.Errorf("client_id prefix 'web-origin' is reserved for the Wallet's own unsigned Digital Credentials API identifier and is not allowed in requests: %w", ErrClientIDPrefixReserved)
 		}
 		return &OID4VPClientID{
 			original: origin,
@@ -114,7 +146,7 @@ func parseOID4VPClientIDAllowingWebOrigin(clientID string, allowWebOrigin bool) 
 		// OID4VP 1.0 Section 5.9.3: "This reserved Client Identifier Prefix is
 		// defined in (#dc_api_request). The Wallet MUST NOT accept this Client
 		// Identifier Prefix in requests."
-		return nil, fmt.Errorf("client_id prefix 'origin' is not allowed")
+		return nil, fmt.Errorf("client_id prefix 'origin' is not allowed: %w", ErrClientIDPrefixReserved)
 	default:
 		// OID4VP 1.0 Section 5.9.2 defines the syntax as
 		// "<client_id_prefix>:<orig_client_id>" over a closed set of prefixes,
