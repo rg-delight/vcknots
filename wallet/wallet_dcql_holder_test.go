@@ -243,3 +243,17 @@ func TestWallet_StorelessWalletHasNoCredentialStore(t *testing.T) {
 	_, err = NewWalletWithConfig(Config{Storeless: true, CredStore: fixtureCredStore(t)})
 	require.ErrorContains(t, err, "storeless wallet cannot be configured with a credential store")
 }
+
+// The two sides of a consent screen name a claim differently: the Holder
+// answers with disclosure names, while a DCQL claims query resolves to the bare
+// name for a single-segment path and to the JSON path for a deeper one. The
+// narrowing has to survive that in both directions - a claim the Holder kept
+// stays selected under the library's own name, and one the Holder withheld is
+// dropped.
+func TestNarrowToDisclosureNamesKeepsTheResolvedClaimPaths(t *testing.T) {
+	resolved := []string{"given_name", `["address","locality"]`}
+
+	require.Equal(t, resolved, narrowToDisclosureNames(resolved, []string{"given_name", "locality"}))
+	require.Equal(t, []string{`["address","locality"]`}, narrowToDisclosureNames(resolved, []string{"locality"}))
+	require.Empty(t, narrowToDisclosureNames(resolved, []string{"family_name"}))
+}

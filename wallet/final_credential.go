@@ -160,9 +160,11 @@ func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTra
 	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
 		DecryptionKey: key,
 		// The high-level wallet path accepts the pre-Final shape and §14.6
-		// batch issuance unless the issuance asked for the strict single
-		// credential contract with RequireSingleCredential.
-		allowLegacyCredentialShape: !strictShape,
+		// batch issuance; RequireSingleCredential narrows that to the one
+		// credential this issuance asked for, without refusing the §9 "still
+		// pending" body the deferred poll has to keep reading.
+		allowLegacyCredentialShape: true,
+		requireSingleCredential:    strictShape,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential response: %w", err)

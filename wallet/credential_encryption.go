@@ -72,7 +72,7 @@ func (p CredentialEncryptionPolicy) resolveCredentialResponseEncryptionKey(
 	metadata *receiverTypes.CredentialIssuerMetadata,
 	supplied *jose.JSONWebKey,
 ) (*jose.JSONWebKey, error) {
-	if err := p.validate(metadata); err != nil {
+	if err := p.Validate(metadata); err != nil {
 		return nil, err
 	}
 	if p.disablesEncryption() {
@@ -91,8 +91,16 @@ func (p CredentialEncryptionPolicy) resolveCredentialResponseEncryptionKey(
 	return &key, nil
 }
 
-// validate reports whether this issuance can honour the policy at all.
-func (p CredentialEncryptionPolicy) validate(metadata *receiverTypes.CredentialIssuerMetadata) error {
+// Validate reports whether a Credential Issuer's metadata can honour this
+// policy: ErrCredentialEncryptionUnavailable when it offers less than the
+// policy requires, ErrCredentialEncryptionDisallowed when it requires more than
+// the policy permits, and nil otherwise.
+//
+// The §8 Credential Request paths apply it themselves. It is exported for an
+// application that resolves the Credential Issuer Metadata earlier in the flow —
+// at the §5 authorization stage, say — and would rather refuse an issuance the
+// Holder's policy forbids before a Holder is sent through a browser for it.
+func (p CredentialEncryptionPolicy) Validate(metadata *receiverTypes.CredentialIssuerMetadata) error {
 	if metadata == nil {
 		return nil
 	}

@@ -98,6 +98,11 @@ func planDCQLQuery(query *DCQLQuery) (dcqlQueryPlan, error) {
 // request requires, the stored credentials that satisfy it. The library decides
 // the claim set here; a Wallet that lets its Holder decide validates that
 // decision with ValidateDCQLCredentialSelections instead.
+//
+// A request no available credential can answer is reported as an error wrapping
+// ErrDCQLSelectionUnsatisfied, the same sentinel a rejected Holder choice
+// carries, so a caller tells "this wallet cannot answer the request" from a
+// malformed query with errors.Is.
 func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLCredentialSelection, error) {
 	plan, err := planDCQLQuery(query)
 	if err != nil {
@@ -118,7 +123,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 			if querySelections, ok := satisfiable[credentialQuery.ID]; ok {
 				selections = append(selections, querySelections...)
 			} else {
-				return nil, fmt.Errorf("required DCQL credential query %q cannot be satisfied", credentialQuery.ID)
+				return nil, fmt.Errorf("%w: required DCQL credential query %q cannot be satisfied", ErrDCQLSelectionUnsatisfied, credentialQuery.ID)
 			}
 		}
 		return selections, nil
@@ -135,7 +140,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 		}
 		if matchingOption == nil {
 			if credentialSet.IsRequired() {
-				return nil, fmt.Errorf("required DCQL credential_set cannot be satisfied")
+				return nil, fmt.Errorf("%w: required DCQL credential_set cannot be satisfied", ErrDCQLSelectionUnsatisfied)
 			}
 			continue
 		}

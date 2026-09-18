@@ -40,6 +40,13 @@ type CredentialResponseDecodeOptions struct {
 	// §14.6 batch issuance needs. It is unexported so an integrator always gets
 	// the strict Final shape; only the package's own issuance path sets it.
 	allowLegacyCredentialShape bool
+	// requireSingleCredential refuses the two shapes a wallet receiving one
+	// credential per issuance cannot carry - the removed singular `credential`
+	// member and a `credentials` array holding more than one - without applying
+	// the rest of the strict Final shape. The §9 deferred poll needs that rest
+	// relaxed: a 200 response carrying neither credentials nor a transaction_id
+	// is the issuer saying "still pending", not a malformed body.
+	requireSingleCredential bool
 }
 
 // ValidateOID4VCIFinalCredentialResponse enforces the OpenID4VCI 1.0 Final
@@ -164,7 +171,35 @@ func DecodeOID4VCIFinalCredentialResponse(body []byte, contentType string, opts 
 	if err := validateOID4VCIFinalCredentialResponse(&response, opts.allowLegacyCredentialShape); err != nil {
 		return nil, err
 	}
+	if opts.requireSingleCredential {
+		if err := validateSingleCredentialResponse(&response); err != nil {
+			return nil, err
+		}
+	}
 	return &response, nil
+}
+
+// validateSingleCredentialResponse applies the single-credential half of the
+// Final shape: the removed singular `credential` member and a batch answer are
+// refused, and every element of the credentials array must be the object §8.2
+// defines. It leaves the deferred "still pending" shape alone.
+func validateSingleCredentialResponse(r *receiverTypes.CredentialResponse) error {
+	if r.Credential != nil {
+		return fmt.Errorf("%w: credential response used the removed singular credential member; OpenID4VCI 1.0 §8.2 requires the credentials array", ErrCredentialResponseShape)
+	}
+	if len(r.Credentials) > 1 {
+		return fmt.Errorf("%w: credential response contained %d credentials, but this issuance receives exactly one", ErrCredentialResponseMultipleCredentials, len(r.Credentials))
+	}
+	for index, value := range r.Credentials {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: credential response contained an unsupported credential shape at credentials[%d] (%T); §8.2 requires objects", ErrCredentialResponseShape, index, value)
+		}
+		if _, ok := object["credential"]; !ok {
+			return fmt.Errorf("%w: credential response object at credentials[%d] does not contain a credential member", ErrCredentialResponseShape, index)
+		}
+	}
+	return nil
 }
 
 // oid4vciFinalJWEKeyAlgorithms lists the JWE key management algorithms accepted
