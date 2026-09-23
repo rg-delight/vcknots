@@ -68,6 +68,21 @@ const (
 	// EndpointResponse is the Authorization Response or error response POST to
 	// the verifier's Response Endpoint (OpenID4VP 1.0 Section 8.2).
 	EndpointResponse Endpoint = "response_endpoint"
+	// EndpointFederationEntityConfiguration is an OpenID Federation Entity
+	// Configuration fetch at /.well-known/openid-federation (OpenID
+	// Federation 1.0 Section 9).
+	EndpointFederationEntityConfiguration Endpoint = "federation_entity_configuration"
+	// EndpointFederationSubordinateStatement is a Subordinate Statement fetch
+	// from a superior's federation_fetch_endpoint (OpenID Federation 1.0
+	// Section 8.1).
+	EndpointFederationSubordinateStatement Endpoint = "federation_subordinate_statement"
+	// EndpointStatusList is a Status List Token fetch
+	// (draft-ietf-oauth-status-list Section 8).
+	EndpointStatusList Endpoint = "status_list"
+	// EndpointIssuerKeyMaterial is a fetch the credential issuer key ladder
+	// makes: JWT VC Issuer Metadata and the jwks_uri it names, a did:web DID
+	// document, or a DID Configuration.
+	EndpointIssuerKeyMaterial Endpoint = "issuer_key_material"
 	// EndpointOther is every request the library did not label.
 	EndpointOther Endpoint = "other"
 )

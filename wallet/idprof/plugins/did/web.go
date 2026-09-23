@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/idprof/types"
 )
 
@@ -284,7 +284,7 @@ func encodePathSegment(segment string) string {
 // fetchDocument retrieves documentURL and returns the response body, bounded by
 // the configured cap.
 func (p *DIDWebPlugin) fetchDocument(ctx context.Context, documentURL *url.URL) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, documentURL.String(), nil)
+	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointIssuerKeyMaterial), http.MethodGet, documentURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: request could not be built", ErrDIDWebDocumentFetchFailed)
 	}

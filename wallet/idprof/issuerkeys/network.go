@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/common/observe"
 )
 
 const (
@@ -107,7 +109,7 @@ func originOf(parsed *url.URL) string {
 // it is read, and the result must be a JSON object rather than any other JSON
 // value.
 func (r *Resolver) fetchJSONObject(ctx context.Context, target *url.URL) (json.RawMessage, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointIssuerKeyMaterial), http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "request could not be built")
 	}

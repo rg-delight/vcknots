@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 )
 
 const (
@@ -431,7 +432,7 @@ func parseStatusListURI(raw string, allowHTTP bool) (*url.URL, error) {
 // and saying so here keeps that failure out of the JWS parser, where it would
 // have surfaced as an unrelated syntax complaint.
 func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointStatusList), http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
 	}
