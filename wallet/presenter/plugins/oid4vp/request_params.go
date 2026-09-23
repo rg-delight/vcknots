@@ -269,7 +269,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		var clientMeta VerifierMetadata
+		var rawMetadata []byte
 		if cmMap, ok := cm.(map[string]any); ok {
 			// Convert map to JSON and then unmarshal to struct
 			jsonBytes, err := json.Marshal(cmMap)
@@ -277,19 +277,24 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 				b.errValidation = fmt.Errorf("failed to marshal client_metadata: %w", err)
 				return
 			}
-			if err := json.Unmarshal(jsonBytes, &clientMeta); err != nil {
-				b.errValidation = fmt.Errorf("invalid client_metadata: %w", err)
-				return
-			}
+			rawMetadata = jsonBytes
 		} else if cmStr, ok := cm.(string); ok {
 			// Handle string format
-			if err := json.Unmarshal([]byte(cmStr), &clientMeta); err != nil {
-				b.errValidation = fmt.Errorf("invalid client_metadata: %w", err)
-				return
-			}
+			rawMetadata = []byte(cmStr)
 		} else {
 			b.errValidation = fmt.Errorf("client_metadata must be a string or map")
 			return
+		}
+		var clientMeta VerifierMetadata
+		if err := json.Unmarshal(rawMetadata, &clientMeta); err != nil {
+			b.errValidation = fmt.Errorf("invalid client_metadata: %w", err)
+			return
+		}
+		if b.requireClientMetadataJWKKeyIDs {
+			if err := validateClientMetadataJWKKeyIDs(rawMetadata); err != nil {
+				b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", err)
+				return
+			}
 		}
 		b.req.ClientMetadata = &clientMeta
 	}

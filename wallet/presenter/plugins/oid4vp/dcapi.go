@@ -43,6 +43,7 @@ func (p *Oid4vpPresenter) newDCAPIRequestBuilder(normalizedProfile profile.Profi
 	b.x509TrustChainRoots = p.X509TrustChainRoots
 	b.insecureSkipX509Verify = p.InsecureSkipX509Verify
 	b.errorResponseAllowed = false
+	b.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
 	if p.RequestObjectValidation != nil {
 		b.WithRequestObjectValidation(*p.RequestObjectValidation)
 	}
