@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -43,9 +44,26 @@ type KeyLookup struct {
 	ctx      context.Context
 	template Request
 
+	// callerVerifiesX5C records that the caller authenticates an x5c chain
+	// itself and asks this lookup for keys only once a chain reached none of
+	// its anchors; see CallerVerifiesX5C.
+	callerVerifiesX5C bool
+
 	mu         sync.Mutex
 	resolution *Resolution
 	err        error
+}
+
+// CallerVerifiesX5C tells the lookup that the caller walks an x5c chain itself
+// - the credential acceptor does, against IssuerX509 - and asks for keys only
+// when the credential carries none or its chain reached no configured anchor
+// (CredentialAcceptancePolicy.ResolveIssuerKeysWhenX5CUntrusted). A resolution
+// for a credential that carries x5c then reports the x5c rung as "certificate
+// chain is not trusted" instead of claiming the chain as usable. It returns l
+// for chaining.
+func (l *KeyLookup) CallerVerifiesX5C() *KeyLookup {
+	l.callerVerifiesX5C = true
+	return l
 }
 
 // NewKeyLookup returns a KeyLookup that resolves within ctx. template carries
@@ -61,8 +79,26 @@ func (r *Resolver) NewKeyLookup(ctx context.Context, template Request) *KeyLooku
 // under header. Its signature is wallet.CredentialAcceptancePolicy's
 // ResolveIssuerKeys, so a caller passes the method value lookup.Keys.
 func (l *KeyLookup) Keys(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+	return l.KeysFromClaims(issuer, header, l.template.Payload)
+}
+
+// KeysFromClaims is Keys for the acceptor's ResolveIssuerKeysFromClaims hook:
+// claims are the credential's issuer-signed claims, which the W3C JWT VC
+// `vc.issuer` binding (Mechanisms.CredentialIssuerBinding) reads. They replace
+// the template's Payload.
+func (l *KeyLookup) KeysFromClaims(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error) {
 	request := requestFromHeader(l.template, issuer, header)
+	request.Payload = claims
 	resolution, err := l.resolver.resolve(l.ctx, request)
+	if l.callerVerifiesX5C && len(request.X5C) > 0 {
+		if resolution != nil {
+			markChainUntrusted(resolution)
+		}
+		var didOnly *DIDOnlyTrustError
+		if errors.As(err, &didOnly) {
+			markChainUntrusted(&Resolution{Diagnostics: didOnly.Diagnostics})
+		}
+	}
 	if err == nil && len(resolution.Candidates) == 0 {
 		err = l.ctx.Err()
 		if err == nil {
