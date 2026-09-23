@@ -54,6 +54,14 @@ type Oid4vpPresenter struct {
 	// database instead of a map. A nil resolver means the map is the whole
 	// registry.
 	ResolvePreRegisteredClient PreRegisteredClientResolver
+	// DisableParseErrorResponses keeps every parse-time refusal inside the
+	// Wallet: no error authorization response is posted, even for the plain
+	// redirect_uri request whose Response URI the Client Identifier binds
+	// (see requestBuilder.errorResponseAllowed). A redirect_uri Client
+	// Identifier binds the endpoint but authenticates nobody, so a Wallet whose
+	// policy is to post nothing before the holder consents to a Verifier it has
+	// not authenticated sets it. The refusal is still returned to the caller.
+	DisableParseErrorResponses bool
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -295,7 +303,7 @@ func (p *Oid4vpPresenter) buildParsedRequest(builder *requestBuilder) (*Credenti
 		// Client Identifier binds its response_uri, so neither endpoint is
 		// trustworthy (see requestBuilder.errorResponseAllowed).
 		var authzErr *AuthorizationRequestError
-		if errors.As(err, &authzErr) && builder.errorResponseAllowed {
+		if errors.As(err, &authzErr) && builder.errorResponseAllowed && !p.DisableParseErrorResponses {
 			if sendErr := p.sendAuthorizationErrorResponse(builder.req, authzErr); sendErr != nil {
 				return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w (also failed to send error authorization response: %v)", err, sendErr)
 			}

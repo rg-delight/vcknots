@@ -1064,6 +1064,21 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		})
 	}
 
+	t.Run("no error response when the caller disables parse error responses", func(t *testing.T) {
+		server, captured := newErrorCapturingServer(t)
+		defer server.Close()
+
+		presenter := &Oid4vpPresenter{AllowHTTP: true, DisableParseErrorResponses: true}
+		_, err := presenter.ParsePresentationRequest(baseURI(server.URL, "&dcql_query=%7B%22credentials%22%3A%5B%5D%7D"))
+		var authzErr *AuthorizationRequestError
+		if !errors.As(err, &authzErr) || authzErr.Code != InvalidRequestError {
+			t.Fatalf("expected the invalid_request refusal to be returned, got %v", err)
+		}
+		if len(*captured) != 0 {
+			t.Fatalf("expected no error response to be sent, got %v", *captured)
+		}
+	})
+
 	t.Run("send failure is reported alongside the original error", func(t *testing.T) {
 		server, _ := newErrorCapturingServer(t)
 		server.Close() // unreachable response_uri
