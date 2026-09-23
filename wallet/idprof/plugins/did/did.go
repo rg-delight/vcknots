@@ -47,6 +47,8 @@ func NewDIDPlugin() *DIDPlugin {
 	}
 	// Register built-in method plugins
 	plugin.RegisterMethodPlugin("key", &DIDKeyPlugin{})
+	plugin.RegisterMethodPlugin("jwk", &DIDJWKPlugin{})
+	plugin.RegisterMethodPlugin("web", &DIDWebPlugin{})
 	return plugin
 }
 
