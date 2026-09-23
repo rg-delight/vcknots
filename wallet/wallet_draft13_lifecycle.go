@@ -156,7 +156,7 @@ func (w *Wallet) ResumeOID4VCIDraft13DeferredCredential(ctx context.Context, req
 	if req.AccessToken == nil || strings.TrimSpace(req.AccessToken.Token) == "" {
 		return nil, fmt.Errorf("access token is required")
 	}
-	endpoint, err := draft13LifecycleEndpoint(req.IssuerMetadata, req.DeferredCredentialEndpoint, func(metadata *receiverTypes.CredentialIssuerMetadata) *common.URIField {
+	endpoint, err := oid4vciLifecycleEndpoint(req.IssuerMetadata, req.DeferredCredentialEndpoint, func(metadata *receiverTypes.CredentialIssuerMetadata) *common.URIField {
 		return metadata.DeferredCredentialEndpoint
 	}, ErrDraft13DeferredEndpointMissing)
 	if err != nil {
@@ -207,18 +207,13 @@ func (w *Wallet) NotifyOID4VCIDraft13Credential(ctx context.Context, req OID4VCI
 	if err := requireOID4VCIContext(ctx, "the notification request"); err != nil {
 		return err
 	}
-	if strings.TrimSpace(req.NotificationID) == "" {
-		return fmt.Errorf("notification ID is required")
+	if err := validateOID4VCINotification(req.NotificationID, req.Event, req.EventDescription); err != nil {
+		return err
 	}
 	if req.AccessToken == nil || strings.TrimSpace(req.AccessToken.Token) == "" {
-		return fmt.Errorf("access token is required")
+		return ErrNotificationAccessTokenMissing
 	}
-	switch req.Event {
-	case "credential_accepted", "credential_failure", "credential_deleted":
-	default:
-		return fmt.Errorf("notification event %q is not one Section 10.1 defines", req.Event)
-	}
-	endpoint, err := draft13LifecycleEndpoint(req.IssuerMetadata, req.NotificationEndpoint, func(metadata *receiverTypes.CredentialIssuerMetadata) *common.URIField {
+	endpoint, err := oid4vciLifecycleEndpoint(req.IssuerMetadata, req.NotificationEndpoint, func(metadata *receiverTypes.CredentialIssuerMetadata) *common.URIField {
 		return metadata.NotificationEndpoint
 	}, ErrDraft13NotificationEndpointMissing)
 	if err != nil {
@@ -235,10 +230,10 @@ func (w *Wallet) NotifyOID4VCIDraft13Credential(ctx context.Context, req OID4VCI
 	}, w.draft13LifecycleProofFactory(req.AccessToken, req.DPoPKey, endpoint))
 }
 
-// draft13LifecycleEndpoint resolves the endpoint a lifecycle request goes to.
+// oid4vciLifecycleEndpoint resolves the endpoint a lifecycle request goes to.
 // The issuer metadata is authoritative when the caller has it; a caller that
 // kept only the endpoint names it directly.
-func draft13LifecycleEndpoint(
+func oid4vciLifecycleEndpoint(
 	metadata *receiverTypes.CredentialIssuerMetadata,
 	named string,
 	advertised func(*receiverTypes.CredentialIssuerMetadata) *common.URIField,

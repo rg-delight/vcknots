@@ -28,17 +28,6 @@ const MaxDeferredInterval = 60 * time.Second
 // the issuer nor the caller named one.
 const defaultDeferredInterval = 5 * time.Second
 
-// OID4VCIFinalNotificationRequest is the OpenID4VCI 1.0 §11 notification
-// endpoint input for events the wallet sends after the initial credential
-// response (credential_deleted).
-type OID4VCIFinalNotificationRequest struct {
-	Type           receiverTypes.SupportedReceivingTypes
-	IssuerMetadata *receiverTypes.CredentialIssuerMetadata
-	AccessToken    *receiverTypes.CredentialIssuanceAccessToken
-	ClientKey      jose.JSONWebKey
-	NotificationID string
-}
-
 // OID4VCIFinalDeferredRequest lets a restarted wallet resume a §9 deferred
 // credential transaction from the transaction_id and access token returned by
 // an IssuancePending result.
@@ -268,27 +257,4 @@ func newOID4VCIFinalIssuancePendingError(intervalSeconds int) error {
 		Code:       "issuance_pending",
 		Interval:   intervalSeconds,
 	})
-}
-
-func notifyOID4VCIFinalCredential(
-	ctx context.Context,
-	finalReceiver receiverTypes.OID4VCIFinalTransport,
-	signer receiverTypes.OID4VCIFinalSigner,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	token *receiverTypes.CredentialIssuanceAccessToken,
-	clientKey jose.JSONWebKey,
-	notificationID string,
-	event string,
-) error {
-	if notificationID == "" || issuerMetadata == nil || issuerMetadata.NotificationEndpoint == nil || token == nil {
-		return nil
-	}
-	endpoint := *issuerMetadata.NotificationEndpoint
-	return finalReceiver.SendCredentialNotificationWithDpopRetryForToken(
-		ctx,
-		endpoint,
-		*token,
-		receiverTypes.NotificationRequest{NotificationID: notificationID, Event: event},
-		oid4vciFinalDpopProofFactory(signer, clientKey, endpoint, token.Token),
-	)
 }

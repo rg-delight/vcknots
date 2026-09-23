@@ -538,7 +538,10 @@ func TestNotifyOID4VCIDraft13Credential(t *testing.T) {
 	require.Equal(t, "invalid_notification_id", endpointError.Code)
 
 	req.Event = "credential_lost"
-	require.ErrorContains(t, fixture.wallet.NotifyOID4VCIDraft13Credential(context.Background(), req), "not one Section 10.1 defines")
+	require.ErrorIs(t, fixture.wallet.NotifyOID4VCIDraft13Credential(context.Background(), req), ErrNotificationEventInvalid)
+	req.Event = "credential_accepted"
+	req.EventDescription = `quote " refused`
+	require.ErrorIs(t, fixture.wallet.NotifyOID4VCIDraft13Credential(context.Background(), req), ErrNotificationEventDescriptionInvalid)
 	require.Len(t, fixture.notificationRequests, 2)
 }
 

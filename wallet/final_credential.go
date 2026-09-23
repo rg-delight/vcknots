@@ -34,7 +34,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 		// §11: a credential that failed verification/storage is reported with
 		// credential_failure (best effort); the original failure is returned.
 		if !flow.policy.skipNotification {
-			if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_failure"); notifyErr != nil {
+			if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialFailure); notifyErr != nil {
 				return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
 			}
 		}
@@ -44,7 +44,7 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	// §11: credential_accepted MUST only be sent after the credential was
 	// successfully stored.
 	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil && !flow.policy.skipNotification {
-		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, "credential_accepted"); notifyErr != nil {
+		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialAccepted); notifyErr != nil {
 			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
 		}
 	}
