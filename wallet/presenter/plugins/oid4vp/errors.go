@@ -61,7 +61,7 @@ var (
 	// Client Identifier Prefix is authenticated by the certificate that signed
 	// a Request Object ("x509_san_dns", "x509_hash"), delivered in plain query
 	// parameters with no Request Object to authenticate it (OID4VP 1.0 §5.9.3).
-	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "X.509 client identifiers require a signed Request Object")
+	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "this client identifier requires a signed Request Object")
 )
 
 // ErrDCQLSelectionUnsatisfied reports that credentials chosen outside this

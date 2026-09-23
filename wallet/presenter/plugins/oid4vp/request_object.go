@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +66,27 @@ type RequestObjectValidationOptions struct {
 	// than long-lived configuration, which is why the context belongs here; a
 	// nil Context means context.Background().
 	Context context.Context
+	// VerifierAttestationIssuers are the parties this Wallet trusts for issuing
+	// Verifier Attestation JWTs (OID4VP 1.0 §5.9.3). An empty list refuses
+	// every verifier_attestation Client Identifier, because the profile makes
+	// establishing that trust a precondition of accepting the request.
+	VerifierAttestationIssuers []VerifierAttestationIssuer
+	// Federation is the OpenID Federation trust policy applied to an
+	// openid_federation Client Identifier. A nil value refuses every such
+	// Client Identifier.
+	Federation *FederationTrustOptions
+	// WalletNonce is a caller attestation, the by-value counterpart of the
+	// nonce this library sends itself: the application fetched this Request
+	// Object with its own request_uri POST, sent this wallet_nonce with it,
+	// and now hands the Request Object over by value (ParseRequestObject).
+	// OpenID4VP 1.0 Section 5.10.1: "if the Wallet passed a wallet_nonce in
+	// the POST request, the Wallet MUST validate whether the request object
+	// contains the respective nonce value in a wallet_nonce claim. If it does
+	// not, the Wallet MUST terminate request processing." Every Client
+	// Identifier Prefix applies that rule to this value exactly as it applies
+	// it to a nonce this library sent. Empty means no nonce was sent, and it
+	// is ignored when this library performed the request_uri POST itself.
+	WalletNonce string
 }
 
 // haipRequestObjectMaxAge is the Request Object lifetime the HAIP profile
@@ -97,6 +119,37 @@ type RequestObjectVerification struct {
 	// or store how long the Verifier's request stays valid reads it here rather
 	// than decoding the Request Object a second time.
 	ExpiresAt time.Time
+	// Certificate describes the leaf certificate that signed an X.509 Request
+	// Object, so a Wallet showing the Verifier's identity does not decode the
+	// same certificate a second time to read what this library already parsed
+	// while authenticating it. It is nil for every other Client Identifier
+	// Prefix.
+	Certificate *RequestObjectCertificate
+	// VerifierAttestation is the attestation that authenticated a
+	// verifier_attestation Client Identifier, nil for every other prefix.
+	VerifierAttestation *VerifierAttestationEvidence
+	// Federation is the Trust Chain that authenticated an openid_federation
+	// Client Identifier, nil for every other prefix.
+	Federation *FederationEvidence
+}
+
+// RequestObjectCertificate is what a Wallet shows about the certificate that
+// signed a Request Object. It carries identity, not trust: the chain, its
+// revocation status and the Client Identifier binding were decided while the
+// Request Object was authenticated, and a certificate is only described here
+// once that succeeded.
+type RequestObjectCertificate struct {
+	// Subject and Issuer are RFC 2253 distinguished names.
+	Subject string
+	Issuer  string
+	// DNSNames are the dNSName Subject Alternative Names of the leaf, read
+	// from the certificate extension rather than from a rendered string.
+	DNSNames []string
+	// NotBefore and NotAfter are the leaf validity window, in UTC.
+	NotBefore time.Time
+	NotAfter  time.Time
+	// SerialNumber is the leaf serial as a decimal string.
+	SerialNumber string
 }
 
 // requestObjectExpiry reads the exp claim of already validated Request Object
@@ -288,6 +341,7 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err != nil {
 		return err
 	}
+	b.adoptCallerWalletNonce(options)
 	// A compact JWS keeps all authentication parameters in the protected
 	// header. Do not accept the general JSON serialization's unprotected x5c.
 	if strings.Count(obj, ".") != 2 || len(obj) > 1<<20 {
@@ -321,7 +375,7 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
-	return b.authenticateX509RequestObject(obj, parsed, options)
+	return b.authenticateRequestObjectByClientIdentifier(obj, parsed, options)
 }
 
 // authenticateX509RequestObject is the one X.509 Request Object authentication
@@ -343,7 +397,7 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 	}
 	if clientID.prefix != OID4VPClientIDPrefixX509Hash && clientID.prefix != OID4VPClientIDPrefixX509SanDNS {
 		// Final 5.1: client_metadata keys are never request-signature keys.
-		return errors.New("signed Request Object client identifier has no configured authentication method")
+		return fmt.Errorf("%w: %q", ErrRequestObjectClientAuthUnsupported, clientID.prefix)
 	}
 	certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
 	if err != nil {
@@ -367,7 +421,7 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 	if b.sentWalletNonce != "" {
 		claimedNonce, ok := verified["wallet_nonce"].(string)
 		if !ok || claimedNonce != b.sentWalletNonce {
-			return newAuthorizationRequestError(InvalidRequestError, "Request Object wallet_nonce does not match")
+			return newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectWalletNonceMismatch)
 		}
 	}
 	now := requestObjectNow(options)
@@ -384,8 +438,38 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 		RevocationUnadvertised: result.Revocation.NoMechanismCertificates,
 		WalletNonce:            b.sentWalletNonce,
 		ExpiresAt:              requestObjectExpiry(verified),
+		Certificate:            describeRequestObjectCertificate(certificates[0]),
 	}
 	return nil
+}
+
+// adoptCallerWalletNonce takes the wallet_nonce the application attests it
+// sent when it fetched a Request Object that now arrives by value, so the echo
+// rule of OpenID4VP 1.0 Section 5.10.1 binds that Request Object exactly as it
+// binds one this library fetched. A nonce this library sent itself always wins:
+// it is the one the Verifier actually received from this parse.
+func (b *requestBuilder) adoptCallerWalletNonce(options RequestObjectValidationOptions) {
+	if b.sentWalletNonce == "" && b.requestSource == "value" && options.WalletNonce != "" {
+		b.sentWalletNonce = options.WalletNonce
+	}
+}
+
+// describeRequestObjectCertificate reports the identity of the leaf that
+// signed an authenticated Request Object. The dNSName Subject Alternative
+// Names come from the parsed extension, so a name containing a comma cannot be
+// split into two by a consumer reading a rendered string instead.
+func describeRequestObjectCertificate(leaf *x509.Certificate) *RequestObjectCertificate {
+	if leaf == nil {
+		return nil
+	}
+	return &RequestObjectCertificate{
+		Subject:      leaf.Subject.String(),
+		Issuer:       leaf.Issuer.String(),
+		DNSNames:     slices.Clone(leaf.DNSNames),
+		NotBefore:    leaf.NotBefore.UTC(),
+		NotAfter:     leaf.NotAfter.UTC(),
+		SerialNumber: leaf.SerialNumber.String(),
+	}
 }
 
 // bindX509ClientID binds an x509_hash or x509_san_dns Client Identifier to the

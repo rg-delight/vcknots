@@ -172,8 +172,15 @@ func (b *requestBuilder) validate() error {
 	}
 
 	if b.draft24 {
-		if (b.req.PresentationDefinition == nil || b.req.PresentationDefinition.ID == "") && (b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0) {
-			return newAuthorizationRequestError(InvalidRequestError, "presentation_definition or dcql_query is required for Draft24")
+		// Draft24 Section 5.1 names three ways to express the Presentation
+		// Definition - by value, by reference in presentation_definition_uri,
+		// or through a scope the Wallet maps to one - besides DCQL. Resolving
+		// a reference or a scope is the Wallet's own step after the request is
+		// admitted, so their presence is what is required here.
+		hasDefinition := b.req.PresentationDefinition != nil && b.req.PresentationDefinition.ID != ""
+		hasDefinitionReference := b.req.PresentationDefinitionURI != "" || b.req.Scope != ""
+		if !hasDefinition && !hasDefinitionReference && (b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0) {
+			return newAuthorizationRequestError(InvalidRequestError, "presentation_definition, presentation_definition_uri, scope or dcql_query is required for Draft24")
 		}
 	} else if b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0 {
 		return newAuthorizationRequestError(InvalidRequestError, "dcql_query is required")
@@ -206,7 +213,7 @@ func (b *requestBuilder) validate() error {
 	}
 
 	if b.req.Nonce == "" {
-		return newAuthorizationRequestError(InvalidRequestError, "nonce is required")
+		return newAuthorizationRequestError(InvalidRequestError, "%w", ErrNonceRequired)
 	}
 
 	if isDirectPostMode(b.req.ResponseMode) {
@@ -246,17 +253,27 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	// never answered to the Verifier: the response_uri of an unauthenticated
 	// request must not receive an outbound POST.
 	if value, isString := singleParams["client_id"].(string); isString {
-		clientID, err := ParseOID4VPClientID(strings.TrimSpace(value))
+		clientID, err := b.parseClientID(strings.TrimSpace(value))
 		if err == nil && clientID.RequiresRequestObjectSignature() {
 			b.errorResponseAllowed = false
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectSignatureRequired)
 			return b
+		}
+		// An unsigned openid_federation request names its response endpoint
+		// in parameters nothing has authenticated until the Trust Chain has
+		// been resolved, so no refusal of it is ever answered to that endpoint.
+		if err == nil && clientID.prefix == OID4VPClientIDPrefixOIDFederation {
+			b.errorResponseAllowed = false
 		}
 	}
 
 	b.setParamsWithAnyMap(singleParams)
 
 	if err := b.validate(); err != nil {
+		b.errValidation = err
+		return b
+	}
+	if err := b.authenticateUnsignedFederationRequest(singleParams); err != nil {
 		b.errValidation = err
 		return b
 	}
@@ -424,6 +441,12 @@ func AuthorityKeyIdentifiersFromCredential(rawCredential string) []string {
 func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
+	}
+	if err := b.validateResponseEncryptionMetadata(); err != nil {
+		// The Verifier asked for an encrypted response and left nothing to
+		// encrypt it to, so even the refusal is not sent in the clear.
+		b.errorResponseAllowed = false
+		return nil, err
 	}
 	if err := b.enforceHAIPProfile(); err != nil {
 		return nil, err

@@ -34,6 +34,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		b.errValidation = err
 		return b
 	}
+	b.adoptCallerWalletNonce(options)
 
 	parsedJWT, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
@@ -74,9 +75,25 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	clientID, clientIDErr := parseOID4VPClientID(b.req.ClientID)
+	clientID, clientIDErr := b.parseClientID(b.req.ClientID)
 	isX509ClientID := clientIDErr == nil &&
 		(clientID.prefix == OID4VPClientIDPrefixX509Hash || clientID.prefix == OID4VPClientIDPrefixX509SanDNS)
+
+	// A Verifier identified by an attestation or by an OpenID Federation
+	// Entity Identifier is authenticated exactly as on the Final wire: the
+	// Draft24 text defines the same two schemes, and the keys that may sign
+	// their Request Objects come from the attestation or the Trust Chain,
+	// never from client_metadata.
+	if clientIDErr == nil && (clientID.prefix == OID4VPClientIDPrefixVerifierAttestation || clientID.prefix == OID4VPClientIDPrefixOIDFederation) {
+		if b.requestObjectValidation == nil {
+			b.errValidation = fmt.Errorf("%w: %q", ErrRequestObjectClientAuthUnsupported, clientID.prefix)
+			return b
+		}
+		if err := b.authenticateRequestObjectByClientIdentifier(obj, parsedJWT, options); err != nil {
+			b.errValidation = err
+		}
+		return b
+	}
 
 	// A configured RequestObjectValidationOptions is the caller's request for
 	// the shared authentication path: trust anchors or a root pool, the CRL

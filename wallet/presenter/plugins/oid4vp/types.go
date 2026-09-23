@@ -137,7 +137,18 @@ type CredentialPresentationRequest struct {
 	// RequestObjectVerification is produced by local signature/trust validation;
 	// it is not accepted from or serialized into authorization request data.
 	RequestObjectVerification *RequestObjectVerification `json:"-"`
-	PresentationDefinition    *PresentationDefinition    `json:"presentation_definition,omitempty"`
+	// PresentationDefinitionURI is the Draft24 presentation_definition_uri
+	// parameter as it arrived. This library does not dereference it; a Wallet
+	// that accepts the parameter resolves it after admitting the request.
+	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
+	// VerifierFederation is the Trust Chain that authenticated an
+	// openid_federation Verifier, whether its request was signed (then it is
+	// also RequestObjectVerification.Federation) or carried in plain
+	// parameters. Like RequestObjectVerification it is produced by this
+	// library and never read from request data. It is nil for every other
+	// Client Identifier Prefix.
+	VerifierFederation     *FederationEvidence     `json:"-"`
+	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
 	// RawPresentationDefinition is the presentation_definition parameter of a
 	// Draft 24 Authorization Request exactly as it arrived, before this library
 	// reduced it to the id it uses. Presentation Exchange is not modelled here,

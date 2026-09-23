@@ -55,12 +55,17 @@ func (c *OID4VPClientID) Original() string {
 }
 
 // RequiresRequestObjectSignature reports whether this Client Identifier can
-// only be authenticated by the X.509 certificate that signed a Request Object
-// (OID4VP 1.0 Section 5.9.3 "x509_san_dns" and "x509_hash"). A request carrying
-// such an identifier in plain query parameters authenticates nothing, and the
-// parse entry points refuse it with ErrRequestObjectSignatureRequired.
+// only be authenticated by the signature over a Request Object: the X.509
+// certificate that signed it (OID4VP 1.0 Section 5.9.3 "x509_san_dns" and
+// "x509_hash"), or the key a Verifier Attestation confirms
+// ("verifier_attestation": "the Verifier MUST sign the request object with the
+// private key corresponding to the public key in the `cnf` claim"). A request
+// carrying such an identifier in plain query parameters authenticates nothing,
+// and the parse entry points refuse it with ErrRequestObjectSignatureRequired.
 func (c *OID4VPClientID) RequiresRequestObjectSignature() bool {
-	return c.prefix == OID4VPClientIDPrefixX509SanDNS || c.prefix == OID4VPClientIDPrefixX509Hash
+	return c.prefix == OID4VPClientIDPrefixX509SanDNS ||
+		c.prefix == OID4VPClientIDPrefixX509Hash ||
+		c.prefix == OID4VPClientIDPrefixVerifierAttestation
 }
 
 // parseOID4VPClientID is the package-internal spelling of ParseOID4VPClientID.
@@ -84,7 +89,34 @@ func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 // in (#dc_api_request). The Wallet MUST NOT accept this Client Identifier
 // Prefix in requests."
 func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error) {
+	if b.draft24 {
+		return parseDraft24ClientID(clientID)
+	}
 	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == "dcapi-unsigned")
+}
+
+// parseDraft24ClientID is the Client Identifier syntax of the Draft24 wire
+// contract. It differs from OpenID4VP 1.0 in one prefix only: Draft24 Section
+// 5.10.1 names an OpenID Federation Entity Identifier with the "https" Client
+// Identifier Scheme, so the whole https URL is both the Client Identifier and
+// the Entity Identifier, where OpenID4VP 1.0 spells the same Verifier
+// "openid_federation:<entity id>". The Draft24 identifier is reported with the
+// Final prefix so both wire contracts reach the one federation authentication.
+func parseDraft24ClientID(clientID string) (*OID4VPClientID, error) {
+	trimmed := strings.TrimSpace(clientID)
+	if strings.HasPrefix(trimmed, "https://") {
+		return &OID4VPClientID{original: trimmed, prefix: OID4VPClientIDPrefixOIDFederation}, nil
+	}
+	return parseOID4VPClientID(trimmed)
+}
+
+// parseClientIDForWire parses the outer Authorization Request client_id with
+// the syntax of the wire contract being parsed.
+func parseClientIDForWire(clientID string, draft24 bool) (*OID4VPClientID, error) {
+	if draft24 {
+		return parseDraft24ClientID(clientID)
+	}
+	return parseOID4VPClientID(clientID)
 }
 
 // parseOID4VPClientIDAllowingWebOrigin implements the OID4VP 1.0 Section 5.9.2
