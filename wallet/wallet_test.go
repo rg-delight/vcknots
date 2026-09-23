@@ -914,9 +914,17 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}]}`)
+	// direct_post.jwt is refused while parsing when the Verifier leaves no key
+	// to encrypt the response to, so the request carries one.
+	encryptionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	clientMetadata, err := json.Marshal(map[string]any{
+		"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &encryptionKey.PublicKey, KeyID: "enc", Algorithm: "ECDH-ES", Use: "enc"}}},
+	})
+	require.NoError(t, err)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response",
-		dcqlQuery,
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&client_metadata=%s",
+		dcqlQuery, url.QueryEscape(string(clientMetadata)),
 	)
 
 	req, endpoint, err := controller.parseAuthorizationRequest(uri)
