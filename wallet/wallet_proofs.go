@@ -57,6 +57,9 @@ func resolveCredentialRequestProofBindingMethod(
 // generateJWTProof generates a JWT proof for credential requests.
 // When clientID is nil, iss is omitted (anonymous pre-authorized flow).
 // When clientID is provided, it must be non-empty.
+//
+// It is generateJWTProofWithTransform with a zero ProofTransform: the proof is
+// the one the library builds, untouched.
 func (w *Wallet) generateJWTProof(
 	key IKeyEntry,
 	did *idprofTypes.IdentityProfile,
@@ -65,60 +68,19 @@ func (w *Wallet) generateJWTProof(
 	clientID *string,
 	proofBindingMethod credentialRequestProofBindingMethod,
 ) (string, error) {
-	signerOpts := (&jose.SignerOptions{}).WithType("openid4vci-proof+jwt")
-	signingKeyEntry := key
-	if proofBindingMethod == credentialRequestProofBindingMethodJWK {
-		publicJWK := key.PublicKey()
-		signerOpts = signerOpts.WithHeader("jwk", publicJWK.Public())
-		signingKeyEntry = keyEntryWithoutPublicKeyID{IKeyEntry: key}
-	} else {
+	keyID := ""
+	if proofBindingMethod != credentialRequestProofBindingMethodJWK {
 		if did == nil {
 			return "", fmt.Errorf("did is required for kid proof binding")
 		}
 		if strings.TrimSpace(did.ID) == "" {
 			return "", fmt.Errorf("did.ID is required for kid proof binding")
 		}
-		signerOpts = signerOpts.WithHeader("kid", did.ID)
+		keyID = did.ID
 	}
-
-	signerAdapter, err := joseutil.NewJWKSigner(signingKeyEntry, jose.ES256)
-	if err != nil {
-		return "", fmt.Errorf("failed to create JWT proof signer adapter: %w", err)
-	}
-
-	claims := map[string]interface{}{
-		"iat": time.Now().Unix(),
-		"aud": aud,
-	}
-
-	if clientID != nil {
-		if strings.TrimSpace(*clientID) == "" {
-			return "", fmt.Errorf("clientID must be non-empty when provided")
-		}
-		claims["iss"] = *clientID
-	}
-
-	if nonce != nil && *nonce != "" {
-		claims["nonce"] = *nonce
-	}
-
-	signingKey := jose.SigningKey{
-		Algorithm: jose.ES256,
-		Key:       signerAdapter,
-	}
-
-	signer, err := jose.NewSigner(signingKey, signerOpts)
-	if err != nil {
-		return "", fmt.Errorf("failed to create JWT proof signer: %w", err)
-	}
-
-	proof, err := jwt.Signed(signer).Claims(claims).Serialize()
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize JWT proof: %w", err)
-	}
-
-	return proof, nil
+	return w.generateJWTProofWithTransform(key, keyID, nonce, aud, clientID, proofBindingMethod, ProofTransform{})
 }
+
 func (w *Wallet) generateDPoPProof(key IKeyEntry, method, targetURL, accessToken string, nonce *string) (string, error) {
 	if key == nil {
 		return "", fmt.Errorf("dpop key is required")

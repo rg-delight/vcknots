@@ -330,6 +330,12 @@ type CredentialConfiguration struct {
 	Format                               string                `json:"format"`
 	CredentialDefinition                 *CredentialDefinition `json:"credential_definition,omitempty"`
 	CredentialSigningAlgValuesSupported  []SignatureAlgorithm  `json:"credential_signing_alg_values_supported,omitempty"`
+
+	// VCT is the SD-JWT VC type identifier of a "vc+sd-jwt" or "dc+sd-jwt"
+	// Credential Configuration (SD-JWT VC Section 3.2.2.2). OpenID4VCI Draft 13
+	// Appendix E.2.2 makes it the member a Credential Request names such a
+	// credential with, so it has to survive the metadata parse.
+	VCT string `json:"vct,omitempty"`
 }
 
 var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
