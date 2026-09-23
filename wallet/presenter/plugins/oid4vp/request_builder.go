@@ -57,11 +57,16 @@ type requestBuilder struct {
 	// with the request= parameter, and "reference" for a Request Object fetched
 	// through request_uri. HAIP §5.1 requires reference.
 	requestSource string
-	// errorResponseAllowed marks that the request parameters came from plain
-	// query parameters (user-initiated URI). Validation failures on the
-	// Request Object paths occur before the object's signature is verified,
-	// so their response_uri is unauthenticated and must not receive an error
-	// authorization response (unauthenticated outbound POST / SSRF primitive).
+	// errorResponseAllowed marks that a refusal of this request may be
+	// answered with an error authorization response. It holds only for plain
+	// query parameters whose Client Identifier carries the redirect_uri prefix,
+	// the one delivery whose response endpoint is bound to the Client
+	// Identifier without any further evidence (OID4VP 1.0 §5.9.3). Validation
+	// failures on the Request Object paths occur before the object's
+	// signature is verified, and every other unsigned Client Identifier names
+	// its response endpoint in parameters nothing has authenticated, so none
+	// of them receives an error authorization response (unauthenticated
+	// outbound POST / SSRF primitive).
 	errorResponseAllowed bool
 }
 
@@ -231,7 +236,6 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		return b
 	}
 
-	b.errorResponseAllowed = true
 	b.requestSource = "query"
 
 	singleParams := make(map[string]any)
@@ -255,16 +259,19 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	if value, isString := singleParams["client_id"].(string); isString {
 		clientID, err := b.parseClientID(strings.TrimSpace(value))
 		if err == nil && clientID.RequiresRequestObjectSignature() {
-			b.errorResponseAllowed = false
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectSignatureRequired)
 			return b
 		}
-		// An unsigned openid_federation request names its response endpoint
-		// in parameters nothing has authenticated until the Trust Chain has
-		// been resolved, so no refusal of it is ever answered to that endpoint.
-		if err == nil && clientID.prefix == OID4VPClientIDPrefixOIDFederation {
-			b.errorResponseAllowed = false
-		}
+		// OID4VP 1.0 §5.9.3: with the redirect_uri prefix "the original Client
+		// Identifier part ... is the Verifier's Redirect URI (or Response URI
+		// when Response Mode direct_post is used)", and setParamsWithAnyMap
+		// answers a refused response_uri at that URI, never at the one the
+		// request chose. No other unsigned Client Identifier binds its response
+		// endpoint: an openid_federation request names it in parameters
+		// nothing has authenticated until the Trust Chain has been resolved, a
+		// pre-registered registration carries no response endpoint, and a
+		// missing or unparsable client_id binds nothing at all.
+		b.errorResponseAllowed = err == nil && clientID.prefix == OID4VPClientIDPrefixRedirectURI
 	}
 
 	b.setParamsWithAnyMap(singleParams)

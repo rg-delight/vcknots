@@ -1021,6 +1021,49 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		}
 	})
 
+	// Only the redirect_uri prefix binds the Response URI to the Client
+	// Identifier (OID4VP 1.0 §5.9.3). Every other unsigned request names its
+	// response_uri in parameters nothing authenticated, so a refusal of it is
+	// never posted there, whichever check refuses it.
+	for _, unbound := range []struct {
+		name     string
+		clientID string
+		register bool
+	}{
+		{name: "missing client_id"},
+		{name: "decentralized_identifier prefix", clientID: "decentralized_identifier:did:example:123"},
+		{name: "registered pre-registered client", clientID: "registered-verifier", register: true},
+	} {
+		t.Run("no error response for an unbound response_uri: "+unbound.name, func(t *testing.T) {
+			server, captured := newErrorCapturingServer(t)
+			defer server.Close()
+
+			presenter := &Oid4vpPresenter{AllowHTTP: true}
+			if unbound.register {
+				presenter.PreRegisteredClients = map[string]PreRegisteredClient{unbound.clientID: {}}
+			}
+			query := url.Values{
+				"response_type": {"vp_token"},
+				"state":         {"err-state"},
+				"response_mode": {"direct_post"},
+				"response_uri":  {server.URL},
+				// The empty credential list is refused as invalid_request.
+				"dcql_query": {`{"credentials":[]}`},
+				"nonce":      {"n"},
+			}
+			if unbound.clientID != "" {
+				query.Set("client_id", unbound.clientID)
+			}
+			_, err := presenter.ParsePresentationRequest("openid4vp://present?" + query.Encode())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if len(*captured) != 0 {
+				t.Fatalf("expected no error response to an unbound response_uri, got %v", *captured)
+			}
+		})
+	}
+
 	t.Run("send failure is reported alongside the original error", func(t *testing.T) {
 		server, _ := newErrorCapturingServer(t)
 		server.Close() // unreachable response_uri

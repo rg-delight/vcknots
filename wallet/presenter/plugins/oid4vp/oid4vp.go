@@ -289,9 +289,10 @@ func (p *Oid4vpPresenter) buildParsedRequest(builder *requestBuilder) (*Credenti
 	if err != nil {
 		// OID4VP: when the Authorization Request is rejected with an OAuth
 		// error code and response_mode=direct_post, deliver the error
-		// authorization response to the Verifier's response_uri. Requests
-		// received as Request Objects are excluded: their validation fails
-		// before the signature is verified, so the response_uri is not yet
+		// authorization response to the Verifier's response_uri. Only a
+		// plain redirect_uri-prefixed request qualifies: Request Objects fail
+		// validation before their signature is verified, and no other unsigned
+		// Client Identifier binds its response_uri, so neither endpoint is
 		// trustworthy (see requestBuilder.errorResponseAllowed).
 		var authzErr *AuthorizationRequestError
 		if errors.As(err, &authzErr) && builder.errorResponseAllowed {
