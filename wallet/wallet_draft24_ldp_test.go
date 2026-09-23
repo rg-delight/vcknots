@@ -42,7 +42,7 @@ type ldpPresentationVectors struct {
 	} `json:"issuer"`
 	Holder struct {
 		PrivateJWK struct{ D string } `json:"privateJwk"`
-		VM         string            `json:"vm"`
+		VM         string             `json:"vm"`
 	} `json:"holder"`
 	Cases []struct {
 		Credential map[string]any `json:"credential"`
