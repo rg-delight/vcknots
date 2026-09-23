@@ -95,6 +95,16 @@ func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error)
 	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == "dcapi-unsigned")
 }
 
+// ParseDraft24OID4VPClientID is ParseOID4VPClientID for a client_id that
+// arrived over the Draft24 wire contract, whose "https" Client Identifier
+// Scheme names an OpenID Federation Entity Identifier (see
+// parseDraft24ClientID). An application that routes a request to the Draft24
+// parser reads the Client Identifier Prefix through this function, so it
+// treats a Draft24 Federation Verifier exactly as the parser does.
+func ParseDraft24OID4VPClientID(clientID string) (*OID4VPClientID, error) {
+	return parseDraft24ClientID(clientID)
+}
+
 // parseDraft24ClientID is the Client Identifier syntax of the Draft24 wire
 // contract. It differs from OpenID4VP 1.0 in one prefix only: Draft24 Section
 // 5.10.1 names an OpenID Federation Entity Identifier with the "https" Client

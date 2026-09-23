@@ -42,6 +42,29 @@ func TestParseOID4VPClientIDExported(t *testing.T) {
 	}
 }
 
+// TestParseDraft24OID4VPClientIDExported pins the Draft24 wire syntax: a
+// whole https URL is an OpenID Federation Entity Identifier, and every other
+// Client Identifier parses exactly as ParseOID4VPClientID parses it.
+func TestParseDraft24OID4VPClientIDExported(t *testing.T) {
+	parsed, err := ParseDraft24OID4VPClientID("https://verifier.example")
+	if err != nil {
+		t.Fatalf("ParseDraft24OID4VPClientID failed: %v", err)
+	}
+	if parsed.Prefix() != OID4VPClientIDPrefixOIDFederation || parsed.Original() != "https://verifier.example" {
+		t.Fatalf("parsed = %q %q, want the Federation Entity Identifier", parsed.Prefix(), parsed.Original())
+	}
+	if _, err := ParseOID4VPClientID("https://verifier.example"); err == nil {
+		t.Fatal("the Final syntax must not accept a bare https Client Identifier")
+	}
+	parsed, err = ParseDraft24OID4VPClientID("x509_san_dns:verifier.example")
+	if err != nil || parsed.Prefix() != OID4VPClientIDPrefixX509SanDNS {
+		t.Fatalf("Draft24 x509_san_dns = %v, %v", parsed, err)
+	}
+	if _, err := ParseDraft24OID4VPClientID("origin:https://verifier.example"); !errors.Is(err, ErrClientIDPrefixReserved) {
+		t.Fatalf("Draft24 reserved prefix error = %v, want ErrClientIDPrefixReserved", err)
+	}
+}
+
 // TestParseOID4VPClientIDReservedPrefixes keeps the two Wallet-only prefixes
 // refused with a code a caller can branch on.
 func TestParseOID4VPClientIDReservedPrefixes(t *testing.T) {
