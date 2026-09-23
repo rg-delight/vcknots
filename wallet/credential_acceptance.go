@@ -38,6 +38,13 @@ type CredentialAcceptancePolicy struct {
 	// IssuerX509 is configured, unless ResolveIssuerKeysWhenX5CUntrusted lets it
 	// take over from a chain that reached no configured trust anchor.
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
+	// ResolveIssuerKeysFromClaims is ResolveIssuerKeys for a resolver that also
+	// reads the issuer-signed claims, such as the W3C JWT VC `vc.issuer`
+	// member that can bind a DID to the Credential Issuer. The claims are as
+	// unauthenticated as the header when it is called: they are hints for
+	// finding keys, never facts. When set, it is used instead of
+	// ResolveIssuerKeys.
+	ResolveIssuerKeysFromClaims func(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysWhenX5CUntrusted lets ResolveIssuerKeys establish the
 	// issuer key when the credential carries an x5c chain that reaches none of
 	// IssuerX509's trust anchors. An issuer may publish a chain this wallet does
@@ -417,7 +424,7 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, issuer, now, verification); err != nil {
+	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, payload, issuer, now, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -437,7 +444,7 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
 // bounds the CRL retrieval the trust path may perform.
-func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
+func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
 	var candidateKeys []jose.JSONWebKey
 
 	// An x5c header is trust evidence only when the caller configured X.509
@@ -447,7 +454,7 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 	// is then not consulted. Neither configured is a fail-closed error unless
 	// the policy opts out of issuer authentication in writing.
 	x5cRaw, x5cPresent := header["x5c"]
-	if policy.IssuerX509 == nil && policy.ResolveIssuerKeys == nil {
+	if policy.IssuerX509 == nil && !policy.resolvesIssuerKeys() {
 		if policy.UnverifiedIssuer {
 			// verification keeps no issuer key and no certificate
 			// fingerprints, so a caller can still tell an authenticated
@@ -487,8 +494,8 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
-			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.ResolveIssuerKeys != nil && chainReachesNoAnchor(err) {
-				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header)
+			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && chainReachesNoAnchor(err) {
+				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 				if resolveErr != nil {
 					// The chain was only this wallet's configuration; the
 					// verdict that stands is the key resolution's own.
@@ -512,10 +519,10 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			verification.IssuerKeyID = result.Fingerprints[0]
 		}
 	} else {
-		if policy.ResolveIssuerKeys == nil {
+		if !policy.resolvesIssuerKeys() {
 			return fmt.Errorf("%w: issuer key resolution is not configured", ErrIssuerKeyUnresolved)
 		}
-		keys, err := resolveIssuerKeyCandidates(policy, issuer, header)
+		keys, err := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 		if err != nil {
 			return err
 		}
@@ -529,8 +536,14 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 // hint, not a filter: the header is unauthenticated until a key verifies it,
 // and an issuer that rotated a key without renaming it must not be refused
 // because a stale identifier matched first.
-func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
-	keys, err := policy.ResolveIssuerKeys(issuer, header)
+func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error) {
+	var keys []jose.JSONWebKey
+	var err error
+	if policy.ResolveIssuerKeysFromClaims != nil {
+		keys, err = policy.ResolveIssuerKeysFromClaims(issuer, header, claims)
+	} else {
+		keys, err = policy.ResolveIssuerKeys(issuer, header)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: issuer key resolution failed: %w", ErrIssuerKeyUnresolved, err)
 	}
@@ -553,6 +566,12 @@ func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer strin
 		}
 	}
 	return ordered, nil
+}
+
+// resolvesIssuerKeys reports whether the policy carries either key-resolution
+// hook.
+func (policy *CredentialAcceptancePolicy) resolvesIssuerKeys() bool {
+	return policy.ResolveIssuerKeys != nil || policy.ResolveIssuerKeysFromClaims != nil
 }
 
 // verifyIssuerSignatureWithCandidates verifies the issuer signature under the
