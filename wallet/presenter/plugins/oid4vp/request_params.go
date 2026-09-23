@@ -89,6 +89,13 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			case OID4VPClientIDPrefixWebOrigin:
 				// The DC API effective client identifier uses the platform
 				// Origin; no redirect URI is derived (OID4VP 1.0 Appendix A.2).
+			case OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
+				// OID4VP 1.0 §5.9.3: both prefixes name a Verifier whose
+				// response endpoints are constrained by what authenticated it
+				// (the Trust Chain metadata, or the attestation's
+				// redirect_uris), never derived from the Client Identifier.
+				// The request is authenticated by
+				// authenticateRequestObjectByClientIdentifier.
 			case OID4VPClientIDPrefixPreRegistered:
 				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
 				// Client Identifier, the Wallet MUST treat the Client Identifier
@@ -174,12 +181,18 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			// authenticates, never to the one the request chose.
 			b.req.ResponseURI = redirectURIFromClientID
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError,
-				"response_uri does not match the redirect_uri Client Identifier")
+				"%w", ErrResponseURIClientIDMismatch)
 			return
 		}
 		// §8.2: the response goes to the Response URI, so no Redirect URI is
 		// used for this request.
 		b.req.RedirectURI = ""
+	}
+	if b.draft24 {
+		if err := bindDraft24RedirectURIResponseURI(params, b.req.ClientID, redirectURIFromClientID, responseURIFromParam, b.req.ResponseMode); err != nil {
+			b.errValidation = err
+			return
+		}
 	}
 
 	// OID4VP 1.0 Appendix A.2: the response is returned through the DC API, so
@@ -208,6 +221,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if b.draft24 {
+		b.req.PresentationDefinitionURI = getParam("presentation_definition_uri", false)
 		raw, exists := params["presentation_definition"]
 		if exists {
 			var data []byte
@@ -304,7 +318,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		missing = append(missing, "dcql_query")
 	}
 
-	if len(missing) > 0 {
+	if len(missing) == 1 && missing[0] == "nonce" {
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrNonceRequired)
+	} else if len(missing) > 0 {
 		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "missing required parameters: %s", strings.Join(missing, ", "))
 	}
 
@@ -374,10 +390,12 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 	for _, dataType := range b.supportedTransactionDataTypes {
 		supported[dataType] = true
 	}
+	// queryIDs maps each Credential Query id to whether it requires
+	// cryptographic holder binding.
 	queryIDs := make(map[string]bool)
 	if b.req.DcqlQuery != nil {
 		for _, query := range b.req.DcqlQuery.Credentials {
-			queryIDs[query.ID] = true
+			queryIDs[query.ID] = query.RequiresHolderBinding()
 		}
 	}
 	resolvedAlg := ""
@@ -397,7 +415,7 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].type is required and must be a string", i)
 		}
 		if !supported[dataType] {
-			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].type %q is not supported", i, dataType)
+			return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].type %q: %w", i, dataType, ErrTransactionDataTypeUnsupported)
 		}
 		credentialIDs, ok := entry["credential_ids"].([]any)
 		if !ok || len(credentialIDs) == 0 {
@@ -405,8 +423,16 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 		}
 		for _, rawID := range credentialIDs {
 			id, ok := rawID.(string)
-			if !ok || !queryIDs[id] {
+			bindingRequired, known := queryIDs[id]
+			if !ok || !known {
 				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
+			}
+			// OID4VP 1.0 Section 8.4 carries the transaction data hashes in
+			// the Key Binding of the presentation, so a Credential Query that
+			// waives cryptographic holder binding has nowhere to carry them
+			// and cannot authorize the transaction.
+			if !bindingRequired {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a credential query without cryptographic holder binding", i)
 			}
 		}
 		// OID4VP 1.0 Appendix B.3.3.1 places transaction_data_hashes_alg in the

@@ -106,10 +106,17 @@ var (
 // selection, then enforces the HAIP combination when the profile is HAIP:
 // ECDH-ES with a P-256 key and A128GCM or A256GCM content encryption.
 func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (*responseEncryption, error) {
+	return selectResponseEncryptionForProfile(metadata, p.Profile.IsHAIP())
+}
+
+// selectResponseEncryptionForProfile is selectResponseEncryption for an
+// explicit profile decision, so parsing a request and encrypting its response
+// apply the one selection rule. A failure wraps ErrResponseEncryptionKeyUnusable
+// or ErrResponseEncryptionEncUnsupported.
+func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (*responseEncryption, error) {
 	if metadata == nil {
-		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response")
+		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response: %w", ErrResponseEncryptionKeyMissing)
 	}
-	haip := p.Profile.IsHAIP()
 	allowedEncryptions := jweContentEncryptions
 	if haip {
 		allowedEncryptions = haipJWEOnlyContentEncryptions
@@ -117,7 +124,7 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 
 	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, haip, metadata.AuthorizationEncryptedResponseAlg)
 	if key == nil {
-		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks")
+		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
 	}
 
 	// The key's own alg wins; authorization_encrypted_response_alg is retained
@@ -130,7 +137,7 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 		algName = "ECDH-ES"
 	}
 	if haip && algName != "ECDH-ES" {
-		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q", algName)
+		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q: %w", algName, ErrResponseEncryptionKeyUnusable)
 	}
 	alg, err := parseJWEKeyAlgorithm(algName)
 	if err != nil {
@@ -157,7 +164,7 @@ func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (
 		if enc == "" {
 			// §8.3 default does not rescue an explicit list with no usable
 			// value; the verifier offered only unsupported algorithms.
-			return nil, fmt.Errorf("encrypted_response_enc_values_supported has no supported content encryption")
+			return nil, fmt.Errorf("encrypted_response_enc_values_supported has no supported content encryption: %w", ErrResponseEncryptionEncUnsupported)
 		}
 	} else {
 		// §8.3: absent list defaults to A128GCM.

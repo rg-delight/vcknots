@@ -159,7 +159,7 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	// Reject malformed outer identifiers before dereferencing request_uri.
 	clientID := strings.TrimSpace(queryParams.Get("client_id"))
 	if clientID != "" {
-		if _, err := parseOID4VPClientID(clientID); err != nil {
+		if _, err := parseClientIDForWire(clientID, draft24); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
@@ -231,7 +231,7 @@ func (p *Oid4vpPresenter) parseRequestObject(requestObject string, expectedClien
 	// it.
 	clientID := strings.TrimSpace(expectedClientID)
 	if clientID != "" {
-		if _, err := parseOID4VPClientID(clientID); err != nil {
+		if _, err := parseClientIDForWire(clientID, draft24); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
