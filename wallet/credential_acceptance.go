@@ -34,8 +34,20 @@ type CredentialAcceptancePolicy struct {
 	IssuerX509 *IssuerX509TrustOptions
 	// ResolveIssuerKeys returns candidate issuer public keys when the credential has
 	// no x5c header (JWKS, DID or a static registry chosen by the caller). header is
-	// the issuer JWT's protected header. Never called when x5c is present.
+	// the issuer JWT's protected header. It is not called when x5c is present and
+	// IssuerX509 is configured, unless ResolveIssuerKeysWhenX5CUntrusted lets it
+	// take over from a chain that reached no configured trust anchor.
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
+	// ResolveIssuerKeysWhenX5CUntrusted lets ResolveIssuerKeys establish the
+	// issuer key when the credential carries an x5c chain that reaches none of
+	// IssuerX509's trust anchors. An issuer may publish a chain this wallet does
+	// not recognise together with a key its metadata or a DID binds, and a
+	// chain that merely reaches no anchor says nothing about the signer. Every
+	// other chain refusal - a revoked certificate, an unknown revocation
+	// status, a failed DNS binding, a HAIP trust anchor inside x5c, an
+	// undecodable x5c - still refuses the credential, because it is evidence
+	// about the signer rather than about this wallet's configuration.
+	ResolveIssuerKeysWhenX5CUntrusted bool
 	// RequireHolderBinding rejects a credential whose holder binding this
 	// wallet cannot establish: one that carries no cnf claim at all, and one
 	// that carries a cnf confirmation key while the acceptance call supplies no
@@ -202,6 +214,11 @@ type CredentialVerification struct {
 	RevocationChecked      int
 	RevocationUnadvertised int
 	HolderBound            bool // cnf present and matched the holder key
+	// IssuerKey is the public key the issuer signature verified under, so a
+	// caller that resolved several candidates through ResolveIssuerKeys can
+	// tell which of them established the issuer. Nil when no issuer key was
+	// authenticated (UnverifiedIssuer).
+	IssuerKey *jose.JSONWebKey
 }
 
 // verifyCredentialForAcceptanceContext authenticates a raw credential before it
@@ -470,6 +487,16 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
+			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.ResolveIssuerKeys != nil && chainReachesNoAnchor(err) {
+				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header)
+				if resolveErr != nil {
+					// The chain was only this wallet's configuration; the
+					// verdict that stands is the key resolution's own.
+					return fmt.Errorf("issuer certificate chain reaches no configured trust anchor, and %w", resolveErr)
+				}
+				candidateKeys = keys
+				return a.verifyIssuerSignatureWithCandidates(parsedCredential, candidateKeys, verification)
+			}
 			return fmt.Errorf("issuer certificate chain is not trusted: %w", err)
 		}
 		if policy.IssuerX509.RequireIssuerDNSBinding {
@@ -488,27 +515,53 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 		if policy.ResolveIssuerKeys == nil {
 			return fmt.Errorf("%w: issuer key resolution is not configured", ErrIssuerKeyUnresolved)
 		}
-		keys, err := policy.ResolveIssuerKeys(issuer, header)
+		keys, err := resolveIssuerKeyCandidates(policy, issuer, header)
 		if err != nil {
-			return fmt.Errorf("%w: issuer key resolution failed: %w", ErrIssuerKeyUnresolved, err)
+			return err
 		}
-		if len(keys) == 0 {
-			return fmt.Errorf("%w: no issuer key could be resolved", ErrIssuerKeyUnresolved)
-		}
-		headerKeyID, _ := header["kid"].(string)
-		if headerKeyID != "" {
-			for _, key := range keys {
-				if key.KeyID == headerKeyID {
-					candidateKeys = append(candidateKeys, key)
-					break
-				}
-			}
-		}
-		if len(candidateKeys) == 0 {
-			candidateKeys = keys
+		candidateKeys = keys
+	}
+	return a.verifyIssuerSignatureWithCandidates(parsedCredential, candidateKeys, verification)
+}
+
+// resolveIssuerKeyCandidates asks the caller's ResolveIssuerKeys hook for the
+// issuer's keys and tries the ones the header's kid names first. The kid is a
+// hint, not a filter: the header is unauthenticated until a key verifies it,
+// and an issuer that rotated a key without renaming it must not be refused
+// because a stale identifier matched first.
+func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+	keys, err := policy.ResolveIssuerKeys(issuer, header)
+	if err != nil {
+		return nil, fmt.Errorf("%w: issuer key resolution failed: %w", ErrIssuerKeyUnresolved, err)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%w: no issuer key could be resolved", ErrIssuerKeyUnresolved)
+	}
+	headerKeyID, _ := header["kid"].(string)
+	if headerKeyID == "" {
+		return keys, nil
+	}
+	ordered := make([]jose.JSONWebKey, 0, len(keys))
+	for _, key := range keys {
+		if key.KeyID == headerKeyID {
+			ordered = append(ordered, key)
 		}
 	}
+	for _, key := range keys {
+		if key.KeyID != headerKeyID {
+			ordered = append(ordered, key)
+		}
+	}
+	return ordered, nil
+}
 
+// verifyIssuerSignatureWithCandidates verifies the issuer signature under the
+// first candidate key that verifies it, and records that key.
+func (a *CredentialAcceptor) verifyIssuerSignatureWithCandidates(
+	parsedCredential *credential.Credential,
+	candidateKeys []jose.JSONWebKey,
+	verification *CredentialVerification,
+) error {
 	verifiedKey := -1
 	for i := range candidateKeys {
 		ok, err := a.verifier.Verify(parsedCredential.Proof, &candidateKeys[i])
@@ -523,7 +576,18 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 	if verification.IssuerKeyID == "" {
 		verification.IssuerKeyID = candidateKeys[verifiedKey].KeyID
 	}
+	verified := candidateKeys[verifiedKey].Public()
+	verification.IssuerKey = &verified
 	return nil
+}
+
+// chainReachesNoAnchor reports whether an x5c chain refusal says only that the
+// chain reaches none of the configured trust anchors, as opposed to something
+// about the signer itself (revocation). It is the one refusal
+// ResolveIssuerKeysWhenX5CUntrusted lets the key-resolution hook take over from.
+func chainReachesNoAnchor(err error) bool {
+	var chainError *commonX509.SigningChainError
+	return errors.As(err, &chainError) && chainError.ErrorCode() == "x509_chain_untrusted"
 }
 
 func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.Duration) error {
