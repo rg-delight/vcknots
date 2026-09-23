@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -337,6 +338,7 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
+	req = req.WithContext(observe.WithEndpoint(req.Context(), observe.EndpointRequestObject))
 	req.Header.Set("User-Agent", "")
 	req.Header.Set("Accept", "application/oauth-authz-req+jwt")
 	if b.draft24 {

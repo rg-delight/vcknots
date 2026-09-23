@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
@@ -101,8 +103,11 @@ const maxVerifierResponseBodySize = 1 << 20 // 1 MiB
 // postAuthorizationResponse form-POSTs an authorization response (or error
 // response) to the verifier and returns the response body on HTTP 200.
 func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData url.Values) ([]byte, error) {
-	client := p.httpClient()
-	resp, err := client.Post(endpoint, "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	// A JWE travels in the "response" member (OpenID4VP 1.0 Section 8.3); the
+	// form itself looks the same either way, so the fact is stated for an
+	// observer rather than left to be inferred from the wire.
+	encrypted := formData.Get("response") != ""
+	resp, err := p.postResponseForm(endpoint, formData, encrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +126,19 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 		return nil, fmt.Errorf("failed to read verifier response: %w", readErr)
 	}
 	return body, nil
+}
+
+// postResponseForm sends one form to the verifier's Response Endpoint, labelled
+// for an observe.Transport with the endpoint role and whether it carries an
+// encrypted Authorization Response.
+func (p *Oid4vpPresenter) postResponseForm(endpoint string, formData url.Values, encrypted bool) (*http.Response, error) {
+	ctx := observe.WithResponseEncryption(observe.WithEndpoint(context.Background(), observe.EndpointResponse), encrypted)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return p.httpClient().Do(request)
 }
 
 // Present sends the presentation to the verifier.

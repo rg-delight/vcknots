@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
@@ -318,7 +319,7 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	// Create HTTP request
-	req, err := http.NewRequestWithContext(context.Background(), "POST", endpointURL.String(), bytes.NewReader(reqBodyBytes))
+	req, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointCredential), "POST", endpointURL.String(), bytes.NewReader(reqBodyBytes))
 	if err != nil {
 		return nil, err
 	}

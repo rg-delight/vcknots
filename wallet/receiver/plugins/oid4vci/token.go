@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -30,7 +31,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	txCode string,
 	opts ...types.TokenRequestOption,
 ) (*types.CredentialIssuanceAccessToken, error) {
-	ctx := context.Background()
+	ctx := observe.WithEndpoint(context.Background(), observe.EndpointToken)
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
@@ -176,7 +177,7 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	setClientAssertionForm(formData, request.ClientAssertion, request.ClientAssertionType)
 
 	var response types.PushedAuthorizationResponse
-	if err := o.doFinalRequest(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", headersToMap(headers), &response); err != nil {
+	if err := o.doFinalRequest(observe.WithEndpoint(ctx, observe.EndpointPushedAuthorization), http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", headersToMap(headers), &response); err != nil {
 		return nil, stageError(StagePAR, fmt.Errorf("failed to push authorization request: %w", err))
 	}
 	return &response, nil
@@ -206,7 +207,7 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, re
 	}
 
 	var response types.CredentialIssuanceAccessToken
-	if err := o.doFinalRequest(context.Background(), http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
+	if err := o.doFinalRequest(observe.WithEndpoint(context.Background(), observe.EndpointToken), http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
 		return nil, stageError(StageToken, fmt.Errorf("failed to exchange authorization code: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
@@ -352,7 +353,7 @@ func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(c
 // server's challenge endpoint. ctx bounds the request.
 func (o *Oid4vciReceiver) FetchClientAttestationChallenge(ctx context.Context, endpoint common.URIField) (*types.ClientAttestationChallengeResponse, error) {
 	var response types.ClientAttestationChallengeResponse
-	if err := o.doFinalRequest(ctx, http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
+	if err := o.doFinalRequest(observe.WithEndpoint(ctx, observe.EndpointAttestationChallenge), http.MethodPost, endpoint, nil, "", nil, &response); err != nil {
 		return nil, fmt.Errorf("failed to fetch client attestation challenge: %w", err)
 	}
 	return &response, nil
@@ -406,7 +407,7 @@ func (o *Oid4vciReceiver) doFormRequestWithDpopAndHeadersRetry(ctx context.Conte
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL.String(), bytes.NewReader(bodyBytes))
+		req, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointToken), http.MethodPost, endpointURL.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
 			return err
 		}

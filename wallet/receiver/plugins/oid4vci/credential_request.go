@@ -14,6 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -52,7 +53,7 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", nonceEndpointURL.Scheme)
 	}
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, nonceEndpointURL.String(), http.NoBody)
+	req, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointNonce), http.MethodPost, nonceEndpointURL.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create nonce request: %w", err)
 	}
@@ -112,7 +113,7 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 // for that server already carries it. ctx bounds the request.
 func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint common.URIField) (*types.NonceResponse, error) {
 	var response types.NonceResponse
-	responseHeader, err := o.doFinalRequestWithResponseHeader(ctx, http.MethodPost, endpoint, nil, "", nil, &response)
+	responseHeader, err := o.doFinalRequestWithResponseHeader(observe.WithEndpoint(ctx, observe.EndpointNonce), http.MethodPost, endpoint, nil, "", nil, &response)
 	if err != nil {
 		return nil, stageError(StageNonce, fmt.Errorf("failed to fetch nonce: %w", err))
 	}
@@ -132,7 +133,7 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 // carries no context; it binds its request to context.Background().
 func (o *Oid4vciReceiver) RequestCredential(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
 	var response types.CredentialResponse
-	if err := o.doBearerJSONRequest(context.Background(), endpoint, dpopBoundToken(accessToken), credentialRequest, dpopProof, &response); err != nil {
+	if err := o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), credentialRequest, dpopProof, &response); err != nil {
 		return nil, fmt.Errorf("failed to request credential: %w", err)
 	}
 	return &response, nil
@@ -144,7 +145,7 @@ func (o *Oid4vciReceiver) RequestCredential(endpoint common.URIField, accessToke
 // context.Background().
 func (o *Oid4vciReceiver) RequestCredentialWithDpopRetry(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, proofFactory DPoPProofFactory) (*types.CredentialResponse, error) {
 	var response types.CredentialResponse
-	if err := o.doBearerJSONRequestWithDpopRetry(context.Background(), endpoint, dpopBoundToken(accessToken), credentialRequest, proofFactory, &response); err != nil {
+	if err := o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), credentialRequest, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to request credential with DPoP retry: %w", err)
 	}
 	return &response, nil
@@ -155,7 +156,7 @@ func (o *Oid4vciReceiver) RequestCredentialWithDpopRetry(endpoint common.URIFiel
 // types.OID4VCIFinalTransport and carries no context; it binds its requests to
 // context.Background().
 func (o *Oid4vciReceiver) PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
-	return o.postCredentialEndpointForToken(context.Background(), endpoint, dpopBoundToken(accessToken), body, contentType, proofFactory)
+	return o.postCredentialEndpointForToken(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), body, contentType, proofFactory)
 }
 
 func (o *Oid4vciReceiver) postCredentialEndpointForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
@@ -187,7 +188,7 @@ func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetryForToken(ctx conte
 // the same reason as PostCredentialEndpointWithNonceRetryForToken.
 // ctx bounds every attempt.
 func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetryForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
-	return o.doBearerJSONRequestWithDpopRetry(ctx, endpoint, accessToken, notification, proofFactory, nil)
+	return o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, accessToken, notification, proofFactory, nil)
 }
 
 // PostCredentialEndpointWithNonceRetry posts the credential request body built
@@ -202,7 +203,7 @@ func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetryForToken(ctx co
 // It is not part of types.OID4VCIFinalTransport and carries no context; it
 // binds its requests to context.Background().
 func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetry(endpoint common.URIField, accessToken string, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
-	return o.postCredentialEndpointWithNonceRetry(context.Background(), endpoint, dpopBoundToken(accessToken), nonceEndpoint, initialCNonce, build, proofFactory)
+	return o.postCredentialEndpointWithNonceRetry(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), nonceEndpoint, initialCNonce, build, proofFactory)
 }
 
 func (o *Oid4vciReceiver) postCredentialEndpointWithNonceRetry(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
@@ -247,7 +248,7 @@ func (o *Oid4vciReceiver) postCredentialEndpointWithNonceRetry(ctx context.Conte
 // context.Background().
 func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
 	var response types.CredentialResponse
-	if err := o.doBearerJSONRequest(context.Background(), endpoint, dpopBoundToken(accessToken), deferredRequest, dpopProof, &response); err != nil {
+	if err := o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointDeferredCredential), endpoint, dpopBoundToken(accessToken), deferredRequest, dpopProof, &response); err != nil {
 		return nil, fmt.Errorf("failed to request deferred credential: %w", err)
 	}
 	return &response, nil
@@ -259,7 +260,7 @@ func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, ac
 // context.Background().
 func (o *Oid4vciReceiver) RequestDeferredCredentialWithDpopRetry(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, proofFactory DPoPProofFactory) (*types.CredentialResponse, error) {
 	var response types.CredentialResponse
-	if err := o.doBearerJSONRequestWithDpopRetry(context.Background(), endpoint, dpopBoundToken(accessToken), deferredRequest, proofFactory, &response); err != nil {
+	if err := o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointDeferredCredential), endpoint, dpopBoundToken(accessToken), deferredRequest, proofFactory, &response); err != nil {
 		return nil, fmt.Errorf("failed to request deferred credential with DPoP retry: %w", err)
 	}
 	return &response, nil
@@ -269,7 +270,7 @@ func (o *Oid4vciReceiver) RequestDeferredCredentialWithDpopRetry(endpoint common
 // pre-built DPoP proof. It is not part of types.OID4VCIFinalTransport and
 // carries no context; it binds its request to context.Background().
 func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, accessToken string, notification types.NotificationRequest, dpopProof string) error {
-	return o.doBearerJSONRequest(context.Background(), endpoint, dpopBoundToken(accessToken), notification, dpopProof, nil)
+	return o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointNotification), endpoint, dpopBoundToken(accessToken), notification, dpopProof, nil)
 }
 
 // SendCredentialNotificationWithDpopRetry sends a Section 11 notification with
@@ -277,7 +278,7 @@ func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, a
 // types.OID4VCIFinalTransport and carries no context; it binds its requests to
 // context.Background().
 func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
-	return o.doBearerJSONRequestWithDpopRetry(context.Background(), endpoint, dpopBoundToken(accessToken), notification, proofFactory, nil)
+	return o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointNotification), endpoint, dpopBoundToken(accessToken), notification, proofFactory, nil)
 }
 
 // EncodeCredentialRequest serializes a Credential Request or Deferred Credential

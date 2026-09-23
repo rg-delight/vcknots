@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -304,7 +305,7 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 		return fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureRequired)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	req, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointIssuerMetadata), http.MethodGet, requestURL.String(), nil)
 	if err != nil {
 		return err
 	}
@@ -528,7 +529,7 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	}
 
 	var metadata types.AuthorizationServerMetadata
-	if err := o.doRequest(context.Background(), "GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
+	if err := o.doRequest(observe.WithEndpoint(context.Background(), observe.EndpointAuthorizationServerMetadata), "GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
 		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf("failed to fetch authorization server metadata: %w", err))
 	}
 

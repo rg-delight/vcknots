@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -308,7 +309,7 @@ func (w *Wallet) requestOID4VCIFinalCredentials(
 	}
 	credentialEndpoint := issuerMetadata.CredentialEndpoint
 	rawResponse, cNonce, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
-		ctx,
+		observe.WithEndpoint(ctx, observe.EndpointCredential),
 		credentialEndpoint,
 		*token,
 		issuerMetadata.NonceEndpoint,

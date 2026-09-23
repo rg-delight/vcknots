@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -507,7 +508,11 @@ func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalA
 		return "", fmt.Errorf("the authorization request cannot be sent: %w", ErrAuthorizationRequestURIExpired)
 	}
 	authClient := noRedirectHTTPClient(client)
-	response, err := authClient.Get(auth.AuthorizationURL)
+	request, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointAuthorization), http.MethodGet, auth.AuthorizationURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
+	}
+	response, err := authClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -162,7 +163,7 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 			return nil, fmt.Errorf("failed to encode deferred credential request: %w", err)
 		}
 		rawResponse, _, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
-			ctx,
+			observe.WithEndpoint(ctx, observe.EndpointDeferredCredential),
 			endpoint,
 			*token,
 			nil,

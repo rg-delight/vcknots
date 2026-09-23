@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
@@ -253,7 +252,7 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	}
 
 	formData := url.Values{"response": []string{encryptedResponse}}
-	resp, err := p.httpClient().Post(endpoint.String(), "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	resp, err := p.postResponseForm(endpoint.String(), formData, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to submit encrypted authorization response: %w", err)
 	}
