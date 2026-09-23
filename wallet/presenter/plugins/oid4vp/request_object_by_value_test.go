@@ -202,3 +202,88 @@ func (f *requestObjectFixture) haipPresenter(deliveredByReference bool) *Oid4vpP
 		Profile:                 profile.HAIP,
 	}
 }
+
+// TestParseRequestObjectAttestsCallerWalletNonce: an application that fetched
+// the Request Object with its own request_uri POST names the wallet_nonce it
+// sent (RequestObjectValidationOptions.WalletNonce), and the by-value entry
+// point holds the Request Object to it exactly as it would hold one this
+// library fetched (OpenID4VP 1.0 Section 5.10.1).
+func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
+	const sent = "caller-wallet-nonce"
+	presenterAttesting := func(f *requestObjectFixture, walletNonce string) *Oid4vpPresenter {
+		options := f.options()
+		options.WalletNonce = walletNonce
+		return &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+	}
+	cases := []struct {
+		name        string
+		walletNonce string
+		claim       any
+		wantErr     bool
+	}{
+		{name: "echoed", walletNonce: sent, claim: sent},
+		{name: "different", walletNonce: sent, claim: "other-nonce", wantErr: true},
+		{name: "missing", walletNonce: sent, wantErr: true},
+		{name: "not a string", walletNonce: sent, claim: 42, wantErr: true},
+		{name: "no nonce attested ignores the claim", claim: "unsolicited"},
+	}
+	for _, draft24 := range []bool{false, true} {
+		for _, tc := range cases {
+			name := tc.name
+			if draft24 {
+				name = "draft24/" + name
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newRequestObjectFixture(t)
+				claims := f.claims()
+				if tc.claim != nil {
+					claims["wallet_nonce"] = tc.claim
+				}
+				p := presenterAttesting(f, tc.walletNonce)
+				parse := p.ParseRequestObject
+				if draft24 {
+					claims["response_mode"] = "direct_post"
+					delete(claims, "dcql_query")
+					claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
+					parse = p.ParseDraft24RequestObject
+				}
+				request, err := parse(f.sign(t, claims, nil), f.clientID())
+				if tc.wantErr {
+					if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
+						t.Fatalf("want ErrRequestObjectWalletNonceMismatch, got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("want the Request Object accepted, got %v", err)
+				}
+				if got := request.RequestObjectVerification.WalletNonce; got != tc.walletNonce {
+					t.Fatalf("RequestObjectVerification.WalletNonce = %q, want %q", got, tc.walletNonce)
+				}
+			})
+		}
+	}
+}
+
+// TestRequestURIPostIgnoresCallerWalletNonce: when this library performs the
+// request_uri POST itself, the nonce it sent is the one the Verifier received,
+// so a caller attestation configured for by-value parsing never replaces it.
+func TestRequestURIPostIgnoresCallerWalletNonce(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	captured := &capturedRequestURIForm{}
+	f.echoNonceHandler(t, captured, nil)
+	options := f.options()
+	options.WalletNonce = "caller-wallet-nonce"
+	p := &Oid4vpPresenter{
+		HTTPClient:              f.server.Client(),
+		RequestObjectValidation: &options,
+		RequestURINonce:         func() (string, error) { return "library-wallet-nonce", nil },
+	}
+	request, err := f.parseRequestURIPost(t, p)
+	if err != nil {
+		t.Fatalf("the echoed library nonce must be accepted: %v", err)
+	}
+	if got := request.RequestObjectVerification.WalletNonce; got != "library-wallet-nonce" {
+		t.Fatalf("RequestObjectVerification.WalletNonce = %q, want the nonce this library sent", got)
+	}
+}

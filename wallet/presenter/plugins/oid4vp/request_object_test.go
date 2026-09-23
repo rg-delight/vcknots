@@ -23,7 +23,11 @@ func TestFinalRequestObjectAuthenticatesHashWithoutDNSAndChecksCRL(t *testing.T)
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	claims["iss"] = map[string]any{"ignored": true}
+	// client_metadata carries no key: X.509 authentication never reads it.
+	// direct_post keeps the empty jwks admissible, since direct_post.jwt
+	// would be refused for having nothing to encrypt the response to.
 	claims["client_metadata"] = map[string]any{"jwks": map[string]any{"keys": []any{}}}
+	claims["response_mode"] = "direct_post"
 	req, err := f.parse(t, claims)
 	if err != nil {
 		t.Fatal(err)
