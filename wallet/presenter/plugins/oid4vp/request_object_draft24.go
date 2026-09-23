@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
-	"time"
 
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
@@ -225,25 +224,31 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// verify the JWT signature and extract standard claims for validation
-	standardClaims := jwt.Claims{}
-	if err := parsedJWT.Claims(&k, &standardClaims); err != nil {
+	// verify the JWT signature and extract the verified claims
+	verifiedClaims := make(commonJOSE.Claims)
+	if err := parsedJWT.Claims(&k, &verifiedClaims); err != nil {
 		b.errValidation = fmt.Errorf("failed to verify JWT signature: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		return b
 	}
 
-	// validate standard JWT claims as per RFC9101 and OID4VP requirements
-	if err := standardClaims.Validate(jwt.Expected{
-		Time: time.Now(), // validates exp, iat, nbf claims
-	}); err != nil {
+	// The registered claims (RFC 9101 Section 10.2, RFC 7519 Section 4.1)
+	// are judged by the same policy as every other Request Object: at the
+	// caller's verification time (RequestObjectValidationOptions.Now) with
+	// the caller's ClockSkew. A wallet that re-authenticates at consent the
+	// Request Object it admitted earlier names the admission instant, so a
+	// Request Object whose exp falls between the two is not refused at
+	// consent. This path never read aud, and keeps not reading it.
+	policy := b.resolveClaimPolicy(options, requestObjectNow(options))
+	policy.Audiences = nil
+	policy.AudienceOptional = true
+	if err := validateRequestObjectClaims(verifiedClaims, policy); err != nil {
 		b.errValidation = fmt.Errorf("JWT standard claims validation failed: %w", err)
 		return b
 	}
-
-	// extract all verified claims for parameter processing
-	verifiedClaims := make(commonJOSE.Claims)
-	if err := parsedJWT.Claims(&k, &verifiedClaims); err != nil {
-		b.errValidation = fmt.Errorf("failed to extract verified claims: %w", err)
+	// This path has always refused a Request Object issued in the future;
+	// it keeps doing so, against the same instant and skew.
+	if err := validateDraft24IssuedAt(verifiedClaims, policy); err != nil {
+		b.errValidation = fmt.Errorf("JWT standard claims validation failed: %w", err)
 		return b
 	}
 
@@ -256,4 +261,17 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	}
 
 	return b
+}
+
+// validateDraft24IssuedAt refuses an iat later than the verification time plus
+// the clock skew (RFC 7519 Section 4.1.6 leaves the check to the recipient).
+func validateDraft24IssuedAt(claims commonJOSE.Claims, policy requestObjectClaimPolicy) error {
+	issuedAt, err := requestObjectNumericDate(claims, "iat")
+	if err != nil || issuedAt == nil {
+		return err
+	}
+	if requestObjectInstant(policy.Now.Add(policy.ClockSkew)).Cmp(issuedAt) < 0 {
+		return fmt.Errorf("request object is issued in the future: %w", ErrRequestObjectExpired)
+	}
+	return nil
 }

@@ -1,10 +1,13 @@
 package oid4vp
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 )
 
 // draft24X509Claims is a Draft24 Authorization Request as a verifier sends it:
@@ -110,5 +113,73 @@ func TestDraft24RequestObjectRejectsExpiredRequestObject(t *testing.T) {
 	_, err := f.presenter().ParseDraft24PresentationRequest(draft24RequestURI(t, f, claims))
 	if err == nil || !strings.Contains(err.Error(), "request object is outside its exp validity") {
 		t.Fatalf("Draft24 must reject an expired Request Object: %v", err)
+	}
+}
+
+// draft24ClientMetadataSignedURI is a Draft24 request whose Request Object is
+// signed with the key its own client_metadata publishes: the one Draft24 path
+// that is not the shared Final authentication.
+func draft24ClientMetadataSignedURI(t *testing.T, f *requestObjectFixture, issuedAt time.Time, lifetime time.Duration) string {
+	t.Helper()
+	claims := map[string]any{
+		"client_id":     "redirect_uri:https://verifier.example/response",
+		"response_type": "vp_token",
+		"response_mode": "direct_post",
+		"response_uri":  "https://verifier.example/response",
+		"nonce":         "draft24-nonce",
+		"iat":           issuedAt.Unix(),
+		"exp":           issuedAt.Add(lifetime).Unix(),
+		"client_metadata": map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: &f.key.PublicKey, Algorithm: "ES256", KeyID: "verifier-key"},
+		}}},
+		"presentation_definition": map[string]any{
+			"id":                "pd-1",
+			"input_descriptors": []any{map[string]any{"id": "pid"}},
+		},
+	}
+	token := f.sign(t, claims, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt").WithHeader("kid", "verifier-key"))
+	return "openid4vp://authorize?" + url.Values{
+		"client_id": {"redirect_uri:https://verifier.example/response"},
+		"request":   {token},
+	}.Encode()
+}
+
+// TestDraft24ClientMetadataRequestObjectUsesTheCallerClock is the regression
+// for a Draft24 Request Object judged against the wall clock. A wallet that
+// re-authenticates at consent the Request Object it admitted earlier passes
+// the admission instant as Now; the object must be judged at that instant
+// with the caller's ClockSkew, exactly as the Final path judges it.
+func TestDraft24ClientMetadataRequestObjectUsesTheCallerClock(t *testing.T) {
+	f := newRequestObjectFixture(t, "verifier.example")
+	// Issued an hour ago with a one-minute lifetime: expired by the wall
+	// clock, valid at the admission instant the caller names.
+	admission := time.Now().Add(-time.Hour).Truncate(time.Second)
+	uri := draft24ClientMetadataSignedURI(t, f, admission, time.Minute)
+	parse := func(now time.Time, skew time.Duration) error {
+		options := RequestObjectValidationOptions{Now: func() time.Time { return now }, ClockSkew: skew}
+		presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+		_, err := presenter.ParseDraft24PresentationRequest(uri)
+		return err
+	}
+
+	if err := parse(admission.Add(30*time.Second), 0); err != nil {
+		t.Fatalf("a Request Object valid at the caller's instant was refused: %v", err)
+	}
+	err := parse(admission.Add(2*time.Minute), 0)
+	if !errors.Is(err, ErrRequestObjectExpired) {
+		t.Fatalf("a Request Object past exp at the caller's instant must be refused as expired: %v", err)
+	}
+	if err := parse(admission.Add(2*time.Minute), 5*time.Minute); err != nil {
+		t.Fatalf("the caller's ClockSkew must be applied to exp: %v", err)
+	}
+
+	// Judged at an instant before iat, the object is refused as issued in
+	// the future, which this path has always done, with the skew applied.
+	early := admission.Add(-time.Hour)
+	if err := parse(early, 0); !errors.Is(err, ErrRequestObjectExpired) {
+		t.Fatalf("a Request Object issued after the caller's instant must be refused: %v", err)
+	}
+	if err := parse(early, 2*time.Hour); err != nil {
+		t.Fatalf("the caller's ClockSkew must be applied to iat: %v", err)
 	}
 }
