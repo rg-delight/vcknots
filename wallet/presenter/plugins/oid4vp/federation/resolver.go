@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/common/observe"
 )
 
 // Package defaults a zero-valued Resolver field stands for. They match the
@@ -241,7 +243,7 @@ func (run *resolution) fetchEntityConfiguration(entityID string) (*entityConfigu
 	if err != nil {
 		return nil, err
 	}
-	raw, err := run.resolver.fetchEntityStatement(run.ctx, statementURL)
+	raw, err := run.resolver.fetchEntityStatement(observe.WithEndpoint(run.ctx, observe.EndpointFederationEntityConfiguration), statementURL)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +265,7 @@ func (run *resolution) subordinateStatement(superior *entityConfiguration, subje
 	if cached, ok := run.subordinates[statementURL]; ok {
 		return cached.statement, cached.err
 	}
-	statement, err := run.resolver.fetchEntityStatement(run.ctx, statementURL)
+	statement, err := run.resolver.fetchEntityStatement(observe.WithEndpoint(run.ctx, observe.EndpointFederationSubordinateStatement), statementURL)
 	run.subordinates[statementURL] = statementResult{statement: statement, err: err}
 	return statement, err
 }
