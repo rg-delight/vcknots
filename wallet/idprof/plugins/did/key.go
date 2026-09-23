@@ -1,7 +1,9 @@
 package did
 
 import (
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"encoding/binary"
 	"fmt"
@@ -95,31 +97,41 @@ func (p *DIDKeyPlugin) Resolve(id string) (*types.IdentityProfile, error) {
 		return nil, fmt.Errorf("failed to decode multicodec: %w", err)
 	}
 
-	if codecType != P256Pub {
-		return nil, fmt.Errorf("unsupported key type: %d", codecType)
-	}
-
-	// Parse the compressed P256 public key
-	pubKey, err := parseCompressedP256Key(keyBytes)
+	jwk, err := didKeyPublicJWK(codecType, keyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse P256 key: %w", err)
+		return nil, err
 	}
-
-	// Create JWK from the public key
-	jwk := &jose.JSONWebKey{
-		Key:       pubKey,
-		KeyID:     id,
-		Algorithm: string(jose.ES256),
-		Use:       "sig",
-	}
+	jwk.KeyID = id
+	jwk.Use = "sig"
 
 	return &types.IdentityProfile{
 		ID:     id,
 		TypeID: "did:key",
 		Keys: &jose.JSONWebKeySet{
-			Keys: []jose.JSONWebKey{*jwk},
+			Keys: []jose.JSONWebKey{jwk},
 		},
 	}, nil
+}
+
+// didKeyPublicJWK decodes the public key a did:key identifier carries. The
+// did:key method names the key type with a multicodec; this library supports
+// P-256 (0x1200) and Ed25519 (0xed).
+func didKeyPublicJWK(codecType uint64, keyBytes []byte) (jose.JSONWebKey, error) {
+	switch codecType {
+	case P256Pub:
+		pubKey, err := parseCompressedP256Key(keyBytes)
+		if err != nil {
+			return jose.JSONWebKey{}, fmt.Errorf("failed to parse P256 key: %w", err)
+		}
+		return jose.JSONWebKey{Key: pubKey, Algorithm: string(jose.ES256)}, nil
+	case Ed25519Pub:
+		if len(keyBytes) != ed25519.PublicKeySize {
+			return jose.JSONWebKey{}, fmt.Errorf("failed to parse Ed25519 key: %d bytes, want %d", len(keyBytes), ed25519.PublicKeySize)
+		}
+		return jose.JSONWebKey{Key: ed25519.PublicKey(append([]byte(nil), keyBytes...)), Algorithm: string(jose.EdDSA)}, nil
+	default:
+		return jose.JSONWebKey{}, fmt.Errorf("unsupported key type: %d", codecType)
+	}
 }
 
 // Update updates a did:key profile
@@ -165,14 +177,11 @@ func (p *DIDKeyPlugin) Validate(profile *types.IdentityProfile) error {
 	}
 
 	// Compare the actual key material
-	profilePubKey, ok1 := profileKey.Key.(*ecdsa.PublicKey)
-	resolvedPubKey, ok2 := resolvedKey.Key.(*ecdsa.PublicKey)
-
-	if !ok1 || !ok2 {
-		return fmt.Errorf("keys are not ECDSA public keys")
+	resolvedPubKey, ok := resolvedKey.Key.(interface{ Equal(crypto.PublicKey) bool })
+	if !ok {
+		return fmt.Errorf("resolved key is not a comparable public key")
 	}
-
-	if !profilePubKey.Equal(resolvedPubKey) {
+	if !resolvedPubKey.Equal(profileKey.Key) {
 		return fmt.Errorf("key material does not match DID identifier")
 	}
 
@@ -197,30 +206,10 @@ func NewDIDKeyProfile(opts *DIDKeyProfileCreateOptions) (*DIDKeyProfile, error) 
 		return nil, fmt.Errorf("public key is required in the JSON Web Key")
 	}
 
-	pubKey, ok := opts.PublicKey.Key.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("public key must be of type ecdsa.PublicKey")
+	encoded, err := didKeyFingerprint(opts.PublicKey.Key)
+	if err != nil {
+		return nil, err
 	}
-
-	jwk := opts.PublicKey
-	if jwk.Key == nil {
-		return nil, fmt.Errorf("public key is required in the JSON Web Key")
-	}
-
-	if !ok {
-		return nil, fmt.Errorf("public key must be of type ecdsa.PublicKey")
-	}
-
-	if pubKey.Curve != elliptic.P256() {
-		return nil, fmt.Errorf("only P256 curve is supported for DIDKeyProfile")
-	}
-
-	encoded := base58.Encode(
-		encodeMulticodec(
-			P256Pub,
-			elliptic.MarshalCompressed(elliptic.P256(), pubKey.X, pubKey.Y),
-		),
-	)
 
 	if len(encoded) == 0 {
 		return nil, fmt.Errorf("encoded public key cannot be empty")
@@ -242,6 +231,25 @@ func NewDIDKeyProfile(opts *DIDKeyProfileCreateOptions) (*DIDKeyProfile, error) 
 	return p, nil
 }
 
+// didKeyFingerprint returns the base58-btc encoding of the multicodec-prefixed
+// public key that follows "did:key:z".
+func didKeyFingerprint(key any) (string, error) {
+	switch pubKey := key.(type) {
+	case *ecdsa.PublicKey:
+		if pubKey.Curve != elliptic.P256() {
+			return "", fmt.Errorf("only P256 curve is supported for DIDKeyProfile")
+		}
+		return base58.Encode(encodeMulticodec(P256Pub, elliptic.MarshalCompressed(elliptic.P256(), pubKey.X, pubKey.Y))), nil
+	case ed25519.PublicKey:
+		if len(pubKey) != ed25519.PublicKeySize {
+			return "", fmt.Errorf("invalid Ed25519 public key size %d", len(pubKey))
+		}
+		return base58.Encode(encodeMulticodec(Ed25519Pub, pubKey)), nil
+	default:
+		return "", fmt.Errorf("public key must be a P-256 ecdsa.PublicKey or an ed25519.PublicKey")
+	}
+}
+
 // ToDIDProfile converts DIDKeyProfile to DIDProfile
 func (p *DIDKeyProfile) ToDIDProfile() *DIDProfile {
 	return &p.DIDProfile
@@ -253,7 +261,8 @@ const (
 )
 
 const (
-	P256Pub = 0x1200
+	P256Pub    = 0x1200
+	Ed25519Pub = 0xed
 )
 
 // decodeMulticodec decodes a multicodec-encoded byte slice
