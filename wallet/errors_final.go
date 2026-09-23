@@ -295,3 +295,28 @@ var (
 	// Request needs.
 	ErrKeyAttestationInvalid = common.NewCodedError("key_attestation_invalid", "key attestation is not valid for this credential request")
 )
+
+// Sentinel errors NotifyOID4VCIFinalCredential and NotifyOID4VCIDraft13Credential
+// return before a Notification Request is sent (OpenID4VCI 1.0 §11.1, Draft 13
+// §10.1). Each is a request the wallet itself got wrong, so repeating it cannot
+// succeed.
+var (
+	// ErrNotificationIDMissing reports a request without the REQUIRED
+	// notification_id.
+	ErrNotificationIDMissing = common.NewCodedError("notification_id_missing", "notification_id is required")
+	// ErrNotificationEventInvalid reports an event other than
+	// credential_accepted, credential_failure or credential_deleted.
+	ErrNotificationEventInvalid = common.NewCodedError("notification_event_invalid", "notification event is not credential_accepted, credential_failure or credential_deleted")
+	// ErrNotificationEventDescriptionInvalid reports an event_description with
+	// a character outside %x20-21 / %x23-5B / %x5D-7E.
+	ErrNotificationEventDescriptionInvalid = common.NewCodedError("notification_event_description_invalid", "event_description contains a character the notification request does not allow")
+	// ErrNotificationAccessTokenMissing reports a request without the access
+	// token the Notification Endpoint requires.
+	ErrNotificationAccessTokenMissing = common.NewCodedError("notification_access_token_missing", "access token is required for the notification request")
+	// ErrNotificationEndpointMissing reports an issuer that advertises no
+	// notification_endpoint, or a caller that named none.
+	ErrNotificationEndpointMissing = common.NewCodedError("notification_endpoint_missing", "notification endpoint is missing on credential issuer")
+	// ErrNotificationDPoPKeyMissing reports a DPoP-bound access token without
+	// the client key it is bound to, so no RFC 9449 proof can be built.
+	ErrNotificationDPoPKeyMissing = common.NewCodedError("notification_dpop_key_missing", "the access token is DPoP-bound but no client key was supplied")
+)

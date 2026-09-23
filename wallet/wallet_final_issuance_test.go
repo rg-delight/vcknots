@@ -105,6 +105,9 @@ type finalIssuanceFixture struct {
 	nonceHandler      http.HandlerFunc
 	credentialHandler http.HandlerFunc
 	deferredHandler   http.HandlerFunc
+	// notificationHandler replaces the default 204 of the §11 Notification
+	// Endpoint, after the request was recorded.
+	notificationHandler http.HandlerFunc
 
 	issuerMetadataCalls int
 	parCalls            int
@@ -114,6 +117,10 @@ type finalIssuanceFixture struct {
 	credentialCalls     int
 	deferredCalls       int
 	notificationEvents  []string
+	// notificationBodies and notificationHeaders record every §11.1
+	// Notification Request as it reached the issuer.
+	notificationBodies  []map[string]any
+	notificationHeaders []http.Header
 	pushedState         string
 	lastCredentialBody  map[string]any
 	lastDeferredBody    map[string]any
@@ -413,9 +420,16 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		f.writeDefaultCredentialResponse(w, payload)
 	case "/notification":
-		var body receiverTypes.NotificationRequest
+		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		f.notificationEvents = append(f.notificationEvents, body.Event)
+		event, _ := body["event"].(string)
+		f.notificationEvents = append(f.notificationEvents, event)
+		f.notificationBodies = append(f.notificationBodies, body)
+		f.notificationHeaders = append(f.notificationHeaders, r.Header.Clone())
+		if f.notificationHandler != nil {
+			f.notificationHandler(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case "/offer":
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{

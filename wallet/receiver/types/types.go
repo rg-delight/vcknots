@@ -743,9 +743,11 @@ type DeferredCredentialRequest struct {
 	TransactionID string `json:"transaction_id"`
 }
 
+// NotificationRequest is the OpenID4VCI 1.0 §11.1 Notification Request body.
 type NotificationRequest struct {
-	NotificationID string `json:"notification_id"`
-	Event          string `json:"event"`
+	NotificationID   string `json:"notification_id"`
+	Event            string `json:"event"`
+	EventDescription string `json:"event_description,omitempty"`
 }
 
 // Receiver defines the interface for credential receiving components

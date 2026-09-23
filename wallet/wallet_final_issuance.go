@@ -434,35 +434,3 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	}
 	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, encryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)
 }
-
-// NotifyOID4VCIFinalCredentialDeleted sends the §11 credential_deleted
-// notification for a credential the wallet removed from storage. It is
-// NotifyOID4VCIFinalCredentialDeletedContext with a background context.
-func (w *Wallet) NotifyOID4VCIFinalCredentialDeleted(req OID4VCIFinalNotificationRequest) error {
-	return w.NotifyOID4VCIFinalCredentialDeletedContext(context.Background(), req)
-}
-
-// NotifyOID4VCIFinalCredentialDeletedContext sends the §11 credential_deleted
-// notification for a credential the wallet removed from storage.
-func (w *Wallet) NotifyOID4VCIFinalCredentialDeletedContext(ctx context.Context, req OID4VCIFinalNotificationRequest) error {
-	if err := requireOID4VCIContext(ctx, "the notification request"); err != nil {
-		return err
-	}
-	if req.Type != receiverTypes.Oid4vci {
-		return fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
-	}
-	if strings.TrimSpace(req.NotificationID) == "" {
-		return fmt.Errorf("notification ID is required")
-	}
-	if req.AccessToken == nil {
-		return fmt.Errorf("access token is required")
-	}
-	if req.IssuerMetadata == nil || req.IssuerMetadata.NotificationEndpoint == nil {
-		return fmt.Errorf("notification endpoint is missing on credential issuer")
-	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
-	if err != nil {
-		return fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
-	}
-	return notifyOID4VCIFinalCredential(ctx, finalReceiver, w.oid4vciFinalSigner(finalReceiver), req.IssuerMetadata, req.AccessToken, req.ClientKey, req.NotificationID, "credential_deleted")
-}
