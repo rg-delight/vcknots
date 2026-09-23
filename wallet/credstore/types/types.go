@@ -74,6 +74,8 @@ func (ce *CredentialEntry) SerializationFlavor() (credential.SupportedSerializat
 		return credential.JwtVc, nil
 	case string(credential.SDJwtVC):
 		return credential.SDJwtVC, nil
+	case string(credential.LdpVc):
+		return credential.LdpVc, nil
 	case string(credential.MockFormat):
 		return credential.MockFormat, nil
 	default:

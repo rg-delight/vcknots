@@ -6,10 +6,12 @@ import (
 	"net/url"
 
 	"github.com/google/uuid"
+	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/serializer/plugins/ldpvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 )
@@ -58,6 +60,42 @@ func (w *Wallet) PresentDraft24Selection(
 	selections []Draft24CredentialSelection,
 	options serializerTypes.SerializePresentationOptions,
 ) (string, error) {
+	return w.PresentDraft24SelectionWithOptions(req, endpoint, key, selections, Draft24PresentOptions{SerializeOptions: options})
+}
+
+// Draft24ResponseTransform lets a caller observe and rewrite a Presentation
+// Exchange response after the library built and signed it and before it is
+// sent: the vp_token bytes and the presentation_submission. It exists for
+// experiments that need a deliberately malformed response to reach a
+// Verifier; a rewrite happens after signing, so it can break the proof. An
+// error stops the presentation before anything is sent and is reported
+// wrapped in ErrDraft24ResponseTransformFailed.
+type Draft24ResponseTransform func(vpToken []byte, submission presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error)
+
+// ErrDraft24ResponseTransformFailed reports that a caller-supplied
+// Draft24ResponseTransform refused the response it was given.
+var ErrDraft24ResponseTransformFailed = common.NewCodedError("draft24_response_transform_failed", "response transform failed")
+
+// Draft24PresentOptions configures PresentDraft24SelectionWithOptions.
+type Draft24PresentOptions struct {
+	// SerializeOptions are the serializer options used for every selection
+	// that names none of its own. A nil value uses the serializer default.
+	SerializeOptions serializerTypes.SerializePresentationOptions
+	// ResponseTransform rewrites the finished response. A nil value sends the
+	// response exactly as the library built it.
+	ResponseTransform Draft24ResponseTransform
+}
+
+// PresentDraft24SelectionWithOptions is PresentDraft24Selection with the
+// options a caller may need beyond the serializer's.
+func (w *Wallet) PresentDraft24SelectionWithOptions(
+	req *oid4vp.CredentialPresentationRequest,
+	endpoint url.URL,
+	key IKeyEntry,
+	selections []Draft24CredentialSelection,
+	presentOptions Draft24PresentOptions,
+) (string, error) {
+	options := presentOptions.SerializeOptions
 	if req == nil {
 		return "", fmt.Errorf("authorization request is required to present a Draft24 selection")
 	}
@@ -106,6 +144,12 @@ func (w *Wallet) PresentDraft24Selection(
 		ID:            uuid.New().String(),
 		DefinitionID:  req.PresentationDefinition.ID,
 		DescriptorMap: descriptorMap,
+	}
+	if presentOptions.ResponseTransform != nil {
+		vpToken, submission, err = presentOptions.ResponseTransform(vpToken, submission)
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", ErrDraft24ResponseTransformFailed, err)
+		}
 	}
 	return w.presenter.PresentDraft24(presenterTypes.Oid4vp, endpoint, vpToken, submission, presentationRequest)
 }
@@ -227,11 +271,19 @@ func (w *Wallet) draft24SerializeOptions(
 	options serializerTypes.SerializePresentationOptions,
 	flavor *credential.SupportedSerializationFlavor,
 ) (serializerTypes.SerializePresentationOptions, error) {
-	if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok {
-		if sdOpts == nil {
+	switch typed := options.(type) {
+	case *sdjwtvc.SdJwtVcPresentationOptions:
+		if typed == nil {
 			options = nil
 		} else {
-			clone := *sdOpts
+			clone := *typed
+			options = &clone
+		}
+	case *ldpvc.LdpVcPresentationOptions:
+		if typed == nil {
+			options = nil
+		} else {
+			clone := *typed
 			options = &clone
 		}
 	}

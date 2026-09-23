@@ -122,21 +122,27 @@ func (w *Wallet) buildDraft24DescriptorMap(credentials []*SavedCredential, flavo
 				continue
 			}
 
+			// W3C VC-JWT carries the Verifiable Presentation under the "vp"
+			// claim, so a path_nested evaluated against the decoded
+			// jwt_vp_json token reaches a credential at
+			// $.vp.verifiableCredential[i]. An ldp_vp is the Verifiable
+			// Presentation itself (OpenID4VP Appendix B.1.3.1), so the
+			// credential sits at $.verifiableCredential[i].
+			nestedPath := fmt.Sprintf("$.vp.verifiableCredential[%d]", i)
+			if *flavor == credential.LdpVc {
+				nestedPath = fmt.Sprintf("$.verifiableCredential[%d]", i)
+			}
 			descriptorMap = append(descriptorMap, presenterTypes.DescriptorMapItem{
 				ID:     descriptionItemID,
 				Format: vpFormat,
-				// One JWT Verifiable Presentation carries every credential, so
-				// the vp_token is a single token at "$" and the nested path is
-				// what distinguishes the credentials inside it.
+				// One Verifiable Presentation carries every credential, so the
+				// vp_token is a single presentation at "$" and the nested path
+				// is what distinguishes the credentials inside it.
 				Path: "$",
 				PathNested: &presenterTypes.DescriptorMapItem{
 					ID:     descriptionItemID,
 					Format: vcFormat,
-					// W3C VC-JWT carries the Verifiable Presentation under the
-					// "vp" claim, so a path_nested evaluated against the decoded
-					// jwt_vp_json token reaches a credential at
-					// $.vp.verifiableCredential[i].
-					Path: fmt.Sprintf("$.vp.verifiableCredential[%d]", i),
+					Path:   nestedPath,
 				},
 			})
 		}

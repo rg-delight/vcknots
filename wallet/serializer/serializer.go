@@ -7,6 +7,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/jwtvc"
+	"github.com/trustknots/vcknots/wallet/serializer/plugins/ldpvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	"github.com/trustknots/vcknots/wallet/serializer/types"
 )
@@ -45,6 +46,12 @@ func WithDefaultConfig() func(*SerializationDispatcher) error {
 			return types.NewFormatError(credential.SDJwtVC, err, "failed to create SD-JWT VC serializer")
 		}
 		d.RegisterPlugin(credential.SDJwtVC, sdJwtVcPlugin)
+
+		ldpVcPlugin, err := ldpvc.NewLdpVcSerializer()
+		if err != nil {
+			return types.NewFormatError(credential.LdpVc, err, "failed to create Data Integrity VC serializer")
+		}
+		d.RegisterPlugin(credential.LdpVc, ldpVcPlugin)
 
 		return nil
 	}

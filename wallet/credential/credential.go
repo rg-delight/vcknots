@@ -12,8 +12,11 @@ import (
 type SupportedSerializationFlavor string // mime type
 
 const (
-	JwtVc      SupportedSerializationFlavor = "application/vc+jwt"
-	SDJwtVC    SupportedSerializationFlavor = "application/dc+sd-jwt"
+	JwtVc   SupportedSerializationFlavor = "application/vc+jwt"
+	SDJwtVC SupportedSerializationFlavor = "application/dc+sd-jwt"
+	// LdpVc is a W3C Verifiable Credential secured with an embedded Data
+	// Integrity proof, under the VC Data Model 2.0 media type (Section 6.3).
+	LdpVc      SupportedSerializationFlavor = "application/vc"
 	MockFormat SupportedSerializationFlavor = "plain/mock" // For testing
 )
 
@@ -24,6 +27,9 @@ func (sf *SupportedSerializationFlavor) OID4VPFormatIdentifier() (string, string
 		return "jwt_vc_json", "jwt_vp_json", nil
 	case SDJwtVC:
 		return "dc+sd-jwt", "dc+sd-jwt", nil
+	case LdpVc:
+		// OpenID4VP Appendix B.1.3: ldp_vc credentials travel in an ldp_vp.
+		return "ldp_vc", "ldp_vp", nil
 	case MockFormat:
 		return "mock_vc", "mock_vp", nil
 	default:

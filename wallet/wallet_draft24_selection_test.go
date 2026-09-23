@@ -234,6 +234,15 @@ func TestBuildDraft24DescriptorMapPathsFollowTheVPTokenShape(t *testing.T) {
 			descriptor: [][]string{{"identity", "identity-backup"}, {"address"}},
 			wantIDs:    []string{"identity", "identity-backup", "address"},
 		},
+		{
+			name:       "ldp vp indexes the presentation itself",
+			flavor:     credential.LdpVc,
+			paths:      []string{"$", "$", "$"},
+			nested:     []string{"$.verifiableCredential[0]", "$.verifiableCredential[0]", "$.verifiableCredential[1]"},
+			vpFormat:   "ldp_vp",
+			descriptor: [][]string{{"identity", "identity-backup"}, {"address"}},
+			wantIDs:    []string{"identity", "identity-backup", "address"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			flavor := tc.flavor
