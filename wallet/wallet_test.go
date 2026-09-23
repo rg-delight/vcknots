@@ -958,10 +958,25 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 	}, 0)
 	require.NoError(t, err)
 
+	// direct_post.jwt is refused while parsing unless client_metadata names a
+	// key the response can be encrypted to, so the request carries one.
+	encryptionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	clientMetadata, err := json.Marshal(map[string]any{
+		"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+			Key:       &encryptionKey.PublicKey,
+			KeyID:     "enc-key-1",
+			Use:       "enc",
+			Algorithm: "ECDH-ES",
+		}}},
+		"encrypted_response_enc_values_supported": []string{"A128GCM", "A256GCM"},
+	})
+	require.NoError(t, err)
+
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]},"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`)
 	uri := fmt.Sprintf(
-		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1",
-		dcqlQuery,
+		"openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post.jwt&response_uri=https://example.com/response&state=state-1&client_metadata=%s",
+		dcqlQuery, url.QueryEscape(string(clientMetadata)),
 	)
 
 	response, err := controller.BuildOID4VPFinalAuthorizationResponse(uri, key)

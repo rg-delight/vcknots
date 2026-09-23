@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -362,7 +363,7 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 	testClaims := map[string]any{
 		"aud":           "test-client",
 		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:http://example.com/callback",
+		"client_id":     "redirect_uri:https://example.com/response",
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
@@ -398,7 +399,7 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 	}{
 		{
 			name:    "Query parameters",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/callback&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
+			uri:     "openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
 			setup:   nil,
 			wantErr: false,
 		},
@@ -443,13 +444,13 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 				// Build URI with request_uri
 				switch tt.name {
 				case "request_uri with default GET method":
-					uri = "openid4vp://present?client_id=redirect_uri:http://example.com/callback&request_uri=" + server.URL
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
 				case "request_uri with explicit GET method":
-					uri = "openid4vp://present?client_id=redirect_uri:http://example.com/callback&request_uri=" + server.URL + "&request_uri_method=GET"
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=GET"
 				case "request_uri with POST method":
-					uri = "openid4vp://present?client_id=redirect_uri:http://example.com/callback&request_uri=" + server.URL + "&request_uri_method=POST"
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=POST"
 				case "request_uri server error":
-					uri = "openid4vp://present?client_id=redirect_uri:http://example.com/callback&request_uri=" + server.URL
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
 				}
 			}
 
@@ -494,7 +495,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 	testClaims := map[string]any{
 		"aud":           "test-client",
 		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:http://example.com/callback",
+		"client_id":     "redirect_uri:https://example.com/response",
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
@@ -600,7 +601,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T)
 		"iss":           "should-be-ignored", // This should be ignored per OID4VP spec
 		"aud":           "test-client",
 		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:http://example.com/callback",
+		"client_id":     "redirect_uri:https://example.com/response",
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
@@ -632,8 +633,8 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T)
 		}
 
 		// Verify that other claims were processed correctly
-		if req.ClientID != "redirect_uri:http://example.com/callback" {
-			t.Fatalf("Expected ClientID 'redirect_uri:http://example.com/callback', got: %s", req.ClientID)
+		if req.ClientID != "redirect_uri:https://example.com/response" {
+			t.Fatalf("Expected ClientID 'redirect_uri:https://example.com/response', got: %s", req.ClientID)
 		}
 		if req.ResponseType != "vp_token" {
 			t.Fatalf("Expected ResponseType 'vp_token', got: %s", req.ResponseType)
@@ -661,7 +662,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			"exp":           exp,
 			"aud":           "test-client",
 			"nonce":         "test-nonce",
-			"client_id":     "redirect_uri:http://example.com/callback",
+			"client_id":     "redirect_uri:https://example.com/response",
 			"response_type": "vp_token",
 			"response_mode": "direct_post",
 			"state":         "test-state",
@@ -756,7 +757,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 		testClaims := map[string]any{
 			"aud":           "test-client",
 			"nonce":         "test-nonce",
-			"client_id":     "redirect_uri:http://example.com/callback",
+			"client_id":     "redirect_uri:https://example.com/response",
 			"response_type": "vp_token",
 			"response_mode": "direct_post",
 			"state":         "test-state",
@@ -886,7 +887,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 	p := &Oid4vpPresenter{}
 	uri := "openid4vp://present?client_id=x509_hash:test-hash&response_type=vp_token&nonce=n&dcql_query=%7B%22credentials%22%3A%5B%7B%22id%22%3A%22pid%22%2C%22format%22%3A%22dc%2Bsd-jwt%22%2C%22meta%22%3A%7B%22vct_values%22%3A%5B%22urn%3Aeudi%3Apid%3A1%22%5D%7D%2C%22claims%22%3A%5B%7B%22path%22%3A%5B%22given_name%22%5D%7D%5D%7D%5D%7D&response_mode=direct_post.jwt&response_uri=https://example.com/response"
 	_, err := p.ParsePresentationRequest(uri)
-	if err == nil || !strings.Contains(err.Error(), "require a signed Request Object") {
+	if !errors.Is(err, ErrRequestObjectSignatureRequired) {
 		t.Fatalf("unsigned x509_hash must be rejected: %v", err)
 	}
 }
@@ -1174,7 +1175,7 @@ func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 	claims := map[string]any{
 		"aud":           "test-client",
 		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:http://example.com/callback",
+		"client_id":     "redirect_uri:https://example.com/response",
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
@@ -1303,12 +1304,13 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 	der := f.leaf.Raw
 	clientID := f.clientID()
 	claims := map[string]any{
-		"aud":           "https://self-issued.me/v2",
-		"nonce":         "n",
-		"client_id":     clientID,
-		"response_type": "vp_token",
-		"response_mode": "direct_post.jwt",
-		"response_uri":  "https://example.org/response",
+		"aud":             "https://self-issued.me/v2",
+		"nonce":           "n",
+		"client_id":       clientID,
+		"response_type":   "vp_token",
+		"response_mode":   "direct_post.jwt",
+		"response_uri":    "https://example.org/response",
+		"client_metadata": responseEncryptionClientMetadataClaim(),
 		"dcql_query": map[string]any{
 			"credentials": []map[string]any{
 				{

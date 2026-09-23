@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -190,6 +191,44 @@ func TestFinalTransactionDataValidation(t *testing.T) {
 		})
 	}
 
+	t.Run("unsupported type names its sentinel", func(t *testing.T) {
+		_, err := parseWith(t, encode(`{"type":"example","credential_ids":["pid"]}`), []string{"other"})
+		require.True(t, errors.Is(err, ErrTransactionDataTypeUnsupported), "want ErrTransactionDataTypeUnsupported, got %v", err)
+	})
+
+	// OID4VP 1.0 Section 8.4 carries the transaction data hashes in the Key
+	// Binding, so a Credential Query that waives cryptographic holder binding
+	// cannot authorize a transaction.
+	t.Run("credential query without holder binding", func(t *testing.T) {
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		query := claims["dcql_query"].(map[string]any)["credentials"].([]any)
+		query = append(query, map[string]any{
+			"id": "unbound", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
+			"require_cryptographic_holder_binding": false,
+		})
+		claims["dcql_query"] = map[string]any{"credentials": query}
+		p := f.presenter()
+		p.SupportedTransactionDataTypes = []string{"example"}
+		parse := func(entry string) error {
+			claims["transaction_data"] = []any{encode(entry)}
+			uri := "openid4vp://authorize?" + url.Values{
+				"client_id": {f.clientID()},
+				"request":   {f.sign(t, claims, nil)},
+			}.Encode()
+			_, err := p.ParsePresentationRequest(uri)
+			return err
+		}
+		err := parse(`{"type":"example","credential_ids":["unbound"]}`)
+		assertAuthzErrorCode(t, err, InvalidTransactionDataError)
+		require.ErrorContains(t, err, "without cryptographic holder binding")
+		err = parse(`{"type":"example","credential_ids":["pid","unbound"]}`)
+		assertAuthzErrorCode(t, err, InvalidTransactionDataError)
+		// The same request is admitted while its transaction names only the
+		// bound query.
+		require.NoError(t, parse(`{"type":"example","credential_ids":["pid"]}`))
+	})
+
 	t.Run("query-encoded transaction_data is validated", func(t *testing.T) {
 		entry := encode(`{"type":"example","credential_ids":["cred"]}`)
 		raw, err := json.Marshal([]string{entry})
@@ -356,14 +395,18 @@ func TestPresentDCQLRejectsEncryptionKeyWithoutAlg(t *testing.T) {
 func TestRedirectURIClientIDBindsResponseURI(t *testing.T) {
 	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
 		t.Run(mode, func(t *testing.T) {
-			uri := finalQueryURI(url.Values{
+			values := url.Values{
 				"client_id":     {"redirect_uri:https://verifier.example/response"},
 				"response_type": {"vp_token"},
 				"response_mode": {mode},
 				"response_uri":  {"https://verifier.example/response"},
 				"nonce":         {"n"},
 				"dcql_query":    {finalDcqlParam},
-			})
+			}
+			if mode == "direct_post.jwt" {
+				values.Set("client_metadata", responseEncryptionClientMetadataParam())
+			}
+			uri := finalQueryURI(values)
 			req, err := (&Oid4vpPresenter{}).ParsePresentationRequest(uri)
 			require.NoError(t, err)
 			require.Equal(t, "https://verifier.example/response", req.ResponseURI)
@@ -409,28 +452,6 @@ func TestRedirectURIClientIDRejectsForeignResponseURI(t *testing.T) {
 	require.ErrorContains(t, err, "response_uri does not match the redirect_uri Client Identifier")
 	require.Equal(t, int32(0), attacker.calls.Load(), "the foreign response_uri must receive nothing")
 	require.Equal(t, int32(1), verifier.calls.Load(), "the authenticated Client Identifier receives the error response")
-}
-
-// Fix 11 (regression): the Draft24 entrypoint keeps its previous behavior, where
-// response_uri is independent of the redirect_uri Client Identifier.
-func TestDraft24RedirectURIClientIDUnchanged(t *testing.T) {
-	values := url.Values{
-		"client_id":               {"redirect_uri:https://verifier.example/cb"},
-		"response_type":           {"vp_token"},
-		"response_mode":           {"direct_post"},
-		"response_uri":            {"https://verifier.example/elsewhere"},
-		"nonce":                   {"n"},
-		"presentation_definition": {`{"id":"definition"}`},
-	}
-	req, err := (&Oid4vpPresenter{}).ParseDraft24PresentationRequest(finalQueryURI(values))
-	require.NoError(t, err)
-	require.Equal(t, "https://verifier.example/elsewhere", req.ResponseURI)
-	require.Equal(t, "https://verifier.example/cb", req.RedirectURI)
-
-	// Draft24 also keeps requiring the response_uri parameter for direct_post.
-	values.Del("response_uri")
-	_, err = (&Oid4vpPresenter{}).ParseDraft24PresentationRequest(finalQueryURI(values))
-	require.ErrorContains(t, err, "response_uri")
 }
 
 // countingResponseServer records how many authorization (error) responses an

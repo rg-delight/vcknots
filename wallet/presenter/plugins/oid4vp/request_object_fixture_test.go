@@ -149,7 +149,8 @@ func (f *requestObjectFixture) claims() map[string]any {
 		"iat": f.now.Unix(), "exp": f.now.Add(5 * time.Minute).Unix(),
 		"aud": "https://self-issued.me/v2", "client_id": f.clientID(),
 		"nonce": "nonce", "response_type": "vp_token", "response_mode": "direct_post.jwt",
-		"response_uri": "https://verifier.example/response",
+		"response_uri":    "https://verifier.example/response",
+		"client_metadata": responseEncryptionClientMetadataClaim(),
 		"dcql_query": map[string]any{"credentials": []any{map[string]any{
 			"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
 		}}},

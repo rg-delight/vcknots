@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -160,7 +159,7 @@ func TestFinalRequestURIPostRejectsWalletNonceMismatch(t *testing.T) {
 			if err == nil {
 				t.Fatal("mismatched wallet_nonce must be rejected")
 			}
-			if !strings.Contains(err.Error(), "Request Object wallet_nonce does not match") {
+			if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			var authzErr *AuthorizationRequestError

@@ -190,6 +190,10 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 	if b.draft24 {
 		if err := bindDraft24RedirectURIResponseURI(params, b.req.ClientID, redirectURIFromClientID, responseURIFromParam, b.req.ResponseMode); err != nil {
+			// As on the Final path, the refused response_uri is not the
+			// Verifier's, so the error authorization response goes to the
+			// URI the Client Identifier authenticates.
+			b.req.ResponseURI = redirectURIFromClientID
 			b.errValidation = err
 			return
 		}

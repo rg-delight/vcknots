@@ -219,3 +219,43 @@ func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, final.RawPresentationDefinition)
 }
+
+// Draft24 Section 5.1 lets a Verifier name its Presentation Definition by
+// reference (presentation_definition_uri) or through a scope instead of by
+// value. Resolving either is the Wallet's step after admission, so parsing
+// accepts the request and reports what arrived, unresolved.
+func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
+	base := func() url.Values {
+		return url.Values{
+			"client_id":     {"redirect_uri:https://verifier.example/response"},
+			"response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"nonce"},
+		}
+	}
+	p := &Oid4vpPresenter{}
+
+	t.Run("presentation_definition_uri", func(t *testing.T) {
+		params := base()
+		params.Set("presentation_definition_uri", "https://verifier.example/pd/1")
+		req, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+		require.NoError(t, err)
+		require.Equal(t, "https://verifier.example/pd/1", req.PresentationDefinitionURI)
+		require.Nil(t, req.PresentationDefinition)
+		require.Nil(t, req.DcqlQuery)
+	})
+
+	t.Run("scope", func(t *testing.T) {
+		params := base()
+		params.Set("scope", "com.example.pid")
+		req, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+		require.NoError(t, err)
+		require.Equal(t, "com.example.pid", req.Scope)
+		require.Nil(t, req.PresentationDefinition)
+		require.Empty(t, req.PresentationDefinitionURI)
+	})
+
+	t.Run("none of them", func(t *testing.T) {
+		_, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + base().Encode())
+		assertAuthzErrorCode(t, err, InvalidRequestError)
+		require.ErrorContains(t, err, "presentation_definition, presentation_definition_uri, scope or dcql_query is required")
+	})
+}

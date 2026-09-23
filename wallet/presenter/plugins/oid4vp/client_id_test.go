@@ -2,6 +2,7 @@ package oid4vp
 
 import (
 	"errors"
+	"net/url"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestParseOID4VPClientIDUnknownPrefix(t *testing.T) {
 // carried in plain query parameters has no signature to authenticate it.
 func TestDraft24QueryParamX509ClientIDRefused(t *testing.T) {
 	presenter := &Oid4vpPresenter{}
-	for _, clientID := range []string{"x509_san_dns:verifier.example", "x509_hash:YWJj"} {
+	for _, clientID := range []string{"x509_san_dns:verifier.example", "x509_hash:YWJj", "verifier_attestation:verifier.example"} {
 		request := "openid4vp://?response_type=vp_token&client_id=" + clientID +
 			"&response_mode=direct_post&response_uri=https://verifier.example/response&nonce=n"
 		_, err := presenter.ParseDraft24PresentationRequest(request)
@@ -82,10 +83,56 @@ func TestDraft24QueryParamX509ClientIDRefused(t *testing.T) {
 // same condition with the same code.
 func TestFinalQueryParamX509ClientIDRefused(t *testing.T) {
 	presenter := &Oid4vpPresenter{}
-	request := "openid4vp://?response_type=vp_token&client_id=x509_san_dns:verifier.example" +
-		"&response_mode=direct_post&response_uri=https://verifier.example/response&nonce=n"
-	_, err := presenter.ParsePresentationRequest(request)
-	if !errors.Is(err, ErrRequestObjectSignatureRequired) {
-		t.Fatalf("ParsePresentationRequest error = %v, want ErrRequestObjectSignatureRequired", err)
+	for _, clientID := range []string{"x509_san_dns:verifier.example", "verifier_attestation:verifier.example"} {
+		request := "openid4vp://?response_type=vp_token&client_id=" + clientID +
+			"&response_mode=direct_post&response_uri=https://verifier.example/response&nonce=n"
+		_, err := presenter.ParsePresentationRequest(request)
+		if !errors.Is(err, ErrRequestObjectSignatureRequired) {
+			t.Fatalf("ParsePresentationRequest(%q) error = %v, want ErrRequestObjectSignatureRequired", clientID, err)
+		}
+	}
+}
+
+// TestVerifierAttestationRequiresRequestObjectSignature: OID4VP 1.0 Section
+// 5.9.3 has the Verifier sign the Request Object with the key its attestation
+// confirms, so the identifier authenticates only a signed request.
+func TestVerifierAttestationRequiresRequestObjectSignature(t *testing.T) {
+	clientID, err := ParseOID4VPClientID("verifier_attestation:verifier.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clientID.RequiresRequestObjectSignature() {
+		t.Fatal("verifier_attestation must require a signed Request Object")
+	}
+	redirect, err := ParseOID4VPClientID("redirect_uri:https://verifier.example/cb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirect.RequiresRequestObjectSignature() {
+		t.Fatal("redirect_uri must not require a signed Request Object")
+	}
+}
+
+// TestMissingNonceNamesItsSentinel: OpenID4VP 1.0 Section 5.2 makes nonce
+// REQUIRED, and the refusal is branchable with errors.Is on both wires and
+// for a signed Request Object.
+func TestMissingNonceNamesItsSentinel(t *testing.T) {
+	presenter := &Oid4vpPresenter{}
+	final := "openid4vp://?response_type=vp_token&client_id=redirect_uri:https://verifier.example/cb" +
+		"&response_mode=fragment&dcql_query=" + url.QueryEscape(finalDcqlParam)
+	if _, err := presenter.ParsePresentationRequest(final); !errors.Is(err, ErrNonceRequired) {
+		t.Fatalf("Final error = %v, want ErrNonceRequired", err)
+	}
+	draft24 := "openid4vp://?response_type=vp_token&client_id=redirect_uri:https://verifier.example/cb" +
+		"&response_mode=fragment&presentation_definition=" + url.QueryEscape(`{"id":"definition"}`)
+	if _, err := presenter.ParseDraft24PresentationRequest(draft24); !errors.Is(err, ErrNonceRequired) {
+		t.Fatalf("Draft24 error = %v, want ErrNonceRequired", err)
+	}
+
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	delete(claims, "nonce")
+	if _, err := f.parse(t, claims); !errors.Is(err, ErrNonceRequired) {
+		t.Fatalf("Request Object error = %v, want ErrNonceRequired", err)
 	}
 }

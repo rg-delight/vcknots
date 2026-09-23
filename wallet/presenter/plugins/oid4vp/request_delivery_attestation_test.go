@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -127,7 +128,7 @@ func TestDeliveryAttestationDoesNotSuppressWalletNonceMismatch(t *testing.T) {
 	}
 
 	_, err := f.parseRequestURIPost(t, p)
-	if err == nil || !strings.Contains(err.Error(), "Request Object wallet_nonce does not match") {
+	if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
 		t.Fatalf("attestation must not suppress wallet_nonce mismatch: %v", err)
 	}
 }
