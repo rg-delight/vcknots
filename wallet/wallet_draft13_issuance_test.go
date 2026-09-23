@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -625,4 +626,45 @@ func TestBeginOID4VCIDraft13AuthorizationRequiresTheGrant(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	_, err := fixture.wallet.BeginOID4VCIDraft13Authorization(context.Background(), fixture.preAuthorizedRequest(t))
 	require.ErrorIs(t, err, ErrDraft13AuthorizationCodeGrantMissing)
+}
+
+// TestObserveLabelsEveryDraft13IssuanceRequest drives a Draft 13 issuance, its
+// deferred poll and its notification through an observed client: each request
+// carries the role it was sent for.
+func TestObserveLabelsEveryDraft13IssuanceRequest(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	fixture.credentialResponse = func(int, map[string]any) (int, any) {
+		return http.StatusAccepted, map[string]any{"transaction_id": "transaction-1"}
+	}
+	recorder := observe.NewRecorder(32)
+	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: observedClient(fixture.server.Client(), recorder), AllowHTTP: true})
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
+	require.NoError(t, err)
+	wallet, err := NewWalletWithConfig(Config{Receiver: receiving, CredStore: newProfileCredStore(t)})
+	require.NoError(t, err)
+
+	req := fixture.preAuthorizedRequest(t)
+	req.DeferredPollAttempts = 1
+	result, err := wallet.ReceiveOID4VCIDraft13Credential(context.Background(), req)
+	require.NoError(t, err)
+	require.NoError(t, wallet.NotifyOID4VCIDraft13Credential(context.Background(), OID4VCIDraft13NotificationRequest{
+		Type:                 receiverTypes.Oid4vci,
+		NotificationEndpoint: fixture.server.URL + "/notification",
+		AccessToken:          result.AccessToken,
+		NotificationID:       result.NotificationID,
+		Event:                "credential_accepted",
+	}))
+
+	labels := make([]observe.Endpoint, 0)
+	for _, exchange := range recorder.Exchanges() {
+		labels = append(labels, exchange.Endpoint)
+	}
+	require.Equal(t, []observe.Endpoint{
+		observe.EndpointIssuerMetadata,
+		observe.EndpointAuthorizationServerMetadata,
+		observe.EndpointToken,
+		observe.EndpointCredential,
+		observe.EndpointDeferredCredential,
+		observe.EndpointNotification,
+	}, labels)
 }

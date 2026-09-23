@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -183,7 +184,7 @@ func (o *Oid4vciReceiver) RequestOID4VCIDraft13Credential(
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode draft13 credential request: %w", err)
 	}
-	return o.postDraft13CredentialEndpoint(ctx, endpoint, accessToken, body, proofFactory)
+	return o.postDraft13CredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointCredential), endpoint, accessToken, body, proofFactory)
 }
 
 // RequestOID4VCIDraft13DeferredCredential posts a Draft 13 Section 9 Deferred
@@ -202,7 +203,7 @@ func (o *Oid4vciReceiver) RequestOID4VCIDraft13DeferredCredential(
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode draft13 deferred credential request: %w", err)
 	}
-	return o.postDraft13CredentialEndpoint(ctx, endpoint, accessToken, body, proofFactory)
+	return o.postDraft13CredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointDeferredCredential), endpoint, accessToken, body, proofFactory)
 }
 
 // SendOID4VCIDraft13Notification posts a Draft 13 Section 10.1 Notification
@@ -221,7 +222,7 @@ func (o *Oid4vciReceiver) SendOID4VCIDraft13Notification(
 	if err != nil {
 		return fmt.Errorf("failed to encode draft13 notification request: %w", err)
 	}
-	_, _, err = o.doDraft13ProtectedPost(ctx, endpoint, accessToken, body, proofFactory)
+	_, _, err = o.doDraft13ProtectedPost(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, accessToken, body, proofFactory)
 	return err
 }
 
