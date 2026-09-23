@@ -38,6 +38,9 @@ type requestBuilder struct {
 	// supportedTransactionDataTypes is copied from the presenter for the Final
 	// transaction_data validation.
 	supportedTransactionDataTypes []string
+	// requireClientMetadataJWKKeyIDs is copied from the presenter's
+	// RequireClientMetadataJWKKeyIDs.
+	requireClientMetadataJWKKeyIDs bool
 	// preRegisteredClients and resolvePreRegisteredClient are copied from the
 	// presenter so a pre-registered Client Identifier can be resolved during
 	// parameter validation (OID4VP 1.0 §5.9.2).

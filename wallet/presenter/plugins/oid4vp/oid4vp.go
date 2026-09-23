@@ -62,6 +62,20 @@ type Oid4vpPresenter struct {
 	// policy is to post nothing before the holder consents to a Verifier it has
 	// not authenticated sets it. The refusal is still returned to the caller.
 	DisableParseErrorResponses bool
+	// RequireClientMetadataJWKKeyIDs refuses, while the request is parsed, an
+	// Authorization Request whose client_metadata parameter carries a jwks
+	// member without a kid (ErrClientMetadataJWKKeyIDMissing) or two members
+	// with the same kid (ErrClientMetadataJWKKeyIDDuplicate). OpenID4VP 1.0
+	// Section 5.1 makes a unique kid on every such key a MUST; Draft24 has no
+	// such rule, and the setting applies to its entrypoints too when a caller
+	// chooses it.
+	//
+	// The zero value accepts such keys. The Wallet does not need the kid to
+	// answer (it picks the response encryption key by use and alg), and
+	// Verifiers in the field omit it, so enforcing it is the integrator's
+	// policy choice rather than a default. HAIP adds no rule on kid and does
+	// not turn this on.
+	RequireClientMetadataJWKKeyIDs bool
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -282,6 +296,7 @@ func (p *Oid4vpPresenter) newParseBuilder(draft24 bool) (*requestBuilder, error)
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
 	builder.preRegisteredClients = p.PreRegisteredClients
 	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
+	builder.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
 	if p.RequestObjectValidation != nil {
 		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
 	}

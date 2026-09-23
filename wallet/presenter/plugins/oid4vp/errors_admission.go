@@ -46,4 +46,14 @@ var (
 	// encrypted_response_enc_values_supported, which HAIP Section 5 requires
 	// of every Verifier using response encryption.
 	ErrResponseEncryptionEncMissing = common.NewCodedError("response_encryption_enc_missing", "HAIP requires encrypted_response_enc_values_supported to list A128GCM and A256GCM")
+	// ErrClientMetadataJWKKeyIDMissing reports a client_metadata.jwks member
+	// without a kid. OpenID4VP 1.0 Section 5.1: "Each JWK in the set MUST have
+	// a `kid` (Key ID) parameter". Reported only when the presenter sets
+	// RequireClientMetadataJWKKeyIDs.
+	ErrClientMetadataJWKKeyIDMissing = common.NewCodedError("client_metadata_jwks_kid_missing", "every key in client_metadata.jwks must have a kid")
+	// ErrClientMetadataJWKKeyIDDuplicate reports two client_metadata.jwks
+	// members with the same kid, which then does not "uniquely identif[y] the
+	// key within the context of the request" (OpenID4VP 1.0 Section 5.1).
+	// Reported only when the presenter sets RequireClientMetadataJWKKeyIDs.
+	ErrClientMetadataJWKKeyIDDuplicate = common.NewCodedError("client_metadata_jwks_kid_duplicate", "every kid in client_metadata.jwks must be unique")
 )
