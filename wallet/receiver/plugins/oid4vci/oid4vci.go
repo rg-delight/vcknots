@@ -44,19 +44,15 @@ type Oid4vciReceiver struct {
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
 
-	// dpopNonceMu guards dpopNonces. The map is created on first use because
-	// every caller builds this struct as a literal, so there is no constructor
-	// that could allocate it. A zero Oid4vciReceiver is therefore usable and,
-	// once in use, must not be copied.
+	// dpopNonceMu guards dpopNonces and dpopNonceClock. A zero Oid4vciReceiver
+	// is usable and, once in use, must not be copied.
 	dpopNonceMu sync.Mutex
-	// dpopNonces is the RFC 9449 Section 8.2 per-server nonce store: "The DPoP
-	// nonce ... is provided by the server to the client in the DPoP-Nonce HTTP
-	// header ... Clients should expect that a server will use the same nonce
-	// for all requests to that server". It is keyed by the endpoint's scheme
-	// and authority, because that is the granularity RFC 9449 Section 8.2
-	// assigns a nonce to, and it holds the most recent value the wallet has
-	// seen from that server on any endpoint.
-	dpopNonces map[string]string
+	// dpopNonces holds the latest RFC 9449 Section 8.2 DPoP nonce of each
+	// server, keyed by scheme and authority. It is shared by every flow this
+	// receiver serves and bounded to maxDPoPNonceServers entries, evicting the
+	// least recently used.
+	dpopNonces     map[string]dpopNonceEntry
+	dpopNonceClock uint64
 }
 
 var (

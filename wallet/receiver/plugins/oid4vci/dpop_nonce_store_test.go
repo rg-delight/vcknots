@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 
@@ -223,4 +225,54 @@ func TestDPoPNonceStoreIsRaceSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// The store is shared by every flow the receiver serves, so it is bounded: the
+// servers used least recently are forgotten first.
+func TestDPoPNonceStoreIsBounded(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	serverURL := func(i int) url.URL {
+		return url.URL{Scheme: "https", Host: fmt.Sprintf("issuer-%d.example", i)}
+	}
+	for i := 0; i < maxDPoPNonceServers+8; i++ {
+		receiver.rememberDPoPNonce(serverURL(i), fmt.Sprintf("nonce-%d", i))
+		if i == 0 {
+			continue
+		}
+		// Server 0 stays in use, so it is never the least recently used.
+		receiver.dpopNonceFor(serverURL(0))
+	}
+	if got := len(receiver.ExportDPoPNonces()); got != maxDPoPNonceServers {
+		t.Fatalf("stored servers = %d, want %d", got, maxDPoPNonceServers)
+	}
+	if got := receiver.dpopNonceFor(serverURL(0)); got != "nonce-0" {
+		t.Fatalf("recently used server lost its nonce: %q", got)
+	}
+	if got := receiver.dpopNonceFor(serverURL(1)); got != "" {
+		t.Fatalf("least recently used server kept its nonce: %q", got)
+	}
+}
+
+// A nonce restored from a persisted grant fills a server the receiver knows
+// nothing about, and never replaces one it learned itself.
+func TestImportDPoPNoncesDoesNotReplaceKnownNonces(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	known := url.URL{Scheme: "https", Host: "issuer.example"}
+	receiver.rememberDPoPNonce(known, "live-nonce")
+
+	receiver.ImportDPoPNonces(map[string]string{
+		dpopNonceServerKey(known): "persisted-nonce",
+		"https://other.example":   "other-nonce",
+		"https://blank.example":   " ",
+	})
+
+	if got := receiver.dpopNonceFor(known); got != "live-nonce" {
+		t.Fatalf("known server nonce = %q, want live-nonce", got)
+	}
+	if got := receiver.dpopNonceFor(url.URL{Scheme: "https", Host: "other.example"}); got != "other-nonce" {
+		t.Fatalf("imported nonce = %q, want other-nonce", got)
+	}
+	if _, present := receiver.ExportDPoPNonces()["https://blank.example"]; present {
+		t.Fatal("a blank nonce must not be imported")
+	}
 }
