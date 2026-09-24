@@ -153,10 +153,12 @@ type SigningChainPolicy struct {
 	// AllowUnadvertisedRevocation; its HTTPClient, when set, wins over
 	// HTTPClient below.
 	CRL CRLCheckerOptions
-	// AllowUnadvertisedRevocation keeps certificates that publish no CRL/OCSP
-	// mechanism on the trust path, reported separately rather than positively
-	// checked. False requires positive status for every certificate below the
-	// anchor.
+	// AllowUnadvertisedRevocation keeps on the trust path a certificate that
+	// publishes no CRL distribution point, counted in
+	// CRLCheckResult.NoMechanismCertificates instead of checked. That includes
+	// a certificate that advertises only OCSP: OCSP is not consulted, so its
+	// status is not established either. False requires a current CRL for
+	// every certificate below the anchor.
 	AllowUnadvertisedRevocation bool
 	// CurrentTime is the single verification clock.
 	CurrentTime time.Time

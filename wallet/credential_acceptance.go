@@ -21,6 +21,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -201,7 +202,7 @@ type IssuerX509TrustOptions struct {
 	RootCAs                     *x509.CertPool     // exactly one of TrustAnchors / RootCAs
 	CertificateKeyUsages        []x509.ExtKeyUsage // optional ecosystem EKU policy
 	CRL                         commonX509.CRLCheckerOptions
-	AllowUnadvertisedRevocation bool // certificates without any CRL DP stay on the trust path, reported separately
+	AllowUnadvertisedRevocation bool // see commonX509.SigningChainPolicy.AllowUnadvertisedRevocation
 	// RequireIssuerDNSBinding is an ecosystem policy, not an SD-JWT VC §3.5 requirement:
 	// when iss is an https URL, the leaf certificate must carry a dNSName SAN equal to its host.
 	RequireIssuerDNSBinding bool
@@ -581,7 +582,6 @@ func (a *CredentialAcceptor) verifyIssuerSignatureWithCandidates(
 	return nil
 }
 
-
 func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.Duration) error {
 	nowUnix := float64(now.Unix()) + float64(now.Nanosecond())/1e9
 	if exp, present, err := numericDateClaim(payload, "exp"); err != nil {
@@ -670,14 +670,14 @@ func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte)
 }
 
 // issuerRevocationHTTPClient resolves the CRL fetch client for issuer trust:
-// the caller's client when configured, otherwise a bounded default. A client
+// the caller's client when configured, otherwise httpfetch.NewClient. A client
 // already set on IssuerX509TrustOptions.CRL takes precedence inside
 // commonX509.VerifySigningChainWithPolicy.
 func issuerRevocationHTTPClient(client *http.Client) *http.Client {
 	if client != nil {
 		return client
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return httpfetch.NewClient()
 }
 
 // IssuerSignedJOSEHeader decodes the protected header of a credential's

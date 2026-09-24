@@ -183,10 +183,19 @@ func TestCRLNoMechanismIsDistinctFromCheckedAndCanBeRequired(t *testing.T) {
 			t.Fatalf("anchor must be excluded: %+v, %v", result, err)
 		}
 	}
+	// OCSP is never consulted, so an OCSP-only certificate has no established
+	// status: it is refused under RequireStatus and counted as having no
+	// mechanism otherwise.
 	ocspOnly := issueCRLTestCertificate(t, ca, func(cert *x509.Certificate) { cert.OCSPServer = []string{"http://unreachable.invalid/ocsp"} })
-	checker := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: &http.Client{}})
-	_, err := checker.Check(context.Background(), []*x509.Certificate{ocspOnly, ca.cert}, ca.now)
-	assertCRLTestKind(t, err, CRLErrorUnsupported)
+	for _, require := range []bool{false, true} {
+		checker := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: &http.Client{Transport: signingTestNoNetwork{t}}, RequireStatus: require})
+		result, err := checker.Check(context.Background(), []*x509.Certificate{ocspOnly, ca.cert}, ca.now)
+		if require {
+			assertCRLTestKind(t, err, CRLErrorUnsupported)
+		} else if err != nil || result.CheckedCertificates != 0 || result.NoMechanismCertificates != 1 {
+			t.Fatalf("OCSP-only certificate misreported: %+v, %v", result, err)
+		}
+	}
 }
 
 func TestCRLRejectsInvalidTimeIssuerSignatureAndMalformedInput(t *testing.T) {
