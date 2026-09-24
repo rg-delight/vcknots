@@ -14,13 +14,10 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
+	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
+	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-type CredentialEndpointHTTPResponse = types.CredentialEndpointHTTPResponse
-
-type CredentialRequestBodyFactory = types.CredentialRequestBodyFactory
 
 type credentialNonceResponse struct {
 	CNonce *string `json:"c_nonce"`
@@ -31,9 +28,8 @@ const maxNonceResponseBodyBytes int64 = 4 << 10
 
 // ErrProofAlgorithmNotSupported reports that the holder key cannot produce any
 // of the algorithms the Credential Issuer lists in
-// proof_signing_alg_values_supported. It is the oid4vcisign sentinel of the
-// same name, so errors.Is matches either.
-var ErrProofAlgorithmNotSupported = oid4vcisign.ErrProofAlgorithmNotSupported
+// proof_signing_alg_values_supported.
+var ErrProofAlgorithmNotSupported = jwtproof.ErrProofAlgorithmNotSupported
 
 // FetchNonce fetches a c_nonce from the Section 7 Nonce Endpoint. It is a
 // types.Receiver method and carries no context; it binds its request to
@@ -82,16 +78,10 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 	return nil, fmt.Errorf("nonce response does not contain c_nonce or nonce")
 }
 
-// FetchNonceResponse performs the Section 7.1 Nonce Request and returns the
-// Section 7.2 Nonce Response. Besides the c_nonce body member it surfaces the
-// RFC 9449 Section 8.2 DPoP-Nonce response header, which Section 7.2 makes
-// binding on the next credential request: "The Credential Issuer MAY provide a
-// DPoP nonce in an HTTP header as defined in Section 8.2 of [@!RFC9449]. In this
-// case, the Wallet uses the new nonce value in the DPoP proof when presenting an
-// access token at the Credential Endpoint." The value is also recorded in this
-// receiver's per-server nonce store, so the next DPoP proof this plugin builds
-// for that server already carries it. ctx bounds the request.
-func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint common.URIField) (*types.NonceResponse, error) {
+// RequestNonce performs the OpenID4VCI 1.0 Section 7 Nonce Request. A
+// DPoP-Nonce response header (Section 7.2) is returned and also kept for the
+// next proof to that server.
+func (o *Oid4vciReceiver) RequestNonce(ctx context.Context, endpoint common.URIField) (*types.NonceResponse, error) {
 	exchanged, err := o.do(observe.WithEndpoint(ctx, observe.EndpointNonce), exchange{method: http.MethodPost, url: url.URL(endpoint)})
 	if err == nil && !exchanged.ok() {
 		err = exchanged.statusError()
@@ -105,10 +95,7 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 	if err != nil {
 		return nil, stageError(StageNonce, fmt.Errorf("failed to fetch nonce: %w", err))
 	}
-	// OpenID4VCI 1.0 §7.2: "c_nonce: REQUIRED. String containing a challenge to
-	// be used when creating a proof of possession of the key." A 2xx Nonce
-	// Response that omits it, or returns it empty, hands the wallet no nonce to
-	// put in the proof, so it fails closed instead of proceeding without one.
+	// Section 7.2: c_nonce is REQUIRED.
 	if strings.TrimSpace(response.CNonce) == "" {
 		return nil, fmt.Errorf("nonce response does not contain a c_nonce: %w", types.ErrNonceResponseInvalid)
 	}
@@ -116,91 +103,70 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 	return &response, nil
 }
 
-func (o *Oid4vciReceiver) postCredentialEndpointForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
-	response, err := o.postProtected(ctx, endpoint, accessToken, body, contentType, proofFactory, httpfetch.CredentialBodyLimit)
+// RequestCredential posts the OpenID4VCI 1.0 Section 8 Credential Request that
+// body builds for cNonce. On the Section 8.3.1.2 invalid_nonce error it fetches
+// a fresh c_nonce from nonceEndpoint and posts once more; with a nil
+// nonceEndpoint the error is returned. A refusal is a
+// *types.CredentialEndpointError.
+func (o *Oid4vciReceiver) RequestCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, nonceEndpoint *common.URIField, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+	if body == nil {
+		return nil, fmt.Errorf("%w: credential request body factory is required", common.ErrInvalidInput)
+	}
+	ctx = observe.WithEndpoint(ctx, observe.EndpointCredential)
+	response, err := o.postCredentialRequest(ctx, endpoint, token, cNonce, body, dpop)
+	if err == nil || !errors.Is(err, types.ErrInvalidNonce) || nonceEndpoint == nil {
+		return response, err
+	}
+	nonceResponse, err := o.RequestNonce(ctx, *nonceEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh c_nonce after invalid_nonce: %w", err)
+	}
+	return o.postCredentialRequest(ctx, endpoint, token, nonceResponse.CNonce, body, dpop)
+}
+
+// RequestDeferredCredential posts an OpenID4VCI 1.0 Section 9 Deferred
+// Credential Request body encoded by EncodeCredentialRequest. A refusal, such
+// as issuance_pending, is a *types.CredentialEndpointError.
+func (o *Oid4vciReceiver) RequestDeferredCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+	return o.postCredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointDeferredCredential), endpoint, token, body, contentType, dpop)
+}
+
+// SendNotification posts an OpenID4VCI 1.0 Section 11 Notification Request.
+func (o *Oid4vciReceiver) SendNotification(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, notification types.NotificationRequest, dpop types.DPoPProofFactory) error {
+	body, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+	_, err = o.postProtected(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, token, body, "application/json", dpop, httpfetch.DefaultBodyLimit)
+	return err
+}
+
+// postCredentialRequest builds the body for cNonce and posts it.
+func (o *Oid4vciReceiver) postCredentialRequest(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+	encoded, contentType, err := body(cNonce)
+	if err != nil {
+		return nil, err
+	}
+	return o.postCredentialEndpoint(ctx, endpoint, token, encoded, contentType, dpop)
+}
+
+func (o *Oid4vciReceiver) postCredentialEndpoint(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+	response, err := o.postProtected(ctx, endpoint, token, body, contentType, dpop, httpfetch.CredentialBodyLimit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to post credential endpoint request: %w", err)
 	}
-	return &CredentialEndpointHTTPResponse{
+	return &types.CredentialEndpointHTTPResponse{
 		Body:        response.body,
 		ContentType: response.header.Get("Content-Type"),
 	}, nil
 }
 
-// PostCredentialEndpointWithNonceRetryForToken posts the Credential Request (or
-// Deferred Credential Request) body build returns for the current c_nonce. The
-// access token is sent with the scheme its token_type names: Bearer (RFC 6750
-// Section 2.1) or DPoP with a proof (RFC 9449 Section 7.1).
-//
-// On the Section 8.3.1.2 "invalid_nonce" error it fetches a fresh c_nonce from
-// nonceEndpoint, rebuilds the body and posts once more; with a nil
-// nonceEndpoint the error is returned as is. It returns the response and the
-// c_nonce the accepted request was built with. ctx bounds every request.
-func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetryForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
-	return o.postCredentialEndpointWithNonceRetry(ctx, endpoint, accessToken, nonceEndpoint, initialCNonce, build, proofFactory)
-}
-
-// SendCredentialNotificationWithDpopRetryForToken sends the Section 11
-// Notification Request with the access token's scheme, as
-// PostCredentialEndpointWithNonceRetryForToken does. ctx bounds every request.
-func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetryForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
-	body, err := json.Marshal(notification)
-	if err != nil {
-		return err
-	}
-	_, err = o.postProtected(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, accessToken, body, "application/json", proofFactory, httpfetch.DefaultBodyLimit)
-	return err
-}
-
-func (o *Oid4vciReceiver) postCredentialEndpointWithNonceRetry(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
-	if build == nil {
-		return nil, initialCNonce, fmt.Errorf("credential request body factory is required")
-	}
-
-	body, contentType, err := build(initialCNonce)
-	if err != nil {
-		return nil, initialCNonce, err
-	}
-
-	response, err := o.postCredentialEndpointForToken(ctx, endpoint, accessToken, body, contentType, proofFactory)
-	if err == nil {
-		return response, initialCNonce, nil
-	}
-	if !errors.Is(err, types.ErrInvalidNonce) || nonceEndpoint == nil {
-		return nil, initialCNonce, err
-	}
-
-	nonceResponse, err := o.FetchNonceResponse(ctx, *nonceEndpoint)
-	if err != nil {
-		return nil, initialCNonce, fmt.Errorf("failed to refresh c_nonce after invalid_nonce: %w", err)
-	}
-	freshCNonce := nonceResponse.CNonce
-
-	body, contentType, err = build(freshCNonce)
-	if err != nil {
-		return nil, freshCNonce, err
-	}
-
-	response, err = o.postCredentialEndpointForToken(ctx, endpoint, accessToken, body, contentType, proofFactory)
-	if err != nil {
-		return nil, freshCNonce, err
-	}
-	return response, freshCNonce, nil
-}
-
-// EncodeCredentialRequest serializes a Credential Request or Deferred Credential
-// Request, encrypting it when the Credential Issuer advertises
-// credential_request_encryption (OpenID4VCI 1.0 Section 8.1 and Section 9.1:
-// "When performing Credential Request encryption, the Client MUST encode the
-// information in the Credential Request in a JWT as specified by
-// [Encrypted Messages], using the parameters from the
-// `credential_request_encryption` object in the Credential Issuer Metadata").
-//
-// It fails closed when the request asks for an encrypted response that it cannot
-// protect: Section 8.2 states that "Credential Request encryption MUST be used if
-// the `credential_response_encryption` parameter is included, to prevent it being
-// substituted by an attacker", so a request carrying that parameter in the clear
-// hands an attacker the wallet's response encryption key to replace.
+// EncodeCredentialRequest serializes a (Deferred) Credential Request and
+// encrypts it when the issuer advertises credential_request_encryption
+// (OpenID4VCI 1.0 Sections 8.2 and 10). A request carrying
+// credential_response_encryption to an issuer without request encryption is
+// refused: Section 8.2 requires the request to be encrypted then, so the
+// response key cannot be substituted.
 func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *types.CredentialIssuerMetadata) ([]byte, string, error) {
 	plaintext, err := json.Marshal(request)
 	if err != nil {
@@ -264,39 +230,42 @@ func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *t
 	return []byte(serialized), "application/jwt", nil
 }
 
-func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*types.CredentialResponse, error) {
+// DecodeCredentialResponse parses an OpenID4VCI 1.0 Section 8.3 Credential
+// Response or Section 9.2 Deferred Credential Response. An application/jwt
+// body is a Section 10 JWE decrypted with decryptionKey (a private key or a
+// *jose.JSONWebKey). A plaintext body is refused with
+// types.ErrCredentialResponsePlaintext when requireEncryption is set or a
+// decryptionKey is given, since a requested encryption is never downgraded.
+// It checks no response shape beyond JSON well-formedness.
+func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType string, decryptionKey any, requireEncryption bool) (*types.CredentialResponse, error) {
+	if key, ok := decryptionKey.(*jose.JSONWebKey); ok && key == nil {
+		decryptionKey = nil
+	}
 	payload := body
-	if strings.Contains(strings.ToLower(contentType), "application/jwt") {
+	encrypted := httpfetch.MediaTypeIs(http.Header{"Content-Type": {contentType}}, "application/jwt")
+	if !encrypted && (requireEncryption || decryptionKey != nil) {
+		return nil, fmt.Errorf("%w: the issuer returned an unencrypted credential response although response encryption was required", types.ErrCredentialResponsePlaintext)
+	}
+	if encrypted {
 		if decryptionKey == nil {
-			return nil, fmt.Errorf("decryption key is required for encrypted credential response")
+			return nil, fmt.Errorf("%w: a decryption key is required for an encrypted credential response", types.ErrCredentialResponseDecrypt)
 		}
-		jwe, err := jose.ParseEncrypted(string(body), supportedJWEKeyAlgorithms(), supportedJWEContentEncryptions())
+		jwe, err := jose.ParseEncrypted(string(body), oid4vcijwe.KeyAlgorithms(), oid4vcijwe.ContentEncryptions())
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse credential response JWE: %w", err)
+			return nil, fmt.Errorf("%w: failed to parse credential response JWE: %w", types.ErrCredentialResponseDecrypt, err)
 		}
-		// OpenID4VCI 1.0 §8.2 / §10 (Encrypted Credential Requests and Responses)
-		// permits the issuer to signal DEFLATE with the JWE protected "zip":"DEF"
-		// header. go-jose v4 (>= 4.1.4) inflates the plaintext inside Decrypt when
-		// that header is present, so no manual flate step is required here;
-		// TestOid4vciReceiver_DecodeCredentialResponseZip pins that behavior.
+		// go-jose inflates a "zip":"DEF" payload inside Decrypt (Section 10).
 		payload, err = jwe.Decrypt(decryptionKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt credential response JWE: %w", err)
+			return nil, fmt.Errorf("%w: failed to decrypt credential response JWE: %w", types.ErrCredentialResponseDecrypt, err)
 		}
 	}
-
 	var response types.CredentialResponse
 	if err := json.Unmarshal(payload, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse credential response JSON: %w", err)
+		return nil, fmt.Errorf("%w: failed to parse credential response JSON: %w", types.ErrCredentialResponseShape, err)
 	}
 	return &response, nil
 }
-
-// ProofOptions carries the inputs of an OpenID4VCI 1.0 Section 8.2.1.1 jwt key
-// proof. It is an alias of types.ProofOptions, which the OID4VCIFinalSigner
-// interface names, so a plugin outside this repository can build the same proof
-// without importing this package.
-type ProofOptions = types.ProofOptions
 
 // postProtected posts body to a Credential, Deferred Credential or
 // Notification Endpoint with the access token and, for a DPoP-bound token, a
@@ -304,7 +273,7 @@ type ProofOptions = types.ProofOptions
 // 8.3.1.2 *types.CredentialEndpointError, or as ErrDPoPRequired when a request
 // sent with a Bearer token is asked for DPoP. An invalid_nonce refusal is
 // reported as such first, so the caller can refresh the c_nonce.
-func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProofFactory, limit int64) (*exchangeResponse, error) {
 	response, err := o.postWithAccessToken(ctx, endpoint, accessToken, body, contentType, proofFactory, limit)
 	if err != nil {
 		return nil, err
@@ -327,7 +296,7 @@ func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URI
 // token_type names. A DPoP-bound token takes a proof from proofFactory for each
 // attempt; a Bearer token carries none (RFC 9449 Section 7.1 pairs the proof
 // with the DPoP scheme). The response is returned whatever its status.
-func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProofFactory, limit int64) (*exchangeResponse, error) {
 	ex := exchange{
 		method:      http.MethodPost,
 		url:         url.URL(endpoint),

@@ -5,29 +5,21 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
-	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -558,7 +550,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 }
 
 func TestOid4vciReceiver_FetchAccessToken_WithTransactionCode(t *testing.T) {
-	form := fetchAccessTokenRequestForm(t, types.PreAuthorizedCodeTokenRequest{
+	form := fetchAccessTokenRequestForm(t, types.TokenRequest{
 		PreAuthorizedCode: "pre-authorized-code",
 		TxCode:            "123456",
 	})
@@ -569,7 +561,7 @@ func TestOid4vciReceiver_FetchAccessToken_WithTransactionCode(t *testing.T) {
 }
 
 func TestOid4vciReceiver_FetchAccessToken_WithoutTransactionCode(t *testing.T) {
-	form := fetchAccessTokenRequestForm(t, types.PreAuthorizedCodeTokenRequest{
+	form := fetchAccessTokenRequestForm(t, types.TokenRequest{
 		PreAuthorizedCode: "pre-authorized-code",
 	})
 
@@ -579,7 +571,7 @@ func TestOid4vciReceiver_FetchAccessToken_WithoutTransactionCode(t *testing.T) {
 	require.False(t, present)
 }
 
-func fetchAccessTokenRequestForm(t *testing.T, request types.PreAuthorizedCodeTokenRequest) url.Values {
+func fetchAccessTokenRequestForm(t *testing.T, request types.TokenRequest) url.Values {
 	t.Helper()
 
 	forms := make(chan url.Values, 1)
@@ -716,10 +708,10 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		CodeChallenge:       "challenge",
 		CodeChallengeMethod: "S256",
 		IssuerState:         "issuer-state-1",
-	}, types.OAuthClientAttestationHeaders{
+	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
 		ClientAttestation:    "attestation-jwt",
 		ClientAttestationPop: "pop-jwt",
-	})
+	})})
 	if err != nil {
 		t.Fatalf("PushAuthorizationRequest() error = %v", err)
 	}
@@ -727,12 +719,13 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("PAR response = %#v", par)
 	}
 
-	token, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), endpoint("/token"), types.AuthorizationCodeTokenRequest{
+	token, err := receiver.RequestToken(t.Context(), endpoint("/token"), types.TokenRequest{
+		GrantType:    types.AuthorizationCode,
 		Code:         "code-1",
 		RedirectURI:  "https://wallet.example/callback",
 		CodeVerifier: "verifier-1",
 		ClientID:     "client-1",
-	}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("dpop-token"))
+	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: fixedProof("dpop-token")})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -740,7 +733,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("token response = %#v", token)
 	}
 
-	nonce, err := receiver.FetchNonceResponse(t.Context(), endpoint("/nonce"))
+	nonce, err := receiver.RequestNonce(t.Context(), endpoint("/nonce"))
 	if err != nil {
 		t.Fatalf("FetchNonce() error = %v", err)
 	}
@@ -767,7 +760,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("deferred response = %#v", deferred)
 	}
 
-	if err := receiver.SendCredentialNotificationWithDpopRetryForToken(t.Context(), endpoint("/notification"), dpopAccessToken("access-1"), types.NotificationRequest{
+	if err := receiver.SendNotification(t.Context(), endpoint("/notification"), dpopAccessToken("access-1"), types.NotificationRequest{
 		NotificationID: deferred.NotificationID,
 		Event:          "credential_accepted",
 	}, fixedProof("dpop-notification")); err != nil {
@@ -836,7 +829,7 @@ func TestOid4vciReceiver_RequestCredentialDPoPRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_PostCredentialEndpointDPoPRetry(t *testing.T) {
+func TestOid4vciReceiver_RequestCredentialEndpointDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -889,7 +882,7 @@ func TestOid4vciReceiver_PostCredentialEndpointDPoPRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
+		t.Fatalf("RequestCredential() error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -902,7 +895,7 @@ func TestOid4vciReceiver_PostCredentialEndpointDPoPRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_ExchangeAuthorizationCodeDPoPRetry(t *testing.T) {
+func TestOid4vciReceiver_RequestTokenDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -963,23 +956,19 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeDPoPRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
-		common.URIField(*parsed),
-		types.AuthorizationCodeTokenRequest{
-			Code:         "code-1",
-			RedirectURI:  "openid-credential-offer://callback",
-			CodeVerifier: "verifier-1",
-			ClientID:     "client-1",
-		},
-		fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
-			ClientAttestation:    "attestation-jwt",
-			ClientAttestationPop: "attestation-pop-jwt",
-		}),
-		func(nonce string) (string, error) {
-			proofNonces = append(proofNonces, nonce)
-			return "proof:" + nonce, nil
-		},
-	)
+	response, err := receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
+		GrantType:    types.AuthorizationCode,
+		Code:         "code-1",
+		RedirectURI:  "openid-credential-offer://callback",
+		CodeVerifier: "verifier-1",
+		ClientID:     "client-1",
+	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
+		ClientAttestation:    "attestation-jwt",
+		ClientAttestationPop: "attestation-pop-jwt",
+	}), DPoP: func(nonce string) (string, error) {
+		proofNonces = append(proofNonces, nonce)
+		return "proof:" + nonce, nil
+	}})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -994,7 +983,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeDPoPRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t *testing.T) {
+func TestOid4vciReceiver_RequestTokenAuthorizationCode(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -1031,28 +1020,24 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 
 	headerFactoryCalls := 0
 	var proofNonces []string
-	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
-		common.URIField(*parsed),
-		types.AuthorizationCodeTokenRequest{
-			Code:         "code-1",
-			RedirectURI:  "openid-credential-offer://callback",
-			CodeVerifier: "verifier-1",
-			ClientID:     "client-1",
-		},
-		func() (types.OAuthClientAttestationHeaders, error) {
-			headerFactoryCalls++
-			return types.OAuthClientAttestationHeaders{
-				ClientAttestation:    "attestation-jwt",
-				ClientAttestationPop: fmt.Sprintf("attestation-pop-jwt-%d", headerFactoryCalls),
-			}, nil
-		},
-		func(nonce string) (string, error) {
-			proofNonces = append(proofNonces, nonce)
-			return "proof:" + nonce, nil
-		},
-	)
+	response, err := receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
+		GrantType:    types.AuthorizationCode,
+		Code:         "code-1",
+		RedirectURI:  "openid-credential-offer://callback",
+		CodeVerifier: "verifier-1",
+		ClientID:     "client-1",
+	}, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+		headerFactoryCalls++
+		return types.OAuthClientAttestationHeaders{
+			ClientAttestation:    "attestation-jwt",
+			ClientAttestationPop: fmt.Sprintf("attestation-pop-jwt-%d", headerFactoryCalls),
+		}, nil
+	}, DPoP: func(nonce string) (string, error) {
+		proofNonces = append(proofNonces, nonce)
+		return "proof:" + nonce, nil
+	}})
 	if err != nil {
-		t.Fatalf("ExchangeAuthorizationCodeWithDpopAndAttestationRetry() error = %v", err)
+		t.Fatalf("RequestToken() error = %v", err)
 	}
 	if response.Token != "access-1" || response.TokenType != "DPoP" {
 		t.Fatalf("response = %#v", response)
@@ -1153,7 +1138,7 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	err = receiver.SendCredentialNotificationWithDpopRetryForToken(t.Context(),
+	err = receiver.SendNotification(t.Context(),
 		common.URIField(*parsed),
 		dpopAccessToken("access-1"),
 		types.NotificationRequest{NotificationID: "notification-1", Event: "credential_accepted"},
@@ -1163,7 +1148,7 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("SendCredentialNotificationWithDpopRetryForToken() error = %v", err)
+		t.Fatalf("SendNotification() error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -1246,7 +1231,7 @@ func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
 		t.Fatalf("failed to serialize response: %v", err)
 	}
 
-	decodedResponse, err := receiver.DecodeCredentialResponse([]byte(serializedResponse), "application/jwt", recipient)
+	decodedResponse, err := receiver.DecodeCredentialResponse([]byte(serializedResponse), "application/jwt", recipient, false)
 	if err != nil {
 		t.Fatalf("DecodeCredentialResponse() error = %v", err)
 	}
@@ -1254,176 +1239,12 @@ func TestOid4vciReceiver_CredentialRequestAndResponseEncryption(t *testing.T) {
 		t.Fatalf("decoded response = %#v", decodedResponse)
 	}
 
-	plainResponse, err := receiver.DecodeCredentialResponse([]byte(`{"transaction_id":"tx-1"}`), "application/json", nil)
+	plainResponse, err := receiver.DecodeCredentialResponse([]byte(`{"transaction_id":"tx-1"}`), "application/json", nil, false)
 	if err != nil {
 		t.Fatalf("DecodeCredentialResponse() plain error = %v", err)
 	}
 	if plainResponse.TransactionID != "tx-1" {
 		t.Fatalf("plain response = %#v", plainResponse)
-	}
-}
-
-func TestOid4vciReceiver_CreateDpopAndCredentialProofJWTs(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
-	}
-	key := jose.JSONWebKey{
-		Key:       privateKey,
-		KeyID:     "wallet-key-1",
-		Algorithm: string(jose.ES256),
-		Use:       "sig",
-	}
-
-	dpop, err := receiver.CreateDpopProof(key, http.MethodPost, "https://issuer.example/credential?ignored=true#fragment", "nonce-1", "access-token")
-	if err != nil {
-		t.Fatalf("CreateDpopProof() error = %v", err)
-	}
-	parsedDpop, err := jwt.ParseSigned(dpop, []jose.SignatureAlgorithm{jose.ES256})
-	if err != nil {
-		t.Fatalf("failed to parse DPoP JWT: %v", err)
-	}
-	if typ := parsedDpop.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "dpop+jwt" {
-		t.Fatalf("DPoP typ = %#v", typ)
-	}
-	if parsedDpop.Headers[0].KeyID != "" {
-		t.Fatalf("DPoP protected header should not contain top-level kid, got %q", parsedDpop.Headers[0].KeyID)
-	}
-	if parsedDpop.Headers[0].JSONWebKey == nil || parsedDpop.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
-		t.Fatalf("DPoP jwk header = %#v", parsedDpop.Headers[0].JSONWebKey)
-	}
-	var dpopClaims map[string]any
-	if err := parsedDpop.Claims(&privateKey.PublicKey, &dpopClaims); err != nil {
-		t.Fatalf("failed to verify DPoP JWT: %v", err)
-	}
-	if dpopClaims["htm"] != http.MethodPost {
-		t.Fatalf("htm = %#v", dpopClaims["htm"])
-	}
-	if dpopClaims["htu"] != "https://issuer.example/credential" {
-		t.Fatalf("htu = %#v", dpopClaims["htu"])
-	}
-	if dpopClaims["nonce"] != "nonce-1" {
-		t.Fatalf("nonce = %#v", dpopClaims["nonce"])
-	}
-	ath := sha256.Sum256([]byte("access-token"))
-	if dpopClaims["ath"] != base64.RawURLEncoding.EncodeToString(ath[:]) {
-		t.Fatalf("ath = %#v", dpopClaims["ath"])
-	}
-
-	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
-		Audience: "https://issuer.example",
-		Nonce:    "credential-nonce",
-	})
-	if err != nil {
-		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
-	}
-	parsedProof, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
-	if err != nil {
-		t.Fatalf("failed to parse proof JWT: %v", err)
-	}
-	if typ := parsedProof.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "openid4vci-proof+jwt" {
-		t.Fatalf("proof typ = %#v", typ)
-	}
-	if parsedProof.Headers[0].KeyID != "" {
-		t.Fatalf("proof protected header should not contain top-level kid, got %q", parsedProof.Headers[0].KeyID)
-	}
-	if parsedProof.Headers[0].JSONWebKey == nil || parsedProof.Headers[0].JSONWebKey.KeyID != "wallet-key-1" {
-		t.Fatalf("proof jwk header = %#v", parsedProof.Headers[0].JSONWebKey)
-	}
-	var proofClaims map[string]any
-	if err := parsedProof.Claims(&privateKey.PublicKey, &proofClaims); err != nil {
-		t.Fatalf("failed to verify proof JWT: %v", err)
-	}
-	if proofClaims["aud"] != "https://issuer.example" || proofClaims["nonce"] != "credential-nonce" {
-		t.Fatalf("proof claims = %#v", proofClaims)
-	}
-}
-
-func TestOid4vciReceiver_CreateClientAttestationJWTs(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	clientPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate client key: %v", err)
-	}
-	attesterPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate attester key: %v", err)
-	}
-	certTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(3),
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, &attesterPrivateKey.PublicKey, attesterPrivateKey)
-	if err != nil {
-		t.Fatalf("failed to create attester certificate: %v", err)
-	}
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		t.Fatalf("failed to parse attester certificate: %v", err)
-	}
-	clientKey := jose.JSONWebKey{Key: clientPrivateKey, KeyID: "client-key-1", Algorithm: string(jose.ES256), Use: "sig"}
-	attesterKey := jose.JSONWebKey{Key: attesterPrivateKey, KeyID: "attester-key-1", Algorithm: string(jose.ES256), Use: "sig", Certificates: []*x509.Certificate{cert}}
-
-	attestation, err := receiver.CreateClientAttestation(clientKey, attesterKey, "https://client-attester.example.org/", "client-1", time.Minute)
-	if err != nil {
-		t.Fatalf("CreateClientAttestation() error = %v", err)
-	}
-	parsedAttestation, err := jwt.ParseSigned(attestation, []jose.SignatureAlgorithm{jose.ES256})
-	if err != nil {
-		t.Fatalf("failed to parse attestation JWT: %v", err)
-	}
-	if typ := parsedAttestation.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "oauth-client-attestation+jwt" {
-		t.Fatalf("attestation typ = %#v", typ)
-	}
-	if parsedAttestation.Headers[0].KeyID != "attester-key-1" {
-		t.Fatalf("attestation kid = %q", parsedAttestation.Headers[0].KeyID)
-	}
-	pool := x509.NewCertPool()
-	pool.AddCert(cert)
-	if chains, err := parsedAttestation.Headers[0].Certificates(x509.VerifyOptions{Roots: pool}); err != nil || len(chains) == 0 {
-		t.Fatalf("expected x5c certificate chain, chains=%#v err=%v", chains, err)
-	}
-	var attestationClaims map[string]any
-	if err := parsedAttestation.Claims(&attesterPrivateKey.PublicKey, &attestationClaims); err != nil {
-		t.Fatalf("failed to verify attestation JWT: %v", err)
-	}
-	if attestationClaims["iss"] != "https://client-attester.example.org/" || attestationClaims["sub"] != "client-1" {
-		t.Fatalf("attestation claims = %#v", attestationClaims)
-	}
-	cnf, ok := attestationClaims["cnf"].(map[string]any)
-	if !ok || cnf["jwk"] == nil {
-		t.Fatalf("attestation cnf = %#v", attestationClaims["cnf"])
-	}
-
-	pop, err := receiver.CreateClientAttestationPop(clientKey, "client-1", "https://issuer.example", "challenge-1", time.Minute)
-	if err != nil {
-		t.Fatalf("CreateClientAttestationPop() error = %v", err)
-	}
-	parsedPop, err := jwt.ParseSigned(pop, []jose.SignatureAlgorithm{jose.ES256})
-	if err != nil {
-		t.Fatalf("failed to parse PoP JWT: %v", err)
-	}
-	if typ := parsedPop.Headers[0].ExtraHeaders[jose.HeaderType]; typ != "oauth-client-attestation-pop+jwt" {
-		t.Fatalf("PoP typ = %#v", typ)
-	}
-	var popClaims map[string]any
-	if err := parsedPop.Claims(&clientPrivateKey.PublicKey, &popClaims); err != nil {
-		t.Fatalf("failed to verify PoP JWT: %v", err)
-	}
-	if popClaims["iss"] != "client-1" || popClaims["aud"] != "https://issuer.example" || popClaims["challenge"] != "challenge-1" {
-		t.Fatalf("PoP claims = %#v", popClaims)
-	}
-	// popClaims is a map[string]any, so comparing the value to "" is false for
-	// every string it can hold and false again when the claim is absent: the
-	// assertion never fired. draft-ietf-oauth-attestation-based-client-auth §4
-	// makes jti "REQUIRED. A unique identifier for the token", so the claim
-	// must be present and a non-empty string.
-	if jti, ok := popClaims["jti"].(string); !ok || jti == "" {
-		t.Fatalf("PoP jti missing: %#v", popClaims)
 	}
 }
 
@@ -2219,12 +2040,10 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 		require.NoError(t, err)
 		receiver := &Oid4vciReceiver{AllowHTTP: true}
 		_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
-			ResponseType:        "code",
-			ClientID:            "client-1",
-			RedirectURI:         "https://wallet.example/callback",
-			ClientAssertion:     "assertion-jwt",
-			ClientAssertionType: types.ClientAssertionTypeJWTBearer,
-		}, types.OAuthClientAttestationHeaders{})
+			ResponseType: "code",
+			ClientID:     "client-1",
+			RedirectURI:  "https://wallet.example/callback",
+		}, types.ClientAuthentication{ClientAssertion: func() (string, error) { return "assertion-jwt", nil }})
 		require.NoError(t, err)
 		assert.Equal(t, "assertion-jwt", captured.Get("client_assertion"))
 		assert.Equal(t, types.ClientAssertionTypeJWTBearer, captured.Get("client_assertion_type"))
@@ -2246,7 +2065,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 			ResponseType: "code",
 			ClientID:     "client-1",
 			RedirectURI:  "https://wallet.example/callback",
-		}, types.OAuthClientAttestationHeaders{})
+		}, types.ClientAuthentication{})
 		require.NoError(t, err)
 		assert.Empty(t, captured.Get("client_assertion"))
 		assert.Empty(t, captured.Get("client_assertion_type"))
@@ -2275,7 +2094,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestAuthorizationDetails(t *testing
 				"credential_configuration_id": "pid",
 			},
 		},
-	}, types.OAuthClientAttestationHeaders{})
+	}, types.ClientAuthentication{})
 	require.NoError(t, err)
 
 	assert.Empty(t, captured.Get("scope"), "scope must be omitted when authorization_details is used")
@@ -2286,7 +2105,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestAuthorizationDetails(t *testing
 	assert.Equal(t, "pid", details[0]["credential_configuration_id"])
 }
 
-func TestOid4vciReceiver_ExchangeAuthorizationCodeClientAssertion(t *testing.T) {
+func TestOid4vciReceiver_RequestTokenClientAssertion(t *testing.T) {
 	var captured url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -2298,21 +2117,23 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeClientAssertion(t *testing.T) 
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
-	token, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), common.URIField(*parsed), types.AuthorizationCodeTokenRequest{
-		Code:                "code-1",
-		RedirectURI:         "https://wallet.example/callback",
-		CodeVerifier:        "verifier-1",
-		ClientID:            "client-1",
-		ClientAssertion:     "assertion-jwt",
-		ClientAssertionType: types.ClientAssertionTypeJWTBearer,
-	}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("dpop-proof"))
+	token, err := receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
+		GrantType:    types.AuthorizationCode,
+		Code:         "code-1",
+		RedirectURI:  "https://wallet.example/callback",
+		CodeVerifier: "verifier-1",
+		ClientID:     "client-1",
+	}, types.ClientAuthentication{
+		ClientAssertion: func() (string, error) { return "assertion-jwt", nil },
+		DPoP:            fixedProof("dpop-proof"),
+	})
 	require.NoError(t, err)
 	assert.Equal(t, "access-1", token.Token)
 	assert.Equal(t, "assertion-jwt", captured.Get("client_assertion"))
 	assert.Equal(t, types.ClientAssertionTypeJWTBearer, captured.Get("client_assertion_type"))
 }
 
-func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(t *testing.T) {
+func TestOid4vciReceiver_RequestTokenRetryRefreshesClientAssertion(t *testing.T) {
 	attempts := 0
 	var captured []url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2333,22 +2154,19 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
 	factoryCalls := 0
-	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
-		common.URIField(*parsed),
-		types.AuthorizationCodeTokenRequest{
-			Code:                "code-1",
-			RedirectURI:         "https://wallet.example/callback",
-			CodeVerifier:        "verifier-1",
-			ClientID:            "client-1",
-			ClientAssertionType: types.ClientAssertionTypeJWTBearer,
-			ClientAssertionFactory: func() (string, error) {
-				factoryCalls++
-				return fmt.Sprintf("assertion-%d", factoryCalls), nil
-			},
+	_, err = receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
+		GrantType:    types.AuthorizationCode,
+		Code:         "code-1",
+		RedirectURI:  "https://wallet.example/callback",
+		CodeVerifier: "verifier-1",
+		ClientID:     "client-1",
+	}, types.ClientAuthentication{
+		ClientAssertion: func() (string, error) {
+			factoryCalls++
+			return fmt.Sprintf("assertion-%d", factoryCalls), nil
 		},
-		func() (types.OAuthClientAttestationHeaders, error) { return types.OAuthClientAttestationHeaders{}, nil },
-		func(string) (string, error) { return "dpop-proof", nil },
-	)
+		DPoP: fixedProof("dpop-proof"),
+	})
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts)
 	require.Equal(t, 2, factoryCalls)
@@ -2387,9 +2205,7 @@ func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
 
 	response, err := receiver.PushAuthorizationRequest(t.Context(),
 		mustURIField(t, redirectingURL+"/par"),
-		types.PushedAuthorizationRequest{ResponseType: "code", ClientID: "wallet", RedirectURI: "https://wallet.example/cb"},
-		types.OAuthClientAttestationHeaders{ClientAttestation: "attestation", ClientAttestationPop: "pop"},
-	)
+		types.PushedAuthorizationRequest{ResponseType: "code", ClientID: "wallet", RedirectURI: "https://wallet.example/cb"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{ClientAttestation: "attestation", ClientAttestationPop: "pop"})})
 
 	require.Error(t, err)
 	assert.Nil(t, response)
@@ -2397,7 +2213,7 @@ func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
 	assert.Zero(t, relayedRequests(), "the pushed request must not reach the redirect target")
 }
 
-func TestPostCredentialEndpointRefusesRedirect(t *testing.T) {
+func TestRequestCredentialRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
@@ -2430,11 +2246,11 @@ func TestFetchIssuerMetadataRefusesRedirect(t *testing.T) {
 	assert.Zero(t, relayedRequests(), "the metadata request must not reach the redirect target")
 }
 
-func TestFetchNonceResponseRefusesRedirect(t *testing.T) {
+func TestRequestNonceRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, redirectingURL+"/nonce"))
+	response, err := receiver.RequestNonce(t.Context(), mustURIField(t, redirectingURL+"/nonce"))
 
 	require.Error(t, err)
 	assert.Nil(t, response)
@@ -2442,51 +2258,24 @@ func TestFetchNonceResponseRefusesRedirect(t *testing.T) {
 	assert.Zero(t, relayedRequests(), "the nonce request must not reach the redirect target")
 }
 
-func TestNoRedirectClientDoesNotMutateCallerClient(t *testing.T) {
-	transport := &http.Transport{}
-	jar, err := cookiejar.New(nil)
-	require.NoError(t, err)
-	caller := &http.Client{Transport: transport, Timeout: 7 * time.Second, Jar: jar}
-
-	wrapped := NoRedirectClient(caller)
-
-	require.NotSame(t, caller, wrapped)
-	assert.Nil(t, caller.CheckRedirect, "the caller's client keeps following redirects")
-	assert.Same(t, transport, wrapped.Transport, "the caller's transport, and so its connection pool, is reused")
-	assert.Equal(t, 7*time.Second, wrapped.Timeout)
-	assert.Same(t, jar, wrapped.Jar)
-
-	require.NotNil(t, wrapped.CheckRedirect)
-	redirected, err := http.NewRequest(http.MethodGet, "https://issuer.example/elsewhere", nil)
-	require.NoError(t, err)
-	assert.ErrorIs(t, wrapped.CheckRedirect(redirected, nil), ErrHTTPRedirectNotAllowed)
-
-	// A caller with no client of its own gets the package default, which refuses
-	// redirects as well.
-	fallback := NoRedirectClient(nil)
-	require.NotNil(t, fallback.CheckRedirect)
-	assert.ErrorIs(t, fallback.CheckRedirect(redirected, nil), ErrHTTPRedirectNotAllowed)
-}
-
 func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 	issuer := mockserver.NewOID4VCIIssuerServer(nil)
 	defer issuer.Close()
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, cNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
 		types.CredentialIssuanceAccessToken{Token: issuer.AccessToken(), TokenType: "Bearer"},
-		nil,
 		"c-nonce-1",
 		func(nonce string) ([]byte, string, error) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
+		nil,
 		noopProofFactory,
 	)
 
 	require.NoError(t, err)
 	require.NotNil(t, response)
-	assert.Equal(t, "c-nonce-1", cNonce)
 
 	requests := issuer.CredentialRequests()
 	require.Len(t, requests, 1)
@@ -2504,14 +2293,14 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 	defer issuer.Close()
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
 		types.CredentialIssuanceAccessToken{Token: issuer.AccessToken(), TokenType: "dpop"},
-		nil,
 		"c-nonce-1",
 		func(nonce string) ([]byte, string, error) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
+		nil,
 		noopProofFactory,
 	)
 
@@ -2524,74 +2313,6 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 	// spelled as RFC 9449 Section 7.1 defines it.
 	assert.Equal(t, "DPoP "+issuer.AccessToken(), requests[0].Authorization)
 	assert.Equal(t, "dpop-proof", requests[0].DPoP)
-}
-
-// transportOnlyReceiver exposes only the transport half of the bundled plugin.
-// Embedding the interface, rather than the concrete receiver, means the signing
-// primitives are not promoted, which is what a third-party HTTP-only plugin
-// looks like.
-type transportOnlyReceiver struct {
-	types.OID4VCIFinalTransport
-}
-
-// TestOid4vciReceiverSatisfiesTransportAndSigner pins the split of the Final
-// receiver capability into a transport contract a plugin owns and a signer
-// contract the wallet may replace. The bundled plugin implements both, so it
-// also satisfies the deprecated compound interface; a transport-only plugin
-// satisfies the transport contract alone.
-func TestOid4vciReceiverSatisfiesTransportAndSigner(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-
-	var transport types.OID4VCIFinalTransport = receiver
-	var signer types.OID4VCIFinalSigner = receiver
-
-	if _, ok := any(&transportOnlyReceiver{OID4VCIFinalTransport: receiver}).(types.OID4VCIFinalSigner); ok {
-		t.Fatal("a transport-only plugin must not satisfy OID4VCIFinalSigner")
-	}
-
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-key-1", Algorithm: string(jose.ES256), Use: "sig"}
-
-	// Signer view: the key proof of Section 8.2.1.1 verifies under the holder key.
-	proof, err := signer.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
-		Audience:         "https://issuer.example",
-		Nonce:            "credential-nonce",
-		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES256},
-	})
-	require.NoError(t, err)
-	parsedProof, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
-	require.NoError(t, err)
-	var proofClaims map[string]any
-	require.NoError(t, parsedProof.Claims(&privateKey.PublicKey, &proofClaims))
-	require.Equal(t, "https://issuer.example", proofClaims["aud"])
-	require.Equal(t, "credential-nonce", proofClaims["nonce"])
-
-	// The same proof comes out of the default signer on its own, which is what a
-	// wallet gets when its plugin implements the transport contract only.
-	standalone, err := oid4vcisign.Default{}.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
-		Audience:         "https://issuer.example",
-		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES256},
-	})
-	require.NoError(t, err)
-	standaloneParsed, err := jwt.ParseSigned(standalone, []jose.SignatureAlgorithm{jose.ES256})
-	require.NoError(t, err)
-	require.Equal(t, "openid4vci-proof+jwt", standaloneParsed.Headers[0].ExtraHeaders[jose.HeaderType])
-
-	// Transport view: the Credential Request codec round-trips without any key.
-	body, contentType, err := transport.EncodeCredentialRequest(
-		map[string]any{"credential_configuration_id": "pid", "proofs": map[string]any{"jwt": []string{proof}}},
-		&types.CredentialIssuerMetadata{},
-	)
-	require.NoError(t, err)
-	require.Equal(t, "application/json", contentType)
-	var encoded map[string]any
-	require.NoError(t, json.Unmarshal(body, &encoded))
-	require.Equal(t, "pid", encoded["credential_configuration_id"])
-
-	response, err := transport.DecodeCredentialResponse([]byte(`{"credential":"credential-1"}`), "application/json", nil)
-	require.NoError(t, err)
-	require.Equal(t, "credential-1", response.Credential)
 }
 
 // preAuthorizedAttestationIssuer is a mock issuer that requires the Appendix E
@@ -2631,20 +2352,15 @@ func preAuthorizedAttestationIssuer(t *testing.T, configure func(*mockserver.OID
 // draft-ietf-oauth-attestation-based-client-auth for exactly this purpose, and
 // HAIP §4.4.1 requires "an OAuth2 Client authentication mechanism at OAuth2
 // Endpoints that support client authentication".
-func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_CarriesAttestationHeaders(t *testing.T) {
+func TestRequestTokenPreAuthorizedCode_CarriesAttestationHeaders(t *testing.T) {
 	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, nil)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 	tokenEndpoint := issuer.URL() + "/token"
 
-	token, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
-		context.Background(),
-		mustURIField(t, tokenEndpoint),
-		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", TxCode: "493536", ClientID: "client-1"},
-		attestationHeadersFactory(t, receiver, clientKey, attesterKey, issuer.URL()),
-		func(nonce string) (string, error) {
-			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		},
-	)
+	token, err := receiver.RequestToken(
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", TxCode: "493536", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: func(nonce string) (string, error) {
+			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		}})
 	require.NoError(t, err)
 	require.Equal(t, "access-1", token.Token)
 
@@ -2664,22 +2380,17 @@ func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_CarriesAttestation
 // RFC 9449 §8: the retry the transport owns rebuilds the attestation headers
 // for the second attempt, so the issuer sees a fresh PoP rather than a replayed
 // one.
-func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_RebuildsHeadersOnNonceChallenge(t *testing.T) {
+func TestRequestTokenPreAuthorizedCode_RebuildsHeadersOnNonceChallenge(t *testing.T) {
 	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, func(config *mockserver.OID4VCIIssuerConfig) {
 		config.TokenDPoPNonce = "token-nonce-1"
 	})
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 	tokenEndpoint := issuer.URL() + "/token"
 
-	token, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
-		context.Background(),
-		mustURIField(t, tokenEndpoint),
-		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"},
-		attestationHeadersFactory(t, receiver, clientKey, attesterKey, issuer.URL()),
-		func(nonce string) (string, error) {
-			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		},
-	)
+	token, err := receiver.RequestToken(
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: func(nonce string) (string, error) {
+			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		}})
 	require.NoError(t, err)
 	require.Equal(t, "access-1", token.Token)
 
@@ -2693,31 +2404,26 @@ func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_RebuildsHeadersOnN
 // An issuer that requires attestation-based client authentication refuses the
 // same request sent without the headers, which is what makes the acceptance
 // above evidence.
-func TestExchangePreAuthorizedCodeWithDpopAndAttestationRetry_IssuerRefusesMissingHeaders(t *testing.T) {
+func TestRequestTokenPreAuthorizedCode_IssuerRefusesMissingHeaders(t *testing.T) {
 	issuer, clientKey, _ := preAuthorizedAttestationIssuer(t, nil)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 	tokenEndpoint := issuer.URL() + "/token"
 
-	_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(
-		context.Background(),
-		mustURIField(t, tokenEndpoint),
-		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"},
-		nil,
-		func(nonce string) (string, error) {
-			return receiver.CreateDpopProof(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		},
-	)
+	_, err := receiver.RequestToken(
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{DPoP: func(nonce string) (string, error) {
+			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
+		}})
 	require.ErrorContains(t, err, "invalid_client")
 }
 
 // attestationHeadersFactory mints a Client Attestation once and a fresh PoP for
 // every attempt, the way a wallet holding a Client Attestation provider does.
-func attestationHeadersFactory(t *testing.T, receiver *Oid4vciReceiver, clientKey, attesterKey jose.JSONWebKey, authorizationServer string) OAuthClientAttestationHeadersFactory {
+func attestationHeadersFactory(t *testing.T, clientKey, attesterKey jose.JSONWebKey, authorizationServer string) types.OAuthClientAttestationHeadersFactory {
 	t.Helper()
-	attestation, err := receiver.CreateClientAttestation(clientKey, attesterKey, "https://client-attester.example", "client-1", time.Minute)
+	attestation, err := signClientAttestation(clientKey, attesterKey, "https://client-attester.example", "client-1")
 	require.NoError(t, err)
 	return func() (types.OAuthClientAttestationHeaders, error) {
-		pop, err := receiver.CreateClientAttestationPop(clientKey, "client-1", authorizationServer, "", time.Minute)
+		pop, err := signClientAttestationPoP(clientKey, "client-1", authorizationServer, "")
 		if err != nil {
 			return types.OAuthClientAttestationHeaders{}, err
 		}

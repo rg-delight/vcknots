@@ -41,7 +41,7 @@ func TestResponseBodiesAreBounded(t *testing.T) {
 	t.Run("a token response above the default limit is refused", func(t *testing.T) {
 		server := serve(credentialSized)
 		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-		_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL), types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, nil, nil)
+		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{})
 		if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 			t.Fatalf("err = %v, want ErrBodyTooLarge", err)
 		}

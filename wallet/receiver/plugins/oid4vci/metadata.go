@@ -28,15 +28,9 @@ const (
 	wellKnownAuthorizationServer = "/.well-known/oauth-authorization-server"
 )
 
-// ErrIssuerIdentifierMismatch reports that a Credential Issuer Metadata document
-// states a credential_issuer that is not identical to the Credential Issuer
-// Identifier the metadata was requested from. OpenID4VCI 1.0 Section 12.2.4:
-// "The value MUST be identical to the Credential Issuer's identifier value into
-// which the well-known URI string was inserted to create the URL used to retrieve
-// the metadata. If these values are not identical (when compared using a simple
-// string comparison with no normalization), the data contained in the response
-// MUST NOT be used." The root wallet package cannot import a plugin, so it
-// declares its own alias of this sentinel.
+// ErrIssuerIdentifierMismatch reports Credential Issuer Metadata whose
+// credential_issuer is not the requested Credential Issuer Identifier
+// (OpenID4VCI 1.0 Section 12.2.4, compared without normalization).
 var ErrIssuerIdentifierMismatch = common.NewCodedError("issuer_metadata_identity_mismatch", "credential_issuer does not match the requested Credential Issuer Identifier")
 
 // ErrAuthorizationServerIssuerMismatch reports that authorization server
@@ -112,14 +106,21 @@ func requireMatchingCredentialIssuer(declared, identifier string) error {
 	return nil
 }
 
-// FetchIssuerMetadata fetches the Section 12.2 Credential Issuer Metadata. It
-// is a types.Receiver method and carries no context; it binds its requests
-// to context.Background().
+// FetchIssuerMetadata is DiscoverCredentialIssuer bound to
+// context.Background(), for the types.Receiver contract.
 func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivingTypes types.SupportedReceivingTypes) (*types.CredentialIssuerMetadata, error) {
-	ctx := context.Background()
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported serialization flavor")
 	}
+	return o.DiscoverCredentialIssuer(context.Background(), endpoint)
+}
+
+// DiscoverCredentialIssuer resolves the OpenID4VCI 1.0 Section 12.2 Credential
+// Issuer Metadata of issuer (a Credential Issuer Identifier, or its well-known
+// metadata URL). The document's credential_issuer must equal the identifier
+// (Section 12.2.4); signed metadata follows IssuerMetadataSigning (Section
+// 12.2.3); under HAIP the metadata must also satisfy HAIP Section 4.1.
+func (o *Oid4vciReceiver) DiscoverCredentialIssuer(ctx context.Context, issuer common.URIField) (*types.CredentialIssuerMetadata, error) {
 	normalized, err := o.normalizedProfile()
 	if err != nil {
 		return nil, err
@@ -127,32 +128,40 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	if err := o.requireHAIPTransport(normalized); err != nil {
 		return nil, err
 	}
+	metadata, err := o.fetchIssuerMetadata(ctx, issuer, normalized)
+	if err != nil {
+		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
+	}
+	if err := requireHAIPIssuerMetadata(normalized, metadata); err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
 
+// fetchIssuerMetadata fetches the Section 12.2.2 document and, when
+// AppendedMetadataPathFallback allows it, the Draft 13 location after a 404.
+func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint common.URIField, normalized profile.Profile) (*types.CredentialIssuerMetadata, error) {
 	signing := o.issuerMetadataSigningOptions(normalized)
 	identifier := credentialIssuerIdentifier(url.URL(endpoint))
 
 	var finalMetadata types.CredentialIssuerMetadata
-	err = o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, normalized, &finalMetadata)
+	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, normalized, &finalMetadata)
 	if err == nil {
 		return &finalMetadata, nil
 	}
-	// The Draft 13 location is tried only when asked for, only after a 404 and
-	// only when it differs from the Section 12.2.2 one. Each attempt decodes
-	// into a fresh value.
 	endpointURL := url.URL(endpoint)
 	var statusError *httpStatusError
 	if !o.AppendedMetadataPathFallback || normalized.IsHAIP() ||
 		strings.Trim(endpointURL.Path, "/") == "" ||
 		strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) ||
 		!errors.As(err, &statusError) || !statusError.isNotFound() {
-		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
+		return nil, err
 	}
 	var metadata types.CredentialIssuerMetadata
 	appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
 	if err := o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, normalized, &metadata); err != nil {
-		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
+		return nil, err
 	}
-
 	return &metadata, nil
 }
 
@@ -506,15 +515,20 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	return verification, payload, nil
 }
 
-// FetchAuthorizationServerMetadata fetches the RFC 8414 authorization server
-// metadata of the identifier endpoint names, and refuses a document whose
-// issuer is not that identifier (RFC 8414 Section 3.3, compared exactly). It
-// is a types.Receiver method and carries no context; it binds its request to
-// context.Background().
+// FetchAuthorizationServerMetadata is DiscoverAuthorizationServer bound to
+// context.Background(), for the types.Receiver contract.
 func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIField, receivingTypes types.SupportedReceivingTypes) (*types.AuthorizationServerMetadata, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
+	return o.DiscoverAuthorizationServer(context.Background(), endpoint)
+}
+
+// DiscoverAuthorizationServer resolves the RFC 8414 metadata of the
+// authorization server issuer (its identifier, or its well-known metadata
+// URL) and refuses a document whose issuer is not that identifier (RFC 8414
+// Section 3.3, compared exactly).
+func (o *Oid4vciReceiver) DiscoverAuthorizationServer(ctx context.Context, issuer common.URIField) (*types.AuthorizationServerMetadata, error) {
 	normalized, err := o.normalizedProfile()
 	if err != nil {
 		return nil, err
@@ -524,10 +538,10 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	}
 
 	var metadata types.AuthorizationServerMetadata
-	if err := o.fetchMetadataDocument(observe.WithEndpoint(context.Background(), observe.EndpointAuthorizationServerMetadata), authorizationServerMetadataURL(url.URL(endpoint)), &metadata); err != nil {
+	if err := o.fetchMetadataDocument(observe.WithEndpoint(ctx, observe.EndpointAuthorizationServerMetadata), authorizationServerMetadataURL(url.URL(issuer)), &metadata); err != nil {
 		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf("failed to fetch authorization server metadata: %w", err))
 	}
-	if identifier := authorizationServerIdentifier(url.URL(endpoint)); metadata.Issuer.String() != identifier {
+	if identifier := authorizationServerIdentifier(url.URL(issuer)); metadata.Issuer.String() != identifier {
 		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf(
 			"authorization server metadata issuer %q is not the requested identifier %q: %w",
 			metadata.Issuer.String(), identifier, ErrAuthorizationServerIssuerMismatch))
@@ -602,22 +616,11 @@ func (o *Oid4vciReceiver) ValidateCredentialConfigurationForProfile(config types
 	}
 }
 
-// ValidateIssuerMetadataForProfile applies the HAIP 1.0 constraints on the
-// Credential Issuer metadata. Under Final the metadata is accepted unchanged.
-// HAIP §4.1: "the nonce_endpoint MUST be present ... if the Credential Issuer
-// metadata ... includes cryptographic_binding_methods_supported".
-func (o *Oid4vciReceiver) ValidateIssuerMetadataForProfile(metadata *types.CredentialIssuerMetadata) error {
-	normalized, err := o.normalizedProfile()
-	if err != nil {
-		return err
-	}
-	if !normalized.IsHAIP() {
-		return nil
-	}
-	if metadata == nil {
-		return fmt.Errorf("issuer metadata is required")
-	}
-	if metadata.NonceEndpoint != nil {
+// requireHAIPIssuerMetadata applies HAIP Section 4.1: a nonce_endpoint is
+// required when a Credential Configuration advertises
+// cryptographic_binding_methods_supported.
+func requireHAIPIssuerMetadata(normalized profile.Profile, metadata *types.CredentialIssuerMetadata) error {
+	if !normalized.IsHAIP() || metadata.NonceEndpoint != nil {
 		return nil
 	}
 	for id, config := range metadata.CredentialConfigurationSupported {

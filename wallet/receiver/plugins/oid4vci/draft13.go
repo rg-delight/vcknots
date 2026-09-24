@@ -46,11 +46,10 @@ var (
 	ErrDraft13IssuancePending = types.ErrDraft13IssuancePending
 )
 
-// RequestOID4VCIDraft13Credential posts a Draft 13 Section 7.2 Credential
-// Request. It owns the RFC 9449 Section 8 DPoP nonce retry, and reports a
-// refusal as *Draft13CredentialEndpointError so the caller can read the fresh
-// c_nonce a Section 7.3.2 invalid_proof response carries.
-func (o *Oid4vciReceiver) RequestOID4VCIDraft13Credential(
+// RequestDraft13Credential posts a Draft 13 Section 7.2 Credential Request. A
+// refusal is a *Draft13CredentialEndpointError, which carries the fresh
+// c_nonce of a Section 7.3.2 invalid_proof response.
+func (o *Oid4vciReceiver) RequestDraft13Credential(
 	ctx context.Context,
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
@@ -64,9 +63,9 @@ func (o *Oid4vciReceiver) RequestOID4VCIDraft13Credential(
 	return o.postDraft13CredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointCredential), endpoint, accessToken, body, proofFactory)
 }
 
-// RequestOID4VCIDraft13DeferredCredential posts a Draft 13 Section 9 Deferred
+// RequestDraft13DeferredCredential posts a Draft 13 Section 9 Deferred
 // Credential Request for transactionID.
-func (o *Oid4vciReceiver) RequestOID4VCIDraft13DeferredCredential(
+func (o *Oid4vciReceiver) RequestDraft13DeferredCredential(
 	ctx context.Context,
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
@@ -83,13 +82,12 @@ func (o *Oid4vciReceiver) RequestOID4VCIDraft13DeferredCredential(
 	return o.postDraft13CredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointDeferredCredential), endpoint, accessToken, body, proofFactory)
 }
 
-// SendOID4VCIDraft13Notification posts a Draft 13 Section 10.1 Notification
-// Request. The endpoint answers 204 with no body on success.
-func (o *Oid4vciReceiver) SendOID4VCIDraft13Notification(
+// SendDraft13Notification posts a Draft 13 Section 10.1 Notification Request.
+func (o *Oid4vciReceiver) SendDraft13Notification(
 	ctx context.Context,
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
-	notification Draft13NotificationRequest,
+	notification types.NotificationRequest,
 	proofFactory types.DPoPProofFactory,
 ) error {
 	if strings.TrimSpace(notification.NotificationID) == "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,12 +13,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-type OAuthClientAttestationHeadersFactory = types.OAuthClientAttestationHeadersFactory
-
-// preAuthorizedCodeGrantType is the OpenID4VCI 1.0 §4.1.1 grant type of the
-// Pre-Authorized Code Flow, registered in §16.4.
-const preAuthorizedCodeGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
 // FetchAccessToken performs the pre-authorized code token request. It is a
 // types.Receiver method and carries no context; it binds its request to
@@ -38,7 +33,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 		return nil, err
 	}
 	formData := url.Values{}
-	formData.Set("grant_type", preAuthorizedCodeGrantType)
+	formData.Set("grant_type", string(types.PreAuthorizedCode))
 	formData.Set("pre-authorized_code", authzCode)
 	if txCode != "" {
 		formData.Set("tx_code", txCode)
@@ -104,9 +99,10 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	return &accessToken, nil
 }
 
-// PushAuthorizationRequest sends the RFC 9126 Pushed Authorization Request of
-// OpenID4VCI 1.0 Section 5.1. ctx bounds the request.
-func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint common.URIField, request types.PushedAuthorizationRequest, headers types.OAuthClientAttestationHeaders) (*types.PushedAuthorizationResponse, error) {
+// PushAuthorizationRequest sends an RFC 9126 Pushed Authorization Request
+// (OpenID4VCI 1.0 Section 5.1.4). RFC 9126 Section 2 has it carry the client
+// authentication of the token endpoint.
+func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint common.URIField, request types.PushedAuthorizationRequest, auth types.ClientAuthentication) (*types.PushedAuthorizationResponse, error) {
 	if _, err := o.normalizedProfile(); err != nil {
 		return nil, err
 	}
@@ -114,9 +110,8 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	formData.Set("response_type", request.ResponseType)
 	formData.Set("client_id", request.ClientID)
 	formData.Set("redirect_uri", request.RedirectURI)
-	// OpenID4VCI 1.0 §5.1.1/§5.1.2: scope and authorization_details are
-	// alternative ways to select the requested Credential Configuration; an
-	// empty value omits the parameter so the other method is unambiguous.
+	// Section 5.1.1/5.1.2: scope and authorization_details are alternative
+	// ways to select the Credential Configuration; empty values are omitted.
 	if request.Scope != "" {
 		formData.Set("scope", request.Scope)
 	}
@@ -133,63 +128,36 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	if request.IssuerState != "" {
 		formData.Set("issuer_state", request.IssuerState)
 	}
-	// RFC 9126 §2: a PAR request carries the token endpoint's client
-	// authentication. Client attestation headers and a client assertion are
-	// different mechanisms and may coexist on the wire, but a deployment uses
-	// one of them.
-	setClientAssertionForm(formData, request.ClientAssertion, request.ClientAssertionType)
+	endpointURL := url.URL(endpoint)
+	if err := requireClientAssertionPrerequisites(endpointURL, request.ClientID, auth); err != nil {
+		return nil, err
+	}
 
-	body := []byte(formData.Encode())
 	var response types.PushedAuthorizationResponse
-	if err := o.doJSON(observe.WithEndpoint(ctx, observe.EndpointPushedAuthorization), exchange{
-		method:      http.MethodPost,
-		url:         url.URL(endpoint),
-		contentType: "application/x-www-form-urlencoded",
-		body:        func() ([]byte, error) { return body, nil },
-		header: func(header http.Header) error {
-			setAttestationHeaders(header, headers)
-			return nil
-		},
-	}, &response); err != nil {
+	if err := o.postForm(observe.WithEndpoint(ctx, observe.EndpointPushedAuthorization), endpointURL, formData, auth, &response); err != nil {
 		return nil, stageError(StagePAR, fmt.Errorf("failed to push authorization request: %w", err))
 	}
 	return &response, nil
 }
 
-// ExchangeAuthorizationCodeWithDpopAndAttestationRetry exchanges the
-// authorization code at the Section 6.1 Token Endpoint and owns the RFC 9449
-// Section 8 DPoP nonce retry: both factories are called once per attempt, so a
-// re-sent request carries a freshly signed proof and freshly built attestation
-// headers rather than a replayed jti. ctx bounds every attempt.
-func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
+// RequestToken sends an OpenID4VCI 1.0 Section 6.1 Token Request. Under HAIP
+// a token_type other than DPoP is refused with ErrDPoPRequired.
+func (o *Oid4vciReceiver) RequestToken(ctx context.Context, endpoint common.URIField, request types.TokenRequest, auth types.ClientAuthentication) (*types.CredentialIssuanceAccessToken, error) {
 	normalized, err := o.normalizedProfile()
 	if err != nil {
 		return nil, err
 	}
-	// The form is rebuilt for every attempt so a fresh client_assertion
-	// (unique jti, RFC 7523 §3) accompanies each re-sent request.
-	buildBody := func() ([]byte, error) {
-		assertion := request.ClientAssertion
-		if request.ClientAssertionFactory != nil {
-			fresh, err := request.ClientAssertionFactory()
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
-			}
-			assertion = fresh
-		}
-		formData := url.Values{}
-		formData.Set("grant_type", "authorization_code")
-		formData.Set("code", request.Code)
-		formData.Set("redirect_uri", request.RedirectURI)
-		formData.Set("code_verifier", request.CodeVerifier)
-		formData.Set("client_id", request.ClientID)
-		setClientAssertionForm(formData, assertion, request.ClientAssertionType)
-		return []byte(formData.Encode()), nil
+	formData, err := tokenRequestForm(request)
+	if err != nil {
+		return nil, err
 	}
-
+	endpointURL := url.URL(endpoint)
+	if err := requireClientAssertionPrerequisites(endpointURL, request.ClientID, auth); err != nil {
+		return nil, err
+	}
 	var response types.CredentialIssuanceAccessToken
-	if err := o.postTokenRequest(ctx, url.URL(endpoint), buildBody, headersFactory, proofFactory, &response); err != nil {
-		return nil, stageError(StageToken, fmt.Errorf("failed to exchange authorization code: %w", err))
+	if err := o.postForm(observe.WithEndpoint(ctx, observe.EndpointToken), endpointURL, formData, auth, &response); err != nil {
+		return nil, stageError(StageToken, fmt.Errorf("token request failed: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
 		return nil, err
@@ -197,72 +165,56 @@ func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopAndAttestationRetry(c
 	return &response, nil
 }
 
-// ExchangePreAuthorizedCodeWithDpopAndAttestationRetry exchanges the
-// Section 4.1.1 pre-authorized_code at the Section 6.1 Token Endpoint. It is the
-// Pre-Authorized Code counterpart of
-// ExchangeAuthorizationCodeWithDpopAndAttestationRetry and owns the same RFC
-// 9449 Section 8 DPoP nonce retry: both factories are called once per attempt,
-// so a re-sent request carries a freshly signed proof, freshly built
-// OAuth-Client-Attestation headers and a fresh client_assertion rather than a
-// replayed jti. ctx bounds every attempt.
-//
-// Section 6.1 makes client authentication OPTIONAL for this grant
-// ("authentication of the Client is OPTIONAL"), so a nil headersFactory sends
-// no attestation headers and a nil proofFactory sends no DPoP proof.
-func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request types.PreAuthorizedCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
-	normalized, err := o.normalizedProfile()
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(request.PreAuthorizedCode) == "" {
-		return nil, fmt.Errorf("pre-authorized_code is required")
-	}
-	endpointURL := url.URL(endpoint)
-	if request.ClientAssertion != "" || request.ClientAssertionFactory != nil {
-		// private_key_jwt identifies the client by client_id, and an empty one
-		// would only be rejected at the authorization server, where the cause
-		// is far harder to see.
-		if strings.TrimSpace(request.ClientID) == "" {
-			return nil, fmt.Errorf("client_id is required when a client assertion is sent")
+// tokenRequestForm encodes request as the Section 6.1 form body.
+func tokenRequestForm(request types.TokenRequest) (url.Values, error) {
+	formData := url.Values{}
+	switch request.GrantType {
+	case types.AuthorizationCode:
+		if strings.TrimSpace(request.Code) == "" {
+			return nil, fmt.Errorf("%w: code is required", common.ErrInvalidInput)
 		}
-		if err := requireSecureClientAssertionTransport(endpointURL); err != nil {
-			return nil, err
+		formData.Set("grant_type", string(types.AuthorizationCode))
+		formData.Set("code", request.Code)
+		setIfNotEmpty(formData, "redirect_uri", request.RedirectURI)
+		setIfNotEmpty(formData, "code_verifier", request.CodeVerifier)
+	case types.PreAuthorizedCode:
+		if strings.TrimSpace(request.PreAuthorizedCode) == "" {
+			return nil, fmt.Errorf("%w: pre-authorized_code is required", common.ErrInvalidInput)
 		}
-	}
-	// The form is rebuilt for every attempt so a fresh client_assertion
-	// (unique jti, RFC 7523 §3) accompanies each re-sent request.
-	buildBody := func() ([]byte, error) {
-		assertion := request.ClientAssertion
-		if request.ClientAssertionFactory != nil {
-			fresh, err := request.ClientAssertionFactory()
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
-			}
-			assertion = fresh
-		}
-		formData := url.Values{}
-		formData.Set("grant_type", preAuthorizedCodeGrantType)
+		formData.Set("grant_type", string(types.PreAuthorizedCode))
 		formData.Set("pre-authorized_code", request.PreAuthorizedCode)
-		if request.TxCode != "" {
-			formData.Set("tx_code", request.TxCode)
+		// Section 6.1: tx_code is sent when the Credential Offer asked for one.
+		setIfNotEmpty(formData, "tx_code", request.TxCode)
+	default:
+		return nil, fmt.Errorf("%w: unsupported grant_type %q", common.ErrInvalidInput, request.GrantType)
+	}
+	setIfNotEmpty(formData, "client_id", strings.TrimSpace(request.ClientID))
+	if len(request.AuthorizationDetails) > 0 {
+		encoded, err := json.Marshal(request.AuthorizationDetails)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode authorization_details: %w", err)
 		}
-		// Sent for both authenticated and unauthenticated requests: client_id
-		// is OPTIONAL for this grant, so it is included whenever the caller
-		// configured one and omitted otherwise.
-		if clientID := strings.TrimSpace(request.ClientID); clientID != "" {
-			formData.Set("client_id", clientID)
-		}
-		setClientAssertionForm(formData, assertion, request.ClientAssertionType)
-		return []byte(formData.Encode()), nil
+		formData.Set("authorization_details", string(encoded))
 	}
-	var response types.CredentialIssuanceAccessToken
-	if err := o.postTokenRequest(ctx, endpointURL, buildBody, headersFactory, proofFactory, &response); err != nil {
-		return nil, stageError(StageToken, fmt.Errorf("failed to exchange the pre-authorized code: %w", err))
+	return formData, nil
+}
+
+func setIfNotEmpty(formData url.Values, name, value string) {
+	if value != "" {
+		formData.Set(name, value)
 	}
-	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
-		return nil, err
+}
+
+// requireClientAssertionPrerequisites checks, before any request, that a
+// private_key_jwt client assertion names its client and travels protected.
+func requireClientAssertionPrerequisites(endpointURL url.URL, clientID string, auth types.ClientAuthentication) error {
+	if auth.ClientAssertion == nil {
+		return nil
 	}
-	return &response, nil
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("%w: client_id is required when a client assertion is sent", common.ErrInvalidInput)
+	}
+	return requireSecureClientAssertionTransport(endpointURL)
 }
 
 // FetchClientAttestationChallenge fetches a challenge from the authorization
@@ -275,37 +227,43 @@ func (o *Oid4vciReceiver) FetchClientAttestationChallenge(ctx context.Context, e
 	return &response, nil
 }
 
-// postTokenRequest posts a form to the Token Endpoint (Section 6.1). The body,
-// the client attestation headers and the DPoP proof are rebuilt for each
-// attempt; a nil factory sends none. ctx bounds every attempt.
-func (o *Oid4vciReceiver) postTokenRequest(ctx context.Context, endpoint url.URL, buildBody func() ([]byte, error), headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory, target any) error {
-	return o.doJSON(observe.WithEndpoint(ctx, observe.EndpointToken), exchange{
+// postForm posts formData to an authorization server endpoint and decodes a
+// 2xx JSON response into target. The client assertion, the attestation headers
+// and the DPoP proof of auth are built again for every attempt.
+func (o *Oid4vciReceiver) postForm(ctx context.Context, endpoint url.URL, formData url.Values, auth types.ClientAuthentication, target any) error {
+	return o.doJSON(ctx, exchange{
 		method:      http.MethodPost,
 		url:         endpoint,
 		contentType: "application/x-www-form-urlencoded",
-		body:        buildBody,
+		body: func() ([]byte, error) {
+			if auth.ClientAssertion == nil {
+				return []byte(formData.Encode()), nil
+			}
+			assertion, err := auth.ClientAssertion()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate client assertion: %w", err)
+			}
+			attempt := maps.Clone(formData)
+			setClientAssertionForm(attempt, assertion)
+			return []byte(attempt.Encode()), nil
+		},
 		header: func(header http.Header) error {
-			if headersFactory == nil {
+			if auth.ClientAttestation == nil {
 				return nil
 			}
-			headers, err := headersFactory()
+			headers, err := auth.ClientAttestation()
 			if err != nil {
 				return err
 			}
 			setAttestationHeaders(header, headers)
 			return nil
 		},
-		dpop: proofFactory,
+		dpop: auth.DPoP,
 	}, target)
 }
 
-// requireSecureClientAssertionTransport refuses to send a client assertion over
-// an unprotected connection. The assertion proves possession of the registered
-// client key, and RFC 6749 §10.8 requires client credentials never to travel in
-// the clear. The AllowHTTP escape (VCKNOTS_WALLET_HTTP_ALLOWED) exists so that
-// the local samples can talk to a development server on this machine, which is
-// why loopback stays permitted; it is not a licence to send the assertion
-// across a network unprotected.
+// requireSecureClientAssertionTransport refuses to send a client assertion
+// over plain HTTP to a host other than loopback (RFC 6749 Section 10.8).
 func requireSecureClientAssertionTransport(endpointURL url.URL) error {
 	if strings.EqualFold(endpointURL.Scheme, "https") || common.IsLoopbackHost(endpointURL.Hostname()) {
 		return nil
@@ -315,20 +273,14 @@ func requireSecureClientAssertionTransport(endpointURL url.URL) error {
 		endpointURL.Host, endpointURL.Scheme)
 }
 
-// setClientAssertionForm adds the RFC 7523 §2.2 private_key_jwt client
-// authentication parameters to a form. Both members are omitted when no
-// assertion is present, so an unauthenticated request carries no client
-// authentication parameters. A supplied assertion without an explicit type is
-// sent with the JWT bearer value, the only type private_key_jwt uses.
-func setClientAssertionForm(formData url.Values, clientAssertion, clientAssertionType string) {
+// setClientAssertionForm adds the RFC 7523 Section 2.2 private_key_jwt
+// parameters; an empty assertion adds none.
+func setClientAssertionForm(formData url.Values, clientAssertion string) {
 	if strings.TrimSpace(clientAssertion) == "" {
 		return
 	}
-	if strings.TrimSpace(clientAssertionType) == "" {
-		clientAssertionType = types.ClientAssertionTypeJWTBearer
-	}
 	formData.Set("client_assertion", clientAssertion)
-	formData.Set("client_assertion_type", clientAssertionType)
+	formData.Set("client_assertion_type", types.ClientAssertionTypeJWTBearer)
 }
 
 // setAttestationHeaders adds the OAuth-Client-Attestation headers of

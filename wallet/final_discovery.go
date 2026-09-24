@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/trustknots/vcknots/wallet/common"
@@ -55,8 +56,8 @@ func pinnedAuthorizationServer(authorizationServer string) authorizationServerSe
 // server and resolves its metadata, whose issuer must be identical to the
 // identifier it was fetched for (RFC 8414 §3.3).
 func discoverOID4VCIIssuer(
-	transport receiverTypes.Receiver,
-	receivingType receiverTypes.SupportedReceivingTypes,
+	ctx context.Context,
+	transport receiverTypes.IssuerDiscovery,
 	issuerIdentifier string,
 	cached *receiverTypes.CredentialIssuerMetadata,
 	selectServer authorizationServerSelector,
@@ -65,7 +66,7 @@ func discoverOID4VCIIssuer(
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
 	}
-	issuerMetadata, err := resolveOID4VCIIssuerMetadata(transport, receivingType, issuerIdentifier, cached)
+	issuerMetadata, err := resolveOID4VCIIssuerMetadata(ctx, transport, issuerIdentifier, cached)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +75,7 @@ func discoverOID4VCIIssuer(
 	if err != nil {
 		return nil, err
 	}
-	authorizationServerMetadata, err := transport.FetchAuthorizationServerMetadata(authorizationServerEndpoint, receivingType)
+	authorizationServerMetadata, err := transport.DiscoverAuthorizationServer(ctx, authorizationServerEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
@@ -97,8 +98,8 @@ func discoverOID4VCIIssuer(
 // issuerIdentifier (§12.2.2), or takes cached, and requires its
 // credential_issuer to be identical to issuerIdentifier (§12.2.4).
 func resolveOID4VCIIssuerMetadata(
-	transport receiverTypes.Receiver,
-	receivingType receiverTypes.SupportedReceivingTypes,
+	ctx context.Context,
+	transport receiverTypes.IssuerDiscovery,
 	issuerIdentifier string,
 	cached *receiverTypes.CredentialIssuerMetadata,
 ) (*receiverTypes.CredentialIssuerMetadata, error) {
@@ -108,7 +109,7 @@ func resolveOID4VCIIssuerMetadata(
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
 		}
-		issuerMetadata, err = transport.FetchIssuerMetadata(*issuerEndpoint, receivingType)
+		issuerMetadata, err = transport.DiscoverCredentialIssuer(ctx, *issuerEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 		}

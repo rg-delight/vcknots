@@ -110,7 +110,7 @@ func (w *Wallet) NotifyOID4VCIFinalCredential(ctx context.Context, req OID4VCIFi
 	if err != nil {
 		return err
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -168,7 +168,7 @@ func notificationDescriptionByte(value byte) bool {
 // notification_id or no Notification Endpoint — is simply not notified.
 func notifyOID4VCIFinalCredential(
 	ctx context.Context,
-	finalReceiver receiverTypes.OID4VCIFinalTransport,
+	finalReceiver receiverTypes.OID4VCITransport,
 	signer receiverTypes.OID4VCIFinalSigner,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
 	token *receiverTypes.CredentialIssuanceAccessToken,
@@ -187,14 +187,14 @@ func notifyOID4VCIFinalCredential(
 
 func sendOID4VCIFinalNotification(
 	ctx context.Context,
-	finalReceiver receiverTypes.OID4VCIFinalTransport,
+	finalReceiver receiverTypes.OID4VCITransport,
 	signer receiverTypes.OID4VCIFinalSigner,
 	endpoint common.URIField,
 	token *receiverTypes.CredentialIssuanceAccessToken,
 	clientKey jose.JSONWebKey,
 	notification receiverTypes.NotificationRequest,
 ) error {
-	return finalReceiver.SendCredentialNotificationWithDpopRetryForToken(
+	return finalReceiver.SendNotification(
 		ctx,
 		endpoint,
 		*token,

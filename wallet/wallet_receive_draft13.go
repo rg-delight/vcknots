@@ -288,7 +288,7 @@ func (w *Wallet) obtainAccessToken(receivingType receiverTypes.SupportedReceivin
 	}
 
 	tokenEndpoint := *authMetadata.TokenEndpoint
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
+	tokenEndpointURL := tokenEndpoint.String()
 	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authMetadata, tokenEndpointURL)
 
 	authMethod, ok := resolveClientAuthMethod(w.clientAuth, authMetadata)

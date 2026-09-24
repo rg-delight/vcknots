@@ -2253,7 +2253,8 @@ func TestReceiveOID4VCIFinalCredential_RefusesKeyAttestationWithUnlistedAlgorith
 // bundled receiver keeps the signing primitives from being promoted, which is
 // what a plugin written outside this module looks like.
 type transportOnlyOID4VCIPlugin struct {
-	receiverTypes.OID4VCIFinalTransport
+	receiverTypes.Receiver
+	receiverTypes.OID4VCITransport
 }
 
 // TestWalletAcceptsCustomFinalSigner drives a whole Final issuance with
@@ -2286,9 +2287,9 @@ func TestWalletAcceptsTransportOnlyPlugin(t *testing.T) {
 	var registered receiverTypes.Receiver
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.wrapReceiverPlugin = func(plugin receiverTypes.Receiver) receiverTypes.Receiver {
-			transport, ok := plugin.(receiverTypes.OID4VCIFinalTransport)
+			transport, ok := plugin.(receiverTypes.OID4VCITransport)
 			require.True(t, ok)
-			registered = &transportOnlyOID4VCIPlugin{OID4VCIFinalTransport: transport}
+			registered = &transportOnlyOID4VCIPlugin{Receiver: plugin, OID4VCITransport: transport}
 			return registered
 		}
 	})
@@ -2306,7 +2307,7 @@ func TestWalletAcceptsTransportOnlyPlugin(t *testing.T) {
 }
 
 // TestFinalIssuanceBoundToALiveContextCompletes is the positive half of the
-// OID4VCIFinalTransport context contract: every transport method now takes the
+// OID4VCITransport context contract: every transport method now takes the
 // flow context, and a live one must not change the outcome of an issuance.
 func TestFinalIssuanceBoundToALiveContextCompletes(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {

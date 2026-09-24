@@ -9,39 +9,17 @@ import (
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-// OID4VCIDraft13Transport is the transport a Draft 13 issuance needs. The
-// endpoints it names are the ones whose request or error body differs from
-// OpenID4VCI 1.0 (the Credential, Deferred Credential and Notification
-// Endpoints); everything else — metadata discovery, the RFC 9126 pushed
-// authorization request and the Section 6.1 token request — is the same HTTP on
-// both versions, so it is taken from the transport the library already defines
-// rather than declared a second time.
-type OID4VCIDraft13Transport interface {
-	receiverTypes.OID4VCIFinalTransport
-
-	// RequestOID4VCIDraft13Credential posts a Draft 13 Section 7.2 Credential
-	// Request.
-	RequestOID4VCIDraft13Credential(ctx context.Context, endpoint common.URIField, accessToken receiverTypes.CredentialIssuanceAccessToken, request receiverOid4vci.Draft13CredentialRequest, proofFactory receiverTypes.DPoPProofFactory) (*receiverOid4vci.Draft13CredentialResponse, error)
-	// RequestOID4VCIDraft13DeferredCredential posts a Draft 13 Section 9
-	// Deferred Credential Request.
-	RequestOID4VCIDraft13DeferredCredential(ctx context.Context, endpoint common.URIField, accessToken receiverTypes.CredentialIssuanceAccessToken, transactionID string, proofFactory receiverTypes.DPoPProofFactory) (*receiverOid4vci.Draft13CredentialResponse, error)
-	// SendOID4VCIDraft13Notification posts a Draft 13 Section 10.1
-	// Notification Request.
-	SendOID4VCIDraft13Notification(ctx context.Context, endpoint common.URIField, accessToken receiverTypes.CredentialIssuanceAccessToken, notification receiverOid4vci.Draft13NotificationRequest, proofFactory receiverTypes.DPoPProofFactory) error
-}
 
 // oid4vciDraft13Flow is the per-issuance state a Draft 13 receive carries: the
 // transport, the documents discovery produced and the configuration that was
 // selected. It exists so the Pre-Authorized and Authorization Code halves share
 // one credential request implementation.
 type oid4vciDraft13Flow struct {
-	transport                   OID4VCIDraft13Transport
+	transport                   receiverTypes.Draft13Transport
 	issuerMetadata              *receiverTypes.CredentialIssuerMetadata
 	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata
 	credentialConfigurationID   string
@@ -50,16 +28,12 @@ type oid4vciDraft13Flow struct {
 
 // draft13Transport resolves the Draft 13 transport of the receiver plugin
 // registered for receivingType.
-func (w *Wallet) draft13Transport(receivingType receiverTypes.SupportedReceivingTypes) (OID4VCIDraft13Transport, error) {
-	transport, err := w.receiver.OID4VCIFinalTransport(receivingType)
+func (w *Wallet) draft13Transport(receivingType receiverTypes.SupportedReceivingTypes) (receiverTypes.Draft13Transport, error) {
+	transport, err := w.receiver.Draft13Transport(receivingType)
 	if err != nil {
-		return nil, fmt.Errorf("OID4VCI transport capability is not available: %w", err)
+		return nil, fmt.Errorf("OID4VCI Draft 13 transport capability is not available: %w", err)
 	}
-	draft13, ok := transport.(OID4VCIDraft13Transport)
-	if !ok {
-		return nil, fmt.Errorf("OID4VCI Draft 13 transport capability is not available: %w", receiverTypes.ErrUnsupportedProtocol)
-	}
-	return draft13, nil
+	return transport, nil
 }
 
 // draft13DPoPEnabled reports whether this issuance uses RFC 9449 DPoP. The
@@ -78,10 +52,10 @@ func (w *Wallet) draft13DPoPEnabled(authorizationServerMetadata *receiverTypes.A
 	if w.dpop.Enabled {
 		return true
 	}
-	if authorizationServerMetadata == nil || authorizationServerMetadata.DpopSigningAlgValuesSupported == nil {
+	if authorizationServerMetadata == nil || authorizationServerMetadata.DPoPSigningAlgValuesSupported == nil {
 		return false
 	}
-	return len(*authorizationServerMetadata.DpopSigningAlgValuesSupported) > 0
+	return len(*authorizationServerMetadata.DPoPSigningAlgValuesSupported) > 0
 }
 
 // draft13DPoPProofFactory builds the RFC 9449 proof for one endpoint. A nil key
@@ -104,14 +78,15 @@ func (w *Wallet) draft13DPoPProofFactory(key IKeyEntry, method string, endpoint 
 // the cached copy) and the metadata of the authorization server the offer
 // selects, with the same identity checks as the Final path.
 func (w *Wallet) discoverDraft13Metadata(
-	transport OID4VCIDraft13Transport,
+	ctx context.Context,
+	transport receiverTypes.Draft13Transport,
 	req OID4VCIDraft13ReceiveRequest,
 	grant *CredentialOfferGrant,
 ) (*oid4vciDiscovery, error) {
 	if err := w.validateDraft13CredentialIssuer(req.CredentialOffer.CredentialIssuer); err != nil {
 		return nil, err
 	}
-	discovery, err := discoverOID4VCIIssuer(transport, req.Type, req.CredentialOffer.CredentialIssuer.String(), req.CachedIssuerMetadata, offeredAuthorizationServer(grant))
+	discovery, err := discoverOID4VCIIssuer(ctx, transport, req.CredentialOffer.CredentialIssuer.String(), req.CachedIssuerMetadata, offeredAuthorizationServer(grant))
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +175,7 @@ func (w *Wallet) ReceiveOID4VCIDraft13Credential(ctx context.Context, req OID4VC
 	if err != nil {
 		return nil, err
 	}
-	discovery, err := w.discoverDraft13Metadata(transport, req, grant)
+	discovery, err := w.discoverDraft13Metadata(ctx, transport, req, grant)
 	if err != nil {
 		return nil, err
 	}
@@ -236,14 +211,15 @@ func (w *Wallet) exchangeDraft13PreAuthorizedCode(
 	preAuthorizedCode string,
 ) (*receiverTypes.CredentialIssuanceAccessToken, error) {
 	tokenEndpoint := *flow.authorizationServerMetadata.TokenEndpoint
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
+	tokenEndpointURL := tokenEndpoint.String()
 
-	var proofFactory receiverTypes.DPoPProofFactory
+	var auth receiverTypes.ClientAuthentication
 	if w.draft13DPoPEnabled(flow.authorizationServerMetadata) {
-		proofFactory = w.draft13DPoPProofFactory(w.dpop.Key, http.MethodPost, tokenEndpointURL, "")
+		auth.DPoP = w.draft13DPoPProofFactory(w.dpop.Key, http.MethodPost, tokenEndpointURL, "")
 	}
 
-	request := receiverTypes.PreAuthorizedCodeTokenRequest{
+	request := receiverTypes.TokenRequest{
+		GrantType:         receiverTypes.PreAuthorizedCode,
 		PreAuthorizedCode: preAuthorizedCode,
 		TxCode:            req.TxCode,
 		ClientID:          clientIDForDraft13TokenRequest(w.clientAuth, req),
@@ -251,12 +227,12 @@ func (w *Wallet) exchangeDraft13PreAuthorizedCode(
 	if method, ok := resolveClientAuthMethod(w.clientAuth, flow.authorizationServerMetadata); ok && method == receiverTypes.PrivateKeyJwt {
 		audience := resolveClientAssertionAudience(w.clientAuth, flow.authorizationServerMetadata, tokenEndpointURL)
 		request.ClientID = w.clientAuth.ClientID
-		request.ClientAssertionFactory = func() (string, error) {
+		auth.ClientAssertion = func() (string, error) {
 			return w.generateClientAssertion(w.clientAuth.Key, w.clientAuth.ClientID, audience, w.clientAuth.signatureAlgorithm())
 		}
 	}
 
-	accessToken, err := flow.transport.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx, tokenEndpoint, request, nil, proofFactory)
+	accessToken, err := flow.transport.RequestToken(ctx, tokenEndpoint, request, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch access token: %w", err)
 	}
@@ -317,7 +293,7 @@ func (w *Wallet) requestDraft13Credential(
 		if err != nil {
 			return nil, err
 		}
-		return flow.transport.RequestOID4VCIDraft13Credential(ctx, endpoint, *accessToken, *request, proofFactory)
+		return flow.transport.RequestDraft13Credential(ctx, endpoint, *accessToken, *request, proofFactory)
 	}
 
 	response, err := post(nonce)

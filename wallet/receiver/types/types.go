@@ -443,7 +443,7 @@ type AuthorizationServerMetadata struct {
 	TokenEndpoint                                      *common.URIField           `json:"token_endpoint,omitempty"`
 	PushedAuthorizationRequestEndpoint                 *common.URIField           `json:"pushed_authorization_request_endpoint,omitempty"`
 	ChallengeEndpoint                                  *common.URIField           `json:"challenge_endpoint,omitempty"`
-	DpopSigningAlgValuesSupported                      *[]jose.SignatureAlgorithm `json:"dpop_signing_alg_values_supported,omitempty"`
+	DPoPSigningAlgValuesSupported                      *[]jose.SignatureAlgorithm `json:"dpop_signing_alg_values_supported,omitempty"`
 	JwksUri                                            *common.URIField           `json:"jwks_uri,omitempty"`
 	RegistrationEndpoint                               *common.URIField           `json:"registration_endpoint,omitempty"`
 	ScopesSupported                                    *[]string                  `json:"scopes_supported,omitempty"`
@@ -583,49 +583,12 @@ func WithClientID(clientID string) TokenRequestOption {
 	}
 }
 
-// ResolveTokenEndpointURL returns the token endpoint exactly as the
-// authorization server metadata published it (RFC 8414 Section 2), so the
-// request and the DPoP htu claim name the same URL.
+// ResolveTokenEndpointURL returns endpoint as the authorization server
+// metadata published it (RFC 8414 Section 2).
+//
+// Deprecated: use the token_endpoint value as published.
 func ResolveTokenEndpointURL(endpoint common.URIField) string {
 	return endpoint.String()
-}
-
-// PreAuthorizedCodeTokenRequest is the OpenID4VCI 1.0 §6.1 Token Request of the
-// Pre-Authorized Code Flow: the single-use pre-authorized_code, the Transaction
-// Code the Credential Offer asked for, and the client authentication the
-// authorization server expects in the request body.
-//
-// It is the request of
-// OID4VCIFinalTransport.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry.
-// The attestation-based client authentication of
-// draft-ietf-oauth-attestation-based-client-auth (OpenID4VCI 1.0 Appendix E) is
-// not a member: it travels in the OAuth-Client-Attestation headers, which that
-// method takes separately.
-type PreAuthorizedCodeTokenRequest struct {
-	// PreAuthorizedCode is the §4.1.1 pre-authorized_code taken from the
-	// Credential Offer grant. §6.1 makes it REQUIRED for this grant type.
-	PreAuthorizedCode string `json:"pre-authorized_code"`
-	// TxCode is the §6.1 tx_code: "This value MUST be present if a tx_code
-	// object was present in the Credential Offer (including if the object was
-	// empty)". An empty value omits the parameter.
-	TxCode string `json:"tx_code,omitempty"`
-	// ClientID names the client. §6.1: "the client_id parameter is only needed
-	// when a form of Client Authentication that relies on this parameter is
-	// used", so an empty value omits the parameter and the request is
-	// anonymous unless another mechanism authenticates it.
-	ClientID string `json:"client_id,omitempty"`
-	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
-	// private_key_jwt client authentication. An empty value omits the
-	// parameter.
-	ClientAssertion string `json:"-"`
-	// ClientAssertionType is the matching client_assertion_type. Empty omits
-	// the parameter.
-	ClientAssertionType string `json:"-"`
-	// ClientAssertionFactory, when set, is called once per HTTP attempt to
-	// obtain a fresh client_assertion; it takes precedence over
-	// ClientAssertion. The retry wrappers use it so a DPoP nonce retry never
-	// replays the same jti.
-	ClientAssertionFactory ClientAssertionFactory `json:"-"`
 }
 
 type PushedAuthorizationRequest struct {
@@ -644,14 +607,6 @@ type PushedAuthorizationRequest struct {
 	CodeChallenge        string
 	CodeChallengeMethod  string
 	IssuerState          string
-	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
-	// private_key_jwt client authentication. RFC 9126 §2 requires the PAR
-	// request to carry the client authentication of the token endpoint. An
-	// empty value omits the parameter.
-	ClientAssertion string
-	// ClientAssertionType is the matching client_assertion_type. Empty omits
-	// the parameter.
-	ClientAssertionType string
 }
 
 type PushedAuthorizationResponse struct {
@@ -659,30 +614,9 @@ type PushedAuthorizationResponse struct {
 	ExpiresIn  int    `json:"expires_in,omitempty"`
 }
 
-// ClientAssertionFactory produces a fresh client_assertion for a single HTTP
-// attempt. RFC 7523 §3 requires every assertion to carry a unique jti, so a
-// retry that re-sends the token request (for example after a DPoP nonce
-// challenge) must not replay the previous assertion.
+// ClientAssertionFactory builds a client_assertion for one HTTP attempt; RFC
+// 7523 Section 3 requires a unique jti per assertion.
 type ClientAssertionFactory func() (string, error)
-
-type AuthorizationCodeTokenRequest struct {
-	Code         string
-	RedirectURI  string
-	CodeVerifier string
-	ClientID     string
-	// ClientAssertion is the RFC 7523 §2.2 client_assertion sent for
-	// private_key_jwt client authentication. An empty value omits the
-	// parameter.
-	ClientAssertion string
-	// ClientAssertionType is the matching client_assertion_type. Empty omits
-	// the parameter.
-	ClientAssertionType string
-	// ClientAssertionFactory, when set, is called once per HTTP attempt to
-	// obtain a fresh client_assertion; it takes precedence over
-	// ClientAssertion. The retry wrappers use it so a DPoP nonce retry never
-	// replays the same jti.
-	ClientAssertionFactory ClientAssertionFactory
-}
 
 type ClientAttestationChallengeResponse struct {
 	AttestationChallenge string `json:"attestation_challenge,omitempty"`
@@ -735,6 +669,19 @@ type CredentialResponse struct {
 	// alongside a deferred transaction_id. Zero when absent.
 	Interval int `json:"interval,omitempty"`
 }
+
+// Credential Response decoding errors (OpenID4VCI 1.0 Sections 8.3 and 10).
+var (
+	// ErrCredentialResponsePlaintext reports a plaintext Credential Response
+	// where an encrypted one was required or requested.
+	ErrCredentialResponsePlaintext = common.NewCodedError("credential_response_plaintext", "credential response was not encrypted")
+	// ErrCredentialResponseDecrypt reports an encrypted Credential Response
+	// that could not be decrypted.
+	ErrCredentialResponseDecrypt = common.NewCodedError("credential_response_decrypt_failed", "credential response JWE could not be decrypted")
+	// ErrCredentialResponseShape reports a Credential Response that is not
+	// well-formed.
+	ErrCredentialResponseShape = common.NewCodedError("credential_response_shape_invalid", "credential response has an invalid shape")
+)
 
 type DeferredCredentialRequest struct {
 	TransactionID string `json:"transaction_id"`
@@ -810,116 +757,6 @@ type ProofOptions struct {
 	SigningAlgValues []jose.SignatureAlgorithm
 }
 
-// OID4VCIFinalTransport is the OpenID4VCI 1.0 Final / HAIP transport a
-// receiver plugin owns: the HTTP exchanges of Section 5 (Pushed Authorization
-// Request and the Token Endpoint), Section 6.3 (the Client Attestation
-// challenge), Section 7 (the Nonce Endpoint), Section 8 (the Credential
-// Endpoint), Section 11 (the Notification Endpoint) and the Credential Request
-// and Credential Response codec of Section 8.1 and Section 8.2. It extends
-// Receiver.
-//
-// It carries no signing primitive. Key proofs, DPoP proofs and Client
-// Attestation PoPs are built by an OID4VCIFinalSigner, so a transport plugin
-// can be implemented outside this repository without access to the wallet's
-// private keys.
-//
-// # Context
-//
-// Every method that performs I/O takes a context.Context as its first
-// parameter and MUST bind every HTTP request it makes — retries included — to
-// it, so that cancelling the issuance stops a request that is already in
-// flight. EncodeCredentialRequest and DecodeCredentialResponse take none: they
-// are pure codecs (JSON plus JWE) that never reach the network.
-//
-// # The retry policy the method names encode
-//
-// The "…WithDpopAndAttestationRetry" and "…WithNonceRetryForToken" suffixes
-// name a retry policy the implementation owns, not a convenience wrapper
-// around a single request. A plugin that implements this interface implements
-// that policy:
-//
-//   - RFC 9449 §8: an authorization server or resource server that answers
-//     with "use_dpop_nonce" and a DPoP-Nonce header has rejected the proof
-//     only because it lacks its nonce. The implementation retries once with a
-//     proof built for that nonce. Every attempt calls the DPoPProofFactory and
-//     the OAuthClientAttestationHeadersFactory again and rebuilds the request
-//     body, because RFC 9449 §4.2 gives every DPoP proof a unique jti and
-//     RFC 7523 §3 a unique jti to every client_assertion: nothing signed for a
-//     previous attempt is ever replayed.
-//   - OpenID4VCI 1.0 §8.3.1.2: an issuer that answers the Credential Endpoint
-//     with "invalid_nonce" has rejected the key proof's c_nonce. The
-//     implementation fetches a fresh c_nonce from the Nonce Endpoint, calls the
-//     CredentialRequestBodyFactory again for it, and posts once more.
-//
-// At most one retry is performed for each of the two conditions, so a
-// misbehaving server cannot hold the wallet in a loop.
-type OID4VCIFinalTransport interface {
-	Receiver
-
-	// PushAuthorizationRequest sends the RFC 9126 Pushed Authorization Request
-	// that OpenID4VCI 1.0 Section 5.1 and HAIP Section 4.3 use to move the
-	// authorization request off the front channel.
-	PushAuthorizationRequest(ctx context.Context, endpoint common.URIField, request PushedAuthorizationRequest, headers OAuthClientAttestationHeaders) (*PushedAuthorizationResponse, error)
-	// ExchangeAuthorizationCodeWithDpopAndAttestationRetry exchanges the
-	// authorization code at the Token Endpoint (Section 6.1). Both factories are
-	// invoked once per HTTP attempt, so an RFC 9449 Section 8 "use_dpop_nonce"
-	// retry re-signs the DPoP proof and rebuilds the Client Attestation headers
-	// instead of replaying the first ones.
-	ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request AuthorizationCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
-	// ExchangePreAuthorizedCodeWithDpopAndAttestationRetry exchanges the
-	// Section 4.1.1 pre-authorized_code at the Token Endpoint (Section 6.1). It
-	// is the Pre-Authorized Code counterpart of
-	// ExchangeAuthorizationCodeWithDpopAndAttestationRetry and owns the same
-	// retry policy: both factories are invoked once per HTTP attempt, so an RFC
-	// 9449 Section 8 "use_dpop_nonce" retry re-signs the DPoP proof and rebuilds
-	// the Client Attestation headers instead of replaying the first ones.
-	//
-	// Section 6.1 makes client authentication OPTIONAL for this grant, so both
-	// factories are optional: a nil headersFactory sends no
-	// OAuth-Client-Attestation headers and a nil proofFactory sends no DPoP
-	// proof, which is the anonymous Pre-Authorized Code request Final 1.0
-	// permits. HAIP Section 4.4.1 requires a client authentication mechanism
-	// and Section 4 a sender-constrained access token, so a HAIP wallet
-	// supplies both.
-	ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx context.Context, endpoint common.URIField, request PreAuthorizedCodeTokenRequest, headersFactory OAuthClientAttestationHeadersFactory, proofFactory DPoPProofFactory) (*CredentialIssuanceAccessToken, error)
-	// FetchClientAttestationChallenge fetches a challenge from the
-	// authorization server's challenge endpoint so the Client Attestation PoP
-	// can be bound to it.
-	FetchClientAttestationChallenge(ctx context.Context, endpoint common.URIField) (*ClientAttestationChallengeResponse, error)
-	// FetchNonceResponse fetches the Section 7 Nonce Endpoint response,
-	// including the optional c_nonce_expires_in member and the RFC 9449
-	// Section 8.2 DPoP-Nonce response header. Section 7.2: "The Credential
-	// Issuer MAY provide a DPoP nonce in an HTTP header as defined in Section
-	// 8.2 of [@!RFC9449]. In this case, the Wallet uses the new nonce value in
-	// the DPoP proof when presenting an access token at the Credential
-	// Endpoint."
-	FetchNonceResponse(ctx context.Context, endpoint common.URIField) (*NonceResponse, error)
-	// PostCredentialEndpointWithNonceRetryForToken posts the Credential Request
-	// and, on the Section 8.3.1.2 "invalid_nonce" error, rebuilds the body with
-	// a fresh c_nonce from the Nonce Endpoint and posts it once more. It takes
-	// the parsed token response rather than the bare access token so the
-	// Authorization header carries the scheme the authorization server issued:
-	// RFC 6750 Section 2.1 defines the Bearer scheme and RFC 9449 Section 7.1
-	// the DPoP scheme. It returns the raw HTTP response and the c_nonce the
-	// accepted request was built with.
-	PostCredentialEndpointWithNonceRetryForToken(ctx context.Context, endpoint common.URIField, accessToken CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error)
-	// SendCredentialNotificationWithDpopRetryForToken sends the Section 11
-	// notification, taking the parsed token response for the same reason as
-	// PostCredentialEndpointWithNonceRetryForToken.
-	SendCredentialNotificationWithDpopRetryForToken(ctx context.Context, endpoint common.URIField, accessToken CredentialIssuanceAccessToken, notification NotificationRequest, proofFactory DPoPProofFactory) error
-	// EncodeCredentialRequest serialises a Credential Request, applying the
-	// Section 8.1 Credential Request encryption when the issuer metadata
-	// advertises credential_request_encryption. It returns the body and the
-	// Content-Type to send it with. It is a pure codec and takes no context:
-	// it performs no I/O.
-	EncodeCredentialRequest(request any, issuerMetadata *CredentialIssuerMetadata) ([]byte, string, error)
-	// DecodeCredentialResponse parses a Credential Response, decrypting the
-	// Section 8.2 encrypted response with decryptionKey when the Content-Type
-	// says the issuer encrypted it. It is a pure codec and takes no context:
-	// it performs no I/O.
-	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
-}
-
 // CredentialOfferFetcher is an optional receiver capability: it dereferences
 // an OpenID4VCI 1.0 Section 4.1.3 credential_offer_uri with the plugin's own
 // HTTP client and transport policy and returns the Credential Offer Object.
@@ -939,10 +776,10 @@ type HTTPSchemePolicy interface {
 // proof and the attestation-based client authentication PoP of
 // draft-ietf-oauth-attestation-based-client-auth Section 4.
 //
-// It is separated from OID4VCIFinalTransport so a wallet can keep its keys in a
-// hardware module or a remote signing service while still using the bundled
-// transport plugin. Wallet.Config selects the implementation; the receiver
-// oid4vcisign package provides the software default.
+// It is separated from the transport so a wallet can keep its keys in a
+// hardware module or a remote signing service. Wallet.Config selects the
+// implementation; the receiver oid4vcisign package provides the software
+// default.
 //
 // The Client Attestation itself is not built here: it is issued by the
 // attester, not by the wallet, and reaches the wallet through a

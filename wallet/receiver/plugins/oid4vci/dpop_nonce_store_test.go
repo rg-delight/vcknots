@@ -90,26 +90,24 @@ func newDPoPNonceTestKey(t *testing.T) jose.JSONWebKey {
 }
 
 // postOneCredentialRequest drives the Credential Endpoint through the public
-// transport API with a real DPoP proof factory, and returns the c_nonce the
-// accepted request was built with.
+// transport API with a real DPoP proof factory.
 func postOneCredentialRequest(t *testing.T, receiver *Oid4vciReceiver, key jose.JSONWebKey, credentialEndpoint string) {
 	t.Helper()
 	endpoint := mustURIField(t, credentialEndpoint)
-	_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
-		t.Context(),
+	_, err := receiver.RequestCredential(t.Context(),
 		endpoint,
 		types.CredentialIssuanceAccessToken{Token: "access-token-1", TokenType: "DPoP"},
-		nil,
 		"c-nonce-1",
 		func(string) ([]byte, string, error) {
 			return []byte(`{"credential_configuration_id":"pid"}`), "application/json", nil
 		},
+		nil,
 		func(nonce string) (string, error) {
-			return receiver.CreateDpopProof(key, http.MethodPost, credentialEndpoint, nonce, "access-token-1")
+			return signDPoP(key, http.MethodPost, credentialEndpoint, nonce, "access-token-1")
 		},
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
+		t.Fatalf("RequestCredential() error = %v", err)
 	}
 }
 
@@ -128,9 +126,9 @@ func TestNonceEndpointDPoPNonceSeedsTheFirstCredentialProof(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
 	key := newDPoPNonceTestKey(t)
 
-	nonceResponse, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
+	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
 	if err != nil {
-		t.Fatalf("FetchNonceResponse() error = %v", err)
+		t.Fatalf("RequestNonce() error = %v", err)
 	}
 	if nonceResponse.CNonce != "c-nonce-1" {
 		t.Fatalf("c_nonce = %q, want c-nonce-1", nonceResponse.CNonce)
@@ -160,9 +158,9 @@ func TestNonceEndpointWithoutDPoPNonceLeavesTheProofNonceless(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
 	key := newDPoPNonceTestKey(t)
 
-	nonceResponse, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
+	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
 	if err != nil {
-		t.Fatalf("FetchNonceResponse() error = %v", err)
+		t.Fatalf("RequestNonce() error = %v", err)
 	}
 	if nonceResponse.DPoPNonce != "" {
 		t.Fatalf("DPoPNonce = %q, want empty when the Nonce Response carries no DPoP-Nonce header", nonceResponse.DPoPNonce)
@@ -190,8 +188,8 @@ func TestDPoPNonceStoreIsKeyedByServer(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: issuer.server.Client(), AllowHTTP: true}
 	key := newDPoPNonceTestKey(t)
 
-	if _, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, issuer.server.URL+"/nonce")); err != nil {
-		t.Fatalf("FetchNonceResponse() error = %v", err)
+	if _, err := receiver.RequestNonce(t.Context(), mustURIField(t, issuer.server.URL+"/nonce")); err != nil {
+		t.Fatalf("RequestNonce() error = %v", err)
 	}
 
 	postOneCredentialRequest(t, receiver, key, other.server.URL+"/credential")
@@ -219,8 +217,8 @@ func TestDPoPNonceStoreIsRaceSafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := receiver.FetchNonceResponse(t.Context(), endpoint); err != nil {
-				t.Errorf("FetchNonceResponse() error = %v", err)
+			if _, err := receiver.RequestNonce(t.Context(), endpoint); err != nil {
+				t.Errorf("RequestNonce() error = %v", err)
 			}
 		}()
 	}
@@ -242,7 +240,7 @@ func TestDPoPNonceStoreIsBounded(t *testing.T) {
 		// Server 0 stays in use, so it is never the least recently used.
 		receiver.dpopNonceFor(serverURL(0))
 	}
-	if got := len(receiver.ExportDPoPNonces()); got != maxDPoPNonceServers {
+	if got := len(receiver.dpopNonces); got != maxDPoPNonceServers {
 		t.Fatalf("stored servers = %d, want %d", got, maxDPoPNonceServers)
 	}
 	if got := receiver.dpopNonceFor(serverURL(0)); got != "nonce-0" {
@@ -250,29 +248,5 @@ func TestDPoPNonceStoreIsBounded(t *testing.T) {
 	}
 	if got := receiver.dpopNonceFor(serverURL(1)); got != "" {
 		t.Fatalf("least recently used server kept its nonce: %q", got)
-	}
-}
-
-// A nonce restored from a persisted grant fills a server the receiver knows
-// nothing about, and never replaces one it learned itself.
-func TestImportDPoPNoncesDoesNotReplaceKnownNonces(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	known := url.URL{Scheme: "https", Host: "issuer.example"}
-	receiver.rememberDPoPNonce(known, "live-nonce")
-
-	receiver.ImportDPoPNonces(map[string]string{
-		dpopNonceServerKey(known): "persisted-nonce",
-		"https://other.example":   "other-nonce",
-		"https://blank.example":   " ",
-	})
-
-	if got := receiver.dpopNonceFor(known); got != "live-nonce" {
-		t.Fatalf("known server nonce = %q, want live-nonce", got)
-	}
-	if got := receiver.dpopNonceFor(url.URL{Scheme: "https", Host: "other.example"}); got != "other-nonce" {
-		t.Fatalf("imported nonce = %q, want other-nonce", got)
-	}
-	if _, present := receiver.ExportDPoPNonces()["https://blank.example"]; present {
-		t.Fatal("a blank nonce must not be imported")
 	}
 }

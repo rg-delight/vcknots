@@ -43,9 +43,8 @@ type OID4VCIFinalTokenGrant struct {
 	// attestation inside it — must carry. Empty when the Credential Issuer
 	// advertises no nonce_endpoint, which §7 permits.
 	CNonce string `json:"c_nonce,omitempty"`
-	// DPoPNonces is the RFC 9449 §8.2 per-server nonce store exported from the
-	// receiver, so the first DPoP proof after the interruption carries the
-	// nonce each server last issued.
+	// DPoPNonces is unused: the receiver keeps DPoP nonces itself, and a
+	// resumed stage answers one use_dpop_nonce challenge.
 	DPoPNonces map[string]string `json:"dpop_nonces,omitempty"`
 	// DPoPKeyThumbprint is the RFC 7638 thumbprint of the key the access token
 	// is bound to, set only for a DPoP-bound token. RequestOID4VCIFinalCredential
@@ -72,19 +71,16 @@ type OID4VCIFinalTokenGrant struct {
 }
 
 // refreshed returns a copy of the grant that names a new c_nonce, with the key
-// attestation request and the exported DPoP nonces brought up to date. It is
+// attestation request brought up to date. It is
 // what travels back to the caller when §8.3.1.2 "invalid_nonce" invalidated an
 // attestation that was signed out of process.
-func (g *OID4VCIFinalTokenGrant) refreshed(cNonce string, flow *oid4vciFinalFlow) *OID4VCIFinalTokenGrant {
+func (g *OID4VCIFinalTokenGrant) refreshed(cNonce string) *OID4VCIFinalTokenGrant {
 	refreshed := *g
 	refreshed.CNonce = cNonce
 	if g.KeyAttestation != nil {
 		attestation := *g.KeyAttestation
 		attestation.Nonce = cNonce
 		refreshed.KeyAttestation = &attestation
-	}
-	if nonces := exportOID4VCIDPoPNonces(flow); len(nonces) > 0 {
-		refreshed.DPoPNonces = nonces
 	}
 	return &refreshed
 }
@@ -162,38 +158,6 @@ func (e *KeyAttestationNonceError) Error() string {
 // Unwrap makes errors.Is(err, ErrKeyAttestationNonceStale) hold.
 func (e *KeyAttestationNonceError) Unwrap() error { return ErrKeyAttestationNonceStale }
 
-// dpopNonceExporter and dpopNonceImporter are the RFC 9449 §8.2 nonce store of
-// a receiver transport. They are optional: a transport that keeps no nonces
-// simply pays the challenge round trip after an interruption.
-type dpopNonceExporter interface {
-	ExportDPoPNonces() map[string]string
-}
-
-type dpopNonceImporter interface {
-	ImportDPoPNonces(nonces map[string]string)
-}
-
-func exportOID4VCIDPoPNonces(flow *oid4vciFinalFlow) map[string]string {
-	exporter, ok := flow.receiver.(dpopNonceExporter)
-	if !ok {
-		return nil
-	}
-	nonces := exporter.ExportDPoPNonces()
-	if len(nonces) == 0 {
-		return nil
-	}
-	return nonces
-}
-
-func importOID4VCIDPoPNonces(flow *oid4vciFinalFlow, nonces map[string]string) {
-	if len(nonces) == 0 {
-		return
-	}
-	if importer, ok := flow.receiver.(dpopNonceImporter); ok {
-		importer.ImportDPoPNonces(nonces)
-	}
-}
-
 // isDPoPAccessToken reports whether a Token Response bound its access token to
 // the wallet's key with the RFC 9449 §7.1 DPoP scheme.
 func isDPoPAccessToken(token *receiverTypes.CredentialIssuanceAccessToken) bool {
@@ -250,7 +214,7 @@ func (w *Wallet) newOID4VCIFinalTokenGrant(
 	}
 	cNonce := ""
 	if nonceEndpoint != nil {
-		nonceResponse, err := flow.receiver.FetchNonceResponse(ctx, *nonceEndpoint)
+		nonceResponse, err := flow.receiver.RequestNonce(ctx, *nonceEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch credential nonce: %w", err)
 		}
@@ -264,7 +228,6 @@ func (w *Wallet) newOID4VCIFinalTokenGrant(
 		CredentialConfigurationID: flow.credentialConfigurationID,
 		CredentialIssuer:          issuerMetadata.CredentialIssuer,
 		AuthorizationServerIssuer: flow.authorizationServerIssuer,
-		DPoPNonces:                exportOID4VCIDPoPNonces(flow),
 	}
 	if flow.keyAttestation != nil {
 		// Only public keys leave the wallet: the attester needs the key
@@ -330,7 +293,6 @@ func (w *Wallet) RequestOID4VCIFinalCredential(ctx context.Context, req OID4VCIF
 	if err := requireOID4VCIFinalGrantKey(grant, req.ClientKey); err != nil {
 		return nil, err
 	}
-	importOID4VCIDPoPNonces(flow, grant.DPoPNonces)
 	return w.requestOID4VCIFinalCredentials(ctx, flow, grant, req.ClientKey, req.CredentialResponseEncryptionKey, req.DeferredPollAttempts, req.MaxDeferredInterval)
 }
 
@@ -401,11 +363,11 @@ func (w *Wallet) restoreOID4VCIFinalCredentialFlow(ctx context.Context, req OID4
 	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
 		return nil, err
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	issuerMetadata, err := resolveOID4VCIIssuerMetadata(finalReceiver, req.Type, grant.CredentialIssuer, nil)
+	issuerMetadata, err := resolveOID4VCIIssuerMetadata(ctx, finalReceiver, grant.CredentialIssuer, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +388,7 @@ func (w *Wallet) requireProfileAccessToken(token *receiverTypes.CredentialIssuan
 // on: the holder keys, the Credential Configuration checked against the wallet
 // profile and the issuer's batch_size, and the key attestation plan.
 func (w *Wallet) newOID4VCIFinalCredentialFlow(
-	finalReceiver receiverTypes.OID4VCIFinalTransport,
+	finalReceiver receiverTypes.OID4VCITransport,
 	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
 	credentialConfigurationID string,
 	in oid4vciFinalCredentialInputs,
@@ -449,9 +411,6 @@ func (w *Wallet) newOID4VCIFinalCredentialFlow(
 		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
 	}
 	if profileValidator != nil {
-		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
-			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
-		}
 		if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
 			return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
 		}
@@ -601,7 +560,7 @@ func (w *Wallet) authorizeOID4VCIFinalPreAuthorizedToken(ctx context.Context, re
 		}
 	}
 
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -614,7 +573,7 @@ func (w *Wallet) authorizeOID4VCIFinalPreAuthorizedToken(ctx context.Context, re
 		hinted.AuthorizationServer = server
 		serverHint = &hinted
 	}
-	discovery, err := discoverOID4VCIIssuer(finalReceiver, req.Type, req.CredentialOffer.CredentialIssuer.String(), nil, offeredAuthorizationServer(serverHint))
+	discovery, err := discoverOID4VCIIssuer(ctx, finalReceiver, req.CredentialOffer.CredentialIssuer.String(), nil, offeredAuthorizationServer(serverHint))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -710,7 +669,7 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 	preAuthorizedCode string,
 ) (*receiverTypes.CredentialIssuanceAccessToken, error) {
 	tokenEndpoint := *flow.authorizationServerMetadata.TokenEndpoint
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
+	tokenEndpointURL := tokenEndpoint.String()
 
 	// Appendix E: attestation-based client authentication travels in the
 	// OAuth-Client-Attestation headers the transport carries, so the §6.1 token
@@ -724,7 +683,9 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 	}
 	attestationInUse := attestationHeaders.ClientAttestation != ""
 
-	tokenRequest := receiverTypes.PreAuthorizedCodeTokenRequest{
+	var auth receiverTypes.ClientAuthentication
+	tokenRequest := receiverTypes.TokenRequest{
+		GrantType:         receiverTypes.PreAuthorizedCode,
 		PreAuthorizedCode: preAuthorizedCode,
 		TxCode:            req.TxCode,
 		ClientID:          strings.TrimSpace(req.ClientID),
@@ -743,10 +704,9 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 		if authMethod == receiverTypes.PrivateKeyJwt {
 			clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, flow.authorizationServerMetadata, tokenEndpointURL)
 			tokenRequest.ClientID = w.clientAuth.ClientID
-			tokenRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
 			// RFC 7523 §3 requires a unique jti, so the factory signs a new
 			// assertion for every attempt instead of replaying the first one.
-			tokenRequest.ClientAssertionFactory = func() (string, error) {
+			auth.ClientAssertion = func() (string, error) {
 				return w.generateClientAssertion(
 					w.clientAuth.Key,
 					w.clientAuth.ClientID,
@@ -762,9 +722,8 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 	// DPoP ignores the header and issues a Bearer token, and HAIP §4 requires
 	// the sender-constrained token the proof makes possible.
 	useDPoP := req.ClientKey.Key != nil
-	var proofFactory receiverTypes.DPoPProofFactory
 	if useDPoP {
-		proofFactory = func(nonce string) (string, error) {
+		auth.DPoP = func(nonce string) (string, error) {
 			proof, err := flow.signer.CreateDpopProof(req.ClientKey, http.MethodPost, tokenEndpointURL, nonce, "")
 			if err != nil {
 				return "", fmt.Errorf("failed to create the token request DPoP proof: %w", err)
@@ -772,9 +731,8 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 			return proof, nil
 		}
 	}
-	var headersFactory receiverTypes.OAuthClientAttestationHeadersFactory
 	if attestationInUse {
-		headersFactory = func() (receiverTypes.OAuthClientAttestationHeaders, error) {
+		auth.ClientAttestation = func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			// draft-ietf-oauth-attestation-based-client-auth §4 gives every PoP
 			// a unique jti, so each attempt signs its own.
 			pop, err := flow.signer.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
@@ -787,7 +745,7 @@ func (w *Wallet) fetchOID4VCIFinalPreAuthorizedToken(
 		}
 	}
 
-	token, err := flow.receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(ctx, tokenEndpoint, tokenRequest, headersFactory, proofFactory)
+	token, err := flow.receiver.RequestToken(ctx, tokenEndpoint, tokenRequest, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange the pre-authorized code: %w", err)
 	}

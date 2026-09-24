@@ -53,18 +53,18 @@ func TestEndpointErrorNamesTheFailedStage(t *testing.T) {
 	_, err = receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 	requireEndpointError(t, err, StageAuthorizationServerMetadata, status, "temporarily_unavailable")
 
-	_, err = receiver.PushAuthorizationRequest(context.Background(), endpoint, types.PushedAuthorizationRequest{ResponseType: "code"}, types.OAuthClientAttestationHeaders{})
+	_, err = receiver.PushAuthorizationRequest(context.Background(), endpoint, types.PushedAuthorizationRequest{ResponseType: "code"}, types.ClientAuthentication{})
 	requireEndpointError(t, err, StagePAR, status, "temporarily_unavailable")
 
-	_, err = receiver.FetchNonceResponse(context.Background(), endpoint)
+	_, err = receiver.RequestNonce(context.Background(), endpoint)
 	requireEndpointError(t, err, StageNonce, status, "temporarily_unavailable")
 
-	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), endpoint, types.AuthorizationCodeTokenRequest{Code: "code-1"}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), noopProofFactory)
+	_, err = receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: noopProofFactory})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 
-	_, err = receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(context.Background(), endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, func() (types.OAuthClientAttestationHeaders, error) {
+	_, err = receiver.RequestToken(context.Background(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
 		return types.OAuthClientAttestationHeaders{}, nil
-	}, noopProofFactory)
+	}, DPoP: noopProofFactory})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 }
 
@@ -81,7 +81,7 @@ func TestEndpointErrorReportsTheOAuthErrorWithoutTheBody(t *testing.T) {
 	defer server.Close()
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 
-	_, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL), types.AuthorizationCodeTokenRequest{Code: "code-1"}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), noopProofFactory)
+	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: noopProofFactory})
 	requireEndpointError(t, err, StageToken, http.StatusBadRequest, "invalid_grant")
 	var endpointError *EndpointError
 	_ = errors.As(err, &endpointError)
@@ -128,7 +128,7 @@ func TestErrorStringsDoNotCarryTheResponseBody(t *testing.T) {
 			return err
 		},
 		"PushAuthorizationRequest": func(path string) error {
-			_, err := receiver.PushAuthorizationRequest(t.Context(), mustURIField(t, server.URL+path), types.PushedAuthorizationRequest{}, types.OAuthClientAttestationHeaders{})
+			_, err := receiver.PushAuthorizationRequest(t.Context(), mustURIField(t, server.URL+path), types.PushedAuthorizationRequest{}, types.ClientAuthentication{})
 			return err
 		},
 	}
@@ -170,7 +170,7 @@ func TestCredentialErrorDescriptionIsBoundedAndSanitized(t *testing.T) {
 		t.Errorf("description = %q", endpointError.Description)
 	}
 
-	_, err = receiver.RequestOID4VCIDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
+	_, err = receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
 	var draft13Error *Draft13CredentialEndpointError
 	if !errors.As(err, &draft13Error) || len(draft13Error.Description) > maxErrorDescriptionLength || strings.Contains(draft13Error.Description, "\x1b") {
 		t.Errorf("draft13 error = %#v", draft13Error)

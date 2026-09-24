@@ -205,7 +205,7 @@ func decodeOID4VCIFinalCredentialResponse(flow *oid4vciFinalFlow, raw *receiverT
 	if flow.policy.requireSingleCredential {
 		maxCredentials = 1
 	}
-	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
+	response, err := decodeCredentialResponse(flow.receiver, raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
 		DecryptionKey: key,
 		shape: credentialResponseShape{
 			maxCredentials: maxCredentials,
@@ -323,7 +323,7 @@ func (w *Wallet) clientAttestationProvider(req OID4VCIFinalReceiveRequest) (Clie
 	return &StaticClientAttester{Key: req.AttesterKey, Issuer: req.AttesterIssuer}, nil
 }
 
-func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCIFinalTransport, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
+func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCITransport, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {
 	provider, err := w.clientAttestationProvider(req)
 	if err != nil {
 		return receiverTypes.OAuthClientAttestationHeaders{}, "", err

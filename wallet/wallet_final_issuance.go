@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/trustknots/vcknots/wallet/common/observe"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -19,7 +18,7 @@ import (
 // taken from the wallet configuration. Begin builds it; Resume rebuilds it from
 // the request and the persisted OID4VCIFinalAuthorization.
 type oid4vciFinalFlow struct {
-	receiver                    receiverTypes.OID4VCIFinalTransport
+	receiver                    receiverTypes.OID4VCITransport
 	signer                      receiverTypes.OID4VCIFinalSigner
 	issuerMetadata              *receiverTypes.CredentialIssuerMetadata
 	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata
@@ -156,11 +155,11 @@ func (w *Wallet) restoreOID4VCIFinalFlow(ctx context.Context, req OID4VCIFinalRe
 	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
 		return nil, err
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	discovery, err := discoverOID4VCIIssuer(finalReceiver, req.Type, auth.CredentialIssuer, nil, pinnedAuthorizationServer(auth.AuthorizationServer))
+	discovery, err := discoverOID4VCIIssuer(ctx, finalReceiver, auth.CredentialIssuer, nil, pinnedAuthorizationServer(auth.AuthorizationServer))
 	if err != nil {
 		return nil, err
 	}
@@ -215,24 +214,15 @@ func (w *Wallet) authorizeOID4VCIFinalToken(
 		return nil, err
 	}
 
-	tokenRequest := receiverTypes.AuthorizationCodeTokenRequest{
+	tokenRequest := receiverTypes.TokenRequest{
+		GrantType:    receiverTypes.AuthorizationCode,
 		Code:         code,
 		RedirectURI:  req.RedirectURI,
 		CodeVerifier: auth.CodeVerifier,
 		ClientID:     req.ClientID,
 	}
-	if flow.usePrivateKeyJwt {
-		// The factory is invoked once per HTTP attempt, so a DPoP nonce retry
-		// re-sends the token request with a fresh client_assertion (new jti)
-		// rather than replaying the first one.
-		tokenRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
-		tokenRequest.ClientAssertionFactory = flow.generateClientAssertion
-	}
-	token, err := flow.receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(
-		ctx,
-		*flow.authorizationServerMetadata.TokenEndpoint,
-		tokenRequest,
-		func() (receiverTypes.OAuthClientAttestationHeaders, error) {
+	tokenAuth := receiverTypes.ClientAuthentication{
+		ClientAttestation: func() (receiverTypes.OAuthClientAttestationHeaders, error) {
 			tokenAttestationHeaders := attestationHeaders
 			if attestationHeaders.ClientAttestation != "" {
 				tokenPop, err := flow.signer.CreateClientAttestationPop(req.ClientKey, req.ClientID, flow.authorizationServerIssuer, attestationChallenge, 5*time.Minute)
@@ -243,10 +233,17 @@ func (w *Wallet) authorizeOID4VCIFinalToken(
 			}
 			return tokenAttestationHeaders, nil
 		},
-		func(nonce string) (string, error) {
+		DPoP: func(nonce string) (string, error) {
 			return flow.signer.CreateDpopProof(req.ClientKey, http.MethodPost, flow.authorizationServerMetadata.TokenEndpoint.String(), nonce, "")
 		},
-	)
+	}
+	if flow.usePrivateKeyJwt {
+		// The factory is invoked once per HTTP attempt, so a DPoP nonce retry
+		// re-sends the token request with a fresh client_assertion (new jti)
+		// rather than replaying the first one.
+		tokenAuth.ClientAssertion = flow.generateClientAssertion
+	}
+	token, err := flow.receiver.RequestToken(ctx, *flow.authorizationServerMetadata.TokenEndpoint, tokenRequest, tokenAuth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
@@ -310,20 +307,27 @@ func (w *Wallet) requestOID4VCIFinalCredentials(
 		return nil, err
 	}
 	credentialEndpoint := issuerMetadata.CredentialEndpoint
-	rawResponse, cNonce, err := flow.receiver.PostCredentialEndpointWithNonceRetryForToken(
-		observe.WithEndpoint(ctx, observe.EndpointCredential),
+	// cNonce is the c_nonce of the last body built, which an invalid_nonce
+	// refresh replaces.
+	cNonce := grant.CNonce
+	recordingBuild := func(nonce string) ([]byte, string, error) {
+		cNonce = nonce
+		return build(nonce)
+	}
+	rawResponse, err := flow.receiver.RequestCredential(
+		ctx,
 		credentialEndpoint,
 		*token,
-		issuerMetadata.NonceEndpoint,
 		grant.CNonce,
-		build,
+		recordingBuild,
+		issuerMetadata.NonceEndpoint,
 		oid4vciFinalDpopProofFactory(flow.signer, clientKey, credentialEndpoint, token.Token),
 	)
 	if err != nil {
 		// §8.3.1.2 "invalid_nonce" invalidated a caller-minted attestation: the
 		// fresh c_nonce travels back in the grant so the caller can re-sign.
 		if errors.Is(err, ErrKeyAttestationNonceStale) {
-			return nil, newKeyAttestationNonceError(grant.refreshed(cNonce, flow))
+			return nil, newKeyAttestationNonceError(grant.refreshed(cNonce))
 		}
 		// CredentialEndpointError is retained so callers can branch with
 		// errors.Is (invalid_proof, credential_request_denied, ...).
@@ -365,7 +369,7 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	if err := w.requireProfileAccessToken(req.AccessToken); err != nil {
 		return nil, err
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
@@ -379,7 +383,7 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	default:
 		return nil, fmt.Errorf("issuer metadata or issuer URL is required")
 	}
-	issuerMetadata, err := resolveOID4VCIIssuerMetadata(finalReceiver, req.Type, issuerIdentifier, req.IssuerMetadata)
+	issuerMetadata, err := resolveOID4VCIIssuerMetadata(ctx, finalReceiver, issuerIdentifier, req.IssuerMetadata)
 	if err != nil {
 		return nil, err
 	}

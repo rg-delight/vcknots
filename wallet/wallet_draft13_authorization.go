@@ -52,7 +52,7 @@ func (w *Wallet) BeginOID4VCIDraft13Authorization(ctx context.Context, req OID4V
 	if err != nil {
 		return nil, err
 	}
-	discovery, err := w.discoverDraft13Metadata(transport, req, grant)
+	discovery, err := w.discoverDraft13Metadata(ctx, transport, req, grant)
 	if err != nil {
 		return nil, err
 	}
@@ -119,16 +119,14 @@ func (w *Wallet) BeginOID4VCIDraft13Authorization(ctx context.Context, req OID4V
 		if err := requireOID4VCIContext(ctx, "the pushed authorization request"); err != nil {
 			return nil, err
 		}
+		var parAuth receiverTypes.ClientAuthentication
 		if method, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); ok && method == receiverTypes.PrivateKeyJwt {
-			audience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint))
-			assertion, err := w.generateClientAssertion(w.clientAuth.Key, w.clientAuth.ClientID, audience, w.clientAuth.signatureAlgorithm())
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
+			audience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, authorizationServerMetadata.TokenEndpoint.String())
+			parAuth.ClientAssertion = func() (string, error) {
+				return w.generateClientAssertion(w.clientAuth.Key, w.clientAuth.ClientID, audience, w.clientAuth.signatureAlgorithm())
 			}
-			authorizationRequest.ClientAssertion = assertion
-			authorizationRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
 		}
-		pushed, err := flowPushAuthorizationRequest(ctx, transport, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, authorizationRequest)
+		pushed, err := flowPushAuthorizationRequest(ctx, transport, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, authorizationRequest, parAuth)
 		if err != nil {
 			return nil, err
 		}
@@ -173,11 +171,12 @@ func withDraft13ResourceIndicator(authorizationURL string, credentialIssuer stri
 
 func flowPushAuthorizationRequest(
 	ctx context.Context,
-	transport OID4VCIDraft13Transport,
+	transport receiverTypes.Draft13Transport,
 	endpoint common.URIField,
 	request receiverTypes.PushedAuthorizationRequest,
+	auth receiverTypes.ClientAuthentication,
 ) (*receiverTypes.PushedAuthorizationResponse, error) {
-	pushed, err := transport.PushAuthorizationRequest(ctx, endpoint, request, receiverTypes.OAuthClientAttestationHeaders{})
+	pushed, err := transport.PushAuthorizationRequest(ctx, endpoint, request, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to push authorization request: %w", err)
 	}
@@ -213,7 +212,7 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 	if err != nil {
 		return nil, err
 	}
-	discovery, err := discoverOID4VCIIssuer(transport, req.Type, auth.CredentialIssuer, req.CachedIssuerMetadata, pinnedAuthorizationServer(auth.AuthorizationServer))
+	discovery, err := discoverOID4VCIIssuer(ctx, transport, auth.CredentialIssuer, req.CachedIssuerMetadata, pinnedAuthorizationServer(auth.AuthorizationServer))
 	if err != nil {
 		return nil, err
 	}
@@ -251,16 +250,14 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 		return nil, err
 	}
 	tokenEndpoint := *authorizationServerMetadata.TokenEndpoint
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
-	// The transport's authorization code exchange always asks for a proof; one
-	// that returns nothing sends the request without a DPoP header, which is
-	// what a server that never advertised DPoP gets.
-	proofFactory := receiverTypes.DPoPProofFactory(func(string) (string, error) { return "", nil })
+	tokenEndpointURL := tokenEndpoint.String()
+	var tokenAuth receiverTypes.ClientAuthentication
 	if w.draft13DPoPEnabled(authorizationServerMetadata) {
-		proofFactory = w.draft13DPoPProofFactory(w.dpop.Key, http.MethodPost, tokenEndpointURL, "")
+		tokenAuth.DPoP = w.draft13DPoPProofFactory(w.dpop.Key, http.MethodPost, tokenEndpointURL, "")
 	}
 
-	tokenRequest := receiverTypes.AuthorizationCodeTokenRequest{
+	tokenRequest := receiverTypes.TokenRequest{
+		GrantType:    receiverTypes.AuthorizationCode,
 		Code:         code,
 		RedirectURI:  auth.RedirectURI,
 		CodeVerifier: auth.CodeVerifier,
@@ -268,11 +265,11 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 	}
 	if method, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); ok && method == receiverTypes.PrivateKeyJwt {
 		audience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
-		tokenRequest.ClientAssertionFactory = func() (string, error) {
+		tokenAuth.ClientAssertion = func() (string, error) {
 			return w.generateClientAssertion(w.clientAuth.Key, w.clientAuth.ClientID, audience, w.clientAuth.signatureAlgorithm())
 		}
 	}
-	accessToken, err := transport.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(ctx, tokenEndpoint, tokenRequest, noDraft13ClientAttestation, proofFactory)
+	accessToken, err := transport.RequestToken(ctx, tokenEndpoint, tokenRequest, tokenAuth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
@@ -289,12 +286,4 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 		}
 	}
 	return w.requestDraft13Credential(ctx, flow, resumed, accessToken)
-}
-
-// noDraft13ClientAttestation is the headers factory of a token request that
-// carries no OAuth 2.0 Attestation-Based Client Authentication: Draft 13
-// predates it, and a wallet client authenticates with private_key_jwt or not
-// at all.
-func noDraft13ClientAttestation() (receiverTypes.OAuthClientAttestationHeaders, error) {
-	return receiverTypes.OAuthClientAttestationHeaders{}, nil
 }
