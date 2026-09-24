@@ -663,7 +663,7 @@ func TestReceiveOID4VCIFinalCredential_ErrorRedirectSurfaced(t *testing.T) {
 // §5.1.4: the pushed request_uri expires, and the wallet does not send an
 // authorization request that carries an expired one.
 func TestRequestOID4VCIAuthorizationCode_ExpiredRequestURI(t *testing.T) {
-	_, err := followOID4VCIAuthorizationEndpoint(nil, &OID4VCIFinalAuthorization{
+	_, err := followOID4VCIAuthorizationEndpoint(context.Background(), nil, &OID4VCIFinalAuthorization{
 		AuthorizationURL: "https://as.example/authorize?client_id=client-1&request_uri=urn%3Arequest%3A1",
 		State:            "state-1",
 		RequestURI:       "urn:request:1",
@@ -1129,7 +1129,7 @@ func TestRequestOID4VCIAuthorizationCodeValidatesIssuer(t *testing.T) {
 	}
 	call := func(server *httptest.Server, policy authorizationResponseIssuerPolicy) (string, error) {
 		authorizationURL := server.URL + "/authorize?client_id=client-1&request_uri=urn%3Arequest%3A1"
-		location, err := followOID4VCIAuthorizationEndpoint(server.Client(), &OID4VCIFinalAuthorization{
+		location, err := followOID4VCIAuthorizationEndpoint(context.Background(), server.Client(), &OID4VCIFinalAuthorization{
 			AuthorizationURL: authorizationURL,
 			State:            "state-1",
 			RequestURI:       "urn:request:1",
@@ -1971,12 +1971,35 @@ func TestOID4VCIFinalAuthorizationRequestURIExpiry(t *testing.T) {
 		t.Fatalf("the authorization endpoint must not be reached with an expired request_uri")
 	}))
 	defer server.Close()
-	_, err := followOID4VCIAuthorizationEndpoint(server.Client(), &OID4VCIFinalAuthorization{
+	_, err := followOID4VCIAuthorizationEndpoint(context.Background(), server.Client(), &OID4VCIFinalAuthorization{
 		AuthorizationURL: server.URL + "/authorize",
 		RequestURI:       "urn:request:1",
 		ExpiresAt:        time.Now().Add(-time.Second),
 	})
 	require.ErrorIs(t, err, ErrAuthorizationRequestURIExpired)
+}
+
+// The self-driven authorization GET is bound to the flow context, so a caller
+// can abandon an authorization endpoint that never answers.
+func TestFollowOID4VCIAuthorizationEndpointHonoursContext(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := followOID4VCIAuthorizationEndpoint(ctx, &http.Client{}, &OID4VCIFinalAuthorization{
+		AuthorizationURL: server.URL + "/authorize",
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 5*time.Second)
 }
 
 // A real wallet needs a system browser at the authorization endpoint, so

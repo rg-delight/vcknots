@@ -13,6 +13,7 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -494,23 +495,20 @@ func oid4vciAuthorizationRequestURL(endpoint *common.URIField, clientID string, 
 	return authorizationURL.String()
 }
 
-// followOID4VCIAuthorizationEndpoint drives the §5.2 authorization endpoint from
-// inside the wallet process: it issues the bare GET and returns the Location the
-// endpoint answers with. Only an issuer that needs no user interaction — a test
-// or conformance issuer — behaves that way, which is why
-// OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization gates it. The client
-// must read the 302 rather than follow it, so http.ErrUseLastResponse applies
-// here instead of the blanket redirect refusal the other endpoints use.
-func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalAuthorization) (string, error) {
+// followOID4VCIAuthorizationEndpoint issues the §5.2 authorization request as a
+// bare GET and returns the Location it redirects to. Only an issuer that needs
+// no user interaction answers that way, which is why
+// OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization gates it. A nil
+// client uses one with a timeout.
+func followOID4VCIAuthorizationEndpoint(ctx context.Context, client *http.Client, auth *OID4VCIFinalAuthorization) (string, error) {
 	if auth.RequestURIExpired(time.Now()) {
 		return "", fmt.Errorf("the authorization request cannot be sent: %w", ErrAuthorizationRequestURIExpired)
 	}
-	authClient := noRedirectHTTPClient(client)
-	request, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointAuthorization), http.MethodGet, auth.AuthorizationURL, nil)
+	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointAuthorization), http.MethodGet, auth.AuthorizationURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
 	}
-	response, err := authClient.Do(request)
+	response, err := httpfetch.NoRedirect(client).Do(request)
 	if err != nil {
 		return "", fmt.Errorf("failed to request authorization endpoint: %w", err)
 	}
@@ -579,22 +577,4 @@ func sameOriginAndPath(registered, actual *url.URL) bool {
 	return strings.EqualFold(registered.Scheme, actual.Scheme) &&
 		strings.EqualFold(registered.Host, actual.Host) &&
 		registered.Path == actual.Path
-}
-
-func noRedirectHTTPClient(client *http.Client) *http.Client {
-	transport := http.DefaultTransport
-	timeout := time.Duration(0)
-	if client != nil {
-		if client.Transport != nil {
-			transport = client.Transport
-		}
-		timeout = client.Timeout
-	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 }

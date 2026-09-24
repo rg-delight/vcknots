@@ -88,7 +88,7 @@ func (w *Wallet) ReceiveOID4VCIFinalCredentialContext(ctx context.Context, req O
 	if err != nil {
 		return nil, err
 	}
-	redirectURL, err := followOID4VCIAuthorizationEndpoint(req.HTTPClient, authorization)
+	redirectURL, err := followOID4VCIAuthorizationEndpoint(ctx, req.HTTPClient, authorization)
 	if err != nil {
 		return nil, err
 	}
