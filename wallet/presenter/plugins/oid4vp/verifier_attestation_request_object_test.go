@@ -213,6 +213,35 @@ func TestVerifierAttestationRequestObjectRefusals(t *testing.T) {
 			},
 			want: ErrVerifierAttestationInvalid,
 		},
+		{
+			// A present but malformed redirect_uris must not lose the
+			// attester's constraint.
+			name: "redirect_uris is a string, not an array",
+			request: func() string {
+				return f.requestObject(t, f.requestClaims(), f.verifierKey, withClaims(func(c map[string]any) {
+					c["redirect_uris"] = attestationResponseURI
+				}))
+			},
+			want: ErrVerifierAttestationInvalid,
+		},
+		{
+			name: "redirect_uris holds a non-string",
+			request: func() string {
+				return f.requestObject(t, f.requestClaims(), f.verifierKey, withClaims(func(c map[string]any) {
+					c["redirect_uris"] = []any{attestationResponseURI, 7}
+				}))
+			},
+			want: ErrVerifierAttestationInvalid,
+		},
+		{
+			name: "redirect_uris is empty",
+			request: func() string {
+				return f.requestObject(t, f.requestClaims(), f.verifierKey, withClaims(func(c map[string]any) {
+					c["redirect_uris"] = []string{}
+				}))
+			},
+			want: ErrVerifierAttestationInvalid,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
