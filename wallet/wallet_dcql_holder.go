@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -178,9 +180,16 @@ func dcqlCandidateFromSavedCredential(saved *SavedCredential) (oid4vp.DCQLCreden
 			claimObject[name] = value
 		}
 	}
-	if flavor == credential.SDJwtVC {
+	switch flavor {
+	case credential.SDJwtVC:
 		if reconstructed, reconstructErr := sdjwtvc.ReconstructClaimsObject(string(saved.Entry.Raw)); reconstructErr == nil {
 			claimObject = reconstructed
+		}
+	case credential.JwtVc, credential.LdpVc:
+		// OID4VP 1.0 Appendix B.1: a claims path pointer into a W3C
+		// Verifiable Credential starts at the credential, not its subject.
+		if root, ok := w3cCredentialObject(flavor, saved.Entry.Raw); ok {
+			claimObject = root
 		}
 	}
 	vct := ""
@@ -221,4 +230,33 @@ func dcqlClaimDisclosureName(encoded string) string {
 		}
 	}
 	return encoded
+}
+
+// w3cCredentialObject decodes the Verifiable Credential a claims path pointer
+// is applied to: the vc claim of a jwt_vc_json payload, or the ldp_vc
+// document itself.
+func w3cCredentialObject(flavor credential.SupportedSerializationFlavor, raw []byte) (map[string]any, bool) {
+	document := raw
+	if flavor == credential.JwtVc {
+		parts := strings.Split(string(raw), ".")
+		if len(parts) != 3 {
+			return nil, false
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return nil, false
+		}
+		document = payload
+	}
+	decoder := json.NewDecoder(bytes.NewReader(document))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, false
+	}
+	if flavor == credential.JwtVc {
+		vc, ok := object["vc"].(map[string]any)
+		return vc, ok
+	}
+	return object, true
 }
