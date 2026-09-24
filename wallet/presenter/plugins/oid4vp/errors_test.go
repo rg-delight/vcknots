@@ -3,6 +3,7 @@ package oid4vp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -241,6 +242,49 @@ func TestSubmitErrorResponseRefusesAnInvalidDescription(t *testing.T) {
 			require.False(t, reached, "a refused error response must not reach the verifier")
 		})
 	}
+}
+
+// TestSubmitErrorResponseEncryptsUnderDirectPostJWT: an error response to a
+// direct_post.jwt request uses that Response Mode (OID4VP 1.0 §5.6), so it is
+// encrypted to the Verifier's key.
+func TestSubmitErrorResponseEncryptsUnderDirectPostJWT(t *testing.T) {
+	recipient := newP256Recipient(t)
+	captured := &url.Values{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		*captured = r.PostForm
+	}))
+	defer server.Close()
+	metadata, err := json.Marshal(map[string]any{
+		"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: "ECDH-ES"}}},
+		"encrypted_response_enc_values_supported": []string{"A128GCM"},
+	})
+	require.NoError(t, err)
+	p := &Oid4vpPresenter{AllowHTTP: true}
+	request, err := p.ParseRequest(context.Background(), "openid4vp://authorize?"+url.Values{
+		"client_id":       {"redirect_uri:" + server.URL + "/response"},
+		"response_type":   {"vp_token"},
+		"response_mode":   {"direct_post.jwt"},
+		"nonce":           {"n"},
+		"state":           {"state-1"},
+		"client_metadata": {string(metadata)},
+		"dcql_query":      {`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]}}]}`},
+	}.Encode())
+	require.NoError(t, err)
+
+	result, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "user declined")
+	require.NoError(t, err)
+	require.True(t, result.Encrypted)
+	require.Len(t, *captured, 1)
+	jwe, err := jose.ParseEncrypted(captured.Get("response"), []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A128GCM})
+	require.NoError(t, err)
+	plaintext, err := jwe.Decrypt(recipient)
+	require.NoError(t, err)
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(plaintext, &payload))
+	require.Equal(t, map[string]string{"error": "access_denied", "error_description": "user declined", "state": "state-1"}, payload)
 }
 
 // TestSubmitErrorResponseOverDCAPI: a DC API request's error response is the

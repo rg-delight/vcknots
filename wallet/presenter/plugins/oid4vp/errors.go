@@ -115,23 +115,32 @@ func (e *AuthorizationRequestError) SendErrorResponse(ctx context.Context, clien
 	if target.state != "" {
 		values["state"] = target.state
 	}
-	formData := url.Values{}
-	if target.responseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		if payload, err := json.Marshal(values); err == nil {
-			if token, err := encryptAuthorizationResponse(payload, target.metadata, target.haip); err == nil {
-				formData.Set("response", token)
-			}
-		}
-	}
-	if formData.Get("response") == "" {
-		for name, value := range values {
-			formData.Set(name, value)
-		}
-	}
+	formData, _ := errorResponseForm(values, target.responseMode, func(payload []byte) (string, error) {
+		return encryptAuthorizationResponse(payload, target.metadata, target.haip)
+	})
 	if _, err := postAuthorizationResponse(ctx, client, target.responseURI, formData); err != nil {
 		return fmt.Errorf("failed to send error authorization response: %w", err)
 	}
 	return nil
+}
+
+// errorResponseForm builds the form of an error authorization response. Under
+// direct_post.jwt the members travel as a JWE when encrypt succeeds, and in
+// plaintext otherwise (OID4VP 1.0 §8.3.1). It reports whether the form is
+// encrypted.
+func errorResponseForm(values map[string]string, mode OAuthAuthzReqResponseMode, encrypt func([]byte) (string, error)) (url.Values, bool) {
+	if mode == OAuthAuthzReqResponseModeDirectPostJWT {
+		if payload, err := json.Marshal(values); err == nil {
+			if token, err := encrypt(payload); err == nil {
+				return url.Values{"response": {token}}, true
+			}
+		}
+	}
+	formData := url.Values{}
+	for name, value := range values {
+		formData.Set(name, value)
+	}
+	return formData, false
 }
 
 // attachErrorResponseTarget records on the refusal in err where an error
@@ -243,8 +252,9 @@ func normalizeOAuthErrorCode(code string) string {
 
 // SubmitErrorResponse answers an admitted request with an OAuth 2.0 error
 // response (OID4VP 1.0 §8.5, RFC 6749 §4.1.2.1): error, error_description and
-// state, form-posted in plaintext to the request's response_uri (§8.3.1
-// permits an unencrypted error response). A DC API request gets
+// state, posted to the request's response_uri. Under direct_post.jwt the
+// response is encrypted when the Verifier's metadata allows it and sent in
+// plaintext otherwise (§8.3.1). A DC API request gets
 // SubmitResult.DCAPIResponse whose data holds only error (Appendix A.4).
 // description is checked against the RFC 6749 character set first
 // (ErrErrorDescriptionInvalid). A request that failed admission is answered
@@ -269,19 +279,22 @@ func (p *Oid4vpPresenter) SubmitErrorResponse(ctx context.Context, req types.Adm
 	if !isDirectPostMode(handle.req.ResponseMode) {
 		return nil, fmt.Errorf("response_mode %q is not supported for an error response", handle.req.ResponseMode)
 	}
-	formData := url.Values{}
-	formData.Set("error", code)
+
+	values := map[string]string{"error": code}
 	if description != "" {
-		formData.Set("error_description", description)
+		values["error_description"] = description
 	}
 	if handle.req.State != "" {
-		formData.Set("state", handle.req.State)
+		values["state"] = handle.req.State
 	}
+	formData, encrypted := errorResponseForm(values, handle.req.ResponseMode, func(payload []byte) (string, error) {
+		return p.encryptAuthorizationResponseJWE(payload, handle.req.ClientMetadata)
+	})
 	body, err := postAuthorizationResponse(ctx, p.httpClient(), handle.endpoint.String(), formData)
 	if err != nil {
 		return nil, err
 	}
-	return &types.SubmitResult{RedirectURI: redirectURIFromVerifierResponse(body)}, nil
+	return &types.SubmitResult{RedirectURI: redirectURIFromVerifierResponse(body), Encrypted: encrypted}, nil
 }
 
 // validateOAuthErrorDescription checks error_description against the production

@@ -10,11 +10,10 @@ import (
 )
 
 // The methods in this file answer a request the caller holds as a
-// CredentialPresentationRequest, at an endpoint the caller names. They serve
-// the wallet package's entry points that predate AdmittedRequest; new code
-// answers an *AdmittedRequest with SubmitDCQLResponse,
-// SubmitPresentationExchangeResponse or SubmitErrorResponse, which take the
-// endpoint from the request.
+// CredentialPresentationRequest, at an endpoint the caller names, for the
+// wallet package's entry points that take such a request. An *AdmittedRequest
+// is answered with SubmitDCQLResponse, SubmitPresentationExchangeResponse or
+// SubmitErrorResponse, which take the endpoint from the request.
 
 // PresentDCQL sends one Authorization Response carrying every selected DCQL
 // query to endpoint. request.ResponseMode selects plaintext (direct_post) or
