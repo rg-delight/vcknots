@@ -93,7 +93,7 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 		}
 	}
 	leaf := certificates[0]
-	if leaf.IsCA || (bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil) {
+	if leaf.IsCA || IsSelfSigned(leaf) {
 		return invalid("certificate", errors.New("signer must be a non-self-signed end-entity certificate"))
 	}
 	if hasKeyUsage(leaf) && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
@@ -207,10 +207,10 @@ func signingPaths(certificates []*x509.Certificate, options SigningChainOptions)
 		if !deferPathLength {
 			return cert
 		}
-		copy := *cert
-		copy.MaxPathLen = -1
-		copy.MaxPathLenZero = false
-		return &copy
+		clone := *cert
+		clone.MaxPathLen = -1
+		clone.MaxPathLenZero = false
+		return &clone
 	}
 	intermediates := x509.NewCertPool()
 	for _, cert := range certificates[1:] {
