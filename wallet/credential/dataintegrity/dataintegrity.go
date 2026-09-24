@@ -10,6 +10,13 @@
 // entry, and a document naming any other URL is refused with
 // ErrContextNotPinned (VC Data Integrity 1.0 Section 2.4.1 and the security
 // considerations of Section 5.1 recommend exactly this).
+//
+// RDFC-1.0 canonicalization can take time exponential in the number of blank
+// nodes that share a first-degree hash (RDFC-1.0 Section 4.4 and its security
+// considerations on dataset poisoning), and the underlying processor offers no
+// cancellation. Canonicalize therefore refuses, before canonicalizing, a
+// dataset with more than 1024 blank nodes or with more than 6 blank nodes whose
+// first-degree hash is not unique, with ErrCanonicalizationTooComplex.
 package dataintegrity
 
 import (
@@ -18,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +50,15 @@ const (
 
 	// ed25519SignatureSize is the size of an Ed25519 signature (RFC 8032).
 	ed25519SignatureSize = ed25519.SignatureSize
+
+	// maxBlankNodes bounds the blank nodes of a dataset Canonicalize accepts.
+	maxBlankNodes = 1024
+	// maxAmbiguousBlankNodes bounds the blank nodes whose first-degree hash is
+	// shared with another blank node, the only ones RDFC-1.0 runs the
+	// exponential Hash N-Degree Quads algorithm on. Six such nodes in one
+	// clique canonicalize in tens of milliseconds; each further node costs
+	// roughly ten times more.
+	maxAmbiguousBlankNodes = 6
 )
 
 var (
@@ -57,6 +74,10 @@ var (
 	ErrCanonicalizationFailed = common.NewCodedError("data_integrity_canonicalization_failed", "RDFC-1.0 canonicalization failed")
 	// ErrSigningFailed reports a signer error or a signature of the wrong size.
 	ErrSigningFailed = common.NewCodedError("data_integrity_signing_failed", "Data Integrity proof signing failed")
+	// ErrCanonicalizationTooComplex reports a dataset whose RDFC-1.0
+	// canonicalization this package refuses to attempt because its blank nodes
+	// exceed the bounds described in the package documentation.
+	ErrCanonicalizationTooComplex = common.NewCodedError("data_integrity_canonicalization_too_complex", "RDFC-1.0 canonicalization exceeds the blank node bounds")
 	// ErrProofInvalid reports a proof that does not verify.
 	ErrProofInvalid = common.NewCodedError("data_integrity_proof_invalid", "Data Integrity proof is invalid")
 )
@@ -153,17 +174,53 @@ func SignEddsaRdfc2022(document map[string]any, options ProofOptions, contexts P
 	return secured, nil
 }
 
-// VerifyEddsaRdfc2022 verifies the single eddsa-rdfc-2022 proof a secured
-// document carries under publicKey (Section 3.2.2). Resolving which key the
-// proof's verificationMethod names, and whether it may be used for the proof
-// purpose, is the caller's decision.
+// VerifyOptions are a verifier's expectations of a proof (VC Data Integrity
+// 1.0 Section 4.4, Verify Proof). Empty fields impose nothing.
+type VerifyOptions struct {
+	// ProofPurpose, when non-empty, must equal the proof's proofPurpose.
+	ProofPurpose string
+	// VerificationMethod, when non-empty, must equal the proof's
+	// verificationMethod. It also selects the proof to verify from a proof
+	// set (Section 2.1.1).
+	VerificationMethod string
+	// Challenge, when non-empty, must equal the proof's challenge.
+	Challenge string
+	// Domain, when non-empty, must equal the proof's domain or one of its
+	// values.
+	Domain string
+	// Now, when non-zero, is the verification time: a proof created after Now
+	// plus ClockSkew, or whose expires is not after Now minus ClockSkew, is
+	// refused.
+	Now time.Time
+	// ClockSkew is the tolerance applied with Now.
+	ClockSkew time.Duration
+}
+
+// VerifyEddsaRdfc2022 is VerifyEddsaRdfc2022WithOptions with no expectations
+// beyond a well-formed proof that verifies under publicKey.
 func VerifyEddsaRdfc2022(document map[string]any, contexts PinnedContexts, publicKey ed25519.PublicKey) error {
-	proof, ok := document["proof"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("%w: the document must carry exactly one proof object", ErrProofInvalid)
+	return VerifyEddsaRdfc2022WithOptions(document, contexts, publicKey, VerifyOptions{})
+}
+
+// VerifyEddsaRdfc2022WithOptions verifies an eddsa-rdfc-2022 proof of a
+// secured document under publicKey (VC Data Integrity EdDSA Cryptosuites v1.0
+// Section 3.2.2) and checks it against options.
+//
+// The document's `proof` is one proof object or a proof set (an array, VC
+// Data Integrity 1.0 Section 2.1.1). The proof verified is the
+// eddsa-rdfc-2022 DataIntegrityProof of the set, selected by
+// options.VerificationMethod when the set holds several. Proof chains
+// (previousProof) are not supported and are refused. `created` and `expires`,
+// when present, must be dateTimeStamp values. Resolving which key the proof's
+// verificationMethod names, and whether it may be used for the proof purpose,
+// is the caller's decision.
+func VerifyEddsaRdfc2022WithOptions(document map[string]any, contexts PinnedContexts, publicKey ed25519.PublicKey, options VerifyOptions) error {
+	proof, err := selectProof(document["proof"], options.VerificationMethod)
+	if err != nil {
+		return err
 	}
-	if proof["type"] != ProofType || proof["cryptosuite"] != CryptosuiteEddsaRdfc2022 {
-		return fmt.Errorf("%w: the proof is not an %s DataIntegrityProof", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	if err := checkProof(proof, options); err != nil {
+		return err
 	}
 	proofValue, ok := proof["proofValue"].(string)
 	if !ok || !strings.HasPrefix(proofValue, "z") {
@@ -197,6 +254,116 @@ func VerifyEddsaRdfc2022(document map[string]any, contexts PinnedContexts, publi
 		return fmt.Errorf("%w: signature verification failed", ErrProofInvalid)
 	}
 	return nil
+}
+
+// selectProof returns the eddsa-rdfc-2022 proof of a `proof` member that is a
+// proof object or a proof set, narrowed to verificationMethod when non-empty.
+func selectProof(member any, verificationMethod string) (map[string]any, error) {
+	var proofs []any
+	switch typed := member.(type) {
+	case map[string]any:
+		proofs = []any{typed}
+	case []any:
+		proofs = typed
+	}
+	if len(proofs) == 0 {
+		return nil, fmt.Errorf("%w: the document must carry a proof object or a non-empty proof set", ErrProofInvalid)
+	}
+	var selected []map[string]any
+	for _, entry := range proofs {
+		proof, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%w: every proof must be an object", ErrProofInvalid)
+		}
+		if proof["type"] != ProofType || proof["cryptosuite"] != CryptosuiteEddsaRdfc2022 {
+			continue
+		}
+		if verificationMethod != "" && proof["verificationMethod"] != verificationMethod {
+			continue
+		}
+		selected = append(selected, proof)
+	}
+	switch len(selected) {
+	case 0:
+		return nil, fmt.Errorf("%w: no %s DataIntegrityProof matches", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	case 1:
+		return selected[0], nil
+	default:
+		return nil, fmt.Errorf("%w: several %s proofs match; name the verificationMethod", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	}
+}
+
+// checkProof applies the proof member rules of VC Data Integrity 1.0 Section
+// 2.1 and the verifier's options to proof.
+func checkProof(proof map[string]any, options VerifyOptions) error {
+	if _, chained := proof["previousProof"]; chained {
+		return fmt.Errorf("%w: proof chains are not supported", ErrProofInvalid)
+	}
+	purpose, _ := proof["proofPurpose"].(string)
+	if purpose == "" {
+		return fmt.Errorf("%w: proofPurpose is required", ErrProofInvalid)
+	}
+	if options.ProofPurpose != "" && purpose != options.ProofPurpose {
+		return fmt.Errorf("%w: proofPurpose %q is not %q", ErrProofInvalid, purpose, options.ProofPurpose)
+	}
+	if method, _ := proof["verificationMethod"].(string); method == "" {
+		return fmt.Errorf("%w: verificationMethod is required", ErrProofInvalid)
+	}
+	if options.Challenge != "" && proof["challenge"] != options.Challenge {
+		return fmt.Errorf("%w: challenge does not match", ErrProofInvalid)
+	}
+	if options.Domain != "" && !proofDomainIncludes(proof["domain"], options.Domain) {
+		return fmt.Errorf("%w: domain does not match", ErrProofInvalid)
+	}
+	created, err := proofTime(proof, "created")
+	if err != nil {
+		return err
+	}
+	expires, err := proofTime(proof, "expires")
+	if err != nil {
+		return err
+	}
+	if options.Now.IsZero() {
+		return nil
+	}
+	if !created.IsZero() && created.After(options.Now.Add(options.ClockSkew)) {
+		return fmt.Errorf("%w: proof was created in the future", ErrProofInvalid)
+	}
+	if !expires.IsZero() && !expires.After(options.Now.Add(-options.ClockSkew)) {
+		return fmt.Errorf("%w: proof has expired", ErrProofInvalid)
+	}
+	return nil
+}
+
+// proofDomainIncludes reports whether a proof's domain, a string or an array
+// of strings, includes want.
+func proofDomainIncludes(domain any, want string) bool {
+	switch typed := domain.(type) {
+	case string:
+		return typed == want
+	case []any:
+		return slices.Contains(typed, any(want))
+	default:
+		return false
+	}
+}
+
+// proofTime reads an optional dateTimeStamp member of a proof (XML Schema
+// dateTimeStamp, which requires a time zone), or the zero time when absent.
+func proofTime(proof map[string]any, name string) (time.Time, error) {
+	raw, present := proof[name]
+	if !present {
+		return time.Time{}, nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return time.Time{}, fmt.Errorf("%w: %s must be a dateTimeStamp", ErrProofInvalid, name)
+	}
+	instant, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: %s must be a dateTimeStamp", ErrProofInvalid, name)
+	}
+	return instant, nil
 }
 
 // HashData is the eddsa-rdfc-2022 hash data of Section 3.2.4: the SHA-256 of
@@ -237,7 +404,9 @@ func HashData(unsecured map[string]any, proofConfig map[string]any, contexts Pin
 // Canonicalize returns the RDFC-1.0 canonical N-Quads of a JSON-LD document
 // expanded against the pinned contexts only. A term that does not expand to
 // an absolute IRI fails the canonicalization instead of being dropped, so a
-// claim the signer cannot vouch for is never silently left unsigned.
+// claim the signer cannot vouch for is never silently left unsigned. A dataset
+// beyond the blank node bounds of the package documentation fails with
+// ErrCanonicalizationTooComplex before any canonicalization work.
 func Canonicalize(document map[string]any, contexts PinnedContexts) (string, error) {
 	loader, err := newPinnedLoader(contexts)
 	if err != nil {
@@ -271,6 +440,9 @@ func Canonicalize(document map[string]any, contexts PinnedContexts) (string, err
 	if !ok {
 		return "", fmt.Errorf("%w: unexpected RDF dataset %T", ErrCanonicalizationFailed, dataset)
 	}
+	if err := checkBlankNodeBounds(rdfDataset); err != nil {
+		return "", err
+	}
 	options.Algorithm = ld.AlgorithmURDNA2015 // RDFC-1.0 with SHA-256
 	options.Format = "application/n-quads"
 	normalized, err := ld.NewJsonLdApi().Normalize(rdfDataset, options)
@@ -282,6 +454,75 @@ func Canonicalize(document map[string]any, contexts PinnedContexts) (string, err
 		return "", fmt.Errorf("%w: unexpected canonicalization output %T", ErrCanonicalizationFailed, normalized)
 	}
 	return nquads, nil
+}
+
+// checkBlankNodeBounds refuses a dataset whose canonicalization could take
+// exponential time. It groups the blank nodes by their first-degree quads
+// (RDFC-1.0 Section 4.6: every quad naming the node, with the node written as
+// one label and every other blank node as another) and counts the nodes whose
+// group has more than one member.
+func checkBlankNodeBounds(dataset *ld.RDFDataset) error {
+	quadsOf := map[string][]string{}
+	for graphName, quads := range dataset.Graphs {
+		for _, quad := range quads {
+			graph := quad.Graph
+			if graph == nil && strings.HasPrefix(graphName, "_:") {
+				graph = ld.NewBlankNode(graphName)
+			}
+			nodes := []ld.Node{quad.Subject, quad.Predicate, quad.Object, graph}
+			for _, node := range nodes {
+				if node == nil || !ld.IsBlankNode(node) {
+					continue
+				}
+				label := node.GetValue()
+				if len(quadsOf) >= maxBlankNodes {
+					if _, known := quadsOf[label]; !known {
+						return fmt.Errorf("%w: more than %d blank nodes", ErrCanonicalizationTooComplex, maxBlankNodes)
+					}
+				}
+				quadsOf[label] = append(quadsOf[label], firstDegreeQuad(nodes, label))
+			}
+		}
+	}
+	groups := map[string]int{}
+	for _, quads := range quadsOf {
+		slices.Sort(quads)
+		groups[strings.Join(quads, "\n")]++
+	}
+	ambiguous := 0
+	for _, size := range groups {
+		if size > 1 {
+			ambiguous += size
+		}
+	}
+	if ambiguous > maxAmbiguousBlankNodes {
+		return fmt.Errorf("%w: %d blank nodes share a first-degree hash, the limit is %d", ErrCanonicalizationTooComplex, ambiguous, maxAmbiguousBlankNodes)
+	}
+	return nil
+}
+
+// firstDegreeQuad serializes one quad for the blank node label: label becomes
+// "_:a" and every other blank node "_:z" (RDFC-1.0 Section 4.6 step 3). The
+// encoding need only be injective, not N-Quads.
+func firstDegreeQuad(nodes []ld.Node, label string) string {
+	parts := make([]string, len(nodes))
+	for index, node := range nodes {
+		switch {
+		case node == nil:
+			parts[index] = "-"
+		case ld.IsBlankNode(node) && node.GetValue() == label:
+			parts[index] = "_:a"
+		case ld.IsBlankNode(node):
+			parts[index] = "_:z"
+		default:
+			if literal, ok := node.(*ld.Literal); ok {
+				parts[index] = fmt.Sprintf("L%q^%q@%q", literal.Value, literal.Datatype, literal.Language)
+			} else {
+				parts[index] = fmt.Sprintf("I%q", node.GetValue())
+			}
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // pinnedLoader is the only document loader the canonicalization uses. It

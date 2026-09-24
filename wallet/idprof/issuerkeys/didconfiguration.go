@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 )
 
 // didConfigurationPath is the well-known location DIF Well Known DID
@@ -20,20 +23,9 @@ const didConfigurationPath = "/.well-known/did-configuration.json"
 const domainLinkageCredentialType = "DomainLinkageCredential"
 
 // domainLinkageAlgorithms are the JWS signature algorithms a Domain Linkage
-// Credential may be signed with: the ECDSA family of RFC 7518 section 3.4, the
-// RSASSA-PKCS1-v1_5 family of section 3.3, the RSASSA-PSS family of section 3.5
-// and EdDSA over Ed25519 (RFC 8037).
-//
-// The MAC algorithms of RFC 7518 section 3.2 and the unsigned "none" of RFC
-// 7515 section 3.6 are deliberately absent: neither authenticates a DID
-// controller to a party holding only public keys, and accepting either would
-// make the linkage assertable by anyone who can serve the document.
-var domainLinkageAlgorithms = []jose.SignatureAlgorithm{
-	jose.ES256, jose.ES384, jose.ES512,
-	jose.RS256, jose.RS384, jose.RS512,
-	jose.PS256, jose.PS384, jose.PS512,
-	jose.EdDSA,
-}
+// Credential may be signed with: the library's accepted asymmetric algorithms,
+// never a MAC or "none".
+var domainLinkageAlgorithms = commonjose.AcceptedSignatureAlgorithms()
 
 // didConfigurationBinds reports whether the Credential Issuer's origin claims
 // the DID through a DIF Well Known DID Configuration.
@@ -177,15 +169,46 @@ func decodeJWTSegment(segment string) (map[string]any, error) {
 
 // withinJWTValidity reports whether the registered `exp` and `nbf` claims of
 // RFC 7519 section 4.1 admit now. A Domain Linkage Credential that carries
-// neither is timeless, which the specification allows.
+// neither is timeless, which the specification allows; one that carries either
+// as something other than a NumericDate is not valid.
 func withinJWTValidity(claims map[string]any, now time.Time) bool {
-	if expiry, ok := claims["exp"].(float64); ok && !now.Before(time.Unix(int64(expiry), 0)) {
-		return false
+	if raw, present := claims["exp"]; present {
+		expiry, ok := numericDate(raw)
+		if !ok || !now.Before(expiry) {
+			return false
+		}
 	}
-	if notBefore, ok := claims["nbf"].(float64); ok && now.Before(time.Unix(int64(notBefore), 0)) {
-		return false
+	if raw, present := claims["nbf"]; present {
+		notBefore, ok := numericDate(raw)
+		if !ok || now.Before(notBefore) {
+			return false
+		}
 	}
 	return true
+}
+
+// numericDate reads a JWT NumericDate (RFC 7519 section 2): a finite JSON
+// number of seconds since the epoch, fractions truncated.
+func numericDate(value any) (time.Time, bool) {
+	var seconds float64
+	switch typed := value.(type) {
+	case float64:
+		seconds = typed
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return time.Time{}, false
+		}
+		seconds = parsed
+	default:
+		return time.Time{}, false
+	}
+	// Beyond ±2^53 seconds a float64 no longer holds whole seconds and the
+	// value is meaningless as a date.
+	if math.IsNaN(seconds) || math.Abs(seconds) > 1<<53 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(seconds), 0), true
 }
 
 // domainLinkageClaimsMatch reports whether the credential inside a verified

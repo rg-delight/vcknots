@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -13,11 +14,10 @@ import (
 	"github.com/btcsuite/btcd/btcutil/base58"
 )
 
-// typescriptVectors are produced by the wallet's independent TypeScript
-// implementation (jsonld.js canonize + node:crypto Ed25519) with fixed seeds, so
-// a byte-identical proofValue here means both implementations sign the same
-// canonical dataset.
-type typescriptVectors struct {
+// referenceVectors are produced by an independent implementation (jsonld.js
+// canonize and node:crypto Ed25519) with fixed seeds, so a byte-identical
+// proofValue here means both implementations sign the same canonical dataset.
+type referenceVectors struct {
 	Issuer     vectorKey      `json:"issuer"`
 	Holder     vectorKey      `json:"holder"`
 	Cases      []vectorCase   `json:"cases"`
@@ -48,13 +48,13 @@ type vectorDocument struct {
 	ProofOptionsNQuads string         `json:"proofOptionsNQuads"`
 }
 
-func loadVectors(t *testing.T) typescriptVectors {
+func loadVectors(t *testing.T) referenceVectors {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/typescript_vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vectors typescriptVectors
+	var vectors referenceVectors
 	if err := json.Unmarshal(raw, &vectors); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func withoutProof(document map[string]any) map[string]any {
 	return unsecured
 }
 
-func TestCanonicalizeMatchesTypeScriptImplementation(t *testing.T) {
+func TestCanonicalizeMatchesReferenceVectors(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, vector := range vectors.Cases {
 		got, err := Canonicalize(withoutProof(vector.Presentation), vectors.Contexts)
@@ -105,7 +105,7 @@ func TestCanonicalizeMatchesTypeScriptImplementation(t *testing.T) {
 	}
 }
 
-func TestVerifyAcceptsTypeScriptProofs(t *testing.T) {
+func TestVerifyAcceptsReferenceProofs(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, vector := range vectors.Cases {
 		if err := VerifyEddsaRdfc2022(vector.Presentation, vectors.Contexts, vectors.Holder.publicKey(t)); err != nil {
@@ -122,7 +122,7 @@ func TestVerifyAcceptsTypeScriptProofs(t *testing.T) {
 	}
 }
 
-func TestSignReproducesTypeScriptProofValue(t *testing.T) {
+func TestSignReproducesReferenceProofValue(t *testing.T) {
 	vectors := loadVectors(t)
 	holderKey := vectors.Holder.privateKey(t)
 	for _, vector := range vectors.Cases {
@@ -146,7 +146,7 @@ func TestSignReproducesTypeScriptProofValue(t *testing.T) {
 		gotProof := signed["proof"].(map[string]any)
 		for _, name := range []string{"type", "cryptosuite", "created", "proofPurpose", "verificationMethod", "challenge", "domain", "proofValue"} {
 			if gotProof[name] != want[name] {
-				t.Fatalf("status=%v: proof %s = %v, TypeScript produced %v", vector.WithStatus, name, gotProof[name], want[name])
+				t.Fatalf("status=%v: proof %s = %v, reference produced %v", vector.WithStatus, name, gotProof[name], want[name])
 			}
 		}
 	}
@@ -270,5 +270,154 @@ func TestVerifyRefusesMalformedProofs(t *testing.T) {
 	}
 	if err := VerifyEddsaRdfc2022(withoutProof(base), vectors.Contexts, publicKey); !errors.Is(err, ErrProofInvalid) {
 		t.Fatalf("missing proof: got %v", err)
+	}
+}
+
+// blankNodeClique is a JSON-LD document of size blank nodes that all link to
+// each other, so every node has the same first-degree hash: the shape that
+// makes RDFC-1.0 run in factorial time.
+func blankNodeClique(size int) map[string]any {
+	graph := make([]any, size)
+	for i := range graph {
+		var links []any
+		for j := 0; j < size; j++ {
+			if j != i {
+				links = append(links, fmt.Sprintf("_:b%d", j))
+			}
+		}
+		graph[i] = map[string]any{"@id": fmt.Sprintf("_:b%d", i), "p": links}
+	}
+	return map[string]any{
+		"@context": map[string]any{"p": map[string]any{"@id": "https://example.test/p", "@type": "@id"}},
+		"@graph":   graph,
+	}
+}
+
+func TestCanonicalizeRefusesADatasetPoisoningCliqueBeforeCanonicalizing(t *testing.T) {
+	started := time.Now()
+	_, err := Canonicalize(blankNodeClique(9), nil)
+	if !errors.Is(err, ErrCanonicalizationTooComplex) {
+		t.Fatalf("got %v, want ErrCanonicalizationTooComplex", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("refusal took %v", elapsed)
+	}
+	if _, err := Canonicalize(blankNodeClique(maxAmbiguousBlankNodes), nil); err != nil {
+		t.Fatalf("a clique within the bound: %v", err)
+	}
+}
+
+func TestCanonicalizeRefusesTooManyBlankNodes(t *testing.T) {
+	graph := make([]any, maxBlankNodes+1)
+	for i := range graph {
+		graph[i] = map[string]any{"@id": fmt.Sprintf("_:b%d", i), "p": fmt.Sprintf("https://example.test/%d", i)}
+	}
+	document := map[string]any{
+		"@context": map[string]any{"p": map[string]any{"@id": "https://example.test/p", "@type": "@id"}},
+		"@graph":   graph,
+	}
+	if _, err := Canonicalize(document, nil); !errors.Is(err, ErrCanonicalizationTooComplex) {
+		t.Fatalf("got %v, want ErrCanonicalizationTooComplex", err)
+	}
+}
+
+func TestVerifyWithOptionsChecksTheVerifierExpectations(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	created, err := time.Parse(time.RFC3339Nano, proof["created"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := vectors.Holder.publicKey(t)
+	matching := VerifyOptions{
+		ProofPurpose:       ProofPurposeAuthentication,
+		VerificationMethod: vectors.Holder.VerificationMethod,
+		Challenge:          proof["challenge"].(string),
+		Domain:             proof["domain"].(string),
+		Now:                created.Add(time.Minute),
+	}
+	if err := VerifyEddsaRdfc2022WithOptions(presentation, vectors.Contexts, publicKey, matching); err != nil {
+		t.Fatalf("matching options: %v", err)
+	}
+	cases := map[string]func(o *VerifyOptions){
+		"another purpose":             func(o *VerifyOptions) { o.ProofPurpose = ProofPurposeAssertionMethod },
+		"another verification method": func(o *VerifyOptions) { o.VerificationMethod = vectors.Issuer.VerificationMethod },
+		"another challenge":           func(o *VerifyOptions) { o.Challenge = "another-nonce" },
+		"another domain":              func(o *VerifyOptions) { o.Domain = "another-verifier" },
+		"created in the future":       func(o *VerifyOptions) { o.Now = created.Add(-time.Hour) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			options := matching
+			mutate(&options)
+			if err := VerifyEddsaRdfc2022WithOptions(presentation, vectors.Contexts, publicKey, options); !errors.Is(err, ErrProofInvalid) {
+				t.Fatalf("got %v, want ErrProofInvalid", err)
+			}
+		})
+	}
+}
+
+func withProof(document map[string]any, proof any) map[string]any {
+	secured := withoutProof(document)
+	secured["proof"] = proof
+	return secured
+}
+
+func TestVerifyRefusesMalformedProofMembers(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	with := func(name string, value any) map[string]any {
+		changed := map[string]any{}
+		for key, member := range proof {
+			changed[key] = member
+		}
+		changed[name] = value
+		return withProof(presentation, changed)
+	}
+	cases := map[string]map[string]any{
+		"created is not a dateTimeStamp": with("created", "2026-09-23"),
+		"expires is not a string":        with("expires", 1),
+		"expired":                        with("expires", "2000-01-01T00:00:00Z"),
+		"chained proof":                  with("previousProof", "urn:uuid:1"),
+		"no proofPurpose":                with("proofPurpose", ""),
+		"empty proof set":                withProof(presentation, []any{}),
+		"proof set entry not an object":  withProof(presentation, []any{"proof"}),
+	}
+	options := VerifyOptions{Now: time.Now()}
+	for name, document := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := VerifyEddsaRdfc2022WithOptions(document, vectors.Contexts, vectors.Holder.publicKey(t), options); !errors.Is(err, ErrProofInvalid) {
+				t.Fatalf("got %v, want ErrProofInvalid", err)
+			}
+		})
+	}
+}
+
+func TestVerifySelectsTheProofOfAProofSet(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	other := map[string]any{"type": ProofType, "cryptosuite": "ecdsa-rdfc-2019", "proofPurpose": ProofPurposeAuthentication, "verificationMethod": "did:example:other#key", "proofValue": "zabc"}
+	publicKey := vectors.Holder.publicKey(t)
+
+	set := withProof(presentation, []any{other, proof})
+	if err := VerifyEddsaRdfc2022(set, vectors.Contexts, publicKey); err != nil {
+		t.Fatalf("proof set: %v", err)
+	}
+
+	second := map[string]any{}
+	for key, value := range proof {
+		second[key] = value
+	}
+	second["verificationMethod"] = vectors.Issuer.VerificationMethod
+	ambiguous := withProof(presentation, []any{second, proof})
+	if err := VerifyEddsaRdfc2022(ambiguous, vectors.Contexts, publicKey); !errors.Is(err, ErrProofInvalid) {
+		t.Fatalf("ambiguous proof set: got %v, want ErrProofInvalid", err)
+	}
+	selected := VerifyOptions{VerificationMethod: vectors.Holder.VerificationMethod}
+	if err := VerifyEddsaRdfc2022WithOptions(ambiguous, vectors.Contexts, publicKey, selected); err != nil {
+		t.Fatalf("selected proof: %v", err)
 	}
 }

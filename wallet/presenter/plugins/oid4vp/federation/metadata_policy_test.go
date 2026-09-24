@@ -203,7 +203,7 @@ func TestResolveMetadataPolicy(t *testing.T) {
 			want:     `{"openid_credential_verifier": {"contacts": {"add": ["ops@example.test"]}}}`,
 		},
 		{
-			// ADR-0083: value and default merge by structure, so member order
+			// value and default merge by structure, so member order
 			// and number spelling do not make equal values conflict.
 			name: "structurally equal object values merge",
 			policies: []string{

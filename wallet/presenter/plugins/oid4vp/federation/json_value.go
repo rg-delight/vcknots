@@ -76,8 +76,7 @@ func asNonEmptyStringArray(value any) ([]string, bool) {
 }
 
 // cloneJSON deep-copies a JSON value. A value that JSON cannot represent is
-// refused, as structuredClone of a non-JSON value is by the TypeScript
-// implementation this package ports.
+// refused.
 func cloneJSON(value any) (any, error) {
 	switch typed := value.(type) {
 	case nil, string, bool, json.Number, float64, float32,
@@ -131,8 +130,9 @@ func cloneJSONObject(value map[string]any) (map[string]any, error) {
 // jsonEqual compares two JSON values structurally: objects by their member
 // sets regardless of member order, arrays item by item, and numbers by their
 // exact numeric value regardless of spelling ("1" equals "1.0"). It is the
-// canonical comparison the value, default and one_of operators need; comparing
-// serialized text would make member order significant (ADR-0083).
+// canonical comparison the value, default and one_of operators need. Comparing
+// serialized text instead would make JSON object member order significant,
+// which it is not (RFC 8259 Section 4).
 func jsonEqual(left, right any) bool {
 	if leftNumber, ok := jsonNumber(left); ok {
 		rightNumber, ok := jsonNumber(right)

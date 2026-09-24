@@ -39,8 +39,9 @@ var (
 	ErrTrustChainInvalid = common.NewCodedError("openid_federation_trust_chain_invalid", "OpenID Federation trust chain is invalid")
 	// ErrTrustChainUnresolved reports that Trust Chain discovery (OpenID
 	// Federation 1.0 Section 10.1) built no chain that reaches a configured
-	// Trust Anchor within the depth bound, including when an Entity
-	// Configuration on the way was unusable for discovery.
+	// Trust Anchor within the Resolver's bounds (depth, fetches, duration),
+	// including when an Entity Configuration on the way was unusable for
+	// discovery.
 	ErrTrustChainUnresolved = common.NewCodedError("openid_federation_trust_chain_unresolved", "OpenID Federation trust chain could not be resolved to a configured trust anchor")
 	// ErrMetadataPolicyInvalid reports that the metadata policies of a Trust
 	// Chain are malformed, cannot be combined, or reject the metadata they are

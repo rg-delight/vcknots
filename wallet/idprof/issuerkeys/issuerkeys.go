@@ -16,13 +16,14 @@
 //     defines for the SD-JWT VC format family;
 //  3. a DID document (W3C DID Core), accepted only once something binds the DID
 //     to the Credential Issuer;
-//  4. the `jwks` member of the OpenID4VCI 1.0 Credential Issuer Metadata, which
-//     is not a key source that specification defines for verifying an issuer
-//     signature, and is consulted only for interoperability.
+//  4. a `jwks` member of the Credential Issuer Metadata. OpenID4VCI 1.0 defines
+//     no issuer signing `jwks`, so this rung is a non-normative, opt-in
+//     mechanism.
 //
-// The ladder's order is the order of that evidence, and it is normative: a
-// caller reads Resolution.Candidates front to back and stops at the first key
-// that verifies the signature.
+// A caller reads Resolution.Candidates front to back and stops at the first key
+// that verifies the signature. Every candidate is attributed to the credential's
+// `iss` (Candidate.Issuer equals Request.Issuer), and no key whose JWK `use` is
+// other than "sig" is a candidate.
 //
 // Nothing here verifies a signature, walks a certification path, or decides
 // whether an issuer is acceptable. It answers one question - which keys is it
@@ -135,16 +136,11 @@ type MechanismDiagnostic struct {
 	// when it produced candidates. It is authored by this package from a fixed
 	// vocabulary and never carries key material, a response body or a URL.
 	Failure string
-	// DisabledBy names the Mechanisms fields - SwitchX5C, SwitchDIDWeb and the
-	// other Switch constants - whose false value kept this rung, a DID method
-	// inside it, or a binding it needed from doing its work. It is empty when
-	// no switch was involved.
-	//
-	// It is there so that a caller can tell "the credential gave this rung
-	// nothing to work with" from "the holder's own configuration switched the
-	// rung off", and point at the switch instead of at the issuer. Failure
-	// still carries a fixed description in that case; a caller that renders
-	// its own wording for a switched-off mechanism reads this field instead.
+	// DisabledBy names the Mechanisms fields (the Switch constants) whose false
+	// value kept this rung, a DID method inside it, or a binding it needed from
+	// doing its work, so a caller can tell a switched-off mechanism from one
+	// the credential gave nothing to work with. It is empty when no switch was
+	// involved.
 	DisabledBy []string
 }
 
@@ -223,10 +219,9 @@ type Resolution struct {
 // verified. A deployment that refuses one says so here, in one place, rather
 // than by omitting a call somewhere in its own code.
 //
-// A holder policy that accepts only an issuer key established through an `x5c`
-// chain reaching a trust anchor (the wallet's strict X.509 issuer setting) is
-// expressed by enabling X5C and nothing else: every other rung then records
-// its switch in DisabledBy and makes no request.
+// A policy that accepts only an issuer key established through an `x5c` chain
+// reaching a trust anchor is expressed by enabling X5C and nothing else: every
+// other rung then records its switch in DisabledBy and makes no request.
 type Mechanisms struct {
 	// X5C allows the `x5c` header rung to report the DNS name a certification
 	// path must be bound to. It does not affect MechanismX5CMetadataJWKSBinding,
@@ -250,20 +245,18 @@ type Mechanisms struct {
 	// DIDConfiguration allows a DIF Well Known DID Configuration served by the
 	// Credential Issuer's origin to bind a DID to that origin.
 	DIDConfiguration bool
-	// CredentialIssuerBinding allows the credential's own signed
+	// CredentialIssuerBinding allows the credential's own
 	// `vc.issuer.credential_issuer` member to bind its DID to the Credential
-	// Issuer. It applies to the W3C JWT VC format only.
+	// Issuer. It applies to the W3C JWT VC format only. This is a
+	// non-normative, opt-in mechanism: the link is self-asserted by the signer,
+	// so it binds nothing an attacker who controls a DID could not also claim.
 	CredentialIssuerBinding bool
-	// IssuerMetadataJWKS allows the `jwks` member of the OpenID4VCI 1.0
-	// Credential Issuer Metadata to be used as a source of issuer signing keys.
-	//
-	// OpenID4VCI 1.0 does not define that member as a key source for verifying
-	// an issuer's signature over a credential - it is defined for encrypting a
-	// Credential Response to the wallet - and the credential formats have their
-	// own key resolution mechanisms, which is what the rungs above this one
-	// implement. It exists because issuers in the field publish their signing
-	// key there and nowhere else, and a wallet that refuses it cannot accept
-	// their credentials at all. It is the last rung for that reason.
+	// IssuerMetadataJWKS allows a `jwks` member of the Credential Issuer
+	// Metadata to be used as a source of issuer signing keys, and as a binding
+	// for DID keys. This is a non-normative, opt-in mechanism: OpenID4VCI 1.0
+	// defines no issuer signing `jwks` (the only `jwks` it defines, in
+	// credential_request_encryption, holds encryption keys). Keys whose `use`
+	// is not "sig" are ignored. It is the last rung.
 	IssuerMetadataJWKS bool
 }
 
@@ -456,6 +449,12 @@ func (r *Resolver) metadataRung(
 	if !r.Mechanisms.IssuerMetadataJWKS {
 		diagnostic.Failure = failureDisabled
 		diagnostic.DisabledBy = []string{SwitchIssuerMetadataJWKS}
+		return nil, diagnostic
+	}
+	// The metadata speaks for the Credential Issuer, so its keys are
+	// attributable to a credential only when `iss` is that identifier.
+	if request.Issuer != request.CredentialIssuer {
+		diagnostic.Failure = "issuer is not the credential issuer"
 		return nil, diagnostic
 	}
 

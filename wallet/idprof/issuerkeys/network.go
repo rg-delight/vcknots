@@ -3,7 +3,7 @@ package issuerkeys
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,28 +11,19 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
-)
-
-const (
-	// defaultMaxDocumentBytes bounds every metadata document the ladder reads.
-	// The documents involved - JWT VC Issuer Metadata, a JWK Set, a DID
-	// Configuration - hold a handful of keys or credentials; anything larger is
-	// a hostile or broken origin.
-	defaultMaxDocumentBytes int64 = 64 << 10
-	// defaultHTTPTimeout bounds one metadata retrieval end to end.
-	defaultHTTPTimeout = 30 * time.Second
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 // defaultHTTPClient is used when the Resolver carries none. It is shared, which
 // is what net/http intends: a Client is safe for concurrent use and pools its
 // connections.
-var defaultHTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+var defaultHTTPClient = &http.Client{Timeout: httpfetch.DefaultTimeout}
 
 func (r *Resolver) maxDocumentBytes() int64 {
 	if r.MaxDocumentBytes > 0 {
 		return r.MaxDocumentBytes
 	}
-	return defaultMaxDocumentBytes
+	return httpfetch.DefaultBodyLimit
 }
 
 func (r *Resolver) now() time.Time {
@@ -43,20 +34,15 @@ func (r *Resolver) now() time.Time {
 }
 
 // httpClient returns the client used for metadata retrieval, with redirects
-// refused.
-//
-// A redirect would let the host named by the issuer identifier hand the request
-// to another host, and the answer would then be attributed to the first. The
-// caller's client is never mutated: a copy carries the redirect policy, so a
-// client shared with other code keeps its own.
+// refused: a redirect would let the host named by the issuer identifier hand
+// the request to another host, whose answer would then be attributed to the
+// first.
 func (r *Resolver) httpClient() *http.Client {
 	base := r.HTTPClient
 	if base == nil {
 		base = defaultHTTPClient
 	}
-	clone := *base
-	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &clone
+	return httpfetch.NoRedirect(base)
 }
 
 // allowedURL parses raw and reports whether the resolver may request it.
@@ -100,14 +86,10 @@ func originOf(parsed *url.URL) string {
 	return parsed.Scheme + "://" + host
 }
 
-// fetchJSONObject retrieves a JSON object from target.
-//
-// The retrieval is deliberately narrow, because everything it reads is used to
-// decide which key signed a credential: the request is a GET that asks for
-// JSON and honours ctx, redirects are refused, the status must be a success,
-// the response must be labelled as JSON, the body is bounded before and while
-// it is read, and the result must be a JSON object rather than any other JSON
-// value.
+// fetchJSONObject retrieves a JSON object from target: a GET that asks for
+// JSON within ctx, with redirects refused, a success status, a JSON media type
+// (application/json, or application/jwk-set+json for a key set) and a bounded,
+// non-empty body that holds a JSON object.
 func (r *Resolver) fetchJSONObject(ctx context.Context, target *url.URL) (json.RawMessage, error) {
 	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointIssuerKeyMaterial), http.MethodGet, target.String(), nil)
 	if err != nil {
@@ -127,47 +109,23 @@ func (r *Resolver) fetchJSONObject(ctx context.Context, target *url.URL) (json.R
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "fetch failed: HTTP "+strconv.Itoa(response.StatusCode))
 	}
-	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "application/json") {
+	if !httpfetch.MediaTypeIs(response.Header, "application/json", "application/jwk-set+json") {
 		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is not labelled as JSON")
 	}
 
-	body, err := readBoundedBody(response, r.maxDocumentBytes())
+	body, err := httpfetch.ReadLimited(response, r.maxDocumentBytes())
+	if errors.Is(err, httpfetch.ErrBodyTooLarge) {
+		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is too large")
+	}
 	if err != nil {
-		return nil, err
+		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "body could not be read")
+	}
+	if len(body) == 0 {
+		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is empty")
 	}
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(body, &probe); err != nil || probe == nil {
 		return nil, newMechanismError(ErrIssuerMetadataInvalid, "response is not a JSON object")
-	}
-	return body, nil
-}
-
-// readBoundedBody reads at most max bytes of the response body and refuses an
-// empty one.
-//
-// A declared Content-Length is checked before a single byte is read, so an
-// origin that announces an oversized document costs nothing to refuse; the
-// streaming read is still bounded, because the declaration is the origin's own
-// and may be absent or untrue.
-func readBoundedBody(response *http.Response, max int64) ([]byte, error) {
-	if declared := response.Header.Get("Content-Length"); declared != "" {
-		length, err := strconv.ParseInt(declared, 10, 64)
-		if err != nil || length < 0 {
-			return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "Content-Length is not a length")
-		}
-		if length > max {
-			return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is too large")
-		}
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, max+1))
-	if err != nil {
-		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "body could not be read")
-	}
-	if int64(len(body)) > max {
-		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is too large")
-	}
-	if len(body) == 0 {
-		return nil, newMechanismError(ErrIssuerMetadataFetchFailed, "response is empty")
 	}
 	return body, nil
 }

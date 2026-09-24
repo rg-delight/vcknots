@@ -23,7 +23,7 @@ var (
 func TestKeyLookup(t *testing.T) {
 	t.Parallel()
 
-	t.Run("fills the request from the header and returns every candidate in ladder order", func(t *testing.T) {
+	t.Run("fills the request from the header and returns the candidates of the iss", func(t *testing.T) {
 		t.Parallel()
 		signer := newES256Key(t, "")
 		didValue := didJWK(t, signer.public)
@@ -42,9 +42,8 @@ func TestKeyLookup(t *testing.T) {
 			t.Fatalf("Keys failed: %v", err)
 		}
 		// The metadata candidate names the Credential Issuer, not the JWT's
-		// DID `iss`, and is still returned: the acceptor path never narrowed
-		// by issuer.
-		if got := keyIDs(keys); !slices.Equal(got, []string{didValue + "#0", "metadata-key"}) {
+		// DID `iss`, so it is not returned.
+		if got := keyIDs(keys); !slices.Equal(got, []string{didValue + "#0"}) {
 			t.Fatalf("key IDs = %v", got)
 		}
 		for _, key := range keys {

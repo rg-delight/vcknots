@@ -3,6 +3,7 @@ package issuerkeys
 import (
 	"context"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
@@ -12,16 +13,16 @@ import (
 
 // didRung is rung 3: a key from a DID document.
 //
-// A DID document proves only that whoever controls the DID published these
-// keys. It says nothing about whether that controller is the Credential Issuer
-// the wallet is talking to, so a resolved key becomes a candidate only once
-// something binds the DID to that issuer, in descending order of how much the
-// binding rests on:
+// The DID is the credential's `iss`; a `kid` that names a verification method
+// of another DID gives the rung nothing. A DID document proves only that
+// whoever controls the DID published these keys, not that the controller is the
+// Credential Issuer, so a resolved key becomes a candidate only once something
+// binds the DID to that issuer:
 //
-//  1. the Credential Issuer Metadata `jwks` names the same key, so the issuer
-//     itself published it;
-//  2. the credential's own signed `vc.issuer` object names both the DID and the
-//     Credential Issuer, so the signer states the link under its signature;
+//  1. the Credential Issuer Metadata `jwks` names the same key (non-normative,
+//     see Mechanisms.IssuerMetadataJWKS);
+//  2. the credential's own `vc.issuer` object names both the DID and the
+//     Credential Issuer (self-asserted, see Mechanisms.CredentialIssuerBinding);
 //  3. a DIF Well Known DID Configuration served by the Credential Issuer's
 //     origin links that origin to the DID.
 //
@@ -36,15 +37,21 @@ func (r *Resolver) didRung(
 ) ([]Candidate, MechanismDiagnostic, error) {
 	diagnostic := MechanismDiagnostic{Mechanism: RungDID}
 
-	didValue := didReference(request.KeyID)
-	if didValue == "" {
-		didValue = didReference(request.Issuer)
+	didValue := didReference(request.Issuer)
+	if didValue != request.Issuer {
+		// A DID URL is not an issuer identifier.
+		didValue = ""
 	}
-	if didValue == "" {
-		diagnostic.Failure = "no DID-shaped issuer or kid"
-		if request.KeyID != "" {
-			diagnostic.Failure = "kid is not a DID"
-		}
+	kidDID := didReference(request.KeyID)
+	switch {
+	case didValue == "" && kidDID != "":
+		diagnostic.Failure = "kid names a DID but the issuer is not that DID"
+		return nil, diagnostic, nil
+	case didValue == "":
+		diagnostic.Failure = "issuer is not a DID"
+		return nil, diagnostic, nil
+	case kidDID != "" && kidDID != didValue:
+		diagnostic.Failure = "kid names a DID other than the issuer"
 		return nil, diagnostic, nil
 	}
 	switchName, supported := didMethodSwitch(didValue)
@@ -195,15 +202,15 @@ func (r *Resolver) resolveDIDKeys(ctx context.Context, didValue, keyID, credenti
 	if err != nil || set == nil {
 		return nil, newMechanismError(ErrDIDResolutionFailed, "DID resolved to no verification key")
 	}
-	keys := set.Keys
+	var keys []jose.JSONWebKey
+	for _, key := range set.Keys {
+		if isSignatureKey(key) {
+			keys = append(keys, key)
+		}
+	}
 	if web {
 		if wanted := verificationMethodID(didValue, keyID); wanted != "" {
-			keys = nil
-			for _, key := range set.Keys {
-				if key.KeyID == wanted {
-					keys = append(keys, key)
-				}
-			}
+			keys = slices.DeleteFunc(keys, func(key jose.JSONWebKey) bool { return key.KeyID != wanted })
 		}
 	}
 	if len(keys) == 0 {
@@ -304,35 +311,22 @@ func (r *Resolver) didResolver() DIDResolver {
 	if r.DID != nil {
 		return r.DID
 	}
-	// The did:web plugin is configured here so that the document retrieval
-	// obeys this resolver's HTTP client and document cap rather than its own
-	// defaults.
-	return pluginDIDResolver{
-		plugin: did.NewDIDPlugin(),
-		web: &did.DIDWebPlugin{
-			HTTPClient:       r.HTTPClient,
-			MaxDocumentBytes: r.maxDocumentBytes(),
-		},
-	}
+	// did:web retrieval uses this resolver's HTTP client and document cap.
+	return pluginDIDResolver{plugin: did.NewDIDPluginWithWeb(&did.DIDWebPlugin{
+		HTTPClient:       r.HTTPClient,
+		MaxDocumentBytes: r.maxDocumentBytes(),
+	})}
 }
 
 // pluginDIDResolver adapts the library's DID profile plugins to DIDResolver.
 type pluginDIDResolver struct {
 	plugin *did.DIDPlugin
-	web    *did.DIDWebPlugin
 }
 
-// Resolve returns the verification keys of the DID's identity profile. A
-// did:web identifier is resolved within ctx; the other methods resolve offline.
+// Resolve returns the verification keys of the DID's identity profile within
+// ctx.
 func (p pluginDIDResolver) Resolve(ctx context.Context, didValue string) (*jose.JSONWebKeySet, error) {
-	if strings.HasPrefix(didValue, "did:web:") {
-		profile, err := p.web.ResolveContext(ctx, didValue)
-		if err != nil {
-			return nil, err
-		}
-		return profile.Keys, nil
-	}
-	profile, err := p.plugin.Resolve(didValue)
+	profile, err := p.plugin.ResolveContext(ctx, didValue)
 	if err != nil {
 		return nil, err
 	}

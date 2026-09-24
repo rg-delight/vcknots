@@ -138,12 +138,11 @@ func anyPublicKeyMatches(candidates []jose.JSONWebKey, reference jose.JSONWebKey
 // algCompatibleKeys returns the keys of a JWK Set that could have produced a
 // signature made with alg.
 //
-// RFC 7517 section 4.4 makes `alg` an optional hint, so a key that states none
-// stays a candidate; a key that states a different one cannot have produced
-// this signature and is dropped. An empty result is an error rather than an
-// empty slice, because the two reasons it happens - the issuer published no key
-// at all, and the issuer published keys for other algorithms - are different
-// things to tell a caller.
+// A key whose `use` is not "sig" is never a signature key (RFC 7517 section
+// 4.2). `alg` is an optional hint (section 4.4), so a key that states none stays
+// a candidate; a key that states a different one is dropped. An empty result is
+// an error, so a caller can tell "no key at all" from "no key for this
+// algorithm".
 func algCompatibleKeys(set *jose.JSONWebKeySet, alg string) ([]jose.JSONWebKey, error) {
 	if set == nil || len(set.Keys) == 0 {
 		return nil, newMechanismError(ErrIssuerMetadataInvalid, "issuer metadata carries no signing key")
@@ -154,6 +153,9 @@ func algCompatibleKeys(set *jose.JSONWebKeySet, alg string) ([]jose.JSONWebKey, 
 		if !ok {
 			continue
 		}
+		if !isSignatureKey(public) {
+			continue
+		}
 		if alg == "" || public.Algorithm == "" || public.Algorithm == alg {
 			compatible = append(compatible, public)
 		}
@@ -162,6 +164,12 @@ func algCompatibleKeys(set *jose.JSONWebKeySet, alg string) ([]jose.JSONWebKey, 
 		return nil, newMechanismError(ErrIssuerMetadataInvalid, "no issuer metadata key matches the credential algorithm")
 	}
 	return compatible, nil
+}
+
+// isSignatureKey reports whether key may verify a signature: a key that
+// declares a `use` other than "sig" (RFC 7517 section 4.2) may not.
+func isSignatureKey(key jose.JSONWebKey) bool {
+	return key.Use == "" || key.Use == "sig"
 }
 
 // publicKey returns the public half of key, or false when key carries no usable

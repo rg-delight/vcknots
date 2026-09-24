@@ -30,8 +30,7 @@ var testNow = time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC)
 
 func fixedNow() time.Time { return testNow }
 
-// allMechanisms enables every rung and binding, which is the wallet's default
-// holder configuration.
+// allMechanisms enables every rung and binding.
 func allMechanisms() Mechanisms {
 	return Mechanisms{
 		X5C:                     true,

@@ -2,6 +2,7 @@
 package did
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -40,15 +41,26 @@ type DIDMethodPlugin interface {
 	Validate(profile *types.IdentityProfile) error
 }
 
-// NewDIDPlugin creates a new DID plugin
+// NewDIDPlugin creates a DID plugin with the offline methods did:key and
+// did:jwk registered. did:web, which resolves over the network, is not
+// registered; use NewDIDPluginWithWeb or RegisterMethodPlugin to enable it.
 func NewDIDPlugin() *DIDPlugin {
 	plugin := &DIDPlugin{
 		methodPlugins: make(map[string]DIDMethodPlugin),
 	}
-	// Register built-in method plugins
 	plugin.RegisterMethodPlugin("key", &DIDKeyPlugin{})
 	plugin.RegisterMethodPlugin("jwk", &DIDJWKPlugin{})
-	plugin.RegisterMethodPlugin("web", &DIDWebPlugin{})
+	return plugin
+}
+
+// NewDIDPluginWithWeb is NewDIDPlugin with did:web also registered, resolved
+// by web. A nil web uses a DIDWebPlugin with its defaults.
+func NewDIDPluginWithWeb(web *DIDWebPlugin) *DIDPlugin {
+	if web == nil {
+		web = &DIDWebPlugin{}
+	}
+	plugin := NewDIDPlugin()
+	plugin.RegisterMethodPlugin("web", web)
 	return plugin
 }
 
@@ -108,6 +120,26 @@ func (p *DIDPlugin) Resolve(id string) (*types.IdentityProfile, error) {
 		return nil, err
 	}
 
+	return methodPlugin.Resolve(id)
+}
+
+// ResolveContext is Resolve with ctx passed to a method plugin that resolves
+// over the network (one that has a ResolveContext method, such as
+// DIDWebPlugin). Other method plugins resolve as Resolve does.
+func (p *DIDPlugin) ResolveContext(ctx context.Context, id string) (*types.IdentityProfile, error) {
+	method, err := extractDIDMethod(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract DID method from %s: %w", id, err)
+	}
+	methodPlugin, err := p.getMethodPlugin(method)
+	if err != nil {
+		return nil, err
+	}
+	if resolver, ok := methodPlugin.(interface {
+		ResolveContext(context.Context, string) (*types.IdentityProfile, error)
+	}); ok {
+		return resolver.ResolveContext(ctx, id)
+	}
 	return methodPlugin.Resolve(id)
 }
 

@@ -2,11 +2,12 @@ package federation
 
 import (
 	"context"
-	"io"
+	"errors"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 // entityStatementMediaType is the media type an Entity Statement is served
@@ -80,8 +81,7 @@ func parseHTTPSFederationURL(value, label string) (*url.URL, error) {
 // fetchEntityStatement retrieves one Entity Statement. It refuses a non-https
 // URL, a host the public-network policy rejects, any redirect, a non-2xx
 // status, a response not labelled as an Entity Statement, and an empty or
-// oversized body. The declared Content-Length is checked before the body is
-// read, and the read itself is capped.
+// oversized body.
 func (r *Resolver) fetchEntityStatement(ctx context.Context, statementURL string) (string, error) {
 	parsed, err := parseHTTPSFederationURL(statementURL, "entity statement URL")
 	if err != nil {
@@ -107,12 +107,15 @@ func (r *Resolver) fetchEntityStatement(ctx context.Context, statementURL string
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return "", failure(ErrStatementFetchFailed, "entity statement returned HTTP %d", response.StatusCode)
 	}
-	if responseMediaType(response) != entityStatementMediaType {
+	if !httpfetch.MediaTypeIs(response.Header, entityStatementMediaType) {
 		return "", failure(ErrStatementFetchFailed, "entity statement response must use %s", entityStatementMediaType)
 	}
-	body, err := readBoundedBody(response, r.maxStatementBytes())
+	body, err := httpfetch.ReadLimited(response, r.maxStatementBytes())
+	if errors.Is(err, httpfetch.ErrBodyTooLarge) {
+		return "", failure(ErrStatementFetchFailed, "entity statement response is too large")
+	}
 	if err != nil {
-		return "", err
+		return "", failure(ErrStatementFetchFailed, "entity statement response could not be read")
 	}
 	statement := strings.TrimSpace(string(body))
 	if statement == "" {
@@ -131,38 +134,4 @@ func (r *Resolver) checkPublicNetworkHost(host string) error {
 		return nil
 	}
 	return failure(ErrStatementFetchFailed, "entity statement URL must use a public network host")
-}
-
-// responseMediaType returns the lowercased media type of the Content-Type
-// header without parameters.
-func responseMediaType(response *http.Response) string {
-	mediaType, _, _ := strings.Cut(response.Header.Get("Content-Type"), ";")
-	return strings.ToLower(strings.TrimSpace(mediaType))
-}
-
-// readBoundedBody reads at most max bytes of the response body and refuses an
-// empty one. A declared Content-Length is checked before a single byte is
-// read; the streaming read is still bounded, because the declaration may be
-// absent or untrue.
-func readBoundedBody(response *http.Response, max int64) ([]byte, error) {
-	if declared := response.Header.Get("Content-Length"); declared != "" {
-		length, err := strconv.ParseInt(declared, 10, 64)
-		if err != nil || length < 0 {
-			return nil, failure(ErrStatementFetchFailed, "entity statement response has invalid Content-Length")
-		}
-		if length > max {
-			return nil, failure(ErrStatementFetchFailed, "entity statement response is too large")
-		}
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, max+1))
-	if err != nil {
-		return nil, failure(ErrStatementFetchFailed, "entity statement response could not be read")
-	}
-	if int64(len(body)) > max {
-		return nil, failure(ErrStatementFetchFailed, "entity statement response is too large")
-	}
-	if len(body) == 0 {
-		return nil, failure(ErrStatementFetchFailed, "entity statement response is empty")
-	}
-	return body, nil
 }

@@ -3,18 +3,17 @@ package did
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/idprof/types"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 // Sentinel errors the did:web method plugin returns. A caller branches on the
@@ -32,8 +31,8 @@ var (
 	// exceeded the configured cap.
 	ErrDIDWebDocumentFetchFailed = common.NewCodedError("did_web_document_fetch_failed", "did:web document could not be retrieved")
 	// ErrDIDWebDocumentInvalid reports that the retrieved body is not a usable
-	// DID document: not a JSON object, or carrying an `id` that names another
-	// DID than the one being resolved (W3C DID Core, section 5.1.1).
+	// DID document: not a JSON object, or without an `id` string equal to the
+	// DID being resolved (W3C DID Core, section 5.1.1).
 	ErrDIDWebDocumentInvalid = common.NewCodedError("did_web_document_invalid", "did:web document is not a usable DID document")
 	// ErrDIDWebNoAssertionKey reports that the DID document declares no
 	// assertion key this plugin can use. W3C DID Core makes `assertionMethod`
@@ -60,13 +59,6 @@ const (
 	// for a JSON DID document, and for plain JSON, which is what most did:web
 	// origins actually serve.
 	didWebAcceptHeader = "application/did+json, application/json"
-	// defaultDIDDocumentBytes bounds a DID document. A DID document holds a
-	// handful of verification methods and service entries; anything larger is
-	// a hostile or broken origin, and the cap keeps one request from spending
-	// unbounded memory.
-	defaultDIDDocumentBytes int64 = 64 << 10
-	// defaultDIDHTTPTimeout bounds a DID document retrieval end to end.
-	defaultDIDHTTPTimeout = 30 * time.Second
 )
 
 // didWebDocumentContentTypes are the media types a did:web origin may label a
@@ -100,7 +92,8 @@ type DIDWebPlugin struct {
 	// HTTPClient retrieves the DID document. A nil value uses a client with a
 	// 30 second timeout. The client's redirect policy is never used: this
 	// plugin refuses redirects, so that the origin the identifier names is the
-	// only origin that can answer for it.
+	// only origin that can answer for it. Which hosts may be reached is the
+	// client's decision.
 	HTTPClient *http.Client
 	// MaxDocumentBytes bounds the retrieved document. A value of zero or less
 	// uses 64 KiB.
@@ -120,20 +113,19 @@ func (p *DIDWebPlugin) Update(profile *types.IdentityProfile, opts ...types.Upda
 	return nil, fmt.Errorf("%w: did:web documents are updated by their controller", ErrDIDWebOperationUnsupported)
 }
 
-// Resolve retrieves the DID document of id and returns its assertion keys.
-//
-// The retrieval is deliberately narrow: the request is a GET that asks for a
-// DID document, redirects are refused so that only the origin named by the
-// identifier can answer, the response must be labelled as a DID document or as
-// JSON, and the body is bounded before and while it is read. A document whose
-// `id` names another DID is refused (W3C DID Core section 5.1.1), because a
-// controller's document must identify the DID it describes.
+// Resolve is ResolveContext with context.Background. It exists to satisfy
+// DIDMethodPlugin; callers that have a context use ResolveContext.
 func (p *DIDWebPlugin) Resolve(id string) (*types.IdentityProfile, error) {
 	return p.ResolveContext(context.Background(), id)
 }
 
-// ResolveContext is Resolve with the document retrieval bounded by ctx, for a
-// caller that resolves within a request of its own and must not outlive it.
+// ResolveContext retrieves the DID document of id within ctx and returns its
+// assertion keys.
+//
+// The request is a GET that asks for a DID document; redirects are refused so
+// that only the origin named by the identifier can answer, the response must
+// be labelled as a DID document or as JSON, and the body is bounded. The
+// document's `id` must be a string equal to id (W3C DID Core section 5.1.1).
 func (p *DIDWebPlugin) ResolveContext(ctx context.Context, id string) (*types.IdentityProfile, error) {
 	documentURL, err := WebDocumentURL(id)
 	if err != nil {
@@ -149,11 +141,9 @@ func (p *DIDWebPlugin) ResolveContext(ctx context.Context, id string) (*types.Id
 	if err := json.Unmarshal(body, &document); err != nil || document == nil {
 		return nil, fmt.Errorf("%w: body is not a JSON object", ErrDIDWebDocumentInvalid)
 	}
-	if raw, ok := document["id"]; ok {
-		var documentID string
-		if err := json.Unmarshal(raw, &documentID); err == nil && documentID != id {
-			return nil, fmt.Errorf("%w: document id names another DID", ErrDIDWebDocumentInvalid)
-		}
+	var documentID string
+	if err := json.Unmarshal(document["id"], &documentID); err != nil || documentID != id {
+		return nil, fmt.Errorf("%w: document id must be the DID being resolved", ErrDIDWebDocumentInvalid)
 	}
 
 	keys := assertionMethodKeys(document, id)
@@ -290,7 +280,7 @@ func (p *DIDWebPlugin) fetchDocument(ctx context.Context, documentURL *url.URL) 
 	}
 	request.Header.Set("Accept", didWebAcceptHeader)
 
-	response, err := p.client().Do(request)
+	response, err := httpfetch.NoRedirect(p.HTTPClient).Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: request failed", ErrDIDWebDocumentFetchFailed)
 	}
@@ -299,72 +289,27 @@ func (p *DIDWebPlugin) fetchDocument(ctx context.Context, documentURL *url.URL) 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("%w: origin returned HTTP %d", ErrDIDWebDocumentFetchFailed, response.StatusCode)
 	}
-	contentType := strings.ToLower(response.Header.Get("Content-Type"))
-	if !containsAnyMediaType(contentType, didWebDocumentContentTypes) {
+	if !httpfetch.MediaTypeIs(response.Header, didWebDocumentContentTypes...) {
 		return nil, fmt.Errorf("%w: response is not labelled as a DID document", ErrDIDWebDocumentFetchFailed)
 	}
-	return readBoundedBody(response, p.maxDocumentBytes(), ErrDIDWebDocumentFetchFailed)
-}
-
-// client returns the HTTP client used for retrieval, with redirects refused.
-// The caller's client is never mutated: a copy carries the redirect policy, so
-// a client shared with other code keeps its own.
-func (p *DIDWebPlugin) client() *http.Client {
-	base := p.HTTPClient
-	if base == nil {
-		base = &http.Client{Timeout: defaultDIDHTTPTimeout}
+	body, err := httpfetch.ReadLimited(response, p.maxDocumentBytes())
+	if errors.Is(err, httpfetch.ErrBodyTooLarge) {
+		return nil, fmt.Errorf("%w: document exceeds the %d byte cap", ErrDIDWebDocumentFetchFailed, p.maxDocumentBytes())
 	}
-	clone := *base
-	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &clone
+	if err != nil {
+		return nil, fmt.Errorf("%w: body could not be read", ErrDIDWebDocumentFetchFailed)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("%w: document is empty", ErrDIDWebDocumentFetchFailed)
+	}
+	return body, nil
 }
 
 func (p *DIDWebPlugin) maxDocumentBytes() int64 {
 	if p.MaxDocumentBytes > 0 {
 		return p.MaxDocumentBytes
 	}
-	return defaultDIDDocumentBytes
-}
-
-// containsAnyMediaType reports whether the lowercased Content-Type header value
-// names one of wanted.
-func containsAnyMediaType(contentType string, wanted []string) bool {
-	for _, mediaType := range wanted {
-		if strings.Contains(contentType, mediaType) {
-			return true
-		}
-	}
-	return false
-}
-
-// readBoundedBody reads at most max bytes of the response body and refuses an
-// empty one.
-//
-// A declared Content-Length is checked before a single byte is read, so an
-// origin that announces an oversized document costs nothing to refuse; the
-// streaming read is still bounded, because the declaration is the origin's own
-// and may be absent or untrue.
-func readBoundedBody(response *http.Response, max int64, sentinel error) ([]byte, error) {
-	if declared := response.Header.Get("Content-Length"); declared != "" {
-		length, err := strconv.ParseInt(declared, 10, 64)
-		if err != nil || length < 0 {
-			return nil, fmt.Errorf("%w: Content-Length is not a length", sentinel)
-		}
-		if length > max {
-			return nil, fmt.Errorf("%w: document exceeds the %d byte cap", sentinel, max)
-		}
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, max+1))
-	if err != nil {
-		return nil, fmt.Errorf("%w: body could not be read", sentinel)
-	}
-	if int64(len(body)) > max {
-		return nil, fmt.Errorf("%w: document exceeds the %d byte cap", sentinel, max)
-	}
-	if len(body) == 0 {
-		return nil, fmt.Errorf("%w: document is empty", sentinel)
-	}
-	return body, nil
+	return httpfetch.DefaultBodyLimit
 }
 
 // assertionMethodKeys returns the public keys the DID document declares through
@@ -382,7 +327,7 @@ func assertionMethodKeys(document map[string]json.RawMessage, did string) []jose
 
 	referenced := make(map[string]struct{}, len(assertionMethods))
 	for _, entry := range assertionMethods {
-		if id := verificationMethodReference(entry); id != "" {
+		if id := absoluteDIDURL(verificationMethodReference(entry), did); id != "" {
 			referenced[id] = struct{}{}
 		}
 	}
@@ -394,7 +339,7 @@ func assertionMethodKeys(document map[string]json.RawMessage, did string) []jose
 		}
 	}
 	for _, entry := range rawArray(document["verificationMethod"]) {
-		id := verificationMethodReference(entry)
+		id := absoluteDIDURL(verificationMethodReference(entry), did)
 		if id == "" {
 			continue
 		}
@@ -426,15 +371,29 @@ func verificationMethodReference(entry json.RawMessage) string {
 	return method.ID
 }
 
+// absoluteDIDURL resolves a verification method identifier against did: a
+// relative DID URL made of a fragment ("#key-1") becomes did + fragment (W3C
+// DID Core section 3.2.2); an absolute one is returned unchanged. Any other
+// relative reference yields "".
+func absoluteDIDURL(reference, did string) string {
+	switch {
+	case strings.HasPrefix(reference, "#") && len(reference) > 1:
+		return did + reference
+	case strings.HasPrefix(reference, "did:"):
+		return reference
+	default:
+		return ""
+	}
+}
+
 // verificationMethodKey reports the public key an embedded verification method
 // carries, when the method belongs to did and publishes its key as a JWK.
 //
-// The identifier must be a DID URL of did itself (RFC-style `<did>#<fragment>`),
-// so a document cannot hand out a key that belongs to some other DID, and the
-// key keeps that identifier as its KeyID so a caller can match it against a JWS
-// `kid`. A method that publishes its key in another format - publicKeyMultibase,
-// for instance - is skipped rather than refused, because a document may mix
-// representations and the other entries are still usable.
+// The identifier, resolved against did, must be a DID URL of did itself
+// (`<did>#<fragment>`), so a document cannot hand out a key of another DID. The
+// key keeps the absolute identifier as its KeyID so a caller can match it
+// against a JWS `kid`. A method that publishes its key in another format, such
+// as publicKeyMultibase, is skipped.
 func verificationMethodKey(entry json.RawMessage, did string) (jose.JSONWebKey, bool) {
 	var method struct {
 		ID           string          `json:"id"`
@@ -443,7 +402,8 @@ func verificationMethodKey(entry json.RawMessage, did string) (jose.JSONWebKey, 
 	if err := json.Unmarshal(entry, &method); err != nil {
 		return jose.JSONWebKey{}, false
 	}
-	if !strings.HasPrefix(method.ID, did+"#") {
+	id := absoluteDIDURL(method.ID, did)
+	if !strings.HasPrefix(id, did+"#") || len(id) == len(did)+1 {
 		return jose.JSONWebKey{}, false
 	}
 	var probe map[string]json.RawMessage
@@ -457,7 +417,7 @@ func verificationMethodKey(entry json.RawMessage, did string) (jose.JSONWebKey, 
 	if !key.Valid() || !key.IsPublic() {
 		return jose.JSONWebKey{}, false
 	}
-	key.KeyID = method.ID
+	key.KeyID = id
 	return key, true
 }
 

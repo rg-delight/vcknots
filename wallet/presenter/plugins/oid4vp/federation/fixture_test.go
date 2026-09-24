@@ -20,7 +20,7 @@ import (
 // testNow is the fixed validation time of the tests.
 var testNow = time.Date(2026, 5, 19, 4, 0, 0, 0, time.UTC)
 
-// testIssuedAt is one minute before testNow, as the TypeScript fixtures use.
+// testIssuedAt is one minute before testNow.
 var testIssuedAt = testNow.Unix() - 60
 
 type signingKey struct {

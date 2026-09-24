@@ -16,10 +16,9 @@ import (
 )
 
 // maxNumericDateSeconds bounds a NumericDate (RFC 7519 Section 2) this package
-// turns into a time.Time. It is the range an ECMAScript Date covers
-// (8.64e15 milliseconds either side of the epoch), which is also the range the
-// TypeScript wallet this package replaces could represent; a value beyond it is
-// not a date any issuer means and is refused rather than wrapped.
+// turns into a time.Time: 8.64e12 seconds (about 273,790 years) either side of
+// the epoch. A value beyond it is not a date any issuer means and is refused
+// rather than wrapped.
 const maxNumericDateSeconds = 8.64e12
 
 // tokenClaims is the verified payload of a Status List Token, reduced to the
@@ -181,7 +180,7 @@ func unverifiedIssuer(signed *jose.JSONWebSignature) (string, error) {
 // public key. A private or symmetric key in the answer is refused rather than
 // used: a private key means the hook is handing out material it should never
 // hold in this path, and a symmetric key would turn the signature check into a
-// MAC check that proves nothing about the issuer. Both describe the wallet's own
+// MAC check that proves nothing about the issuer. Both describe the caller's
 // configuration, so they are reported as ErrStatusListIssuerKeyUnresolved.
 func (c *Checker) resolveIssuerKeys(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
 	if c.ResolveIssuerKeys == nil {
@@ -348,22 +347,4 @@ func numericDateClaim(claims map[string]any, name string) (time.Time, bool, erro
 	}
 	whole, fraction := math.Modf(seconds)
 	return time.Unix(int64(whole), int64(math.Round(fraction*1e9))).UTC(), true, nil
-}
-
-// readAllBounded reads reader to its end, refusing to hold more than maxBytes.
-// It reads through a limit one byte past the cap, so an over-long body is
-// detected as soon as that byte arrives and the rest is never read.
-func readAllBounded(reader io.Reader, maxBytes int64) ([]byte, error) {
-	limit := maxBytes
-	if limit < math.MaxInt64 {
-		limit++
-	}
-	body, err := io.ReadAll(io.LimitReader(reader, limit))
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading the response body: %w", ErrStatusListFetchFailed, err)
-	}
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("%w: response body exceeds the %d byte cap", ErrStatusListFetchFailed, maxBytes)
-	}
-	return body, nil
 }
