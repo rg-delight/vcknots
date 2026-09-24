@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
-	"github.com/trustknots/vcknots/wallet/common"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
@@ -273,6 +272,10 @@ func (r *Resolver) trustedChainCandidate(ctx context.Context, request Request, r
 	if err := commonX509.RequireLeafDNSName(certificates[0], resolution.IssuerDNSName, false); err != nil {
 		return untrusted()
 	}
+	// An empty anchor set trusts no chain.
+	if len(trust.TrustAnchors) == 0 {
+		return untrusted()
+	}
 	now := r.now
 	if trust.Now != nil {
 		now = trust.Now
@@ -311,13 +314,10 @@ func (r *Resolver) trustedChainCandidate(ctx context.Context, request Request, r
 }
 
 // chainRefusalIsStructural reports whether a signing-chain refusal is about
-// the caller's trust configuration - the chain reaches no configured anchor -
-// rather than about the signer. commonX509 names that condition
-// "x509_chain_untrusted"; a revoked chain, an unknown revocation status and an
-// exhausted revocation budget carry codes of their own.
+// the caller's trust configuration (the chain reaches no configured anchor)
+// rather than about the signer.
 func chainRefusalIsStructural(err error) bool {
-	code, ok := common.CodeOf(err)
-	return ok && code == "x509_chain_untrusted"
+	return errors.Is(err, commonX509.ErrNoTrustAnchor)
 }
 
 // markChainUntrusted records on the `x5c` rung's diagnostic that the chain it
