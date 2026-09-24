@@ -204,7 +204,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	// enforced on the DC API delivery paths only; a request_uri-delivered
 	// dc_api.jwt request is a different (rejected) delivery and keeps its own
 	// profile error.
-	if (b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed") &&
+	if b.requestSource.isDCAPI() &&
 		(b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPI || b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPIJWT) {
 		if redirectURIFromParam != "" || responseURIFromParam != "" {
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not be present with response_mode %s", b.req.ResponseMode)
@@ -214,7 +214,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ResponseURI = ""
 	}
 
-	if b.requestSource == "query" && !b.draft24 {
+	if b.requestSource == sourceQuery && !b.draft24 {
 		if _, hasMethod := params["request_uri_method"]; hasMethod {
 			// OID4VP 1.0 §5.1: "request_uri_method parameter MUST NOT be
 			// present if a request_uri parameter is not present." This path is

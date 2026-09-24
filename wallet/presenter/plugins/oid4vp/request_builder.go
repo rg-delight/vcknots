@@ -16,6 +16,43 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
+// requestSource records how the Authorization Request parameters arrived.
+type requestSource int
+
+const (
+	sourceUnknown requestSource = iota
+	// sourceQuery is plain query parameters.
+	sourceQuery
+	// sourceValue is a Request Object passed by value (request=, or
+	// ParseRequestObject).
+	sourceValue
+	// sourceReference is a Request Object fetched through request_uri.
+	sourceReference
+	// sourceDCAPIUnsigned and sourceDCAPISigned are Digital Credentials API
+	// requests (OID4VP 1.0 Appendix A.3).
+	sourceDCAPIUnsigned
+	sourceDCAPISigned
+)
+
+// isDCAPI reports whether the request arrived through the DC API.
+func (s requestSource) isDCAPI() bool {
+	return s == sourceDCAPIUnsigned || s == sourceDCAPISigned
+}
+
+// delivery is the RequestObjectVerification.Delivery value for s.
+func (s requestSource) delivery() string {
+	switch s {
+	case sourceQuery:
+		return "query"
+	case sourceValue:
+		return "value"
+	case sourceReference:
+		return "reference"
+	default:
+		return ""
+	}
+}
+
 type requestBuilder struct {
 	req                     *CredentialPresentationRequest
 	httpClient              *http.Client
@@ -55,11 +92,7 @@ type requestBuilder struct {
 	// (OID4VP 1.0 §5.10.1). It is empty for GET and when no nonce was sent.
 	sentWalletNonce string
 	errValidation   error
-	// requestSource records how the Authorization Request parameters arrived:
-	// "query" for plain query parameters, "value" for a Request Object supplied
-	// with the request= parameter, and "reference" for a Request Object fetched
-	// through request_uri. HAIP §5.1 requires reference.
-	requestSource string
+	requestSource   requestSource
 	// errorResponseAllowed marks that a refusal of this request may be
 	// answered with an error authorization response. It holds only for plain
 	// query parameters whose Client Identifier carries the redirect_uri prefix,
@@ -239,7 +272,7 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		return b
 	}
 
-	b.requestSource = "query"
+	b.requestSource = sourceQuery
 
 	singleParams := make(map[string]any)
 	for key, values := range params {
@@ -400,11 +433,8 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	b.WithRequestObject(string(body))
-	// The Request Object arrived by reference; HAIP §5.1 distinguishes this from
-	// a Request Object supplied by value in the request= parameter.
-	b.requestSource = "reference"
-	return b
+	b.requestSource = sourceReference
+	return b.withRequestObject(string(body))
 }
 
 // newRequestURINonce returns the wallet_nonce for a Final request_uri POST. It

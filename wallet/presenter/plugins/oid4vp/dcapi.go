@@ -108,7 +108,7 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(invocation DCAPIInvocation, origin 
 	params["client_id"] = dcapiWebOriginClientID(origin)
 
 	b := p.newDCAPIRequestBuilder(normalizedProfile)
-	b.requestSource = "dcapi-unsigned"
+	b.requestSource = sourceDCAPIUnsigned
 	b.setParamsWithAnyMap(params)
 	if b.errValidation != nil {
 		return nil, b.errValidation
@@ -185,7 +185,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 		}
 		return map[string]any(verified), nil
 	}
-	b.requestSource = "dcapi-signed"
+	b.requestSource = sourceDCAPISigned
 	return b.finishDCAPIRequestObject(certificates, options, chainResult, clientID, verify, origin)
 }
 
@@ -277,7 +277,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 			}
 			return claims, nil
 		}
-		b.requestSource = "dcapi-signed"
+		b.requestSource = sourceDCAPISigned
 		request, finishErr := b.finishDCAPIRequestObject(certificates, options, chainResult, clientID, verify, origin)
 		if finishErr != nil {
 			lastErr = finishErr

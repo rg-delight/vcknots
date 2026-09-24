@@ -81,7 +81,7 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 func TestHAIPRejectsPreRegisteredClientID(t *testing.T) {
 	builder := NewRequestBuilder()
 	builder.profile = profile.HAIP
-	builder.requestSource = "reference"
+	builder.requestSource = sourceReference
 	builder.req.ClientID = "example-client"
 	builder.req.ResponseMode = OAuthAuthzReqResponseModeDirectPostJWT
 	err := builder.enforceHAIPProfile()

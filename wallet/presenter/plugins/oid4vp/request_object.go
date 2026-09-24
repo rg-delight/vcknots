@@ -181,10 +181,15 @@ func (b *requestBuilder) WithExpectedClientID(clientID string) *requestBuilder {
 	return b
 }
 
-// WithRequestObject authenticates Final Request Objects. Draft24 keeps its
-// original behavior behind the explicit Draft24 builder and parse entrypoint.
+// WithRequestObject authenticates a Request Object passed by value.
 func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
-	b.requestSource = "value"
+	b.requestSource = sourceValue
+	return b.withRequestObject(obj)
+}
+
+// withRequestObject authenticates a Request Object delivered as b.requestSource
+// records.
+func (b *requestBuilder) withRequestObject(obj string) *requestBuilder {
 	if b.draft24 {
 		return b.withDraft24RequestObject(obj)
 	}
@@ -449,7 +454,7 @@ func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.J
 // binds one this library fetched. A nonce this library sent itself always wins:
 // it is the one the Verifier actually received from this parse.
 func (b *requestBuilder) adoptCallerWalletNonce(options RequestObjectValidationOptions) {
-	if b.sentWalletNonce == "" && b.requestSource == "value" && options.WalletNonce != "" {
+	if b.sentWalletNonce == "" && b.requestSource == sourceValue && options.WalletNonce != "" {
 		b.sentWalletNonce = options.WalletNonce
 	}
 }

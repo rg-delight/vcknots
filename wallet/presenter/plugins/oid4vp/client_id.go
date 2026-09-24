@@ -92,7 +92,7 @@ func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error)
 	if b.draft24 {
 		return parseDraft24ClientID(clientID)
 	}
-	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == "dcapi-unsigned")
+	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == sourceDCAPIUnsigned)
 }
 
 // ParseDraft24OID4VPClientID is ParseOID4VPClientID for a client_id that

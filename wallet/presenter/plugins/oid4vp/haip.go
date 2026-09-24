@@ -15,10 +15,10 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	// request= satisfy HAIP §5.1 although this process cannot observe the
 	// original delivery. It is scoped to the HAIP delivery check only; the
 	// wallet_nonce echo stays bound to an actual request_uri POST.
-	deliveryAttested := b.profile.IsHAIP() && b.requestSource == "value" &&
+	deliveryAttested := b.profile.IsHAIP() && b.requestSource == sourceValue &&
 		b.requestObjectValidation != nil && b.requestObjectValidation.DeliveredByReference
 	if b.req.RequestObjectVerification != nil {
-		b.req.RequestObjectVerification.Delivery = b.requestSource
+		b.req.RequestObjectVerification.Delivery = b.requestSource.delivery()
 		b.req.RequestObjectVerification.DeliveryAttested = deliveryAttested
 	}
 	if b.draft24 || !b.profile.IsHAIP() {
@@ -28,13 +28,13 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 	// "The Wallet MUST support unsigned, signed, and multi-signed requests as
 	// defined in Appendices A.3.1 and A.3.2". The request_uri encryption rule
 	// of §5.1 is therefore relaxed for DC API modes.
-	if b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed" {
+	if b.requestSource.isDCAPI() {
 		// HAIP §5.2: "The Verifier MUST use the Response Mode dc_api.jwt."
 		// The unencrypted dc_api mode stays available to non-HAIP Final.
 		if b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
 			return newAuthorizationRequestError(InvalidRequestError, "HAIP requires the response_mode dc_api.jwt for Digital Credentials API requests")
 		}
-		if b.requestSource == "dcapi-unsigned" {
+		if b.requestSource == sourceDCAPIUnsigned {
 			// An unsigned request has no Verifier client_id to authenticate.
 			return nil
 		}
@@ -49,7 +49,7 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 		}
 		return nil
 	}
-	if b.requestSource != "reference" && !deliveryAttested {
+	if b.requestSource != sourceReference && !deliveryAttested {
 		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
 		// JAR with the request_uri parameter".
 		return fmt.Errorf("%w: %w",
