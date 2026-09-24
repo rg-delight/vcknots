@@ -2,13 +2,17 @@ package wallet
 
 import (
 	"encoding/json"
+	"maps"
 	"net/url"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 )
 
 // fixtureCredStore is any real credential store, used only to prove that a
@@ -48,16 +52,45 @@ func heldCredential(t *testing.T, fixture sdjwtPresentationFixture, vct string) 
 	return credstoreTypes.CredentialEntry{}
 }
 
-// A Holder answers a consent screen in disclosure names. The library has to
-// translate them to the claim paths the DCQL query resolved to, and to validate
-// the choice, so an application never reimplements either.
+// heldCredentialWithClaim is heldCredential for a wallet holding several
+// credentials of one vct, told apart by one claim value.
+func heldCredentialWithClaim(t *testing.T, fixture sdjwtPresentationFixture, name, value string) credstoreTypes.CredentialEntry {
+	t.Helper()
+	entries, _, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{Offset: 0, Limit: nil})
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if entry.Credential.Claims != nil && (*entry.Credential.Claims)[name] == value {
+			return *entry.Entry
+		}
+	}
+	t.Fatalf("no stored credential with %s %q", name, value)
+	return credstoreTypes.CredentialEntry{}
+}
+
+// postedVPToken returns the vp_token the fixture's Verifier received.
+func postedVPToken(t *testing.T, fixture sdjwtPresentationFixture) map[string][]string {
+	t.Helper()
+	select {
+	case form := <-fixture.posted:
+		var tokens map[string][]string
+		require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+		return tokens
+	default:
+		t.Fatal("no presentation submitted")
+		return nil
+	}
+}
+
+// A Holder answers a consent screen in disclosure names. The kept names choose
+// one claim set of the query (OID4VP 1.0 Section 6.4.1), and only that set is
+// disclosed.
 func TestWallet_PresentDCQLHolderSelectionDisclosesTheHoldersClaims(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
-		`"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`
+		`"claims":[{"id":"given","path":["given_name"]},{"id":"family","path":["family_name"]}],"claim_sets":[["given","family"],["given"]]}]}`
 	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
 	redirect, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
@@ -67,16 +100,86 @@ func TestWallet_PresentDCQLHolderSelectionDisclosesTheHoldersClaims(t *testing.T
 	)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
+	tokens := postedVPToken(t, fixture)
+	require.Len(t, tokens["pid"], 1)
+	require.Equal(t, []string{"given_name"}, disclosedNames(t, tokens["pid"][0]))
+}
 
+// Section 6.4.1: "If the Wallet cannot deliver all claims requested by the
+// Verifier according to these rules, it MUST NOT return the respective
+// Credential." Withholding part of the only claim set is refusing the query.
+func TestWallet_PresentDCQLHolderSelectionRefusesAPartialClaimSet(t *testing.T) {
+	fixture := newSDJWTPresentationFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
+	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
+		`"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`
+	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+
+	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
+		req, endpoint, fixture.key,
+		[]DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: heldCredential(t, fixture, "urn:test:identity"), DisclosedClaims: []string{"given_name"}}},
+		nil,
+	)
+	require.ErrorIs(t, err, oid4vp.ErrDCQLSelectionUnsatisfied)
 	select {
-	case form := <-fixture.posted:
-		var tokens map[string][]string
-		require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
-		require.Len(t, tokens["pid"], 1)
-		require.Equal(t, []string{"given_name"}, disclosedNames(t, tokens["pid"][0]))
+	case <-fixture.posted:
+		t.Fatal("a partial claim set was disclosed")
 	default:
-		t.Fatal("no presentation submitted")
 	}
+}
+
+// The response carries exactly the Holder's (query, credential) choices: a
+// credential chosen for one query is not also sent for an optional query it
+// happens to satisfy.
+func TestWallet_PresentDCQLHolderSelectionSendsOnlyTheChosenQueries(t *testing.T) {
+	fixture := newSDJWTPresentationFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
+	query := `{"credentials":[` +
+		`{"id":"given","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
+		`{"id":"family","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["family_name"]}]}],` +
+		`"credential_sets":[{"options":[["given"]]},{"required":false,"options":[["family"]]}]}`
+	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+
+	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
+		req, endpoint, fixture.key,
+		[]DCQLHolderSelection{{QueryIDs: []string{"given"}, Credential: heldCredential(t, fixture, "urn:test:identity")}},
+		nil,
+	)
+	require.NoError(t, err)
+	tokens := postedVPToken(t, fixture)
+	require.Equal(t, []string{"given"}, slices.Collect(maps.Keys(tokens)))
+	require.Equal(t, []string{"given_name"}, disclosedNames(t, tokens["given"][0]))
+}
+
+// With multiple false a query takes one credential, and which one is the
+// Holder's choice: when two chosen credentials both satisfy a query, the one
+// the Holder named for it is presented, not the first that matches.
+func TestWallet_PresentDCQLHolderSelectionPresentsTheChosenCandidate(t *testing.T) {
+	fixture := newSDJWTPresentationFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Hanako"})
+	query := `{"credentials":[` +
+		`{"id":"first","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
+		`{"id":"second","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
+	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+
+	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
+		req, endpoint, fixture.key,
+		[]DCQLHolderSelection{
+			{QueryIDs: []string{"second"}, Credential: heldCredentialWithClaim(t, fixture, "given_name", "Taro")},
+			{QueryIDs: []string{"first"}, Credential: heldCredentialWithClaim(t, fixture, "given_name", "Hanako")},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	tokens := postedVPToken(t, fixture)
+	require.Len(t, tokens["first"], 1)
+	require.Len(t, tokens["second"], 1)
+	require.Contains(t, tokens["first"][0], disclosureFor(t, fixture, "Hanako"))
+	require.Contains(t, tokens["second"][0], disclosureFor(t, fixture, "Taro"))
 }
 
 // A nil DisclosedClaims is the Holder agreeing to the claim set the query asked
@@ -245,15 +348,31 @@ func TestWallet_StorelessWalletHasNoCredentialStore(t *testing.T) {
 }
 
 // The two sides of a consent screen name a claim differently: the Holder
-// answers with disclosure names, while a DCQL claims query resolves to the bare
-// name for a single-segment path and to the JSON path for a deeper one. The
-// narrowing has to survive that in both directions - a claim the Holder kept
-// stays selected under the library's own name, and one the Holder withheld is
-// dropped.
-func TestNarrowToDisclosureNamesKeepsTheResolvedClaimPaths(t *testing.T) {
-	resolved := []string{"given_name", `["address","locality"]`}
+// answers with disclosure names, while a claim set resolves to bare names and
+// JSON claims path pointers. A set is chosen only when every claim in it,
+// nested or array-indexed, was kept.
+func TestHolderClaimSetMatchesDisclosureNames(t *testing.T) {
+	sets := [][]string{{"given_name", `["address","locality"]`}, {`["nationalities",1]`}}
 
-	require.Equal(t, resolved, narrowToDisclosureNames(resolved, []string{"given_name", "locality"}))
-	require.Equal(t, []string{`["address","locality"]`}, narrowToDisclosureNames(resolved, []string{"locality"}))
-	require.Empty(t, narrowToDisclosureNames(resolved, []string{"family_name"}))
+	chosen, ok := holderClaimSet(sets, nil)
+	require.True(t, ok)
+	require.Equal(t, sets[0], chosen)
+	chosen, ok = holderClaimSet(sets, []string{"given_name", "locality"})
+	require.True(t, ok)
+	require.Equal(t, sets[0], chosen)
+	chosen, ok = holderClaimSet(sets, []string{"locality", "nationalities"})
+	require.True(t, ok)
+	require.Equal(t, sets[1], chosen)
+	_, ok = holderClaimSet(sets, []string{"locality"})
+	require.False(t, ok)
+}
+
+// disclosureFor returns the stored disclosure of the credential whose
+// given_name is value, which appears verbatim in any presentation of it.
+func disclosureFor(t *testing.T, fixture sdjwtPresentationFixture, value string) string {
+	t.Helper()
+	raw := string(heldCredentialWithClaim(t, fixture, "given_name", value).Raw)
+	parts := strings.Split(raw, "~")
+	require.GreaterOrEqual(t, len(parts), 2)
+	return parts[1]
 }

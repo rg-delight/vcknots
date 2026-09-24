@@ -34,6 +34,9 @@ type DCQLCredentialCandidate struct {
 	// the X.509 certificates in the credential's issuer chain. It is matched
 	// against aki trusted_authorities queries (OID4VP 1.0 Section 6.1.1.1).
 	AuthorityKeyIDs []string
+	// Types lists the W3C VC type values of the credential. It is matched
+	// against meta.type_values (OID4VP 1.0 Appendix B.1.1).
+	Types []string
 }
 
 // DCQLCredentialSelection describes the concrete wallet credential and claims
@@ -158,6 +161,39 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 	return selections, nil
 }
 
+// ResolveDCQLClaimSets returns, in the Verifier's order of preference (OID4VP
+// 1.0 Section 6.4.1), the claims each claim set of credential query queryID
+// resolves to for candidate, leaving out the sets candidate cannot satisfy. A
+// Wallet whose Holder chooses the claim set picks one of these and checks the
+// result with ValidateDCQLCredentialSelections.
+//
+// A candidate that fails the query's constraints or satisfies no claim set, and
+// a queryID the request does not contain, are reported as errors wrapping
+// ErrDCQLSelectionUnsatisfied.
+func ResolveDCQLClaimSets(query *DCQLQuery, queryID string, candidate DCQLCredentialCandidate) ([][]string, error) {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	credentialQuery, requested := plan.queries[queryID]
+	if !requested {
+		return nil, fmt.Errorf("%w: the request contains no credential query %q", ErrDCQLSelectionUnsatisfied, queryID)
+	}
+	if err := dcqlCandidateConstraintError(credentialQuery, candidate); err != nil {
+		return nil, err
+	}
+	var claimSets [][]string
+	for _, claims := range plan.claimOptions[queryID] {
+		if resolved, satisfied := matchDCQLClaims(claims, candidate); satisfied {
+			claimSets = append(claimSets, resolved)
+		}
+	}
+	if len(claimSets) == 0 {
+		return nil, fmt.Errorf("%w: credential %q satisfies no claim set of credential query %q", ErrDCQLSelectionUnsatisfied, candidate.ID, queryID)
+	}
+	return claimSets, nil
+}
+
 // ValidateDCQLCredentialSelections reports whether credentials chosen outside
 // this library - by the Holder on a consent screen - answer the DCQL query.
 //
@@ -216,26 +252,11 @@ func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredent
 // to one selected credential, and requires its disclosed claims to be exactly
 // one of the claim sets that query offers.
 func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidate DCQLCredentialCandidate, selection DCQLCredentialSelection) error {
-	vctValues, validMeta := dcqlVCTValues(query.Meta)
-	if !validMeta {
-		return fmt.Errorf("credential query %q has an invalid meta.vct_values", query.ID)
+	if err := dcqlCandidateConstraintError(query, candidate); err != nil {
+		return err
 	}
-	switch {
-	case candidate.Format != query.Format:
-		return fmt.Errorf("%w: credential %q is in format %q, and credential query %q requests %q", ErrDCQLSelectionUnsatisfied, candidate.ID, candidate.Format, query.ID, query.Format)
-	case len(vctValues) > 0 && !containsString(vctValues, candidate.VCT):
-		return fmt.Errorf("%w: credential %q does not carry a vct credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
-	case selection.Format != "" && selection.Format != candidate.Format,
-		selection.VCT != "" && selection.VCT != candidate.VCT:
+	if (selection.Format != "" && selection.Format != candidate.Format) || (selection.VCT != "" && selection.VCT != candidate.VCT) {
 		return fmt.Errorf("%w: the selection for credential query %q does not describe credential %q", ErrDCQLSelectionUnsatisfied, query.ID, candidate.ID)
-	case query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() && candidate.HolderBound != nil && !*candidate.HolderBound:
-		// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder Binding
-		// (i.e., do not have a cnf Claim) cannot be returned in this case."
-		return fmt.Errorf("%w: credential %q has no cryptographic holder binding, which credential query %q requires", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
-	case !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate):
-		// OID4VP 1.0 Section 6.4.2: "Credentials not matching the respective
-		// constraints ... are treated as if they would not exist in the Wallet."
-		return fmt.Errorf("%w: credential %q is outside the trusted authorities credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
 	}
 	for _, claims := range claimOptions {
 		resolved, satisfied := matchDCQLClaims(claims, candidate)
@@ -244,6 +265,36 @@ func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]D
 		}
 	}
 	return fmt.Errorf("%w: the claims selected for credential query %q are not one of the claim sets it offers", ErrDCQLSelectionUnsatisfied, query.ID)
+}
+
+// dcqlCandidateConstraintError reports why candidate cannot answer query before
+// any claim is considered: its format, meta type constraint, holder binding or
+// issuer. OID4VP 1.0 Section 6.4.2 treats such a credential as absent. The
+// error wraps ErrDCQLSelectionUnsatisfied unless the query's meta is malformed.
+func dcqlCandidateConstraintError(query DCQLCredentialQuery, candidate DCQLCredentialCandidate) error {
+	vctValues, validVCT := dcqlVCTValues(query.Meta)
+	if !validVCT {
+		return fmt.Errorf("credential query %q has an invalid meta.vct_values", query.ID)
+	}
+	typeValues, validTypes := dcqlTypeValues(query.Format, query.Meta)
+	if !validTypes {
+		return fmt.Errorf("credential query %q has an invalid meta.type_values", query.ID)
+	}
+	switch {
+	case candidate.Format != query.Format:
+		return fmt.Errorf("%w: credential %q is in format %q, and credential query %q requests %q", ErrDCQLSelectionUnsatisfied, candidate.ID, candidate.Format, query.ID, query.Format)
+	case len(vctValues) > 0 && !containsString(vctValues, candidate.VCT):
+		return fmt.Errorf("%w: credential %q does not carry a vct credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case len(typeValues) > 0 && !matchesDCQLTypeValues(typeValues, candidate.Types):
+		return fmt.Errorf("%w: credential %q does not carry the types credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() && candidate.HolderBound != nil && !*candidate.HolderBound:
+		// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder Binding
+		// (i.e., do not have a cnf Claim) cannot be returned in this case."
+		return fmt.Errorf("%w: credential %q has no cryptographic holder binding, which credential query %q requires", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	case !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate):
+		return fmt.Errorf("%w: credential %q is outside the trusted authorities credential query %q accepts", ErrDCQLSelectionUnsatisfied, candidate.ID, query.ID)
+	}
+	return nil
 }
 
 // sameDCQLClaimSelection compares a resolved claim set with the claims a
@@ -310,30 +361,12 @@ func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCred
 // matching candidate is returned (OID4VP 1.0 Section 6.1/8.1); otherwise every
 // matching candidate is returned so it can be presented separately.
 func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidates []DCQLCredentialCandidate) []DCQLCredentialSelection {
-	vctValues, validMeta := dcqlVCTValues(query.Meta)
-	if !validMeta {
-		return nil
-	}
 	// Prefer the first satisfiable claim set across all candidates, rather than
 	// selecting a later claim set merely because its credential appeared first.
 	for _, claims := range claimOptions {
 		selections := []DCQLCredentialSelection{}
 		for _, candidate := range candidates {
-			if candidate.Format != query.Format || (len(vctValues) > 0 && !containsString(vctValues, candidate.VCT)) {
-				continue
-			}
-			if query.Format == "dc+sd-jwt" && query.RequiresHolderBinding() &&
-				candidate.HolderBound != nil && !*candidate.HolderBound {
-				// OID4VP 1.0 Appendix B.3: "SD-JWTs that do not support Holder
-				// Binding (i.e., do not have a cnf Claim) cannot be returned in
-				// this case." Treat an unbound credential as absent so another
-				// credential can satisfy the query.
-				continue
-			}
-			if !candidateMatchesTrustedAuthorities(query.TrustedAuthorities, candidate) {
-				// OID4VP 1.0 Section 6.4.2: "Credentials not matching the
-				// respective constraints ... are treated as if they would not
-				// exist in the Wallet."
+			if dcqlCandidateConstraintError(query, candidate) != nil {
 				continue
 			}
 			requestedClaims, ok := matchDCQLClaims(claims, candidate)
@@ -358,43 +391,56 @@ func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQL
 	return nil
 }
 
+// matchDCQLClaims resolves one claim set against candidate and returns the
+// encoded claims path pointers to disclose. A claim with values discloses only
+// the elements whose value matches (OID4VP 1.0 Section 6.4.1 treats the others
+// as absent), so a null component is replaced by the index of each match.
 func matchDCQLClaims(claimQueries []DCQLClaimQuery, candidate DCQLCredentialCandidate) ([]string, bool) {
 	claims := make([]string, 0, len(claimQueries))
+	add := func(path []any) {
+		encoded := encodeDCQLClaimPath(path)
+		if !containsString(claims, encoded) {
+			claims = append(claims, encoded)
+		}
+	}
 	for _, claim := range claimQueries {
 		elements, satisfied := candidate.selectDCQLClaimElements(claim.Path)
 		if !satisfied {
 			return nil, false
 		}
-		if claim.Values != nil {
-			matches := false
-			for _, value := range elements {
-				for _, expected := range claim.Values {
-					if dcqlClaimValuesEqual(value, expected) {
-						matches = true
-						break
-					}
-				}
-				if matches {
+		if claim.Values == nil {
+			add(claim.Path)
+			continue
+		}
+		matched := false
+		for _, element := range elements {
+			for _, expected := range claim.Values {
+				if dcqlClaimValuesEqual(element.value, expected) {
+					matched = true
+					add(element.path)
 					break
 				}
 			}
-			if !matches {
-				return nil, false
-			}
 		}
-		encoded := encodeDCQLClaimPath(claim.Path)
-		if !containsString(claims, encoded) {
-			claims = append(claims, encoded)
+		if !matched {
+			return nil, false
 		}
 	}
 	return claims, true
 }
 
+// dcqlClaimElement is one element a claims path pointer selected, with the
+// pointer that addresses it alone: every null component replaced by an index.
+type dcqlClaimElement struct {
+	path  []any
+	value any
+}
+
 // selectDCQLClaimElements applies a claims path pointer (OID4VP 1.0 Section 7.1.1)
 // to the candidate. With a decoded ClaimObject the full nested path semantics
-// apply; the legacy Claims/ClaimValues representation supports one-segment
-// string paths only.
-func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]any, bool) {
+// apply; the Claims/ClaimValues representation supports one-segment string
+// paths only.
+func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]dcqlClaimElement, bool) {
 	if candidate.ClaimObject != nil {
 		return evaluateDCQLClaimPath(candidate.ClaimObject, path)
 	}
@@ -406,40 +452,47 @@ func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]
 		return nil, false
 	}
 	if candidate.ClaimValues == nil {
-		return []any{}, true
+		return []dcqlClaimElement{}, true
 	}
 	value, exists := candidate.ClaimValues[name]
 	if !exists {
-		return []any{}, true
+		return []dcqlClaimElement{}, true
 	}
-	return []any{value}, true
+	return []dcqlClaimElement{{path: path, value: value}}, true
 }
 
 // evaluateDCQLClaimPath processes a claims path pointer from left to right over
 // a decoded JSON credential root. It returns the selected elements and reports
 // whether any element was selected.
-func evaluateDCQLClaimPath(root map[string]any, path []any) ([]any, bool) {
-	current := []any{root}
+func evaluateDCQLClaimPath(root map[string]any, path []any) ([]dcqlClaimElement, bool) {
+	current := []dcqlClaimElement{{path: []any{}, value: root}}
 	for _, component := range path {
-		next := []any{}
+		next := []dcqlClaimElement{}
+		extend := func(element dcqlClaimElement, step any, value any) {
+			concrete := make([]any, len(element.path), len(element.path)+1)
+			copy(concrete, element.path)
+			next = append(next, dcqlClaimElement{path: append(concrete, step), value: value})
+		}
 		switch value := component.(type) {
 		case string:
 			for _, element := range current {
-				object, ok := element.(map[string]any)
+				object, ok := element.value.(map[string]any)
 				if !ok {
 					continue
 				}
 				if selected, exists := object[value]; exists {
-					next = append(next, selected)
+					extend(element, value, selected)
 				}
 			}
 		case nil:
 			for _, element := range current {
-				array, ok := element.([]any)
+				array, ok := element.value.([]any)
 				if !ok {
 					continue
 				}
-				next = append(next, array...)
+				for index, item := range array {
+					extend(element, index, item)
+				}
 			}
 		default:
 			index, ok := dcqlPathIndex(value)
@@ -447,12 +500,12 @@ func evaluateDCQLClaimPath(root map[string]any, path []any) ([]any, bool) {
 				return nil, false
 			}
 			for _, element := range current {
-				array, ok := element.([]any)
+				array, ok := element.value.([]any)
 				if !ok {
 					continue
 				}
 				if index < int64(len(array)) {
-					next = append(next, array[index])
+					extend(element, component, array[index])
 				}
 			}
 		}
@@ -517,28 +570,26 @@ func dcqlPathIndex(value any) (int64, bool) {
 	}
 }
 
-// candidateMatchesTrustedAuthorities applies the OID4VP 1.0 Section 6.1.1
-// matching rule: a credential matches when it matches one of the values of one
-// of the entries. This wallet supports the HAIP 1.0 section 5 "aki" type; other
-// types cannot be evaluated and are ignored. A query whose entries are all of an
-// unknown type therefore places no constraint.
+// candidateMatchesTrustedAuthorities applies OID4VP 1.0 Section 6.1.1: a
+// credential matches when it matches one of the values of one of the entries.
+// Only the "aki" type (HAIP 1.0 Section 5) is evaluated; an entry of any other
+// type matches no credential, so a query naming only such types is
+// unsatisfiable rather than unconstrained.
 func candidateMatchesTrustedAuthorities(authorities []TrustedAuthority, candidate DCQLCredentialCandidate) bool {
 	if len(authorities) == 0 {
 		return true
 	}
-	supported := 0
 	for _, authority := range authorities {
 		if authority.Type != "aki" {
 			continue
 		}
-		supported++
 		for _, value := range authority.Values {
 			if containsString(candidate.AuthorityKeyIDs, value) {
 				return true
 			}
 		}
 	}
-	return supported == 0
+	return false
 }
 
 func dcqlClaimOptions(query DCQLCredentialQuery) ([][]DCQLClaimQuery, error) {
@@ -726,4 +777,79 @@ func dcqlVCTValues(meta map[string]any) ([]string, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// dcqlTypeValues returns meta.type_values for a W3C VC format (OID4VP 1.0
+// Appendix B.1.1), from a directly constructed Go query or decoded JSON.
+func dcqlTypeValues(format string, meta map[string]any) ([][]string, bool) {
+	if format != "jwt_vc_json" && format != "ldp_vc" {
+		return nil, true
+	}
+	raw, exists := meta["type_values"]
+	if !exists {
+		return nil, true
+	}
+	if values, ok := raw.([][]string); ok {
+		return values, true
+	}
+	alternatives, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([][]string, 0, len(alternatives))
+	for _, alternative := range alternatives {
+		switch types := alternative.(type) {
+		case []string:
+			result = append(result, types)
+		case []any:
+			strs := make([]string, 0, len(types))
+			for _, value := range types {
+				text, ok := value.(string)
+				if !ok {
+					return nil, false
+				}
+				strs = append(strs, text)
+			}
+			result = append(result, strs)
+		default:
+			return nil, false
+		}
+	}
+	return result, true
+}
+
+// w3cCredentialsVocabulary is the IRI the W3C VC base context maps its terms
+// to, in both the VCDM 1.1 and 2.0 contexts.
+const w3cCredentialsVocabulary = "https://www.w3.org/2018/credentials#"
+
+// matchesDCQLTypeValues reports whether every type of one type_values
+// alternative is among the credential's types. type_values holds fully
+// expanded IRIs; without a JSON-LD processor the base context term
+// VerifiableCredential is expanded to its IRI, and any other type is compared
+// as written, which Appendix B.1.1 permits for types no @context defines. A
+// type defined only by another context therefore does not match its IRI.
+func matchesDCQLTypeValues(alternatives [][]string, types []string) bool {
+	expanded := make([]string, 0, len(types)+1)
+	for _, value := range types {
+		expanded = append(expanded, value)
+		if value == "VerifiableCredential" {
+			expanded = append(expanded, w3cCredentialsVocabulary+value)
+		}
+	}
+	for _, alternative := range alternatives {
+		if len(alternative) == 0 {
+			continue
+		}
+		matched := true
+		for _, value := range alternative {
+			if !containsString(expanded, value) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }

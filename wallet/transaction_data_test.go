@@ -125,7 +125,7 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 				if tc.wrongKey {
 					key = newMockKeyEntry()
 				}
-				query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{}}
+				query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:test:identity"}}}
 				if tc.requestValue != nil {
 					query["require_cryptographic_holder_binding"] = tc.requestValue
 				}
@@ -201,7 +201,7 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 
 func TestWallet_FinalBindingRequirementsArePerQuery(t *testing.T) {
 	controller, key, baseURL, _ := receiveSDJWTForHolderBinding(t, true)
-	query := `{"credentials":[{"id":"unbound","format":"dc+sd-jwt","meta":{},"require_cryptographic_holder_binding":false},{"id":"bound","format":"dc+sd-jwt","meta":{}}]}`
+	query := `{"credentials":[{"id":"unbound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"require_cryptographic_holder_binding":false},{"id":"bound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]}}]}`
 	uri := "openid4vp://present?" + url.Values{
 		"client_id": {"redirect_uri:" + baseURL + "/response"}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
 		"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
@@ -302,4 +302,22 @@ func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
 	require.ErrorContains(t, err, "references no selected credential (invalid_transaction_data)")
 	_, err = assignTransactionDataOwners([]string{"not-base64!"}, selections)
 	require.ErrorContains(t, err, "transaction_data entry 0")
+}
+
+// OID4VP 1.0 Section 8.4: the presentation that authorizes a transaction_data
+// entry must carry it. Only an SD-JWT VC Key Binding JWT can here, so an entry
+// owned by any other credential fails the presentation instead of being
+// dropped. The request is built directly because the parser refuses it.
+func TestWallet_TransactionDataOwnedByANonSDJWTCredentialFails(t *testing.T) {
+	controller, key := receiveCredentialForPresentationTest(t)
+	req := &oid4vp.CredentialPresentationRequest{
+		OAuthAuthzRequest: &oid4vp.OAuthAuthzRequest{ResponseType: "vp_token", ClientID: "redirect_uri:https://verifier.example/response", Nonce: "n"},
+		DcqlQuery: &oid4vp.DcqlQuery{Credentials: []oid4vp.CredentialQuery{{
+			ID: "vc", Format: "jwt_vc_json", Meta: map[string]any{"type_values": [][]string{{"VerifiableCredential"}}},
+		}}},
+		TransactionData: []string{base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["vc"]}`))},
+	}
+
+	_, err := controller.buildDCQLVPToken(req, key, nil)
+	require.ErrorContains(t, err, "invalid_transaction_data")
 }

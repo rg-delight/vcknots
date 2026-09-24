@@ -169,6 +169,74 @@ func (r *sdjwtDisclosureResolver) selectPath(payload map[string]any, path []any,
 		}
 		current = next
 	}
+	// The pointer selects each element as a whole (OID4VP 1.0 Section 7), so
+	// the selectively disclosable members of a selected object or array are
+	// part of the claim and are disclosed with it.
+	walked := map[string]bool{}
+	for _, element := range current {
+		if err := r.discloseMembers(element, needed, walked); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// discloseMembers records the digests of every disclosure nested in value.
+// walked holds the disclosures already descended into, which also bounds a
+// credential that repeats digests.
+func (r *sdjwtDisclosureResolver) discloseMembers(value any, needed, walked map[string]bool) error {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, member := range node {
+			if key == "_sd" || key == "_sd_alg" {
+				continue
+			}
+			if err := r.discloseMembers(member, needed, walked); err != nil {
+				return err
+			}
+		}
+		raw, exists := node["_sd"]
+		if !exists {
+			return nil
+		}
+		digests, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("_sd must be an array")
+		}
+		for _, rawDigest := range digests {
+			digest, ok := rawDigest.(string)
+			if !ok || digest == "" {
+				return fmt.Errorf("_sd must contain non-empty digests")
+			}
+			// A digest with no disclosure is a decoy.
+			disclosure, ok := r.byDigest[digest]
+			if !ok || disclosure.IsArrayElement || walked[digest] {
+				continue
+			}
+			walked[digest] = true
+			needed[digest] = true
+			if err := r.discloseMembers(disclosure.Value, needed, walked); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range node {
+			resolved, disclosure, err := r.resolveArrayElement(item)
+			if err != nil {
+				return err
+			}
+			if disclosure != nil {
+				if walked[disclosure.Digest] {
+					continue
+				}
+				walked[disclosure.Digest] = true
+				needed[disclosure.Digest] = true
+			}
+			if err := r.discloseMembers(resolved, needed, walked); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

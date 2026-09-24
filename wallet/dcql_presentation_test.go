@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -322,6 +324,47 @@ func TestWallet_DCQLUnsatisfiableIsAccessDenied(t *testing.T) {
 	var authzErr *oid4vp.AuthorizationRequestError
 	require.ErrorAs(t, err, &authzErr)
 	require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
+}
+
+// OID4VP 1.0 Appendix B.1.1: a jwt_vc_json credential is presented only when
+// its types cover one type_values alternative.
+func TestWallet_DCQLMatchesJWTVCTypeValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, typeValues string
+		wantPresented    bool
+	}{
+		{name: "expanded base type", typeValues: `[["https://www.w3.org/2018/credentials#VerifiableCredential"]]`, wantPresented: true},
+		{name: "type the credential lacks", typeValues: `[["VerifiableCredential","IDCredential"]]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, key := receiveCredentialForPresentationTest(t)
+			posted := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ParseForm() == nil && r.PostForm.Get("vp_token") != "" {
+					posted = true
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(server.Close)
+			query := `{"credentials":[{"id":"vc","format":"jwt_vc_json","meta":{"type_values":` + tc.typeValues + `}}]}`
+			uri := "openid4vp://present?" + url.Values{
+				"client_id": {"redirect_uri:" + server.URL}, "response_uri": {server.URL}, "response_type": {"vp_token"},
+				"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
+			}.Encode()
+
+			_, err := controller.PresentCredential(uri, key, nil)
+			if tc.wantPresented {
+				require.NoError(t, err)
+				require.True(t, posted)
+				return
+			}
+			var authzErr *oid4vp.AuthorizationRequestError
+			require.ErrorAs(t, err, &authzErr)
+			require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
+			require.False(t, posted)
+		})
+	}
 }
 
 func TestWallet_ConfigPropagatesTransactionDataTypes(t *testing.T) {
@@ -720,5 +763,95 @@ func TestWallet_PresentDCQLSelectionKeepsTransactionDataAssignment(t *testing.T)
 		require.Empty(t, transactionDataHashesOf(t, tokens["pid"][0]))
 	default:
 		t.Fatal("no presentation submitted")
+	}
+}
+
+// storeSDJWT signs payload as an SD-JWT VC bound to the fixture key and stores
+// it with the given disclosures.
+func storeSDJWT(t *testing.T, fixture sdjwtPresentationFixture, payload map[string]any, disclosures ...string) {
+	t.Helper()
+	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	payload["iss"] = "https://issuer.example"
+	payload["vct"] = "urn:test:identity"
+	payload["iat"] = time.Now().Unix()
+	payload["exp"] = time.Now().Add(time.Hour).Unix()
+	payload["cnf"] = map[string]any{"jwk": fixture.key.PublicKey()}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
+	require.NoError(t, err)
+	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
+	require.NoError(t, err)
+	wire := signed + "~" + strings.Join(disclosures, "~") + "~"
+	require.NoError(t, fixture.wallet.credStore.SaveCredentialEntry(credstoreTypes.CredentialEntry{
+		Id: uuid.NewString(), ReceivedAt: time.Now(), Raw: []byte(wire), MimeType: string(credential.SDJwtVC),
+	}, credstoreTypes.SupportedCredStoreTypes(0)))
+}
+
+// sdDisclosure encodes one disclosure (a [salt, name, value] object property or
+// a [salt, value] array element) and returns it with its sha-256 digest.
+func sdDisclosure(t *testing.T, parts ...any) (string, string) {
+	t.Helper()
+	raw, err := json.Marshal(parts)
+	require.NoError(t, err)
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	digest := sha256.Sum256([]byte(encoded))
+	return encoded, base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+// disclosedParts returns the disclosures of a presented SD-JWT, each as the
+// name of an object property or the value of an array element.
+func disclosedParts(t *testing.T, wire string) []any {
+	t.Helper()
+	parts := strings.Split(wire, "~")
+	disclosed := []any{}
+	for _, encoded := range parts[1 : len(parts)-1] {
+		raw, err := base64.RawURLEncoding.DecodeString(encoded)
+		require.NoError(t, err)
+		var disclosure []any
+		require.NoError(t, json.Unmarshal(raw, &disclosure))
+		require.True(t, len(disclosure) == 2 || len(disclosure) == 3)
+		disclosed = append(disclosed, disclosure[1])
+	}
+	return disclosed
+}
+
+// OID4VP 1.0 Section 6.4.1 and Section 7: a claims query selects the claims its
+// path points to, values treats a non-matching element as absent, and a
+// selected object is disclosed with its selectively disclosable members.
+func TestWallet_DCQLDisclosesExactlyTheSelectedClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name, claims string
+		want         []any
+	}{
+		{name: "values narrow a wildcard to the matching element", claims: `[{"path":["nationalities",null],"values":["DE"]}]`, want: []any{"DE"}},
+		{name: "wildcard without values selects every element", claims: `[{"path":["nationalities",null]}]`, want: []any{"JP", "DE", "FR"}},
+		{name: "a selected object carries its members", claims: `[{"path":["address"]}]`, want: []any{"address", "postal_code", "city"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSDJWTPresentationFixture(t)
+			jp, jpHash := sdDisclosure(t, "salt-jp", "JP")
+			de, deHash := sdDisclosure(t, "salt-de", "DE")
+			fr, frHash := sdDisclosure(t, "salt-fr", "FR")
+			postal, postalHash := sdDisclosure(t, "salt-postal", "postal_code", "12345")
+			city, cityHash := sdDisclosure(t, "salt-city", "city", "Milliways")
+			address, addressHash := sdDisclosure(t, "salt-address", "address", map[string]any{"_sd": []any{postalHash, cityHash}})
+			storeSDJWT(t, fixture, map[string]any{
+				"_sd":           []any{addressHash},
+				"nationalities": []any{map[string]any{"...": jpHash}, map[string]any{"...": deHash}, map[string]any{"...": frHash}},
+			}, jp, de, fr, address, postal, city)
+
+			query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":` + tc.claims + `}]}`
+			_, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+			require.NoError(t, err)
+			select {
+			case form := <-fixture.posted:
+				var tokens map[string][]string
+				require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+				require.Len(t, tokens["pid"], 1)
+				require.ElementsMatch(t, tc.want, disclosedParts(t, tokens["pid"][0]))
+			default:
+				t.Fatal("no presentation submitted")
+			}
+		})
 	}
 }

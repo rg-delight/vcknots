@@ -51,7 +51,7 @@ func TestAuthorityKeyIdentifiersFromCredential(t *testing.T) {
 }
 
 func TestParseDcqlTrustedAuthorities(t *testing.T) {
-	valid := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"trusted_authorities":[{"type":"aki","values":["abc","def"]}]}]}`
+	valid := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"trusted_authorities":[{"type":"aki","values":["abc","def"]}]}]}`
 	query, err := parseDcqlQuery(valid)
 	require.NoError(t, err)
 	require.Len(t, query.Credentials[0].TrustedAuthorities, 1)
@@ -69,7 +69,7 @@ func TestParseDcqlTrustedAuthorities(t *testing.T) {
 		{"non-string value", `"trusted_authorities":[{"type":"aki","values":[1]}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},` + tc.raw + `}]}`)
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` + tc.raw + `}]}`)
 			assertAuthzErrorCode(t, err, InvalidRequestError)
 		})
 	}
@@ -95,15 +95,28 @@ func TestResolveDCQLTrustedAuthoritiesAKI(t *testing.T) {
 		require.Empty(t, selected)
 	}
 
-	// An unknown trusted authority type cannot be evaluated by this wallet and
-	// therefore places no constraint.
+	// Section 6.1.1: a credential matches only by matching a value of one of
+	// the listed types. A type this wallet cannot evaluate matches nothing, so
+	// it cannot widen the query.
 	unknown := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt",
 		TrustedAuthorities: []TrustedAuthority{{Type: "etsi_tl", Values: []string{"x"}}},
 	}}}
 	selected, err = ResolveSatisfiableDCQLCredentials(unknown, []DCQLCredentialCandidate{nonMatching})
+	require.ErrorIs(t, err, ErrDCQLSelectionUnsatisfied)
+	require.Empty(t, selected)
+
+	mixed := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+		ID: "pid", Format: "dc+sd-jwt",
+		TrustedAuthorities: []TrustedAuthority{
+			{Type: "openid_federation", Values: []string{"https://federation.example"}},
+			{Type: "aki", Values: []string{"matching"}},
+		},
+	}}}
+	selected, err = ResolveSatisfiableDCQLCredentials(mixed, []DCQLCredentialCandidate{nonMatching, matching})
 	require.NoError(t, err)
 	require.Len(t, selected, 1)
+	require.Equal(t, "bound", selected[0].CandidateID)
 }
 
 // Gap 2: OID4VP 1.0 Section 6.4.2 / Appendix B.3 holder binding.

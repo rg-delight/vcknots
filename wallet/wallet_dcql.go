@@ -85,7 +85,18 @@ func (w *Wallet) serializeDCQLSelections(req *oid4vp.CredentialPresentationReque
 			}
 		}
 		applyOID4VPRequestOptions(req, options)
-		if sdOpts, ok := options.(*sdjwtvc.SdJwtVcPresentationOptions); ok && sdOpts != nil {
+		// Section 8.4: the presentation must carry every entry this query owns
+		// (Section 5.1). Only an SD-JWT VC Key Binding JWT carries
+		// transaction_data_hashes here, so any other credential fails closed.
+		owned, err := ownedTransactionData(req.TransactionData, selection.QueryID, transactionDataOwners)
+		if err != nil {
+			return nil, err
+		}
+		sdOpts, sdJWT := options.(*sdjwtvc.SdJwtVcPresentationOptions)
+		if len(owned) > 0 && (!sdJWT || sdOpts == nil || flavor != credential.SDJwtVC) {
+			return nil, fmt.Errorf("transaction_data for credential query %q requires an SD-JWT VC with key binding (invalid_transaction_data)", selection.QueryID)
+		}
+		if sdJWT && sdOpts != nil {
 			if sdOpts.LimitDisclosureToSelectedClaims || len(sdOpts.SelectedClaims) > 0 {
 				for _, name := range selection.RequestedClaims {
 					if !slices.Contains(sdOpts.SelectedClaims, name) {
@@ -109,21 +120,9 @@ func (w *Wallet) serializeDCQLSelections(req *oid4vp.CredentialPresentationReque
 					break
 				}
 			}
-			// Section 8.4: "The Wallet that received the transaction_data
-			// parameter in the request MUST include a representation or
-			// reference to the data in the respective Credential
-			// presentation." Only the entries that reference this query
-			// (Section 5.1) and that this query owns are hashed into its
-			// Key Binding JWT; every other presentation stays free of them.
-			referenced, err := transactionDataForQuery(req.TransactionData, selection.QueryID)
-			if err != nil {
-				return nil, err
-			}
-			sdOpts.TransactionData = nil
-			for _, entry := range referenced {
-				if transactionDataOwners[entry] == selection.QueryID {
-					sdOpts.TransactionData = append(sdOpts.TransactionData, entry)
-				}
+			sdOpts.TransactionData = owned
+			if len(owned) > 0 {
+				sdOpts.RequireKeyBinding = true
 			}
 			sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
 			if sdOpts.TransactionDataHashesAlg == "" {
