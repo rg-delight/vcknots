@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
@@ -308,19 +309,6 @@ func thumbprint(key jose.JSONWebKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-// signatureAlgorithms are the algs an attestation may use: asymmetric only,
-// since OpenID4VCI 1.0 Appendix D.1 says alg "MUST NOT be `none` or an
-// identifier for a symmetric algorithm (MAC)", as does the Wallet Attestation
-// draft for Appendix E.
-func signatureAlgorithms() []jose.SignatureAlgorithm {
-	return []jose.SignatureAlgorithm{
-		jose.ES256, jose.ES384, jose.ES512,
-		jose.PS256, jose.PS384, jose.PS512,
-		jose.RS256, jose.RS384, jose.RS512,
-		jose.EdDSA,
-	}
-}
-
 // authenticate verifies who signed the attestation before any claim is
 // believed: the x5c leaf when present (with the chain validated against
 // configured anchors), ResolveKey otherwise. label names the artifact in
@@ -358,7 +346,10 @@ func authenticate(ctx context.Context, token string, header jwtHeader, policy Tr
 		}
 		key = resolved
 	}
-	signed, err := jose.ParseSigned(token, signatureAlgorithms())
+	// OpenID4VCI 1.0 Appendix D.1 (and the Wallet Attestation draft for
+	// Appendix E): alg "MUST NOT be `none` or an identifier for a symmetric
+	// algorithm (MAC)", which the accepted set never includes.
+	signed, err := jose.ParseSigned(token, commonjose.AcceptedSignatureAlgorithms())
 	if err != nil {
 		return fmt.Errorf("%s is not a verifiable JWS: %w", label, err)
 	}

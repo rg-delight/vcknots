@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
@@ -290,19 +291,6 @@ func (s IssuerMetadataSigningOptions) expectedLeafDNSName(identifier string) (st
 // typ JOSE header of signed Credential Issuer Metadata.
 const signedIssuerMetadataJWTType = "openidvci-issuer-metadata+jwt"
 
-// signedIssuerMetadataAlgorithms lists the signature algorithms accepted for
-// signed metadata. Section 12.2.3 requires the alg header to be a digital
-// signature algorithm and that it "MUST NOT be `none` or an identifier for a
-// symmetric algorithm (MAC)", which this allowlist enforces by construction.
-func signedIssuerMetadataAlgorithms() []jose.SignatureAlgorithm {
-	return []jose.SignatureAlgorithm{
-		jose.ES256, jose.ES384, jose.ES512,
-		jose.PS256, jose.PS384, jose.PS512,
-		jose.RS256, jose.RS384, jose.RS512,
-		jose.EdDSA,
-	}
-}
-
 // fetchIssuerMetadataDocument performs one Credential Issuer Metadata request
 // and decodes the response by its media type, per Section 12.2.2. identifier is
 // the Credential Issuer Identifier the request was derived from; signed metadata
@@ -399,7 +387,10 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	if err != nil {
 		return nil, nil, err
 	}
-	signed, err := jose.ParseSigned(compact, signedIssuerMetadataAlgorithms())
+	// Section 12.2.3: alg is a digital signature algorithm and "MUST NOT be
+	// `none` or an identifier for a symmetric algorithm (MAC)", which the
+	// accepted set never includes.
+	signed, err := jose.ParseSigned(compact, commonjose.AcceptedSignatureAlgorithms())
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}
