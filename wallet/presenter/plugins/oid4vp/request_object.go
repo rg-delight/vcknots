@@ -528,8 +528,13 @@ func validateRequestObjectClaims(claims commonJOSE.Claims, policy requestObjectC
 		return fmt.Errorf("request object is missing exp: %w", ErrRequestObjectExpired)
 	}
 	// NumericDate permits fractions; compare exactly, without truncating or
-	// losing precision through float64. iat imposes no maximum token age of its
-	// own; MaxAge is the policy that bounds the distance between iat and exp.
+	// losing precision through float64. An iat in the future is refused, so
+	// MaxAge, measured from iat, bounds the real remaining lifetime.
+	if issuedAt := dates["iat"]; issuedAt != nil {
+		if requestObjectInstant(policy.Now.Add(policy.ClockSkew)).Cmp(issuedAt) < 0 {
+			return fmt.Errorf("request object is issued in the future: %w", ErrRequestObjectExpired)
+		}
+	}
 	if expiry := dates["exp"]; expiry != nil {
 		if requestObjectInstant(policy.Now.Add(-policy.ClockSkew)).Cmp(expiry) >= 0 {
 			return fmt.Errorf("request object is outside its exp validity: %w", ErrRequestObjectExpired)
