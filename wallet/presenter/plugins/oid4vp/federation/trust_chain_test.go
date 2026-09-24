@@ -12,7 +12,7 @@ const (
 	testIntermediateID = "https://intermediate.example.test"
 )
 
-// chainOptions varies the three-statement chain the TypeScript tests build.
+// chainOptions varies the three-statement chain the tests build.
 type chainOptions struct {
 	leafHeader             header
 	leafIssuedAt           int64

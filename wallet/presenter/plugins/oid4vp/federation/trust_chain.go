@@ -43,8 +43,7 @@ type TrustChain struct {
 // about it, each Subordinate Statement with its issuer's keys, and the Trust
 // Anchor's Entity Configuration with both its own and the configured keys.
 //
-// iat and exp are compared with now exactly, with no clock skew allowance, as
-// the TypeScript implementation this package ports does.
+// iat and exp are compared with now exactly, with no clock skew allowance.
 func ValidateTrustChain(trustChain []string, subjectEntityID string, anchors []TrustAnchor, now time.Time) (*TrustChain, error) {
 	if len(trustChain) == 0 {
 		return nil, failure(ErrTrustChainInvalid, "trust chain must contain at least one statement")

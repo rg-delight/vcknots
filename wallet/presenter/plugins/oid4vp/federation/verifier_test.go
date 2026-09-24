@@ -77,7 +77,7 @@ func TestResolveVerifierTrustSelectsDisplayMetadata(t *testing.T) {
 		locales []string
 		want    [4]string
 	}{
-		// As in the TypeScript selectLocale, a tagged value in another
+		// A tagged value in another
 		// language is preferred over the untagged one when no tag matches.
 		{"default English", localizedEntityMetadata, nil, [4]string{"Example Verifier", "https://verifier.example.test/logo-ja.png", "https://verifier.example.test/policy-ja", "https://verifier.example.test/ja"}},
 		{"untagged only", map[string]any{"organization_name": "Plain", "logo_uri": "https://verifier.example.test/logo.png"}, []string{"ja"}, [4]string{"Plain", "https://verifier.example.test/logo.png", "", ""}},
