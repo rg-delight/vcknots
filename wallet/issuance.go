@@ -104,7 +104,8 @@ type CredentialRequest struct {
 }
 
 // IssuanceAuthorization is the state between BeginIssuance and
-// AuthorizeIssuance. It is a bearer secret (CodeVerifier).
+// AuthorizeIssuance. It is a bearer secret (CodeVerifier) and is used once:
+// discard it after AuthorizeIssuance, whether that succeeded or failed.
 type IssuanceAuthorization struct {
 	Version IssuanceVersion `json:"version"`
 	// AuthorizationURL is the authorization request to open in the holder's
@@ -145,7 +146,10 @@ func (a *IssuanceAuthorization) RequestURIExpired(now time.Time) bool {
 }
 
 // IssuanceGrant is the state between the token exchange and
-// RequestCredential. It is a bearer secret (AccessToken).
+// RequestCredential. It is a bearer secret (AccessToken) and is used once:
+// discard it after RequestCredential, keeping only the Deferred or
+// Notification of its result. A call that stopped before sending anything,
+// such as with *KeyAttestationRequiredError, may be repeated with it.
 type IssuanceGrant struct {
 	Version                   IssuanceVersion `json:"version"`
 	CredentialIssuer          string          `json:"credential_issuer"`
@@ -173,7 +177,10 @@ type IssuanceGrant struct {
 }
 
 // DeferredIssuance is a pending deferred transaction (OpenID4VCI 1.0 Section
-// 9). It is a bearer secret (AccessToken, ResponseDecryptionKey).
+// 9). It is a bearer secret (AccessToken, ResponseDecryptionKey). Each
+// RequestDeferredCredential uses it once: poll again with the result's
+// Deferred, and discard it when the credentials are issued or the transaction
+// fails.
 type DeferredIssuance struct {
 	Version                   IssuanceVersion                              `json:"version"`
 	CredentialIssuer          string                                       `json:"credential_issuer"`
@@ -195,7 +202,7 @@ type DeferredIssuance struct {
 
 // IssuanceNotification is what NotifyIssuer needs to report the fate of issued
 // credentials (OpenID4VCI 1.0 Section 11). It is a bearer secret
-// (AccessToken).
+// (AccessToken) and is used once: discard it after NotifyIssuer.
 type IssuanceNotification struct {
 	Version           IssuanceVersion                              `json:"version"`
 	CredentialIssuer  string                                       `json:"credential_issuer"`
