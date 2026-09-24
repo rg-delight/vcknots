@@ -16,6 +16,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -46,6 +47,14 @@ type Oid4vciReceiver struct {
 	// HAIP and accepts an unsigned application/json document in every profile;
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
+	// IssuerMetadataFederation resolves the Credential Issuer Metadata of an
+	// issuer whose metadata document is not found (404) from its OpenID
+	// Federation Entity: the openid_credential_issuer metadata derived from a
+	// Trust Chain to one of the resolver's TrustAnchors (OpenID Federation 1.0
+	// Section 6.1.4). A nil HTTPClient uses HTTPClient. Without a valid chain
+	// the fetch fails. It does not apply when IssuerMetadataSigning.Require is
+	// set, because the result is not Section 12.2.3 signed metadata.
+	IssuerMetadataFederation *federation.Resolver
 
 	// dpopNonceMu guards dpopNonces.
 	dpopNonceMu sync.Mutex

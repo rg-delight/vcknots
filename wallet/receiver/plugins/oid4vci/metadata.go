@@ -20,6 +20,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -139,31 +140,77 @@ func (o *Oid4vciReceiver) DiscoverCredentialIssuer(ctx context.Context, issuer c
 	return metadata, nil
 }
 
-// fetchIssuerMetadata fetches the Section 12.2.2 document and, when
-// AppendedMetadataPathFallback allows it, the Draft 13 location after a 404.
+// fetchIssuerMetadata fetches the Section 12.2.2 document. After a 404 it
+// tries the Draft 13 location when AppendedMetadataPathFallback allows it, and
+// then the issuer's OpenID Federation Entity when IssuerMetadataFederation is
+// set.
 func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint common.URIField, normalized profile.Profile) (*types.CredentialIssuerMetadata, error) {
 	signing := o.issuerMetadataSigningOptions(normalized)
 	identifier := credentialIssuerIdentifier(url.URL(endpoint))
 
-	var finalMetadata types.CredentialIssuerMetadata
-	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, normalized, &finalMetadata)
+	var metadata types.CredentialIssuerMetadata
+	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, normalized, &metadata)
 	if err == nil {
-		return &finalMetadata, nil
+		return &metadata, nil
 	}
 	endpointURL := url.URL(endpoint)
+	if o.AppendedMetadataPathFallback && !normalized.IsHAIP() && isNotFound(err) &&
+		strings.Trim(endpointURL.Path, "/") != "" &&
+		!strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) {
+		appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
+		if err = o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, normalized, &metadata); err == nil {
+			return &metadata, nil
+		}
+	}
+	if o.IssuerMetadataFederation != nil && !signing.Require && isNotFound(err) {
+		return o.federationIssuerMetadata(ctx, identifier)
+	}
+	return nil, err
+}
+
+// isNotFound reports a 404 answer to a metadata request.
+func isNotFound(err error) bool {
 	var statusError *httpStatusError
-	if !o.AppendedMetadataPathFallback || normalized.IsHAIP() ||
-		strings.Trim(endpointURL.Path, "/") == "" ||
-		strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) ||
-		!errors.As(err, &statusError) || !statusError.isNotFound() {
-		return nil, err
+	return errors.As(err, &statusError) && statusError.isNotFound()
+}
+
+// credentialIssuerEntityType is the OpenID Federation Entity Type whose
+// metadata is Credential Issuer Metadata.
+const credentialIssuerEntityType = "openid_credential_issuer"
+
+// federationIssuerMetadata derives the Credential Issuer Metadata of
+// identifier from the first of its valid Trust Chains that yields it. The
+// credential_issuer member must still equal identifier (Section 12.2.4).
+func (o *Oid4vciReceiver) federationIssuerMetadata(ctx context.Context, identifier string) (*types.CredentialIssuerMetadata, error) {
+	resolver := *o.IssuerMetadataFederation
+	if resolver.HTTPClient == nil {
+		resolver.HTTPClient = o.HTTPClient
 	}
-	var metadata types.CredentialIssuerMetadata
-	appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
-	if err := o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, normalized, &metadata); err != nil {
-		return nil, err
+	chains, err := resolver.ResolveTrustChains(ctx, identifier)
+	if err != nil {
+		return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
 	}
-	return &metadata, nil
+	for _, chain := range chains {
+		derived, deriveErr := federation.DeriveEntityMetadata(chain, credentialIssuerEntityType)
+		if deriveErr != nil {
+			err = deriveErr
+			continue
+		}
+		document, err := json.Marshal(derived)
+		if err != nil {
+			return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
+		}
+		var metadata types.CredentialIssuerMetadata
+		if err := json.Unmarshal(document, &metadata); err != nil {
+			return nil, fmt.Errorf("issuer metadata from OpenID Federation: failed to parse: %w", err)
+		}
+		if err := requireMatchingCredentialIssuer(metadata.CredentialIssuer, identifier); err != nil {
+			return nil, err
+		}
+		metadata.RawDocument = document
+		return &metadata, nil
+	}
+	return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
 }
 
 // issuerMetadataSigningOptions resolves the signed metadata policy for one

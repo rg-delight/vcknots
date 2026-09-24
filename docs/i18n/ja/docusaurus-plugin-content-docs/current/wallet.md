@@ -899,6 +899,11 @@ HAIP では、attestation は自己署名でない `x5c` leaf を持ち、トラ
 `ErrIssuerMetadataSignatureRequired` は `Require` の結果です。
 `CredentialIssuerMetadata.MetadataSignature` は受け入れた署名者を記録し、`RawDocument` は受け入れた文書を保持します。
 
+`oid4vci.Oid4vciReceiver.IssuerMetadataFederation`（wallet の `TrustAnchors` と探索の上限を持つ `*federation.Resolver`）は、メタデータを OpenID Federation でだけ公開する Issuer に対応します。
+メタデータ文書が 404 を返したとき、Trust Anchor のいずれかへの Trust Chain から、chain の metadata policy を適用して導いた `openid_credential_issuer` メタデータを使います。その `credential_issuer` も要求した識別子でなければなりません。
+有効な chain がなければ探索は失敗します。
+federation のメタデータは §12.2.3 の署名付きメタデータではないため、`IssuerMetadataSigning.Require` が設定されていれば参照しません。
+
 ### Draft 13
 
 `w.Draft13()` は、同じ段階的メソッドと状態の型で OpenID4VCI Draft 13 を実行します。

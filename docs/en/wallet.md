@@ -816,6 +816,8 @@ The library never holds an attester's private key. Before an attestation is sent
 
 Every rejection of a signed document satisfies `errors.Is(err, ErrIssuerMetadataSignatureInvalid)`; `ErrIssuerMetadataSubjectMismatch`, `ErrIssuerMetadataLeafDNSMismatch` and `ErrIssuerMetadataExpired` wrap it. `ErrIssuerMetadataSignatureRequired` is the `Require` outcome. `CredentialIssuerMetadata.MetadataSignature` records the accepted signer, and `RawDocument` keeps the accepted document.
 
+`oid4vci.Oid4vciReceiver.IssuerMetadataFederation` (a `*federation.Resolver` with the wallet's `TrustAnchors` and discovery bounds) serves an issuer that publishes its metadata only through OpenID Federation. When the metadata document answers 404, the metadata is the `openid_credential_issuer` metadata derived from a Trust Chain to one of the anchors, after the chain's metadata policies; its `credential_issuer` must still be the requested identifier. Without a valid chain the discovery fails. It is not consulted when `IssuerMetadataSigning.Require` is set, because federation metadata is not §12.2.3 signed metadata.
+
 ### Draft 13
 
 `w.Draft13()` runs OpenID4VCI Draft 13 with the same staged methods and state types; the states carry `IssuanceVersionDraft13`. A Credential Offer is required, the `c_nonce` comes from the Token and Credential Responses, one key proof is sent, and there are no key attestations or credential encryption. `Config.TestHooks.KeyProof` rewrites the key proof for testing.
