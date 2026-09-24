@@ -160,7 +160,7 @@ func (w *Wallet) discoverDraft13Metadata(
 // process-wide one.
 func (w *Wallet) validateDraft13CredentialIssuer(issuer *url.URL) error {
 	if issuer != nil && strings.EqualFold(issuer.Scheme, "http") {
-		if _, allowHTTP := w.credentialOfferHTTPClient(); allowHTTP {
+		if w.oid4vciHTTPPolicy().allowHTTP {
 			asHTTPS := *issuer
 			asHTTPS.Scheme = "https"
 			return validateCredentialIssuerIdentifier(&asHTTPS)

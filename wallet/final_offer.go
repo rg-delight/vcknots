@@ -4,21 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-// maxCredentialOfferResponseBytes bounds the §4.1.1 credential_offer_uri
-// response so a hostile issuer cannot exhaust wallet memory during offer
-// resolution.
-const maxCredentialOfferResponseBytes int64 = 64 << 10
 
 // parseCredentialOfferJSON decodes the §4.1.1 Credential Offer JSON shared by
 // the by-value and by-reference offer variants.
@@ -81,12 +75,9 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	if err != nil {
 		return "", fmt.Errorf("invalid credential_offer_uri: %w", err)
 	}
-	client, allowHTTP := w.credentialOfferHTTPClient()
-	if !strings.EqualFold(parsedURI.Scheme, "https") && !(allowHTTP || env.IsHTTPAllowed()) {
+	policy := w.oid4vciHTTPPolicy()
+	if !strings.EqualFold(parsedURI.Scheme, "https") && !(policy.allowHTTP && strings.EqualFold(parsedURI.Scheme, "http")) {
 		return "", fmt.Errorf("credential_offer_uri must use https")
-	}
-	if client == nil {
-		client = http.DefaultClient
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURI.String(), nil)
@@ -95,21 +86,22 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	}
 	request.Header.Set("Accept", "application/json")
 
-	response, err := client.Do(request)
+	response, err := httpfetch.NoRedirect(policy.client).Do(request)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch credential_offer_uri: %w", err)
 	}
 	defer response.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxCredentialOfferResponseBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("failed to read credential_offer_uri response: %w", err)
-	}
-	if int64(len(body)) > maxCredentialOfferResponseBytes {
-		return "", fmt.Errorf("credential_offer_uri response exceeds %d bytes", maxCredentialOfferResponseBytes)
-	}
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("credential_offer_uri request failed: status=%d", response.StatusCode)
+	}
+	// §4.1.3: the Credential Offer Object MUST use the media type
+	// application/json.
+	if !httpfetch.MediaTypeIs(response.Header, "application/json") {
+		return "", fmt.Errorf("credential_offer_uri response is not application/json")
+	}
+	body, err := httpfetch.ReadLimited(response, httpfetch.DefaultBodyLimit)
+	if err != nil {
+		return "", fmt.Errorf("failed to read credential_offer_uri response: %w", err)
 	}
 	if strings.TrimSpace(string(body)) == "" {
 		return "", fmt.Errorf("credential_offer_uri response body is empty")
@@ -117,21 +109,28 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	return string(body), nil
 }
 
-// credentialOfferHTTPClient returns the OID4VCI receiver's configured HTTP
-// client (and its AllowHTTP test escape) so offer resolution uses the same
-// transport policy as the rest of the receiving flow.
-func (w *Wallet) credentialOfferHTTPClient() (*http.Client, bool) {
+// oid4vciHTTPPolicy is the outbound HTTP configuration of the registered
+// OpenID4VCI receiver, which the root-level fetches share.
+type oid4vciHTTPPolicy struct {
+	// client is the receiver's HTTP client; nil means a default one.
+	client *http.Client
+	// allowHTTP is the receiver's plain-HTTP escape for local test issuers.
+	allowHTTP bool
+}
+
+// oid4vciHTTPPolicy reads the transport policy from the bundled OID4VCI
+// receiver. A receiver of another type yields the default policy: a bounded
+// client and no plain HTTP.
+func (w *Wallet) oid4vciHTTPPolicy() oid4vciHTTPPolicy {
 	if w.receiver == nil {
-		return nil, false
+		return oid4vciHTTPPolicy{}
 	}
 	for _, plugin := range w.receiver.Plugins() {
-		oid4vciPlugin, ok := plugin.(*receiverOid4vci.Oid4vciReceiver)
-		if !ok {
-			continue
+		if receiver, ok := plugin.(*receiverOid4vci.Oid4vciReceiver); ok {
+			return oid4vciHTTPPolicy{client: receiver.HTTPClient, allowHTTP: receiver.AllowHTTP}
 		}
-		return oid4vciPlugin.HTTPClient, oid4vciPlugin.AllowHTTP
 	}
-	return nil, false
+	return oid4vciHTTPPolicy{}
 }
 
 // requireOfferedCredentialConfiguration resolves the selected Credential

@@ -560,6 +560,62 @@ func TestResolveCredentialOffer_ByReferenceEnforcesSizeLimit(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 }
 
+// offerResolutionWallet is a wallet whose OID4VCI receiver talks to server
+// with the given plain-HTTP allowance.
+func offerResolutionWallet(t *testing.T, server *httptest.Server, allowHTTP bool) *Wallet {
+	t.Helper()
+	plugin := &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: allowHTTP}
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
+	require.NoError(t, err)
+	w, err := NewWalletWithConfig(Config{CredStore: newProfileCredStore(t), Receiver: receiving})
+	require.NoError(t, err)
+	return w
+}
+
+// The plain-HTTP escape is the receiver's AllowHTTP alone: the process-wide
+// environment switch does not widen it for offer resolution.
+func TestResolveCredentialOffer_PlainHTTPFollowsReceiverPolicyOnly(t *testing.T) {
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential_issuer": "https://issuer.example"})
+	}))
+	defer server.Close()
+
+	w := offerResolutionWallet(t, server, false)
+	_, err := w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/offer"))
+	require.ErrorContains(t, err, "https")
+	require.Equal(t, 0, calls)
+}
+
+// A credential_offer_uri that redirects is refused rather than followed, and
+// §4.1.3 requires the offer to be served as application/json.
+func TestResolveCredentialOffer_RefusesRedirectAndWrongMediaType(t *testing.T) {
+	offerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/offer", http.StatusFound)
+		case "/text":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(`{"credential_issuer":"https://issuer.example"}`))
+		default:
+			offerCalls++
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential_issuer": "https://issuer.example"})
+		}
+	}))
+	defer server.Close()
+	w := offerResolutionWallet(t, server, true)
+
+	_, err := w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/redirect"))
+	require.ErrorContains(t, err, "status=302")
+	require.Equal(t, 0, offerCalls)
+
+	_, err = w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/text"))
+	require.ErrorContains(t, err, "application/json")
+}
+
 func TestReceiveOID4VCIFinalCredential_IssuerIdentifierMismatch(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.credentialIssuerOverride = "https://other.example"
