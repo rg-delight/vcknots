@@ -219,3 +219,55 @@ func TestSelectedDisclosuresIncludeMembersOfSelectedElements(t *testing.T) {
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{address, city}, got)
 }
+
+// An array may hold decoy digests (RFC 9901 Section 4.2.5). A selected array or
+// object discloses its real elements only, a decoy takes no index, and the
+// reconstructed view the DCQL matcher reads drops it, so both count the same
+// elements.
+func TestSelectedDisclosuresSkipArrayDecoys(t *testing.T) {
+	encode := func(parts ...any) (string, string) {
+		raw, err := json.Marshal(parts)
+		require.NoError(t, err)
+		encoded := base64.RawURLEncoding.EncodeToString(raw)
+		digest := sha256.Sum256([]byte(encoded))
+		return encoded, base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+	de, deHash := encode("s1", "DE")
+	fr, frHash := encode("s2", "FR")
+	other, otherHash := encode("s3", "other_claim", "x")
+	decoy := map[string]any{"...": "decoy-array-digest"}
+	payload := map[string]any{
+		"_sd":           []any{otherHash},
+		"nationalities": []any{decoy, map[string]any{"...": deHash}, decoy, map[string]any{"...": frHash}},
+		"address":       map[string]any{"countries": []any{map[string]any{"...": deHash}, decoy}},
+	}
+	disclosures := []string{de, fr, other}
+
+	for claim, want := range map[string][]string{
+		"nationalities":           {de, fr},
+		`["nationalities",null]`:  {de, fr},
+		`["nationalities",0]`:     {de},
+		`["nationalities",1]`:     {fr},
+		"address":                 {de},
+		`["address","countries"]`: {de},
+	} {
+		got, err := selectTopLevelDisclosures(payload, disclosures, "sha-256", []string{claim})
+		require.NoError(t, err, claim)
+		require.ElementsMatch(t, want, got, claim)
+	}
+	_, err := selectTopLevelDisclosures(payload, disclosures, "sha-256", []string{`["nationalities",2]`})
+	require.Error(t, err, "a decoy takes no index")
+
+	// A placeholder naming an object property disclosure is malformed.
+	malformed := map[string]any{"_sd": []any{otherHash}, "list": []any{map[string]any{"...": otherHash}}}
+	_, err = selectTopLevelDisclosures(malformed, disclosures, "sha-256", []string{"list"})
+	require.Error(t, err)
+
+	resolver, err := newSDJWTDisclosureResolver(disclosures, "sha-256")
+	require.NoError(t, err)
+	reconstructed, err := resolver.reconstruct(payload)
+	require.NoError(t, err)
+	object := reconstructed.(map[string]any)
+	require.Equal(t, []any{"DE", "FR"}, object["nationalities"])
+	require.Equal(t, []any{"DE"}, object["address"].(map[string]any)["countries"])
+}

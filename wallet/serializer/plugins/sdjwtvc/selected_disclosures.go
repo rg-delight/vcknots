@@ -130,15 +130,15 @@ func (r *sdjwtDisclosureResolver) selectPath(payload map[string]any, path []any,
 				if !ok {
 					continue
 				}
-				for _, item := range array {
-					resolved, disclosure, err := r.resolveArrayElement(item)
-					if err != nil {
-						return err
+				elements, err := r.arrayElements(array)
+				if err != nil {
+					return err
+				}
+				for _, element := range elements {
+					if element.disclosure != nil {
+						needed[element.disclosure.Digest] = true
 					}
-					if disclosure != nil {
-						needed[disclosure.Digest] = true
-					}
-					next = append(next, resolved)
+					next = append(next, element.value)
 				}
 			}
 		default:
@@ -151,17 +151,17 @@ func (r *sdjwtDisclosureResolver) selectPath(payload map[string]any, path []any,
 				if !ok {
 					continue
 				}
-				if index < 0 || index >= int64(len(array)) {
-					continue
-				}
-				resolved, disclosure, err := r.resolveArrayElement(array[index])
+				elements, err := r.arrayElements(array)
 				if err != nil {
 					return err
 				}
-				if disclosure != nil {
+				if index < 0 || index >= int64(len(elements)) {
+					continue
+				}
+				if disclosure := elements[index].disclosure; disclosure != nil {
 					needed[disclosure.Digest] = true
 				}
-				next = append(next, resolved)
+				next = append(next, elements[index].value)
 			}
 		}
 		if len(next) == 0 {
@@ -220,19 +220,19 @@ func (r *sdjwtDisclosureResolver) discloseMembers(value any, needed, walked map[
 			}
 		}
 	case []any:
-		for _, item := range node {
-			resolved, disclosure, err := r.resolveArrayElement(item)
-			if err != nil {
-				return err
-			}
-			if disclosure != nil {
+		elements, err := r.arrayElements(node)
+		if err != nil {
+			return err
+		}
+		for _, element := range elements {
+			if disclosure := element.disclosure; disclosure != nil {
 				if walked[disclosure.Digest] {
 					continue
 				}
 				walked[disclosure.Digest] = true
 				needed[disclosure.Digest] = true
 			}
-			if err := r.discloseMembers(resolved, needed, walked); err != nil {
+			if err := r.discloseMembers(element.value, needed, walked); err != nil {
 				return err
 			}
 		}
@@ -276,28 +276,46 @@ func (r *sdjwtDisclosureResolver) objectDisclosure(object map[string]any, name s
 	return found, nil
 }
 
-// resolveArrayElement resolves an array element that is committed by a
-// disclosure placeholder ({"...": "<digest>"}). Plain elements are returned
-// unchanged.
-func (r *sdjwtDisclosureResolver) resolveArrayElement(item any) (any, *credential.SDJwtDisclosure, error) {
-	object, ok := item.(map[string]any)
-	if !ok {
-		return item, nil, nil
+// arrayElement is one element of an array as the holder sees it: a plain
+// value, or the value of the array element disclosure its placeholder commits.
+type arrayElement struct {
+	value      any
+	disclosure *credential.SDJwtDisclosure
+}
+
+// arrayElements resolves the placeholders ({"...": "<digest>"}) of array and
+// drops the decoys, placeholders whose digest no disclosure matches
+// (RFC 9901 Section 4.2.5). Element indices are counted over the result, which
+// is also the array ReconstructClaimsObject returns. A placeholder whose digest
+// is not a string, or names an object property disclosure, is an error.
+func (r *sdjwtDisclosureResolver) arrayElements(array []any) ([]arrayElement, error) {
+	elements := make([]arrayElement, 0, len(array))
+	for _, item := range array {
+		object, ok := item.(map[string]any)
+		if !ok {
+			elements = append(elements, arrayElement{value: item})
+			continue
+		}
+		raw, exists := object["..."]
+		if !exists {
+			elements = append(elements, arrayElement{value: item})
+			continue
+		}
+		digest, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("array element placeholder must be a digest string")
+		}
+		disclosure, ok := r.byDigest[digest]
+		if !ok {
+			continue
+		}
+		if !disclosure.IsArrayElement {
+			return nil, fmt.Errorf("array element placeholder names an object property disclosure")
+		}
+		copy := disclosure
+		elements = append(elements, arrayElement{value: disclosure.Value, disclosure: &copy})
 	}
-	raw, exists := object["..."]
-	if !exists {
-		return item, nil, nil
-	}
-	digest, ok := raw.(string)
-	if !ok {
-		return nil, nil, fmt.Errorf("array element placeholder must be a digest string")
-	}
-	disclosure, ok := r.byDigest[digest]
-	if !ok || !disclosure.IsArrayElement {
-		return nil, nil, fmt.Errorf("unresolved array element disclosure")
-	}
-	copy := disclosure
-	return disclosure.Value, &copy, nil
+	return elements, nil
 }
 
 // decodeSelectedClaimPath turns a selected claim string into a claims path
@@ -358,9 +376,9 @@ func selectedPathIndex(value any) (int64, bool) {
 
 // ReconstructClaimsObject parses a combined SD-JWT VC credential and returns its
 // root JSON object with all disclosures applied, including nested selectively
-// disclosable object properties and array elements. It lets the DCQL layer
-// evaluate OID4VP 1.0 Section 7 claims path pointers over the decoded
-// credential.
+// disclosable object properties and array elements, with array decoys dropped.
+// It lets the DCQL layer evaluate OID4VP 1.0 Section 7 claims path pointers
+// over the decoded credential.
 func ReconstructClaimsObject(rawCredential string) (map[string]any, error) {
 	combined := ParseCombinedFormatForPresentation(rawCredential)
 	if combined.SDJWT == "" {
@@ -400,7 +418,7 @@ func ReconstructClaimsObject(rawCredential string) (map[string]any, error) {
 }
 
 // reconstruct materializes a payload value with every applicable disclosure
-// applied recursively.
+// applied recursively and array decoys dropped.
 func (r *sdjwtDisclosureResolver) reconstruct(node any) (any, error) {
 	switch value := node.(type) {
 	case map[string]any:
@@ -441,23 +459,13 @@ func (r *sdjwtDisclosureResolver) reconstruct(node any) (any, error) {
 		}
 		return object, nil
 	case []any:
-		array := make([]any, 0, len(value))
-		for _, item := range value {
-			if object, ok := item.(map[string]any); ok {
-				if rawDigest, exists := object["..."]; exists {
-					if digest, ok := rawDigest.(string); ok {
-						if disclosure, ok := r.byDigest[digest]; ok && disclosure.IsArrayElement {
-							reconstructed, err := r.reconstruct(disclosure.Value)
-							if err != nil {
-								return nil, err
-							}
-							array = append(array, reconstructed)
-							continue
-						}
-					}
-				}
-			}
-			reconstructed, err := r.reconstruct(item)
+		elements, err := r.arrayElements(value)
+		if err != nil {
+			return nil, err
+		}
+		array := make([]any, 0, len(elements))
+		for _, element := range elements {
+			reconstructed, err := r.reconstruct(element.value)
 			if err != nil {
 				return nil, err
 			}
