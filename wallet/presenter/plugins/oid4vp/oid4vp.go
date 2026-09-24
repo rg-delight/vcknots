@@ -45,7 +45,8 @@ type Oid4vpPresenter struct {
 	// SupportedTransactionDataTypes lists the transaction_data "type" values the
 	// wallet can process. A nil or empty list means the wallet supports no
 	// transaction_data type, so any request carrying transaction_data is
-	// rejected with invalid_transaction_data (OID4VP 1.0 §5.1, §8.4).
+	// rejected with invalid_transaction_data (OID4VP 1.0 §5.1, §8.4; Draft 24
+	// §5.1).
 	SupportedTransactionDataTypes []string
 	// PreRegisteredClients is the registry of Verifiers registered out of
 	// band, keyed by Client Identifier (OID4VP 1.0 §5.9.2). A Final request

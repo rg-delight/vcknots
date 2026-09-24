@@ -1095,6 +1095,8 @@ holder が候補から選ぶ wallet は `oid4vp.ResolveDCQLClaimSets` と `oid4v
 transaction data を運ぶのは Key Binding JWT 付きの `dc+sd-jwt` の提示だけです。
 参照される `dc+sd-jwt` の query は holder binding を要求していなければならず、他の形式に割り当てられた entry は何かを送る前に失敗します。
 各 entry は提示する Credential の 1 つに束縛され（§5.1）、ハッシュアルゴリズムは entry の `transaction_data_hashes_alg` から決まります（既定は `sha-256`）。
+Draft 24 の要求も同じ規則に従います。
+`credential_ids` は input descriptor（または Draft 24 の credential query）を指し、それぞれ SD-JWT VC（`vc+sd-jwt`）を受け付けなければなりません。
 
 ### 応答モードと暗号化
 

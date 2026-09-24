@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/google/uuid"
@@ -222,7 +223,22 @@ func buildDraft24DescriptorMap(count int, flavor credential.SupportedSerializati
 // serializeDraft24Presentation renders the Presentation Exchange vp_token.
 // Each SD-JWT VC gets its own presentation with a Key Binding JWT; every
 // other format is one presentation of all credentials under one key.
+//
+// Each transaction_data entry is carried by the one credential whose input
+// descriptors own it (Draft 24 Section 5.1), and only an SD-JWT VC Key Binding
+// JWT can carry it (Appendix A.4.5).
 func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentationRequest, p Presentation, credentials []resolvedCredential, flavor credential.SupportedSerializationFlavor) ([]byte, error) {
+	var presentedDescriptors []string
+	for _, selection := range p.Credentials {
+		presentedDescriptors = append(presentedDescriptors, selection.QueryIDs...)
+	}
+	transactionDataOwners, err := assignTransactionDataOwners(req.TransactionData, presentedDescriptors)
+	if err != nil {
+		return nil, err
+	}
+	if flavor != credential.SDJwtVC && len(req.TransactionData) > 0 {
+		return nil, fmt.Errorf("transaction_data requires an SD-JWT VC presentation, not %s (invalid_transaction_data)", flavor)
+	}
 	if flavor != credential.SDJwtVC {
 		key := credentials[0].key
 		saved := make([]*SavedCredential, len(credentials))
@@ -261,8 +277,14 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 				sdOpts.SelectedClaims = append([]string(nil), disclosed...)
 				sdOpts.LimitDisclosureToSelectedClaims = true
 			}
-			if len(req.TransactionData) > 0 {
-				sdOpts.TransactionData = req.TransactionData
+			var owned []string
+			for _, entry := range req.TransactionData {
+				if slices.Contains(p.Credentials[index].QueryIDs, transactionDataOwners[entry]) && !slices.Contains(owned, entry) {
+					owned = append(owned, entry)
+				}
+			}
+			if len(owned) > 0 {
+				sdOpts.TransactionData = owned
 				sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
 				if sdOpts.TransactionDataHashesAlg == "" {
 					sdOpts.TransactionDataHashesAlg = "sha-256"

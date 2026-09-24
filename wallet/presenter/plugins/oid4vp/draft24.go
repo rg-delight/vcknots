@@ -91,6 +91,7 @@ func (p *Oid4vpPresenter) newDraft24RequestBuilder(ctx context.Context) (*draft2
 	}
 	builder := newDraft24RequestBuilder()
 	p.configureCore(ctx, &builder.requestCore)
+	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
 	return builder, nil
 }
 

@@ -979,7 +979,7 @@ A wallet whose holder chooses among candidates uses `oid4vp.ResolveDCQLClaimSets
 
 ### `transaction_data`
 
-`Config.SupportedTransactionDataTypes` (or `Oid4vpPresenter.SupportedTransactionDataTypes` on an injected presenter) lists the `transaction_data` types the wallet processes; with an empty list every request carrying `transaction_data` is refused with `invalid_transaction_data`. Each entry must reference credential queries of the request. Only a `dc+sd-jwt` presentation with a Key Binding JWT carries transaction data: a referenced `dc+sd-jwt` query must require holder binding, and an entry assigned to another format fails before anything is sent. Each entry is bound to one presented credential (§5.1), and the hash algorithm comes from the entries' `transaction_data_hashes_alg` (`sha-256` by default).
+`Config.SupportedTransactionDataTypes` (or `Oid4vpPresenter.SupportedTransactionDataTypes` on an injected presenter) lists the `transaction_data` types the wallet processes; with an empty list every request carrying `transaction_data` is refused with `invalid_transaction_data`. Each entry must reference credential queries of the request. Only a `dc+sd-jwt` presentation with a Key Binding JWT carries transaction data: a referenced `dc+sd-jwt` query must require holder binding, and an entry assigned to another format fails before anything is sent. Each entry is bound to one presented credential (§5.1), and the hash algorithm comes from the entries' `transaction_data_hashes_alg` (`sha-256` by default). A Draft 24 request follows the same rules: `credential_ids` name input descriptors (or Draft 24 credential queries), and each must accept an SD-JWT VC (`vc+sd-jwt`).
 
 ### Response modes and encryption
 

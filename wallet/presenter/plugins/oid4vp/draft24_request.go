@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -15,6 +16,9 @@ import (
 // protocol profile, so HAIP never applies here.
 type draft24RequestBuilder struct {
 	requestCore
+	// supportedTransactionDataTypes lists the transaction_data types the
+	// wallet processes (Draft 24 Section 5.1).
+	supportedTransactionDataTypes []string
 }
 
 func newDraft24RequestBuilder() *draft24RequestBuilder {
@@ -296,19 +300,95 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "missing required parameters: %s", strings.Join(missing, ", "))
 	}
 
-	if td, exists := params["transaction_data"]; exists && td != nil {
-		switch v := td.(type) {
-		case []interface{}:
-			for _, item := range v {
-				if str, ok := item.(string); ok {
-					b.req.TransactionData = append(b.req.TransactionData, str)
-				}
-			}
-		case []string:
-			b.req.TransactionData = v
+	if td, exists := params["transaction_data"]; exists && td != nil && b.errValidation == nil {
+		entries, err := parseTransactionDataParam(td)
+		if err != nil {
+			b.errValidation = err
+			return
+		}
+		b.req.TransactionData = entries
+		if err := b.validateTransactionData(); err != nil {
+			b.errValidation = err
 		}
 	}
-	b.req.TransactionDataHashesAlg = getParam("transaction_data_hashes_alg", false)
+}
+
+// validateTransactionData applies the rules of the 1.0 path to Draft 24
+// transaction_data (Draft 24 Section 5.1): each credential_ids member names an
+// input descriptor or a credential query, and the credential it names must be
+// an SD-JWT VC, whose Key Binding JWT is the only place the hashes can go
+// (Draft 24 Appendix A.4.5). The descriptors of a definition passed by
+// reference are not known yet; the wallet checks them when it presents.
+func (b *draft24RequestBuilder) validateTransactionData() error {
+	check := func(int, string) error { return nil }
+	switch {
+	case b.req.DcqlQuery != nil:
+		queries := make(map[string]CredentialQuery, len(b.req.DcqlQuery.Credentials))
+		for _, query := range b.req.DcqlQuery.Credentials {
+			queries[query.ID] = query
+		}
+		check = func(i int, id string) error {
+			query, known := queries[id]
+			if !known {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
+			}
+			if !isDraft24SDJWTFormat(query.Format) {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a %s credential query, which cannot carry transaction data", i, query.Format)
+			}
+			return nil
+		}
+	case len(b.req.RawPresentationDefinition) > 0:
+		formats, err := draft24DescriptorFormats(b.req.RawPresentationDefinition)
+		if err != nil {
+			return newAuthorizationRequestError(InvalidRequestError, "invalid presentation_definition: %v", err)
+		}
+		check = func(i int, id string) error {
+			descriptorFormats, known := formats[id]
+			if !known {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown input descriptor", i)
+			}
+			if len(descriptorFormats) > 0 && !slices.ContainsFunc(descriptorFormats, isDraft24SDJWTFormat) {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an input descriptor whose formats %v cannot carry transaction data", i, descriptorFormats)
+			}
+			return nil
+		}
+	}
+	alg, err := validateTransactionData(b.req.TransactionData, b.supportedTransactionDataTypes, check)
+	if err != nil {
+		return err
+	}
+	b.req.TransactionDataHashesAlg = alg
+	return nil
+}
+
+// isDraft24SDJWTFormat reports whether format names an SD-JWT VC.
+func isDraft24SDJWTFormat(format string) bool {
+	return format == "vc+sd-jwt" || format == "dc+sd-jwt"
+}
+
+// draft24DescriptorFormats maps each input descriptor id of a Presentation
+// Definition to the formats it accepts: its own format member, else the
+// definition's, else none (any format).
+func draft24DescriptorFormats(raw json.RawMessage) (map[string][]string, error) {
+	var definition struct {
+		Format           map[string]json.RawMessage `json:"format"`
+		InputDescriptors []struct {
+			ID     string                     `json:"id"`
+			Format map[string]json.RawMessage `json:"format"`
+		} `json:"input_descriptors"`
+	}
+	if err := json.Unmarshal(raw, &definition); err != nil {
+		return nil, err
+	}
+	formats := make(map[string][]string, len(definition.InputDescriptors))
+	for _, descriptor := range definition.InputDescriptors {
+		accepted := descriptor.Format
+		if len(accepted) == 0 {
+			accepted = definition.Format
+		}
+		formats[descriptor.ID] = slices.Sorted(maps.Keys(accepted))
+	}
+	return formats, nil
 }
 
 // parseDraft24DcqlQuery decodes a Draft 24 dcql_query without the 1.0
