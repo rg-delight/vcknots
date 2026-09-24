@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"fmt"
+	"slices"
 	"time"
 
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -68,21 +70,19 @@ type OID4VCIDraft13ReceiveRequest struct {
 	StoreCredential bool
 }
 
-// OID4VCIDraft13Authorization is the state a caller holds between the two
-// halves of the Draft 13 Section 3.4 Authorization Code Flow:
-// BeginOID4VCIDraft13Authorization produces it, the caller sends the holder to
-// AuthorizationURL in a browser, and ResumeOID4VCIDraft13Authorization consumes
-// it together with the redirect the browser came back with.
+// OID4VCIDraft13Authorization is the state a caller holds between
+// BeginOID4VCIDraft13Authorization and ResumeOID4VCIDraft13Authorization. It is
+// JSON-serialisable so it survives a process restart.
 //
-// Every member is JSON-serialisable so the state survives a process restart,
-// which is what lets a wallet whose authorization leg runs in someone else's
-// browser keep no session in memory. It carries the PKCE verifier, so a caller
-// stores it the way it stores a secret.
+// The state is confidential: CodeVerifier is the PKCE verifier that redeems the
+// authorization code. Keep it where only the wallet can read it, protect it
+// against modification, and resume from it once. Resuming re-fetches the
+// issuer and authorization server metadata; no endpoint is taken from the
+// state.
 type OID4VCIDraft13Authorization struct {
 	// AuthorizationURL is the authorization request to open in the browser.
 	AuthorizationURL string `json:"authorization_url"`
-	// State is the RFC 6749 Section 4.1.1 state the redirect must echo. It is
-	// not a secret: the redirect carries it back in the clear.
+	// State is the RFC 6749 Section 4.1.1 state the redirect must echo.
 	State string `json:"state"`
 	// CodeVerifier is the RFC 7636 PKCE verifier for the token request.
 	CodeVerifier string `json:"code_verifier"`
@@ -96,14 +96,46 @@ type OID4VCIDraft13Authorization struct {
 	RequestURI string `json:"request_uri,omitempty"`
 	// ExpiresAt is the RFC 9126 Section 2.2 request_uri expiry measured from
 	// the PAR response; the zero value means the issuer stated no deadline.
-	ExpiresAt                   time.Time                                  `json:"expires_at"`
-	IssuerMetadata              *receiverTypes.CredentialIssuerMetadata    `json:"issuer_metadata"`
-	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata"`
-	CredentialConfigurationID   string                                     `json:"credential_configuration_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	// CredentialIssuer is the Credential Issuer Identifier of the issuance.
+	CredentialIssuer string `json:"credential_issuer"`
+	// AuthorizationServer is the RFC 8414 issuer identifier of the
+	// authorization server the request was sent to.
+	AuthorizationServer       string `json:"authorization_server"`
+	CredentialConfigurationID string `json:"credential_configuration_id"`
 	// AuthorizationDetailsRequested records whether the authorization request
 	// used authorization_details rather than scope, which decides how strictly
 	// the Token Response is read (Section 6.2).
 	AuthorizationDetailsRequested bool `json:"authorization_details_requested"`
+}
+
+// requireFor checks that the state is complete and belongs to req.
+func (a *OID4VCIDraft13Authorization) requireFor(req OID4VCIDraft13ReceiveRequest) error {
+	for name, value := range map[string]string{
+		"state":                       a.State,
+		"code_verifier":               a.CodeVerifier,
+		"redirect_uri":                a.RedirectURI,
+		"client_id":                   a.ClientID,
+		"credential_issuer":           a.CredentialIssuer,
+		"authorization_server":        a.AuthorizationServer,
+		"credential_configuration_id": a.CredentialConfigurationID,
+	} {
+		if value == "" {
+			return fmt.Errorf("authorization state is missing %s: %w", name, ErrIssuanceStateInvalid)
+		}
+	}
+	if (req.ClientID != "" && req.ClientID != a.ClientID) || (req.RedirectURI != "" && req.RedirectURI != a.RedirectURI) {
+		return fmt.Errorf("the request names another client_id or redirect_uri than the authorization state: %w", ErrIssuanceStateInvalid)
+	}
+	offer := req.CredentialOffer
+	if offer == nil {
+		return ErrDraft13OfferMissing
+	}
+	if offer.CredentialIssuer == nil || offer.CredentialIssuer.String() != a.CredentialIssuer ||
+		!slices.Contains(offer.CredentialConfigurationIDs, a.CredentialConfigurationID) {
+		return fmt.Errorf("the credential offer names another issuance than the authorization state: %w", ErrIssuanceStateInvalid)
+	}
+	return nil
 }
 
 // RequestURIExpired reports whether the RFC 9126 Section 2.2 request_uri

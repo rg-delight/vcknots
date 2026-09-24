@@ -107,21 +107,21 @@ func (w *Wallet) discoverDraft13Metadata(
 	transport OID4VCIDraft13Transport,
 	req OID4VCIDraft13ReceiveRequest,
 	grant *CredentialOfferGrant,
-) (*receiverTypes.CredentialIssuerMetadata, *receiverTypes.AuthorizationServerMetadata, error) {
+) (*oid4vciDiscovery, error) {
 	if err := w.validateDraft13CredentialIssuer(req.CredentialOffer.CredentialIssuer); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	discovery, err := discoverOID4VCIIssuer(transport, req.Type, req.CredentialOffer.CredentialIssuer.String(), req.CachedIssuerMetadata, offeredAuthorizationServer(grant))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if err := w.validateCredentialConfigurationIDs(req.CredentialOffer, discovery.issuerMetadata); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if discovery.authorizationServerMetadata.TokenEndpoint == nil {
-		return nil, nil, ErrDraft13TokenEndpointMissing
+		return nil, ErrDraft13TokenEndpointMissing
 	}
-	return discovery.issuerMetadata, discovery.authorizationServerMetadata, nil
+	return discovery, nil
 }
 
 // validateDraft13CredentialIssuer applies the Section 11.2.1 rule that the
@@ -201,10 +201,11 @@ func (w *Wallet) ReceiveOID4VCIDraft13Credential(ctx context.Context, req OID4VC
 	if err != nil {
 		return nil, err
 	}
-	issuerMetadata, authorizationServerMetadata, err := w.discoverDraft13Metadata(transport, req, grant)
+	discovery, err := w.discoverDraft13Metadata(transport, req, grant)
 	if err != nil {
 		return nil, err
 	}
+	issuerMetadata, authorizationServerMetadata := discovery.issuerMetadata, discovery.authorizationServerMetadata
 	configurationID, configuration, err := selectDraft13CredentialConfiguration(req, issuerMetadata)
 	if err != nil {
 		return nil, err
