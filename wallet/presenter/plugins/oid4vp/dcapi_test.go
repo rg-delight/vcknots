@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -44,8 +45,8 @@ func signedDCAPIClaims(f *requestObjectFixture) map[string]any {
 
 func TestParseDCAPIRequestUnsigned(t *testing.T) {
 	p := &Oid4vpPresenter{}
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
 			"response_type": "vp_token", "response_mode": "dc_api", "nonce": "n-1", "dcql_query": dcapiDCQL(),
 		})},
 		Origin: "https://verifier.example",
@@ -61,8 +62,8 @@ func TestParseDCAPIRequestUnsignedIgnoresClientIDAndOrigins(t *testing.T) {
 	// A.2: the Wallet MUST ignore client_id and expected_origins in unsigned
 	// requests and use the platform Origin as the effective identifier.
 	p := &Oid4vpPresenter{}
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
 			"client_id": "x509_hash:attacker", "expected_origins": []any{"https://attacker.example"},
 			"response_type": "vp_token", "response_mode": "dc_api", "nonce": "n-1", "dcql_query": dcapiDCQL(),
 		})},
@@ -75,8 +76,8 @@ func TestParseDCAPIRequestUnsignedIgnoresClientIDAndOrigins(t *testing.T) {
 
 func TestParseDCAPIRequestRejectsResponseURI(t *testing.T) {
 	p := &Oid4vpPresenter{}
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
 			"response_type": "vp_token", "response_mode": "dc_api", "nonce": "n-1",
 			"response_uri": "https://verifier.example/response", "dcql_query": dcapiDCQL(),
 		})},
@@ -90,8 +91,8 @@ func TestParseDCAPIRequestRejectsResponseURI(t *testing.T) {
 func TestParseDCAPIRequestSigned(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	obj := f.sign(t, signedDCAPIClaims(f), nil)
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://verifier.example",
 	}
 	request, err := parseDCAPIForTest(f.presenter(), invocation)
@@ -107,8 +108,8 @@ func TestParseDCAPIRequestSignedWrongExpectedOrigins(t *testing.T) {
 	claims := signedDCAPIClaims(f)
 	claims["expected_origins"] = []any{"https://attacker.example"}
 	obj := f.sign(t, claims, nil)
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://verifier.example",
 	}
 	_, err := parseDCAPIForTest(f.presenter(), invocation)
@@ -123,8 +124,8 @@ func TestParseDCAPIRequestOriginComesFromInvocation(t *testing.T) {
 	claims := signedDCAPIClaims(f)
 	claims["expected_origins"] = []any{"https://verifier.example"}
 	obj := f.sign(t, claims, nil)
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://attacker.example",
 	}
 	_, err := parseDCAPIForTest(f.presenter(), invocation)
@@ -167,8 +168,8 @@ func TestParseDCAPIRequestMultiSigned(t *testing.T) {
 			map[string]any{"protected": trustedParts[0], "signature": trustedParts[2]},
 		},
 	}
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": multi})},
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": multi})},
 		Origin:  "https://verifier.example",
 	}
 	request, err := parseDCAPIForTest(trusted.presenter(), invocation)
@@ -225,8 +226,8 @@ func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			recipient := newDCAPIRecipient(t)
 			p := &Oid4vpPresenter{Profile: tc.profile}
-			invocation := DCAPIInvocation{
-				Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, tc.encValues)},
+			invocation := types.DCAPIInvocation{
+				Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, tc.encValues)},
 				Origin:  "https://verifier.example",
 			}
 			request, err := p.ParseDCAPIRequest(context.Background(), invocation)
@@ -254,8 +255,8 @@ func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 	t.Run("unsigned", func(t *testing.T) {
 		p := &Oid4vpPresenter{Profile: profile.HAIP}
-		invocation := DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, newDCAPIRecipient(t), []string{"A128GCM", "A256GCM"})},
+		invocation := types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, newDCAPIRecipient(t), []string{"A128GCM", "A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
 		_, err := parseDCAPIForTest(p, invocation)
@@ -265,8 +266,8 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 	t.Run("signed", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		obj := f.sign(t, signedDCAPIClaims(f), nil)
-		invocation := DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
+		invocation := types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 			Origin:  "https://verifier.example",
 		}
 		p := f.presenterWithHAIP()
@@ -292,8 +293,8 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 				map[string]any{"protected": trustedParts[0], "signature": trustedParts[2]},
 			},
 		}
-		invocation := DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": multi})},
+		invocation := types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": multi})},
 			Origin:  "https://verifier.example",
 		}
 		p := trusted.presenterWithHAIP()
@@ -304,8 +305,8 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 
 func TestParseDCAPIRequestHAIPRejectsDirectPost(t *testing.T) {
 	p := (&Oid4vpPresenter{Profile: profile.HAIP})
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
 			"response_type": "vp_token", "response_mode": "direct_post.jwt", "nonce": "n-1", "dcql_query": dcapiDCQL(),
 		})},
 		Origin: "https://verifier.example",
@@ -324,8 +325,8 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	pool := x509.NewCertPool()
 	pool.AddCert(f.root)
 	options := RequestObjectValidationOptions{RootCAs: pool, Now: func() time.Time { return f.now }}
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{
 			"request": f.signWithRoot(t, signedDCAPIClaims(f), true),
 		})},
 		Origin: "https://verifier.example",
@@ -502,8 +503,8 @@ func TestParseDCAPIRequestRequestObjectSentinels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newRequestObjectFixture(t)
-			invocation := DCAPIInvocation{
-				Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": tt.object(t, f)})},
+			invocation := types.DCAPIInvocation{
+				Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": tt.object(t, f)})},
 				Origin:  "https://verifier.example",
 			}
 			_, err := parseDCAPIForTest(f.presenter(), invocation)
@@ -518,9 +519,9 @@ func TestParseDCAPIRequestRequestObjectSentinels(t *testing.T) {
 // delivery: the response mode must be a DC API mode (OID4VP 1.0 Appendix A.2),
 // and a dc_api.jwt request must leave the Wallet a key to encrypt to.
 func TestParseDCAPIRequestAdmission(t *testing.T) {
-	unsigned := func(data map[string]any) DCAPIInvocation {
-		return DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, data)},
+	unsigned := func(data map[string]any) types.DCAPIInvocation {
+		return types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, data)},
 			Origin:  "https://verifier.example",
 		}
 	}
@@ -544,8 +545,8 @@ func TestParseDCAPIRequestAdmission(t *testing.T) {
 
 	t.Run("HAIP requires both content encryptions on dc_api.jwt too", func(t *testing.T) {
 		recipient := newDCAPIRecipient(t)
-		invocation := DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
+		invocation := types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
 		_, err := parseDCAPIForTest((&Oid4vpPresenter{Profile: profile.HAIP}), invocation)

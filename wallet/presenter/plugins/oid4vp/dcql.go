@@ -455,11 +455,6 @@ func validateDCQLSetOptions(raw any, name string, ids map[string]bool, allowEmpt
 	return nil
 }
 
-// Compatibility names share the upstream DCQL model.
-type DCQLQuery = DcqlQuery
-type DCQLCredentialQuery = CredentialQuery
-type DCQLCredentialSet = CredentialSetQuery
-
 // DCQLClaimQuery preserves the DCQL claims path pointer. A path component is a
 // string (object key), null (all array elements) or a non-negative integer
 // (array index), per OID4VP 1.0 Section 7.

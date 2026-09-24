@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 // publicEncryptionJWK is the fixture response encryption key as a JSON member
@@ -191,8 +192,8 @@ func TestClientMetadataJWKKeyIDsOnDCAPIRequests(t *testing.T) {
 		"response_type": "vp_token", "response_mode": "dc_api", "nonce": "n-1", "dcql_query": dcapiDCQL(),
 		"client_metadata": clientMetadataWithKeys([]any{publicEncryptionJWK(t, "")}),
 	})
-	invocation := DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
+	invocation := types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
 		Origin:  "https://verifier.example",
 	}
 

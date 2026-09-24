@@ -31,7 +31,7 @@ func parseDraft24RequestObjectForTest(p *Oid4vpPresenter, requestObject, clientI
 	return admittedRequest(p.ParseDraft24RequestObject(context.Background(), requestObject, types.RequestObjectSource{ClientID: clientID}))
 }
 
-func parseDCAPIForTest(p *Oid4vpPresenter, invocation DCAPIInvocation) (*CredentialPresentationRequest, error) {
+func parseDCAPIForTest(p *Oid4vpPresenter, invocation types.DCAPIInvocation) (*CredentialPresentationRequest, error) {
 	return admittedRequest(p.ParseDCAPIRequest(context.Background(), invocation))
 }
 

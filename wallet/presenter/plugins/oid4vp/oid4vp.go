@@ -86,12 +86,6 @@ func (p *Oid4vpPresenter) ProtocolProfile() profile.Profile {
 	return normalized
 }
 
-// SetSupportedTransactionDataTypes is used by the wallet root to propagate its
-// supported transaction_data types to the default presenter plugin.
-func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(values []string) {
-	p.SupportedTransactionDataTypes = values
-}
-
 var (
 	_ types.RequestParser      = (*Oid4vpPresenter)(nil)
 	_ types.DCAPIRequestParser = (*Oid4vpPresenter)(nil)

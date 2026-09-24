@@ -70,13 +70,6 @@ type PresentationExchangeResponder interface {
 	SubmitPresentationExchangeResponse(ctx context.Context, req AdmittedRequest, vpToken []byte, submission PresentationSubmission) (*SubmitResult, error)
 }
 
-// TransactionDataConfigurer is implemented by plugins that accept OpenID4VP
-// 1.0 Section 8.4 transaction_data; types lists the type values the wallet
-// can process.
-type TransactionDataConfigurer interface {
-	SetSupportedTransactionDataTypes(types []string)
-}
-
 // SubmitResult is the outcome of answering an admitted request.
 type SubmitResult struct {
 	// RedirectURI is the redirect_uri the verifier returned, if any.

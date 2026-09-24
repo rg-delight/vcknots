@@ -435,7 +435,7 @@ func TestEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 
 // dcapiUnsignedInvocation builds an unsigned Digital Credentials API invocation
 // with the given Response Mode (OID4VP 1.0 Appendix A.3.1).
-func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation {
+func dcapiUnsignedInvocation(t *testing.T, responseMode string) types.DCAPIInvocation {
 	t.Helper()
 	params := map[string]any{
 		"response_type": "vp_token", "response_mode": responseMode, "nonce": "n-1",
@@ -451,8 +451,8 @@ func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return DCAPIInvocation{
-		Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
+	return types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: data},
 		Origin:  "https://verifier.example",
 	}
 }

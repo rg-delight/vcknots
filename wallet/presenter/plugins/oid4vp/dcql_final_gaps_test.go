@@ -76,7 +76,7 @@ func TestParseDcqlTrustedAuthorities(t *testing.T) {
 }
 
 func TestResolveDCQLTrustedAuthoritiesAKI(t *testing.T) {
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	query := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt",
 		TrustedAuthorities: []TrustedAuthority{{Type: "aki", Values: []string{"matching"}}},
 	}}}
@@ -98,7 +98,7 @@ func TestResolveDCQLTrustedAuthoritiesAKI(t *testing.T) {
 	// Section 6.1.1: a credential matches only by matching a value of one of
 	// the listed types. A type this wallet cannot evaluate matches nothing, so
 	// it cannot widen the query.
-	unknown := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	unknown := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt",
 		TrustedAuthorities: []TrustedAuthority{{Type: "etsi_tl", Values: []string{"x"}}},
 	}}}
@@ -106,7 +106,7 @@ func TestResolveDCQLTrustedAuthoritiesAKI(t *testing.T) {
 	require.ErrorIs(t, err, ErrDCQLSelectionUnsatisfied)
 	require.Empty(t, selected)
 
-	mixed := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	mixed := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt",
 		TrustedAuthorities: []TrustedAuthority{
 			{Type: "openid_federation", Values: []string{"https://federation.example"}},
@@ -123,7 +123,7 @@ func TestResolveDCQLTrustedAuthoritiesAKI(t *testing.T) {
 func TestResolveDCQLHolderBindingSelection(t *testing.T) {
 	bound := true
 	unbound := false
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	query := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 	}}}
 	unboundCandidate := DCQLCredentialCandidate{ID: "unbound", Format: "dc+sd-jwt", HolderBound: &unbound}
@@ -139,7 +139,7 @@ func TestResolveDCQLHolderBindingSelection(t *testing.T) {
 	require.Empty(t, selected)
 
 	waived := false
-	waivedQuery := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	waivedQuery := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 		RequireCryptographicHolderBinding: &waived,
 	}}}
@@ -150,7 +150,7 @@ func TestResolveDCQLHolderBindingSelection(t *testing.T) {
 
 // Gap 3: OID4VP 1.0 Section 6.1 multiple / Section 8.1.
 func TestResolveDCQLMultipleReturnsAllMatches(t *testing.T) {
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	query := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 		Claims: []DCQLClaimQuery{{Path: []any{"given_name"}}},
 	}}}
@@ -182,7 +182,7 @@ func TestResolveDCQLNestedClaimPaths(t *testing.T) {
 			"nationalities": []any{"British", "Betelgeusian"},
 		},
 	}
-	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	query := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 		Claims: []DCQLClaimQuery{
 			{Path: []any{"address", "postal_code"}},
@@ -200,7 +200,7 @@ func TestResolveDCQLNestedClaimPaths(t *testing.T) {
 	}, selected[0].Claims)
 
 	// Values apply to the selected nested element.
-	valuesQuery := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	valuesQuery := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 		Claims: []DCQLClaimQuery{{Path: []any{"address", "postal_code"}, Values: []any{"99999"}}},
 	}}}
@@ -209,7 +209,7 @@ func TestResolveDCQLNestedClaimPaths(t *testing.T) {
 	require.Empty(t, selected)
 
 	// A path that selects no element is unsatisfied.
-	missing := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+	missing := &DcqlQuery{Credentials: []CredentialQuery{{
 		ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{},
 		Claims: []DCQLClaimQuery{{Path: []any{"address", "missing"}}},
 	}}}

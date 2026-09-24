@@ -271,7 +271,7 @@ func (p *Oid4vpPresenter) SubmitErrorResponse(ctx context.Context, req types.Adm
 		return nil, err
 	}
 	if handle.isDCAPI() {
-		return &types.SubmitResult{DCAPIResponse: &DCAPIResponse{
+		return &types.SubmitResult{DCAPIResponse: &types.DCAPIResponse{
 			Protocol: handle.req.DCAPIProtocol,
 			Data:     map[string]any{"error": code},
 		}}, nil

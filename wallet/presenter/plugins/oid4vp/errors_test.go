@@ -295,5 +295,5 @@ func TestSubmitErrorResponseOverDCAPI(t *testing.T) {
 	require.NoError(t, err)
 	result, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "user declined")
 	require.NoError(t, err)
-	require.Equal(t, &DCAPIResponse{Protocol: DCAPIProtocolUnsigned, Data: map[string]any{"error": "access_denied"}}, result.DCAPIResponse)
+	require.Equal(t, &types.DCAPIResponse{Protocol: DCAPIProtocolUnsigned, Data: map[string]any{"error": "access_denied"}}, result.DCAPIResponse)
 }

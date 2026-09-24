@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
+	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 func newDCAPIVerifierKey(t *testing.T) *ecdsa.PrivateKey {
@@ -44,10 +45,10 @@ func dcapiWalletRequestData(t *testing.T, responseMode string, recipient *ecdsa.
 	return raw
 }
 
-func invokeDCAPI(t *testing.T, fixture sdjwtPresentationFixture, responseMode string, recipient *ecdsa.PrivateKey, encValues []string) *oid4vp.DCAPIResponse {
+func invokeDCAPI(t *testing.T, fixture sdjwtPresentationFixture, responseMode string, recipient *ecdsa.PrivateKey, encValues []string) *presenterTypes.DCAPIResponse {
 	t.Helper()
-	invocation := oid4vp.DCAPIInvocation{
-		Request: oid4vp.DCAPIRequest{
+	invocation := presenterTypes.DCAPIInvocation{
+		Request: presenterTypes.DCAPIRequest{
 			Protocol: oid4vp.DCAPIProtocolUnsigned,
 			Data:     dcapiWalletRequestData(t, responseMode, recipient, encValues),
 		},

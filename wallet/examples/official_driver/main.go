@@ -30,6 +30,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
+	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
@@ -640,8 +641,8 @@ func run(config configuration, request operation) (any, error) {
 		if request.Origin == "" {
 			return nil, fmt.Errorf("present-dcapi requires origin")
 		}
-		invocation := oid4vp.DCAPIInvocation{
-			Request: oid4vp.DCAPIRequest{
+		invocation := presenterTypes.DCAPIInvocation{
+			Request: presenterTypes.DCAPIRequest{
 				Protocol: request.DCAPIRequest.Protocol,
 				Data:     request.DCAPIRequest.Data,
 			},

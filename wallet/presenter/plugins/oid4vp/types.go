@@ -7,7 +7,6 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 // PresentationDefinition is used only by the explicit Draft24 entrypoint.
@@ -56,16 +55,6 @@ const (
 	DCAPIProtocolSigned      = "openid4vp-v1-signed"
 	DCAPIProtocolMultiSigned = "openid4vp-v1-multisigned"
 )
-
-// The DC API value types live in the presenter types package; see
-// types.DCAPIRequest, types.DCAPIInvocation and types.DCAPIResponse.
-type (
-	DCAPIRequest    = types.DCAPIRequest
-	DCAPIInvocation = types.DCAPIInvocation
-	DCAPIResponse   = types.DCAPIResponse
-)
-
-var _ types.TransactionDataConfigurer = (*Oid4vpPresenter)(nil)
 
 // OAuthAuthorizationResponse represents a OAuth 2.0 Authorization Response
 // These fields are defined in RFC6749.

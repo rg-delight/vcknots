@@ -373,7 +373,7 @@ func TestWallet_SubmitHandlesTransactionData(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
-	fixturePresenter(t, fixture.wallet).SetSupportedTransactionDataTypes([]string{"example"})
+	fixturePresenter(t, fixture.wallet).SupportedTransactionDataTypes = []string{"example"}
 
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -486,7 +486,7 @@ func transactionDataFixture(t *testing.T) sdjwtPresentationFixture {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
-	fixturePresenter(t, fixture.wallet).SetSupportedTransactionDataTypes([]string{"example"})
+	fixturePresenter(t, fixture.wallet).SupportedTransactionDataTypes = []string{"example"}
 	return fixture
 }
 
