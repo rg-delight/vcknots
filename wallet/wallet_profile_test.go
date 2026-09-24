@@ -74,14 +74,14 @@ func TestNewWalletWithConfig_ProfilePropagation(t *testing.T) {
 		presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenterTypes.Oid4vp, &oid4vp.Oid4vpPresenter{Profile: profile.Final}))
 		require.NoError(t, err)
 		_, err = NewWalletWithConfig(Config{Profile: profile.HAIP, CredStore: newProfileCredStore(t), Presenter: presenting})
-		require.ErrorContains(t, err, "does not match wallet profile")
+		require.ErrorIs(t, err, ErrProfileMismatch)
 	})
 
 	t.Run("rejects a mismatched injected receiver plugin", func(t *testing.T) {
 		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.Final}))
 		require.NoError(t, err)
 		_, err = NewWalletWithConfig(Config{Profile: profile.HAIP, CredStore: newProfileCredStore(t), Receiver: receiving})
-		require.ErrorContains(t, err, "does not match wallet profile")
+		require.ErrorIs(t, err, ErrProfileMismatch)
 	})
 
 	t.Run("accepts matching injected plugins", func(t *testing.T) {
@@ -102,7 +102,7 @@ func TestNewWalletWithConfig_ProfilePropagation(t *testing.T) {
 
 	t.Run("unknown profile is rejected", func(t *testing.T) {
 		_, err := NewWalletWithConfig(Config{Profile: profile.Profile("bogus"), CredStore: newProfileCredStore(t)})
-		require.ErrorContains(t, err, "unknown protocol profile")
+		require.ErrorIs(t, err, profile.ErrUnknownProfile)
 	})
 }
 
