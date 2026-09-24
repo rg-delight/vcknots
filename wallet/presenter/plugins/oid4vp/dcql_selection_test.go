@@ -42,7 +42,7 @@ func TestResolveSatisfiableDCQLCredentials(t *testing.T) {
 	if selection.QueryID != "pid" || selection.CandidateID != "wallet-credential-1" {
 		t.Fatalf("selection IDs = %#v", selection)
 	}
-	if got := selection.RequestedClaims; len(got) != 2 || got[0] != "given_name" || got[1] != "family_name" {
+	if got := selection.Claims; len(got) != 2 || got[0] != "given_name" || got[1] != "family_name" {
 		t.Fatalf("requested claims = %#v", got)
 	}
 }
@@ -128,7 +128,7 @@ func TestResolveDCQLClaimSetPreference(t *testing.T) {
 			if err != nil || len(selected) != 1 {
 				t.Fatalf("selection = %#v, %v", selected, err)
 			}
-			if selected[0].CandidateID != tc.wantID || !reflect.DeepEqual(selected[0].RequestedClaims, []string{tc.wantClaim}) {
+			if selected[0].CandidateID != tc.wantID || !reflect.DeepEqual(selected[0].Claims, []string{tc.wantClaim}) {
 				t.Fatalf("selection = %#v, want %s / %s", selected, tc.wantID, tc.wantClaim)
 			}
 		})
@@ -168,8 +168,8 @@ func TestResolveDCQLEmptyClaimSetFallback(t *testing.T) {
 				if err != nil || len(selected) != 1 {
 					t.Fatalf("claim set selection = %#v, %v", selected, err)
 				}
-				if !reflect.DeepEqual(selected[0].RequestedClaims, wantClaims) {
-					t.Fatalf("selected claims = %#v, want %#v", selected[0].RequestedClaims, wantClaims)
+				if !reflect.DeepEqual(selected[0].Claims, wantClaims) {
+					t.Fatalf("selected claims = %#v, want %#v", selected[0].Claims, wantClaims)
 				}
 			})
 		}
@@ -289,7 +289,7 @@ func TestResolveDCQLNestedClaimDoesNotBecomeRootClaim(t *testing.T) {
 func TestResolveDCQLRepeatedClaimPathDisclosesOnce(t *testing.T) {
 	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}}, {Path: []any{"name"}}}}}}
 	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"name"}}})
-	if err != nil || len(selected) != 1 || !reflect.DeepEqual(selected[0].RequestedClaims, []string{"name"}) {
+	if err != nil || len(selected) != 1 || !reflect.DeepEqual(selected[0].Claims, []string{"name"}) {
 		t.Fatalf("duplicate claim paths were not deduplicated: %#v, %v", selected, err)
 	}
 }
@@ -306,11 +306,11 @@ const dcqlSelectionQueryJSON = `{"credentials":[` +
 	`{"id":"email","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:email"]},"claims":[{"path":["email"]}]}],` +
 	`"credential_sets":[{"options":[["pid","addr"],["pid"]]},{"options":[["addr"]],"required":false}]}`
 
-// TestValidateDCQLCredentialSelections covers the decision OID4VP 1.0 Sections
+// TestValidateDCQLMatches covers the decision OID4VP 1.0 Sections
 // 6.2 and 6.3 leave to the Wallet and this library leaves to the Holder: which
 // claim set to disclose and which credential_set option to answer. The library
 // accepts any choice the request itself accepts, and nothing else.
-func TestValidateDCQLCredentialSelections(t *testing.T) {
+func TestValidateDCQLMatches(t *testing.T) {
 	query, err := parseDcqlQuery(dcqlSelectionQueryJSON)
 	if err != nil {
 		t.Fatal(err)
@@ -325,51 +325,48 @@ func TestValidateDCQLCredentialSelections(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name            string
-		selections      []DCQLCredentialSelection
+		selections      []DCQLMatch
 		wantUnsatisfied bool
 	}{
-		{name: "holder picks the narrower claim set", selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", Format: "dc+sd-jwt", VCT: "urn:test:pid", RequestedClaims: []string{"family_name"}},
+		{name: "holder picks the narrower claim set", selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-1", Claims: []string{"family_name"}},
 		}},
-		{name: "holder picks the wider claim set in any order", selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", RequestedClaims: []string{"family_name", "given_name"}},
+		{name: "holder picks the wider claim set in any order", selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-1", Claims: []string{"family_name", "given_name"}},
 		}},
-		{name: "holder answers the wider credential_set option", selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", RequestedClaims: []string{"family_name"}},
-			{QueryID: "addr", CandidateID: "addr-1", RequestedClaims: []string{"street_address"}},
+		{name: "holder answers the wider credential_set option", selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-1", Claims: []string{"family_name"}},
+			{QueryID: "addr", CandidateID: "addr-1", Claims: []string{"street_address"}},
 		}},
-		{name: "claims outside every claim set", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", RequestedClaims: []string{"given_name"}},
+		{name: "claims outside every claim set", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-1", Claims: []string{"given_name"}},
 		}},
-		{name: "credential query the request does not contain", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "phone", CandidateID: "pid-1", RequestedClaims: []string{"family_name"}},
+		{name: "credential query the request does not contain", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "phone", CandidateID: "pid-1", Claims: []string{"family_name"}},
 		}},
-		{name: "credential the wallet cannot present", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "not-stored", RequestedClaims: []string{"family_name"}},
+		{name: "credential the wallet cannot present", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "not-stored", Claims: []string{"family_name"}},
 		}},
-		{name: "vct the credential query does not accept", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "addr-1", RequestedClaims: []string{"family_name"}},
+		{name: "vct the credential query does not accept", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "addr-1", Claims: []string{"family_name"}},
 		}},
-		{name: "format the credential query does not request", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-jwt", RequestedClaims: []string{"family_name"}},
+		{name: "format the credential query does not request", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-jwt", Claims: []string{"family_name"}},
 		}},
-		{name: "credential without the required holder binding", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-unbound", RequestedClaims: []string{"family_name"}},
+		{name: "credential without the required holder binding", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-unbound", Claims: []string{"family_name"}},
 		}},
-		{name: "selection describes a different credential", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", VCT: "urn:test:other", RequestedClaims: []string{"family_name"}},
+		{name: "no option of the required credential_set is answered", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "addr", CandidateID: "addr-1", Claims: []string{"street_address"}},
 		}},
-		{name: "no option of the required credential_set is answered", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "addr", CandidateID: "addr-1", RequestedClaims: []string{"street_address"}},
-		}},
-		{name: "credential query outside every answered option", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "pid", CandidateID: "pid-1", RequestedClaims: []string{"family_name"}},
-			{QueryID: "email", CandidateID: "email-1", RequestedClaims: []string{"email"}},
+		{name: "credential query outside every answered option", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "pid", CandidateID: "pid-1", Claims: []string{"family_name"}},
+			{QueryID: "email", CandidateID: "email-1", Claims: []string{"email"}},
 		}},
 		{name: "selecting nothing leaves the required credential_set unanswered", wantUnsatisfied: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateDCQLCredentialSelections(query, candidates, tc.selections)
+			err := ValidateDCQLMatches(query, candidates, tc.selections)
 			if tc.wantUnsatisfied {
 				if !errors.Is(err, ErrDCQLSelectionUnsatisfied) {
 					t.Fatalf("error = %v, want ErrDCQLSelectionUnsatisfied", err)
@@ -377,17 +374,17 @@ func TestValidateDCQLCredentialSelections(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("ValidateDCQLCredentialSelections() error = %v", err)
+				t.Fatalf("ValidateDCQLMatches() error = %v", err)
 			}
 		})
 	}
 }
 
-// TestValidateDCQLCredentialSelections_PerQueryConstraints covers the
+// TestValidateDCQLMatches_PerQueryConstraints covers the
 // constraints a single credential query places on how many credentials answer
 // it (OID4VP 1.0 Section 6.1 multiple) and on who issued them (Section 6.1.1
 // trusted_authorities).
-func TestValidateDCQLCredentialSelections_PerQueryConstraints(t *testing.T) {
+func TestValidateDCQLMatches_PerQueryConstraints(t *testing.T) {
 	query, err := parseDcqlQuery(`{"credentials":[` +
 		`{"id":"multi","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"multiple":true,"claims":[{"path":["given_name"]}],` +
 		`"trusted_authorities":[{"type":"aki","values":["authority-a"]}]},` +
@@ -403,27 +400,27 @@ func TestValidateDCQLCredentialSelections_PerQueryConstraints(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name            string
-		selections      []DCQLCredentialSelection
+		selections      []DCQLMatch
 		wantUnsatisfied bool
 	}{
-		{name: "several credentials answer a multiple query", selections: []DCQLCredentialSelection{
-			{QueryID: "multi", CandidateID: "a1", RequestedClaims: []string{"given_name"}},
-			{QueryID: "multi", CandidateID: "a2", RequestedClaims: []string{"given_name"}},
+		{name: "several credentials answer a multiple query", selections: []DCQLMatch{
+			{QueryID: "multi", CandidateID: "a1", Claims: []string{"given_name"}},
+			{QueryID: "multi", CandidateID: "a2", Claims: []string{"given_name"}},
 		}},
-		{name: "the same credential is selected twice", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "multi", CandidateID: "a1", RequestedClaims: []string{"given_name"}},
-			{QueryID: "multi", CandidateID: "a1", RequestedClaims: []string{"given_name"}},
+		{name: "the same credential is selected twice", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "multi", CandidateID: "a1", Claims: []string{"given_name"}},
+			{QueryID: "multi", CandidateID: "a1", Claims: []string{"given_name"}},
 		}},
-		{name: "a second credential answers a single-credential query", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "single", CandidateID: "a1", RequestedClaims: []string{"given_name"}},
-			{QueryID: "single", CandidateID: "a2", RequestedClaims: []string{"given_name"}},
+		{name: "a second credential answers a single-credential query", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "single", CandidateID: "a1", Claims: []string{"given_name"}},
+			{QueryID: "single", CandidateID: "a2", Claims: []string{"given_name"}},
 		}},
-		{name: "credential outside the trusted authorities", wantUnsatisfied: true, selections: []DCQLCredentialSelection{
-			{QueryID: "multi", CandidateID: "b1", RequestedClaims: []string{"given_name"}},
+		{name: "credential outside the trusted authorities", wantUnsatisfied: true, selections: []DCQLMatch{
+			{QueryID: "multi", CandidateID: "b1", Claims: []string{"given_name"}},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateDCQLCredentialSelections(query, candidates, tc.selections)
+			err := ValidateDCQLMatches(query, candidates, tc.selections)
 			if tc.wantUnsatisfied {
 				if !errors.Is(err, ErrDCQLSelectionUnsatisfied) {
 					t.Fatalf("error = %v, want ErrDCQLSelectionUnsatisfied", err)
@@ -431,16 +428,16 @@ func TestValidateDCQLCredentialSelections_PerQueryConstraints(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("ValidateDCQLCredentialSelections() error = %v", err)
+				t.Fatalf("ValidateDCQLMatches() error = %v", err)
 			}
 		})
 	}
 }
 
-// TestValidateDCQLCredentialSelections_MalformedQuery pins that a request this
+// TestValidateDCQLMatches_MalformedQuery pins that a request this
 // library cannot interpret is reported as a structural failure, not as a
 // rejected consent decision: no selection could have repaired it.
-func TestValidateDCQLCredentialSelections_MalformedQuery(t *testing.T) {
+func TestValidateDCQLMatches_MalformedQuery(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		query *DCQLQuery
@@ -452,7 +449,7 @@ func TestValidateDCQLCredentialSelections_MalformedQuery(t *testing.T) {
 		}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateDCQLCredentialSelections(tc.query, nil, nil)
+			err := ValidateDCQLMatches(tc.query, nil, nil)
 			if err == nil {
 				t.Fatal("expected a structural error")
 			}
@@ -487,8 +484,8 @@ func TestResolveDCQLTypeValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			candidate := DCQLCredentialCandidate{ID: "vc", Format: "jwt_vc_json", Types: tc.types}
 			selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{candidate})
-			validateErr := ValidateDCQLCredentialSelections(query, []DCQLCredentialCandidate{candidate},
-				[]DCQLCredentialSelection{{QueryID: "id", CandidateID: "vc", RequestedClaims: []string{}}})
+			validateErr := ValidateDCQLMatches(query, []DCQLCredentialCandidate{candidate},
+				[]DCQLMatch{{QueryID: "id", CandidateID: "vc", Claims: []string{}}})
 			if tc.wantMatch {
 				if err != nil || len(selected) != 1 || validateErr != nil {
 					t.Fatalf("selection = %#v, %v; validation = %v", selected, err, validateErr)
@@ -529,8 +526,8 @@ func TestResolveDCQLValuesNarrowWildcards(t *testing.T) {
 			if err != nil || len(selected) != 1 {
 				t.Fatalf("selection = %#v, %v", selected, err)
 			}
-			if !reflect.DeepEqual(selected[0].RequestedClaims, tc.want) {
-				t.Fatalf("requested claims = %q, want %q", selected[0].RequestedClaims, tc.want)
+			if !reflect.DeepEqual(selected[0].Claims, tc.want) {
+				t.Fatalf("requested claims = %q, want %q", selected[0].Claims, tc.want)
 			}
 		})
 	}

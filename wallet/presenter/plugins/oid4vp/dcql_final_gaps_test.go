@@ -197,7 +197,7 @@ func TestResolveDCQLNestedClaimPaths(t *testing.T) {
 		`["address","postal_code"]`,
 		`["degrees",null,"type"]`,
 		`["nationalities",1]`,
-	}, selected[0].RequestedClaims)
+	}, selected[0].Claims)
 
 	// Values apply to the selected nested element.
 	valuesQuery := &DCQLQuery{Credentials: []DCQLCredentialQuery{{

@@ -53,9 +53,16 @@ func invokeDCAPI(t *testing.T, fixture sdjwtPresentationFixture, responseMode st
 		},
 		Origin: "https://verifier.example",
 	}
-	response, err := fixture.wallet.PresentCredentialToDCAPI(invocation, fixture.key)
+	request, err := fixture.wallet.ParseDCAPIRequest(t.Context(), invocation)
 	require.NoError(t, err)
-	return response
+	require.Nil(t, request.ResponseEndpoint())
+	selections, err := fixture.wallet.SelectCredentials(t.Context(), request)
+	require.NoError(t, err)
+	result, err := fixture.wallet.SubmitPresentation(t.Context(), request, Presentation{Key: fixture.key, Credentials: selections})
+	require.NoError(t, err)
+	require.Empty(t, result.RedirectURI)
+	require.NotNil(t, result.DCAPIResponse)
+	return result.DCAPIResponse
 }
 
 func kbJWTAudience(t *testing.T, wire string, holder *jose.JSONWebKey) (string, string) {
@@ -71,7 +78,7 @@ func kbJWTAudience(t *testing.T, wire string, holder *jose.JSONWebKey) (string, 
 	return audience, nonce
 }
 
-func TestWalletPresentCredentialToDCAPIPlaintext(t *testing.T) {
+func TestWalletSubmitPresentationToDCAPIPlaintext(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, map[string]any{"nationality": "JP"}, map[string]string{"given_name": "Taro"})
@@ -87,7 +94,7 @@ func TestWalletPresentCredentialToDCAPIPlaintext(t *testing.T) {
 	require.Equal(t, "dcapi-nonce", nonce)
 }
 
-func TestWalletPresentCredentialToDCAPIEncrypted(t *testing.T) {
+func TestWalletSubmitPresentationToDCAPIEncrypted(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, map[string]any{"nationality": "JP"}, map[string]string{"given_name": "Taro"})

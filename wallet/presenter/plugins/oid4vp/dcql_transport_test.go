@@ -22,7 +22,7 @@ func TestOid4vpPresenter_PresentDCQL_SendsAllQueriesInOneResponse(t *testing.T) 
 		"identity": {"identity-presentation"},
 		"accounts": {"first-account-presentation", "second-account-presentation"},
 	}
-	redirect, err := p.PresentDCQL(types.Oid4vp, endpoint, want, &types.PresentationRequest{State: "state +/&="})
+	redirect, err := sendDCQLForTest(p, endpoint, want, &types.PresentationRequest{State: "state +/&="})
 	if err != nil {
 		t.Fatalf("PresentDCQL() error = %v", err)
 	}
@@ -60,7 +60,7 @@ func TestOid4vpPresenter_PresentDCQL_RejectsInvalidInputBeforeNetwork(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, endpoint, _, calls := dcqlTransportEndpoint(t)
-			redirect, err := p.PresentDCQL(types.Oid4vp, endpoint, tt.tokens, tt.request)
+			redirect, err := sendDCQLForTest(p, endpoint, tt.tokens, tt.request)
 			if err == nil || redirect != "" {
 				t.Fatalf("PresentDCQL() = (%q, %v), want rejection", redirect, err)
 			}
@@ -104,7 +104,7 @@ func TestOid4vpPresenter_PresentDCQL_EncryptedResponsePreservesAllQueries(t *tes
 		"identity": {"identity-presentation"},
 		"accounts": {"first-account-presentation", "second-account-presentation"},
 	}
-	redirect, err := p.PresentDCQL(types.Oid4vp, endpoint, want, &types.PresentationRequest{
+	redirect, err := sendDCQLForTest(p, endpoint, want, &types.PresentationRequest{
 		State: "encrypted-state",
 		ClientMetadata: &VerifierMetadata{
 			AuthorizationEncryptedResponseAlg:   string(jose.ECDH_ES),

@@ -39,14 +39,13 @@ type DCQLCredentialCandidate struct {
 	Types []string
 }
 
-// DCQLCredentialSelection describes the concrete wallet credential and claims
-// selected for one DCQL credential query.
-type DCQLCredentialSelection struct {
-	QueryID         string
-	CandidateID     string
-	Format          string
-	VCT             string
-	RequestedClaims []string
+// DCQLMatch is one candidate answering one DCQL credential query, with the
+// claims path pointers it discloses: a bare name for a one-segment path,
+// otherwise the JSON-encoded path with every null replaced by an index.
+type DCQLMatch struct {
+	QueryID     string
+	CandidateID string
+	Claims      []string
 }
 
 // dcqlQueryPlan is the validated structure of one DCQL query: every credential
@@ -97,22 +96,22 @@ func planDCQLQuery(query *DCQLQuery) (dcqlQueryPlan, error) {
 	return plan, nil
 }
 
-// ResolveSatisfiableDCQLCredentials chooses, for every credential query the
-// request requires, the stored credentials that satisfy it. The library decides
-// the claim set here; a Wallet that lets its Holder decide validates that
-// decision with ValidateDCQLCredentialSelections instead.
+// ResolveSatisfiableDCQLCredentials is the library's own choice: for every
+// credential query the request requires, the candidates that satisfy it with
+// the first claim set any candidate satisfies. A Holder's choice is checked
+// with ValidateDCQLMatches instead.
 //
 // A request no available credential can answer is reported as an error wrapping
 // ErrDCQLSelectionUnsatisfied, the same sentinel a rejected Holder choice
 // carries, so a caller tells "this wallet cannot answer the request" from a
 // malformed query with errors.Is.
-func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLCredentialSelection, error) {
+func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCredentialCandidate) ([]DCQLMatch, error) {
 	plan, err := planDCQLQuery(query)
 	if err != nil {
 		return nil, err
 	}
 
-	satisfiable := map[string][]DCQLCredentialSelection{}
+	satisfiable := map[string][]DCQLMatch{}
 	for _, credentialQuery := range query.Credentials {
 		selections := resolveDCQLCredentialQuery(credentialQuery, plan.claimOptions[credentialQuery.ID], candidates)
 		if len(selections) > 0 {
@@ -121,7 +120,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 	}
 
 	if len(query.CredentialSets) == 0 {
-		selections := make([]DCQLCredentialSelection, 0, len(satisfiable))
+		selections := make([]DCQLMatch, 0, len(satisfiable))
 		for _, credentialQuery := range query.Credentials {
 			if querySelections, ok := satisfiable[credentialQuery.ID]; ok {
 				selections = append(selections, querySelections...)
@@ -132,7 +131,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 		return selections, nil
 	}
 
-	selected := map[string][]DCQLCredentialSelection{}
+	selected := map[string][]DCQLMatch{}
 	for _, credentialSet := range query.CredentialSets {
 		matchingOption := []string(nil)
 		for _, option := range credentialSet.Options {
@@ -152,7 +151,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 		}
 	}
 
-	selections := make([]DCQLCredentialSelection, 0, len(selected))
+	selections := make([]DCQLMatch, 0, len(selected))
 	for _, credentialQuery := range query.Credentials {
 		if querySelections, ok := selected[credentialQuery.ID]; ok {
 			selections = append(selections, querySelections...)
@@ -165,7 +164,7 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 // 1.0 Section 6.4.1), the claims each claim set of credential query queryID
 // resolves to for candidate, leaving out the sets candidate cannot satisfy. A
 // Wallet whose Holder chooses the claim set picks one of these and checks the
-// result with ValidateDCQLCredentialSelections.
+// result with ValidateDCQLMatches.
 //
 // A candidate that fails the query's constraints or satisfies no claim set, and
 // a queryID the request does not contain, are reported as errors wrapping
@@ -194,23 +193,16 @@ func ResolveDCQLClaimSets(query *DCQLQuery, queryID string, candidate DCQLCreden
 	return claimSets, nil
 }
 
-// ValidateDCQLCredentialSelections reports whether credentials chosen outside
-// this library - by the Holder on a consent screen - answer the DCQL query.
+// ValidateDCQLMatches checks matches chosen outside this library, typically
+// by the Holder, against query. OID4VP 1.0 Sections 6.2 and 6.3 leave the
+// choice of credential_set option and claim set to the Wallet; this function
+// only checks it: each match satisfies its credential query with exactly one
+// of its claim sets, multiple is honoured, every required credential_set has
+// an answered option, and nothing outside an answered option is presented.
 //
-// OID4VP 1.0 Section 6.3 leaves the choice between the claim_sets of a
-// credential query to the Wallet ("the Wallet MUST return one of the sets that
-// it can satisfy"), and Section 6.2 leaves the choice between the options of a
-// credential_set to the Wallet in the same way. Deciding that in the library
-// would take the decision away from the person giving consent, so this function
-// only checks the decision: every selected credential must satisfy its
-// credential query, the disclosed claims must be exactly one claim set that
-// query offers, every required credential_set must have a fully answered
-// option, and nothing may be presented that no answered option asked for.
-//
-// A selection the request cannot accept is reported as an error that wraps
-// ErrDCQLSelectionUnsatisfied. A malformed request is reported as a plain
-// structural error, which no selection could have repaired.
-func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredentialCandidate, selections []DCQLCredentialSelection) error {
+// An unacceptable choice wraps ErrDCQLSelectionUnsatisfied; a malformed query
+// is a plain structural error.
+func ValidateDCQLMatches(query *DCQLQuery, candidates []DCQLCredentialCandidate, matches []DCQLMatch) error {
 	plan, err := planDCQLQuery(query)
 	if err != nil {
 		return err
@@ -220,8 +212,8 @@ func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredent
 		byID[candidate.ID] = candidate
 	}
 
-	presented := map[string][]DCQLCredentialSelection{}
-	for _, selection := range selections {
+	presented := map[string][]DCQLMatch{}
+	for _, selection := range matches {
 		credentialQuery, requested := plan.queries[selection.QueryID]
 		if !requested {
 			return fmt.Errorf("%w: selection references credential query %q, which the request does not contain", ErrDCQLSelectionUnsatisfied, selection.QueryID)
@@ -251,16 +243,13 @@ func ValidateDCQLCredentialSelections(query *DCQLQuery, candidates []DCQLCredent
 // validateDCQLSelectedCandidate applies one credential query's own constraints
 // to one selected credential, and requires its disclosed claims to be exactly
 // one of the claim sets that query offers.
-func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidate DCQLCredentialCandidate, selection DCQLCredentialSelection) error {
+func validateDCQLSelectedCandidate(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidate DCQLCredentialCandidate, selection DCQLMatch) error {
 	if err := dcqlCandidateConstraintError(query, candidate); err != nil {
 		return err
 	}
-	if (selection.Format != "" && selection.Format != candidate.Format) || (selection.VCT != "" && selection.VCT != candidate.VCT) {
-		return fmt.Errorf("%w: the selection for credential query %q does not describe credential %q", ErrDCQLSelectionUnsatisfied, query.ID, candidate.ID)
-	}
 	for _, claims := range claimOptions {
 		resolved, satisfied := matchDCQLClaims(claims, candidate)
-		if satisfied && sameDCQLClaimSelection(resolved, selection.RequestedClaims) {
+		if satisfied && sameDCQLClaimSelection(resolved, selection.Claims) {
 			return nil
 		}
 	}
@@ -323,7 +312,7 @@ func sameDCQLClaimSelection(resolved, selected []string) bool {
 // required set needs one fully answered option, and a credential query that no
 // answered option contains would disclose a credential the request never asked
 // for in that combination.
-func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCredentialSelection) error {
+func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLMatch) error {
 	if len(query.CredentialSets) == 0 {
 		for _, credentialQuery := range query.Credentials {
 			if len(presented[credentialQuery.ID]) == 0 {
@@ -360,11 +349,11 @@ func validateDCQLPresentedSets(query *DCQLQuery, presented map[string][]DCQLCred
 // the first satisfiable claim set. When query.Multiple is false only the first
 // matching candidate is returned (OID4VP 1.0 Section 6.1/8.1); otherwise every
 // matching candidate is returned so it can be presented separately.
-func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidates []DCQLCredentialCandidate) []DCQLCredentialSelection {
+func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQLClaimQuery, candidates []DCQLCredentialCandidate) []DCQLMatch {
 	// Prefer the first satisfiable claim set across all candidates, rather than
 	// selecting a later claim set merely because its credential appeared first.
 	for _, claims := range claimOptions {
-		selections := []DCQLCredentialSelection{}
+		selections := []DCQLMatch{}
 		for _, candidate := range candidates {
 			if dcqlCandidateConstraintError(query, candidate) != nil {
 				continue
@@ -373,12 +362,10 @@ func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQL
 			if !ok {
 				continue
 			}
-			selections = append(selections, DCQLCredentialSelection{
-				QueryID:         query.ID,
-				CandidateID:     candidate.ID,
-				Format:          candidate.Format,
-				VCT:             candidate.VCT,
-				RequestedClaims: requestedClaims,
+			selections = append(selections, DCQLMatch{
+				QueryID:     query.ID,
+				CandidateID: candidate.ID,
+				Claims:      requestedClaims,
 			})
 			if !query.Multiple {
 				break
@@ -733,7 +720,7 @@ func dcqlIntegerValue(value any) (string, bool) {
 	return coefficient + "e" + exponent.String(), true
 }
 
-func everyDCQLCredentialIDSatisfiable(ids []string, satisfiable map[string][]DCQLCredentialSelection) bool {
+func everyDCQLCredentialIDSatisfiable(ids []string, satisfiable map[string][]DCQLMatch) bool {
 	if len(ids) == 0 {
 		return false
 	}

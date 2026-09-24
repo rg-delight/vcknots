@@ -271,7 +271,7 @@ func TestOid4vpPresenter_EncryptAuthorizationResponse(t *testing.T) {
 	}
 }
 
-func TestOid4vpPresenter_SubmitEncryptedAuthorizationResponse(t *testing.T) {
+func TestOid4vpPresenter_DirectPostJWTResponse(t *testing.T) {
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate recipient key: %v", err)
@@ -316,25 +316,24 @@ func TestOid4vpPresenter_SubmitEncryptedAuthorizationResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse endpoint: %v", err)
 	}
-	body, err := p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
-		"vp_token": map[string]any{"pid": []string{"presented-sd-jwt"}},
-		"state":    "state-1",
-	}, &VerifierMetadata{
-		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
-			{
+	redirect, err := sendDCQLForTest(p, *endpoint, map[string][]string{"pid": {"presented-sd-jwt"}}, &types.PresentationRequest{
+		State:        "state-1",
+		ResponseMode: string(OAuthAuthzReqResponseModeDirectPostJWT),
+		ClientMetadata: &VerifierMetadata{
+			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 				Key:       &recipient.PublicKey,
 				KeyID:     "enc-key-1",
 				Use:       "enc",
 				Algorithm: string(jose.ECDH_ES),
-			},
-		}},
-		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
+			}}},
+			EncryptedResponseEncValuesSupported: []string{"A256GCM"},
+		},
 	})
 	if err != nil {
-		t.Fatalf("SubmitEncryptedAuthorizationResponse() error = %v", err)
+		t.Fatalf("direct_post.jwt response error = %v", err)
 	}
-	if body != `{"redirect_uri":"https://example.com/callback"}` {
-		t.Fatalf("body = %q", body)
+	if redirect != "https://example.com/callback" {
+		t.Fatalf("redirect = %q", redirect)
 	}
 }
 

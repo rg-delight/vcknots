@@ -82,30 +82,19 @@ func transactionDataForQuery(encoded []string, queryID string) ([]string, error)
 	return matched, nil
 }
 
-// assignTransactionDataOwners maps every transaction_data entry to the single
-// selected credential query that authorizes it, keyed by the encoded entry.
-//
-// OID4VP 1.0 Final Section 5.1 says of credential_ids: "If there is more than
-// one element in the array, the Wallet MUST use only one of the referenced
-// Credentials for transaction authorization." The wallet picks the first
-// referenced query that the DCQL selection actually presents, so the entry is
-// hashed into exactly one Key Binding JWT even when several of the referenced
-// credentials are being presented.
-//
-// Section 8.4 requires the Wallet to "include a representation or reference to
-// the data in the respective Credential presentation"; an entry whose
-// credential_ids reference nothing the wallet is presenting cannot satisfy
-// that, and the Error Response section lists exactly this case
-// ("the credential_ids does not match, or the referenced Credential(s) are not
-// available in the Wallet") under invalid_transaction_data. Such a request
-// fails here, before any credential is serialized or disclosed.
-func assignTransactionDataOwners(encoded []string, selections []oid4vp.DCQLCredentialSelection) (map[string]string, error) {
+// assignTransactionDataOwners maps every transaction_data entry to the one
+// presented credential query that authorizes it: the first of its
+// credential_ids being presented (OID4VP 1.0 Section 5.1, "the Wallet MUST use
+// only one of the referenced Credentials"). An entry that references nothing
+// presented is invalid_transaction_data (Section 8.4) and fails before any
+// credential is serialized.
+func assignTransactionDataOwners(encoded []string, presentedQueries []string) (map[string]string, error) {
 	if len(encoded) == 0 {
 		return nil, nil
 	}
-	selected := make(map[string]bool, len(selections))
-	for _, selection := range selections {
-		selected[selection.QueryID] = true
+	selected := make(map[string]bool, len(presentedQueries))
+	for _, queryID := range presentedQueries {
+		selected[queryID] = true
 	}
 	owners := make(map[string]string, len(encoded))
 	for index, entry := range encoded {

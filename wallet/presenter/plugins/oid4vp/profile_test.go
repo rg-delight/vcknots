@@ -250,7 +250,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A256GCM"},
 			},
 		}
-		if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err != nil {
+		if _, err := sendDCQLForTest(p, s.endpoint(t), vpToken, request); err != nil {
 			t.Fatal(err)
 		}
 		if got := s.calls.Load(); got != 1 {
@@ -292,7 +292,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
 		}
-		if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err != nil {
+		if _, err := sendDCQLForTest(p, s.endpoint(t), vpToken, request); err != nil {
 			t.Fatal(err)
 		}
 		token := (<-s.forms).Get("response")
@@ -318,7 +318,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
 		}
-		if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err == nil {
+		if _, err := sendDCQLForTest(p, s.endpoint(t), vpToken, request); err == nil {
 			t.Fatal("expected no usable encryption key error")
 		}
 		if got := s.calls.Load(); got != 0 {
@@ -330,7 +330,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 		s := newEncryptionServer(t)
 		p := &Oid4vpPresenter{HTTPClient: s.server.Client()}
 		request := &types.PresentationRequest{State: "plain-state"}
-		if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err != nil {
+		if _, err := sendDCQLForTest(p, s.endpoint(t), vpToken, request); err != nil {
 			t.Fatal(err)
 		}
 		form := <-s.forms
@@ -366,7 +366,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
 		}
-		if _, err := newHAIPPresenter(s).PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err != nil {
+		if _, err := sendDCQLForTest(newHAIPPresenter(s), s.endpoint(t), vpToken, request); err != nil {
 			t.Fatal(err)
 		}
 		token := (<-s.forms).Get("response")
@@ -386,7 +386,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A128GCM"},
 			},
 		}
-		if _, err := newHAIPPresenter(s).PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err == nil {
+		if _, err := sendDCQLForTest(newHAIPPresenter(s), s.endpoint(t), vpToken, request); err == nil {
 			t.Fatal("HAIP must reject ECDH-ES+A128KW")
 		}
 		if got := s.calls.Load(); got != 0 {
@@ -402,7 +402,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 				EncryptedResponseEncValuesSupported: []string{"A128CBC-HS256"},
 			},
 		}
-		if _, err := newHAIPPresenter(s).PresentDCQL(types.Oid4vp, s.endpoint(t), vpToken, request); err == nil {
+		if _, err := sendDCQLForTest(newHAIPPresenter(s), s.endpoint(t), vpToken, request); err == nil {
 			t.Fatal("HAIP must reject A128CBC-HS256")
 		}
 		if got := s.calls.Load(); got != 0 {
@@ -563,7 +563,7 @@ func responseEncryptionFor(t *testing.T, encValues []string, enc jose.ContentEnc
 			EncryptedResponseEncValuesSupported: encValues,
 		},
 	}
-	if _, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request); err != nil {
+	if _, err := sendDCQLForTest(p, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request); err != nil {
 		t.Fatal(err)
 	}
 	token := (<-s.forms).Get("response")

@@ -89,7 +89,7 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 				}
 				var redirect string
 				if draft {
-					redirect, err = p.PresentDraft24(types.Oid4vp, *endpoint, []byte("credential~kb-jwt"), submission, request)
+					redirect, err = sendPresentationExchangeForTest(p, *endpoint, []byte("credential~kb-jwt"), submission, request)
 				} else {
 					redirect, err = p.Present(types.Oid4vp, *endpoint, []byte("credential~kb-jwt"), request)
 				}

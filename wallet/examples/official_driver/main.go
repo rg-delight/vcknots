@@ -610,7 +610,20 @@ func run(config configuration, request operation) (any, error) {
 			},
 			Origin: request.Origin,
 		}
-		return w.PresentCredentialToDCAPI(invocation, holder, nil)
+		ctx := context.Background()
+		admitted, err := w.ParseDCAPIRequest(ctx, invocation)
+		if err != nil {
+			return nil, err
+		}
+		selections, err := w.SelectCredentials(ctx, admitted)
+		if err != nil {
+			return nil, err
+		}
+		submitted, err := w.SubmitPresentation(ctx, admitted, wallet.Presentation{Key: holder, Credentials: selections})
+		if err != nil {
+			return nil, err
+		}
+		return submitted.DCAPIResponse, nil
 	case "list":
 		entries, total, err := w.GetCredentialEntries(wallet.GetCredentialEntriesRequest{})
 		if err != nil {

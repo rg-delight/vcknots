@@ -3,7 +3,6 @@ package wallet
 import (
 	"encoding/json"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -67,6 +66,22 @@ func heldCredentialWithClaim(t *testing.T, fixture sdjwtPresentationFixture, nam
 	return credstoreTypes.CredentialEntry{}
 }
 
+// ref returns a pointer to a copy of entry.
+func ref(entry credstoreTypes.CredentialEntry) *credstoreTypes.CredentialEntry {
+	return &entry
+}
+
+// presentSelections submits selections for request from w and returns the
+// redirect_uri the Verifier answered with.
+func presentSelections(t *testing.T, w *Wallet, request *oid4vp.AdmittedRequest, key IKeyEntry, selections []CredentialSelection) (string, error) {
+	t.Helper()
+	result, err := w.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
+	if err != nil {
+		return "", err
+	}
+	return result.RedirectURI, nil
+}
+
 // postedVPToken returns the vp_token the fixture's Verifier received.
 func postedVPToken(t *testing.T, fixture sdjwtPresentationFixture) map[string][]string {
 	t.Helper()
@@ -84,19 +99,17 @@ func postedVPToken(t *testing.T, fixture sdjwtPresentationFixture) map[string][]
 // A Holder answers a consent screen in disclosure names. The kept names choose
 // one claim set of the query (OID4VP 1.0 Section 6.4.1), and only that set is
 // disclosed.
-func TestWallet_PresentDCQLHolderSelectionDisclosesTheHoldersClaims(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLDisclosesTheHoldersClaims(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
 		`"claims":[{"id":"given","path":["given_name"]},{"id":"family","path":["family_name"]}],"claim_sets":[["given","family"],["given"]]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	redirect, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: credential, DisclosedClaims: []string{"given_name"}}},
-		nil,
+	redirect, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{QueryIDs: []string{"pid"}, Credential: &credential, DisclosedClaims: []string{"given_name"}}},
 	)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
@@ -108,18 +121,16 @@ func TestWallet_PresentDCQLHolderSelectionDisclosesTheHoldersClaims(t *testing.T
 // Section 6.4.1: "If the Wallet cannot deliver all claims requested by the
 // Verifier according to these rules, it MUST NOT return the respective
 // Credential." Withholding part of the only claim set is refusing the query.
-func TestWallet_PresentDCQLHolderSelectionRefusesAPartialClaimSet(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLRefusesAPartialClaimSet(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
 		`"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: heldCredential(t, fixture, "urn:test:identity"), DisclosedClaims: []string{"given_name"}}},
-		nil,
+	_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{QueryIDs: []string{"pid"}, Credential: ref(heldCredential(t, fixture, "urn:test:identity")), DisclosedClaims: []string{"given_name"}}},
 	)
 	require.ErrorIs(t, err, oid4vp.ErrDCQLSelectionUnsatisfied)
 	select {
@@ -132,7 +143,7 @@ func TestWallet_PresentDCQLHolderSelectionRefusesAPartialClaimSet(t *testing.T) 
 // The response carries exactly the Holder's (query, credential) choices: a
 // credential chosen for one query is not also sent for an optional query it
 // happens to satisfy.
-func TestWallet_PresentDCQLHolderSelectionSendsOnlyTheChosenQueries(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLSendsOnlyTheChosenQueries(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
@@ -140,12 +151,10 @@ func TestWallet_PresentDCQLHolderSelectionSendsOnlyTheChosenQueries(t *testing.T
 		`{"id":"given","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
 		`{"id":"family","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["family_name"]}]}],` +
 		`"credential_sets":[{"options":[["given"]]},{"required":false,"options":[["family"]]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{{QueryIDs: []string{"given"}, Credential: heldCredential(t, fixture, "urn:test:identity")}},
-		nil,
+	_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{QueryIDs: []string{"given"}, Credential: ref(heldCredential(t, fixture, "urn:test:identity"))}},
 	)
 	require.NoError(t, err)
 	tokens := postedVPToken(t, fixture)
@@ -156,7 +165,7 @@ func TestWallet_PresentDCQLHolderSelectionSendsOnlyTheChosenQueries(t *testing.T
 // With multiple false a query takes one credential, and which one is the
 // Holder's choice: when two chosen credentials both satisfy a query, the one
 // the Holder named for it is presented, not the first that matches.
-func TestWallet_PresentDCQLHolderSelectionPresentsTheChosenCandidate(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLPresentsTheChosenCandidate(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
@@ -164,15 +173,13 @@ func TestWallet_PresentDCQLHolderSelectionPresentsTheChosenCandidate(t *testing.
 	query := `{"credentials":[` +
 		`{"id":"first","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
 		`{"id":"second","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{
-			{QueryIDs: []string{"second"}, Credential: heldCredentialWithClaim(t, fixture, "given_name", "Taro")},
-			{QueryIDs: []string{"first"}, Credential: heldCredentialWithClaim(t, fixture, "given_name", "Hanako")},
+	_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{
+			{QueryIDs: []string{"second"}, Credential: ref(heldCredentialWithClaim(t, fixture, "given_name", "Taro"))},
+			{QueryIDs: []string{"first"}, Credential: ref(heldCredentialWithClaim(t, fixture, "given_name", "Hanako"))},
 		},
-		nil,
 	)
 	require.NoError(t, err)
 	tokens := postedVPToken(t, fixture)
@@ -184,19 +191,17 @@ func TestWallet_PresentDCQLHolderSelectionPresentsTheChosenCandidate(t *testing.
 
 // A nil DisclosedClaims is the Holder agreeing to the claim set the query asked
 // for, which is what a consent screen with nothing to deselect means.
-func TestWallet_PresentDCQLHolderSelectionDisclosesTheWholeClaimSetByDefault(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLDisclosesTheWholeClaimSetByDefault(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` +
 		`"claims":[{"path":["given_name"]},{"path":["family_name"]}]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: credential}},
-		nil,
+	_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{QueryIDs: []string{"pid"}, Credential: &credential}},
 	)
 	require.NoError(t, err)
 
@@ -212,33 +217,33 @@ func TestWallet_PresentDCQLHolderSelectionDisclosesTheWholeClaimSetByDefault(t *
 
 // The satisfiability gate belongs to the library: a choice the request cannot
 // accept must fail before anything is serialized.
-func TestWallet_PresentDCQLHolderSelectionRejectsUnsatisfyingChoices(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLRejectsUnsatisfyingChoices(t *testing.T) {
 	twoQueries := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},` +
 		`{"id":"address","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:address"]},"claims":[{"path":["street_address"]}]}]}`
 	oneQuery := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
 	for _, testCase := range []struct {
 		name       string
 		query      string
-		selections func(identity, address credstoreTypes.CredentialEntry) []DCQLHolderSelection
+		selections func(identity, address credstoreTypes.CredentialEntry) []CredentialSelection
 	}{
 		{
 			name:  "credential the credential query does not accept",
 			query: oneQuery,
-			selections: func(_, address credstoreTypes.CredentialEntry) []DCQLHolderSelection {
-				return []DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: address}}
+			selections: func(_, address credstoreTypes.CredentialEntry) []CredentialSelection {
+				return []CredentialSelection{{QueryIDs: []string{"pid"}, Credential: &address}}
 			},
 		},
 		{
 			name:  "required credential query left unanswered",
 			query: twoQueries,
-			selections: func(identity, _ credstoreTypes.CredentialEntry) []DCQLHolderSelection {
-				return []DCQLHolderSelection{{QueryIDs: []string{"pid"}, Credential: identity}}
+			selections: func(identity, _ credstoreTypes.CredentialEntry) []CredentialSelection {
+				return []CredentialSelection{{QueryIDs: []string{"pid"}, Credential: &identity}}
 			},
 		},
 		{
 			name:  "nothing answered at all",
 			query: oneQuery,
-			selections: func(_, _ credstoreTypes.CredentialEntry) []DCQLHolderSelection {
+			selections: func(_, _ credstoreTypes.CredentialEntry) []CredentialSelection {
 				return nil
 			},
 		},
@@ -248,12 +253,10 @@ func TestWallet_PresentDCQLHolderSelectionRejectsUnsatisfyingChoices(t *testing.
 			holder := fixture.key.PublicKey()
 			fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 			fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
-			req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, testCase.query))
+			request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, testCase.query))
 
-			_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-				req, endpoint, fixture.key,
+			_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
 				testCase.selections(heldCredential(t, fixture, "urn:test:identity"), heldCredential(t, fixture, "urn:test:address")),
-				nil,
 			)
 			require.Error(t, err)
 			select {
@@ -268,15 +271,16 @@ func TestWallet_PresentDCQLHolderSelectionRejectsUnsatisfyingChoices(t *testing.
 // OID4VP 1.0 Section 6.4.2 lets the Holder decline a credential_set whose
 // `required` is false, and Section 8.1 carries that as the empty vp_token
 // object. CredentialSetQuery.IsRequired is what makes the default true.
-func TestWallet_PresentDCQLHolderSelectionSendsTheEmptyVPToken(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLSendsTheEmptyVPToken(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}],` +
 		`"credential_sets":[{"options":[["pid"]],"required":false}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	redirect, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(req, endpoint, fixture.key, nil, nil)
+	redirect, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 
@@ -290,37 +294,30 @@ func TestWallet_PresentDCQLHolderSelectionSendsTheEmptyVPToken(t *testing.T) {
 
 // A credential that names no credential query cannot be placed in the vp_token,
 // which is keyed by credential query id.
-func TestWallet_PresentDCQLHolderSelectionRequiresACredentialQueryID(t *testing.T) {
+func TestWallet_SubmitPresentationDCQLRequiresACredentialQueryID(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	_, err := storelessPresentationWallet(t, fixture).PresentDCQLHolderSelection(
-		req, endpoint, fixture.key,
-		[]DCQLHolderSelection{{Credential: heldCredential(t, fixture, "urn:test:identity")}},
-		nil,
+	_, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{Credential: ref(heldCredential(t, fixture, "urn:test:identity"))}},
 	)
 	require.ErrorContains(t, err, "names no credential query")
 }
 
 // A Presentation Exchange selection carries its credential by value on the same
 // storeless wallet, so the Draft24 path needs no store either.
-func TestWallet_PresentDraft24SelectionFromAStorelessWallet(t *testing.T) {
+func TestWallet_SubmitPresentationDraft24FromAStorelessWallet(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
-	endpoint, err := url.Parse(fixture.baseURL + "/response")
-	require.NoError(t, err)
+	request := parseDraft24(t, fixture.wallet, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 
-	redirect, err := storelessPresentationWallet(t, fixture).PresentDraft24Selection(
-		request, *endpoint, fixture.key,
-		[]Draft24CredentialSelection{{CredentialID: credential.Id, Credential: &credential, InputDescriptorIDs: []string{"identity"}}},
-		nil,
+	redirect, err := presentSelections(t, storelessPresentationWallet(t, fixture), request, fixture.key,
+		[]CredentialSelection{{Credential: &credential, QueryIDs: []string{"identity"}}},
 	)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
