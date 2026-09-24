@@ -29,143 +29,22 @@ import (
 // notification of Section 10 — has the same body in both versions, so the
 // difference is only which error shape comes back.
 
-// Draft13Proof is the Draft 13 Section 7.2.1 `proof` object of a Credential
-// Request. Draft 13 carries exactly one proof; the plural `proofs` member is a
-// Final 1.0 addition.
-type Draft13Proof struct {
-	ProofType string `json:"proof_type"`
-	JWT       string `json:"jwt"`
-}
-
-// Draft13CredentialRequest is the Draft 13 Section 7.2 Credential Request. A
-// request either names a `credential_identifier` the Token Response supplied,
-// or the `format` and the format-specific members that identify the credential;
-// Section 7.2 forbids sending both.
-type Draft13CredentialRequest struct {
-	Format               string                      `json:"format,omitempty"`
-	VCT                  string                      `json:"vct,omitempty"`
-	CredentialDefinition *types.CredentialDefinition `json:"credential_definition,omitempty"`
-	CredentialIdentifier string                      `json:"credential_identifier,omitempty"`
-	Proof                *Draft13Proof               `json:"proof,omitempty"`
-}
-
-// Draft13CredentialResponse is the Draft 13 Section 7.3 Credential Response and
-// the Section 9.1 Deferred Credential Response, which share a shape. Exactly one
-// of Credential and TransactionID is set on a well-formed response.
-type Draft13CredentialResponse struct {
-	// Credential is the issued credential, in the format the request named.
-	Credential string
-	// TransactionID is the Section 7.3 `transaction_id` of a deferred issuance.
-	TransactionID string
-	// NotificationID is the Section 7.3 `notification_id` the Section 10
-	// notification refers to.
-	NotificationID string
-	// CNonce and CNonceExpiresIn are the Section 7.3 `c_nonce` members, which
-	// Draft 13 lets the Credential Response carry for the next request.
-	CNonce          string
-	CNonceExpiresIn *int
-	// Interval is the polling interval in seconds an issuer names next to a
-	// transaction_id. Draft 13 defines none on the Credential Response; OpenID4VCI
-	// 1.0 Section 8.3 added `interval` there, and an issuer that already sends it
-	// is telling the wallet something worth keeping. Zero when absent.
-	Interval int
-}
-
-// Draft13NotificationRequest is the Draft 13 Section 10.1 Notification Request
-// body.
-type Draft13NotificationRequest struct {
-	NotificationID string `json:"notification_id"`
-	// Event is credential_accepted, credential_failure or credential_deleted.
-	Event string `json:"event"`
-	// EventDescription is the OPTIONAL human-readable event_description.
-	EventDescription string `json:"event_description,omitempty"`
-}
-
-// Draft13CredentialEndpointError is a Draft 13 Section 7.3.1 Credential Error
-// Response, a Section 9.2 Deferred Credential Error Response or a Section 10.2
-// Notification Error Response.
-//
-// It is a distinct type from types.CredentialEndpointError because Draft 13
-// puts a fresh `c_nonce` in the error body: Section 7.3.2 says the Credential
-// Issuer returns `invalid_proof` "along with a new `c_nonce`" and the wallet
-// "SHOULD retry with the new nonce". Final 1.0 removed that member, so the
-// Final error type has nowhere to keep it and a caller reading Final's type
-// would silently lose the only nonce a Draft 13 issuer offers.
-type Draft13CredentialEndpointError struct {
-	// StatusCode is the HTTP status the endpoint answered with.
-	StatusCode int
-	// Code is the `error` member, such as invalid_proof or issuance_pending.
-	Code string
-	// Description is the optional `error_description`.
-	Description string
-	// CNonce and CNonceExpiresIn are the fresh nonce a Section 7.3.2
-	// invalid_proof response carries, empty when the issuer sent none.
-	CNonce          string
-	CNonceExpiresIn *int
-	// Interval is the Section 9.2 `interval`: the seconds to wait before
-	// polling a deferred transaction again.
-	Interval int
-	// DPoPNonce is the RFC 9449 Section 8.2 DPoP-Nonce response header, kept so
-	// a caller can build a corrected request.
-	DPoPNonce string
-}
-
-// Draft 13 error codes this package names, so a caller branches on a condition
-// rather than on the issuer's spelling of it.
-var (
-	// ErrDraft13InvalidProof is the Section 7.3.1 `invalid_proof` error. The
-	// error may carry a fresh c_nonce to retry with.
-	ErrDraft13InvalidProof = common.NewCodedError("draft13_credential_invalid_proof", "invalid_proof")
-	// ErrDraft13IssuancePending is the Section 9.2 `issuance_pending` error of
-	// the Deferred Credential Endpoint.
-	ErrDraft13IssuancePending = common.NewCodedError("draft13_credential_issuance_pending", "issuance_pending")
+// The Draft 13 wire types live in the receiver types package so a plugin
+// outside this module can implement types.Draft13CredentialTransport.
+type (
+	Draft13Proof                   = types.Draft13Proof
+	Draft13CredentialRequest       = types.Draft13CredentialRequest
+	Draft13CredentialResponse      = types.Draft13CredentialResponse
+	Draft13NotificationRequest     = types.NotificationRequest
+	Draft13CredentialEndpointError = types.Draft13CredentialEndpointError
 )
 
-// ErrorCode names the condition: the specific Draft 13 error codes this package
-// acts on get their own code, and everything else reports the endpoint refusal.
-func (e *Draft13CredentialEndpointError) ErrorCode() string {
-	if e == nil {
-		return "draft13_credential_endpoint_failed"
-	}
-	switch e.Code {
-	case "invalid_proof":
-		return "draft13_credential_invalid_proof"
-	case "issuance_pending":
-		return "draft13_credential_issuance_pending"
-	default:
-		return "draft13_credential_endpoint_failed"
-	}
-}
-
-func (e *Draft13CredentialEndpointError) Error() string {
-	if e == nil {
-		return "draft13 credential endpoint error"
-	}
-	switch {
-	case e.Code != "" && e.Description != "":
-		return fmt.Sprintf("draft13 credential endpoint returned HTTP %d %s: %s", e.StatusCode, e.Code, e.Description)
-	case e.Code != "":
-		return fmt.Sprintf("draft13 credential endpoint returned HTTP %d %s", e.StatusCode, e.Code)
-	default:
-		return fmt.Sprintf("draft13 credential endpoint returned HTTP %d", e.StatusCode)
-	}
-}
-
-// Is lets a caller write errors.Is(err, ErrDraft13InvalidProof) instead of
-// comparing the issuer's error string.
-func (e *Draft13CredentialEndpointError) Is(target error) bool {
-	if e == nil {
-		return false
-	}
-	switch target {
-	case ErrDraft13InvalidProof:
-		return e.Code == "invalid_proof"
-	case ErrDraft13IssuancePending:
-		return e.Code == "issuance_pending"
-	default:
-		return false
-	}
-}
+// Draft 13 error conditions; see types.ErrDraft13InvalidProof and
+// types.ErrDraft13IssuancePending.
+var (
+	ErrDraft13InvalidProof    = types.ErrDraft13InvalidProof
+	ErrDraft13IssuancePending = types.ErrDraft13IssuancePending
+)
 
 // RequestOID4VCIDraft13Credential posts a Draft 13 Section 7.2 Credential
 // Request. It owns the RFC 9449 Section 8 DPoP nonce retry, and reports a
