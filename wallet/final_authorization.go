@@ -338,9 +338,9 @@ func (w *Wallet) requireHAIPClientAuthentication(req OID4VCIFinalReceiveRequest)
 // using authorization_details"; otherwise it sends an openid_credential entry
 // carrying credential_configuration_id.
 //
-// haip narrows that to scope only. HAIP §4.1: "For Grant Type
+// haip narrows that to scope only. HAIP §4.2: "For Grant Type
 // `authorization_code`, the Issuer MUST include a scope value ... The Wallet
-// MUST use that value in the `scope` Authorization parameter", and §4.2: the
+// MUST use that value in the `scope` Authorization parameter", and §4.3: the
 // Wallet "MUST use the `scope` parameter to communicate Credential Type(s)".
 func oid4vciAuthorizationRequestParameters(requestedType, credentialConfigurationID string, config receiverTypes.CredentialConfiguration, haip bool) (string, []map[string]any, error) {
 	scope := strings.TrimSpace(config.Scope)

@@ -176,11 +176,10 @@ func selectDraft13CredentialConfiguration(
 // pre-authorized code for an access token, and requests the credential with a
 // Section 7.2.1 key proof.
 //
-// It is the Draft 13 counterpart of ReceiveOID4VCIFinalCredential. Unlike the
-// long-standing ReceiveCredential it reports the whole Credential Response —
-// the deferred transaction_id, the notification_id and the refreshed c_nonce —
-// so a wallet that owns its own persistence can resume and notify later, and it
-// only writes to the credential store when the request asks it to.
+// Unlike ReceiveCredential it reports the whole Credential Response — the
+// deferred transaction_id, the notification_id and the refreshed c_nonce — so a
+// wallet that owns its persistence can resume and notify later, and it writes
+// to the credential store only when the request asks it to.
 func (w *Wallet) ReceiveOID4VCIDraft13Credential(ctx context.Context, req OID4VCIDraft13ReceiveRequest) (*OID4VCIDraft13ReceiveResult, error) {
 	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
 		return nil, err
@@ -473,9 +472,8 @@ func (w *Wallet) storeDraft13Credential(
 		holderKey = &publicKey
 	}
 	raw := result.RawCredential
-	// Draft 13 leaves issuer key resolution to ecosystem policy, exactly as the
-	// long-standing ReceiveCredential does, so the acceptance policy stays
-	// optional here.
+	// Draft 13 leaves issuer key resolution to ecosystem policy, so the
+	// acceptance policy is optional here, as on ReceiveCredential.
 	saved, err := w.storeAndParseCredential(ctx, &raw, credential.SupportedSerializationFlavor(flavor), holderKey, false)
 	if err != nil {
 		return err

@@ -248,7 +248,7 @@ func validateClientAttestation(attestation *ClientAttestation, request ClientAtt
 	if claims.Sub != request.ClientID {
 		return fmt.Errorf("client attestation sub %q does not match client_id %q", claims.Sub, request.ClientID)
 	}
-	// HAIP §4.3.1: "Wallet Attestations MUST NOT be reused across different
+	// HAIP §4.4.1: "Wallet Attestations MUST NOT be reused across different
 	// Issuers." An absent aud is permitted; a present-but-wrong one is the
 	// reuse the profile forbids.
 	if !attestationAudienceMatches(claims.Aud, request.AuthorizationServer) {

@@ -73,12 +73,9 @@ type OID4VCIFinalReceiveRequest struct {
 	// "authorization_details" sends an openid_credential entry with the
 	// configuration id and no scope (OpenID4VCI 1.0 §5.1.1).
 	//
-	// Under HAIP only scope is allowed: HAIP §4.1 says "For Grant Type
-	// `authorization_code`, the Issuer MUST include a scope value ... The
-	// Wallet MUST use that value in the `scope` Authorization parameter" and
-	// §4.2 that the Wallet "MUST use the `scope` parameter to communicate
-	// Credential Type(s)". An explicit "authorization_details" fails, and so
-	// does a Credential Configuration that advertises no scope.
+	// Under HAIP only scope is allowed (HAIP §4.2, §4.3): an explicit
+	// "authorization_details" fails, and so does a Credential Configuration
+	// that advertises no scope.
 	AuthorizationRequestType string
 	HolderKey                jose.JSONWebKey
 	// AdditionalHolderKeys requests §14.6 batch issuance. Each key yields one

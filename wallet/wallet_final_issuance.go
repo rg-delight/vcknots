@@ -126,15 +126,9 @@ func (w *Wallet) ResumeOID4VCIFinalAuthorization(ctx context.Context, req OID4VC
 }
 
 // requireOID4VCIContext reports a cancelled context at an issuance step
-// boundary, naming the step that was about to start.
-//
-// It is not what stops a request in flight: every OID4VCIFinalTransport method
-// that performs I/O now takes the flow context and binds its HTTP requests to
-// it, so cancelling ctx aborts the request that is running. This check adds the
-// part a bound request cannot give: it stops the flow between steps, before any
-// key proof, DPoP proof, client assertion or key attestation is signed for a
-// request that would be abandoned anyway, and it names the step in the error
-// instead of surfacing a bare transport failure.
+// boundary, naming the step that was about to start, so no proof is signed for
+// a request that would be abandoned. Requests in flight are bound to ctx by the
+// transport.
 func requireOID4VCIContext(ctx context.Context, step string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("OpenID4VCI issuance cancelled before %s: %w", step, err)
@@ -180,12 +174,9 @@ func (w *Wallet) restoreOID4VCIFinalFlow(ctx context.Context, req OID4VCIFinalRe
 	return flow, nil
 }
 
-// resumeOID4VCIFinalAuthorization is the composition of the two halves of the
-// resumed flow: authorizeOID4VCIFinalToken exchanges the code and collects
-// everything the Credential Request needs into an OID4VCIFinalTokenGrant, and
-// requestOID4VCIFinalCredentials spends it. Both halves see the same flow, so
-// running them back to back is exactly what the single call did before they
-// were separable.
+// resumeOID4VCIFinalAuthorization runs authorizeOID4VCIFinalToken, which
+// exchanges the code into an OID4VCIFinalTokenGrant, and
+// requestOID4VCIFinalCredentials, which spends it, on the same flow.
 func (w *Wallet) resumeOID4VCIFinalAuthorization(
 	ctx context.Context,
 	req OID4VCIFinalReceiveRequest,
