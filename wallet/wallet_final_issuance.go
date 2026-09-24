@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -167,7 +166,12 @@ func (w *Wallet) restoreOID4VCIFinalFlow(req OID4VCIFinalReceiveRequest, auth *O
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	return w.newOID4VCIFinalFlow(req, finalReceiver, auth.IssuerMetadata, auth.AuthorizationServerMetadata, auth.CredentialConfigurationID, true)
+	discovery := &oid4vciDiscovery{
+		issuerMetadata:              auth.IssuerMetadata,
+		authorizationServerMetadata: auth.AuthorizationServerMetadata,
+		authorizationServer:         auth.AuthorizationServerMetadata.Issuer.String(),
+	}
+	return w.newOID4VCIFinalFlow(req, finalReceiver, discovery, auth.CredentialConfigurationID, true)
 }
 
 // resumeOID4VCIFinalAuthorization is the composition of the two halves of the
@@ -366,38 +370,36 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
 
-	issuerMetadata := req.IssuerMetadata
-	if issuerMetadata == nil {
-		if req.IssuerURL == nil {
-			return nil, fmt.Errorf("issuer metadata or issuer URL is required")
-		}
-		issuerEndpoint, err := common.ParseURIField(req.IssuerURL.String())
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
-		}
-		issuerMetadata, err = finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
-		}
-		if issuerMetadata.CredentialIssuer != req.IssuerURL.String() {
-			return nil, fmt.Errorf(
-				"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
-				issuerMetadata.CredentialIssuer, req.IssuerURL.String())
-		}
+	var issuerIdentifier string
+	switch {
+	case req.IssuerMetadata != nil:
+		issuerIdentifier = req.IssuerMetadata.CredentialIssuer
+	case req.IssuerURL != nil:
+		issuerIdentifier = req.IssuerURL.String()
+	default:
+		return nil, fmt.Errorf("issuer metadata or issuer URL is required")
+	}
+	issuerMetadata, err := resolveOID4VCIIssuerMetadata(finalReceiver, req.Type, issuerIdentifier, req.IssuerMetadata)
+	if err != nil {
+		return nil, err
 	}
 	if issuerMetadata.DeferredCredentialEndpoint == nil {
 		return nil, fmt.Errorf("deferred credential endpoint is missing on credential issuer")
 	}
 
-	holderKeys, err := resolveOID4VCIFinalHolderKeys(OID4VCIFinalReceiveRequest{
-		HolderKey:            req.HolderKey,
-		AdditionalHolderKeys: req.AdditionalHolderKeys,
-	}, true)
+	flow, err := w.newOID4VCIFinalCredentialFlow(finalReceiver, issuerMetadata, req.CredentialConfigurationID, oid4vciFinalCredentialInputs{
+		holderKey:            req.HolderKey,
+		additionalHolderKeys: req.AdditionalHolderKeys,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
+		},
+		withoutProofs: true,
+	})
 	if err != nil {
 		return nil, err
-	}
-	if len(holderKeys) > issuerMetadata.BatchSize() {
-		return nil, fmt.Errorf("requested %d credentials but the issuer batch_size is %d", len(holderKeys), issuerMetadata.BatchSize())
 	}
 
 	encryptionKey, err := req.CredentialEncryption.resolveCredentialResponseEncryptionKey(issuerMetadata, req.CredentialResponseEncryptionKey)
@@ -416,20 +418,6 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	interval := clampDeferredInterval(req.Interval, req.MaxInterval)
 	if interval <= 0 {
 		interval = defaultDeferredInterval
-	}
-	flow := &oid4vciFinalFlow{
-		receiver:                  finalReceiver,
-		signer:                    w.oid4vciFinalSigner(finalReceiver),
-		issuerMetadata:            issuerMetadata,
-		credentialConfigurationID: req.CredentialConfigurationID,
-		credentialConfiguration:   issuerMetadata.CredentialConfigurationSupported[req.CredentialConfigurationID],
-		holderKeys:                holderKeys,
-		policy: oid4vciFinalCredentialPolicy{
-			encryption:                   req.CredentialEncryption,
-			skipNotification:             req.SkipNotification,
-			requireSingleCredential:      req.RequireSingleCredential,
-			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
-		},
 	}
 	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, encryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)
 }

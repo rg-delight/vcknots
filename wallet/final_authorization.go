@@ -156,60 +156,17 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
 
-	issuerEndpoint, err := common.ParseURIField(issuerIdentifier)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
-	}
-	issuerMetadata, err := finalReceiver.FetchIssuerMetadata(*issuerEndpoint, req.Type)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
-	}
-	// §12.2.2/§12.2.4: the credential_issuer value in the metadata MUST match
-	// the credential issuer the wallet requested exactly; the wallet performs
-	// no normalization.
-	if issuerMetadata.CredentialIssuer != issuerIdentifier {
-		if req.CredentialOffer != nil {
-			return nil, nil, fmt.Errorf(
-				"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
-				issuerMetadata.CredentialIssuer, issuerIdentifier)
-		}
-		return nil, nil, fmt.Errorf(
-			"credential issuer metadata identifier %q does not match the requested credential issuer %q",
-			issuerMetadata.CredentialIssuer, issuerIdentifier)
-	}
-
-	if _, err := requireOfferedCredentialConfiguration(issuerMetadata, credentialConfigurationID); err != nil {
-		return nil, nil, err
-	}
-
-	// §12.3: select the authorization server. A grant authorization_server hint
-	// MUST be listed in authorization_servers; otherwise the first listed server
-	// is used, falling back to the credential issuer when the list is empty.
-	authorizationServerEndpoint, err := SelectOID4VCIAuthorizationServer(issuerMetadata, authCodeGrant, *issuerEndpoint)
+	discovery, err := discoverOID4VCIIssuer(finalReceiver, req.Type, issuerIdentifier, nil, offeredAuthorizationServer(authCodeGrant))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	authorizationServerMetadata, err := finalReceiver.FetchAuthorizationServerMetadata(authorizationServerEndpoint, req.Type)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
-	}
+	issuerMetadata := discovery.issuerMetadata
+	authorizationServerMetadata := discovery.authorizationServerMetadata
 	if authorizationServerMetadata.AuthorizationEndpoint == nil {
 		return nil, nil, fmt.Errorf("authorization endpoint is missing on authorization server")
 	}
-	if authorizationServerMetadata.TokenEndpoint == nil {
-		return nil, nil, fmt.Errorf("token endpoint is missing on authorization server")
-	}
-	// RFC 8414 §3.3: the issuer identifier in the metadata MUST be identical to
-	// the authorization server identifier used to fetch it. The verified value
-	// is the attestation PoP audience.
-	if authorizationServerMetadata.Issuer.String() != authorizationServerEndpoint.String() {
-		return nil, nil, fmt.Errorf(
-			"authorization server metadata issuer %q does not match the selected authorization server %q",
-			authorizationServerMetadata.Issuer.String(), authorizationServerEndpoint.String())
-	}
 
-	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, issuerMetadata, authorizationServerMetadata, credentialConfigurationID, false)
+	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, discovery, credentialConfigurationID, false)
 	if err != nil {
 		return nil, nil, err
 	}

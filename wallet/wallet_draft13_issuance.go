@@ -100,10 +100,9 @@ func (w *Wallet) draft13DPoPProofFactory(key IKeyEntry, method string, endpoint 
 	}
 }
 
-// discoverDraft13Metadata fetches the Credential Issuer metadata and the
-// metadata of the authorization server the offer or the issuer selected
-// (Section 11.2.3 authorization_servers, with the grant's authorization_server
-// hint taking precedence).
+// discoverDraft13Metadata resolves the Credential Issuer metadata (or checks
+// the cached copy) and the metadata of the authorization server the offer
+// selects, with the same identity checks as the Final path.
 func (w *Wallet) discoverDraft13Metadata(
 	transport OID4VCIDraft13Transport,
 	req OID4VCIDraft13ReceiveRequest,
@@ -112,45 +111,17 @@ func (w *Wallet) discoverDraft13Metadata(
 	if err := w.validateDraft13CredentialIssuer(req.CredentialOffer.CredentialIssuer); err != nil {
 		return nil, nil, err
 	}
-	issuerEndpoint, err := common.ParseURIField(req.CredentialOffer.CredentialIssuer.String())
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse credential issuer endpoint: %w", err)
-	}
-
-	issuerMetadata := req.CachedIssuerMetadata
-	if issuerMetadata == nil {
-		issuerMetadata, err = transport.FetchIssuerMetadata(*issuerEndpoint, req.Type)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
-		}
-	} else if issuerMetadata.CredentialIssuer != req.CredentialOffer.CredentialIssuer.String() {
-		// Section 11.2.3: the metadata's credential_issuer MUST be the issuer it
-		// was retrieved for. A caller-supplied document is held to the same rule
-		// the fetch applies, so a cache cannot hand one issuer's endpoints to
-		// another's offer.
-		return nil, nil, fmt.Errorf(
-			"credential issuer metadata identifier %q does not match the credential offer credential_issuer %q",
-			issuerMetadata.CredentialIssuer, req.CredentialOffer.CredentialIssuer.String())
-	}
-	if err := w.validateCredentialConfigurationIDs(req.CredentialOffer, issuerMetadata); err != nil {
-		return nil, nil, err
-	}
-
-	authorizationServerEndpoint, err := SelectOID4VCIAuthorizationServer(issuerMetadata, grant, *issuerEndpoint)
+	discovery, err := discoverOID4VCIIssuer(transport, req.Type, req.CredentialOffer.CredentialIssuer.String(), req.CachedIssuerMetadata, offeredAuthorizationServer(grant))
 	if err != nil {
 		return nil, nil, err
 	}
-	authorizationServerMetadata, err := transport.FetchAuthorizationServerMetadata(authorizationServerEndpoint, req.Type)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to fetch authorization server metadata: %w", err)
+	if err := w.validateCredentialConfigurationIDs(req.CredentialOffer, discovery.issuerMetadata); err != nil {
+		return nil, nil, err
 	}
-	if authorizationServerMetadata == nil {
-		return nil, nil, fmt.Errorf("authorization server metadata is nil")
-	}
-	if authorizationServerMetadata.TokenEndpoint == nil {
+	if discovery.authorizationServerMetadata.TokenEndpoint == nil {
 		return nil, nil, ErrDraft13TokenEndpointMissing
 	}
-	return issuerMetadata, authorizationServerMetadata, nil
+	return discovery.issuerMetadata, discovery.authorizationServerMetadata, nil
 }
 
 // validateDraft13CredentialIssuer applies the Section 11.2.1 rule that the
@@ -220,7 +191,7 @@ func (w *Wallet) ReceiveOID4VCIDraft13Credential(ctx context.Context, req OID4VC
 	if err := w.validateDraft13CredentialIssuer(req.CredentialOffer.CredentialIssuer); err != nil {
 		return nil, err
 	}
-	grant := req.CredentialOffer.Grants[preAuthorizedGrantType]
+	grant := req.CredentialOffer.Grants[preAuthorizedCodeGrantType]
 	if grant == nil || strings.TrimSpace(grant.PreAuthorizedCode) == "" {
 		return nil, ErrDraft13PreAuthorizedCodeGrantMissing
 	}
@@ -255,10 +226,6 @@ func (w *Wallet) ReceiveOID4VCIDraft13Credential(ctx context.Context, req OID4VC
 	}
 	return w.requestDraft13Credential(ctx, flow, req, accessToken)
 }
-
-// preAuthorizedGrantType is the Draft 13 Section 4.1.1 grant type of the
-// Pre-Authorized Code Flow.
-const preAuthorizedGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
 // exchangeDraft13PreAuthorizedCode performs the Section 6.1 token request of the
 // Pre-Authorized Code Flow.
