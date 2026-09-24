@@ -10,12 +10,17 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
+// PresentationRequest is types.PresentationRequest.
 type PresentationRequest = types.PresentationRequest
 
+// PresentationDispatcher routes presentation operations to the plugin
+// registered for the requested protocol.
 type PresentationDispatcher struct {
 	plugins map[types.SupportedPresentationProtocol]types.Presenter
 }
 
+// NewPresentationDispatcher returns a PresentationDispatcher configured by
+// options, such as WithDefaultConfig and WithPlugin.
 func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (*PresentationDispatcher, error) {
 	d := &PresentationDispatcher{
 		plugins: make(map[types.SupportedPresentationProtocol]types.Presenter),
@@ -30,6 +35,8 @@ func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (
 	return d, nil
 }
 
+// WithDefaultConfig registers an oid4vp.Oid4vpPresenter for types.Oid4vp,
+// allowing plain http endpoints only when env.IsHTTPAllowed reports true.
 func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
 		oid4vpReceiver := &oid4vp.Oid4vpPresenter{AllowHTTP: env.IsHTTPAllowed()}
@@ -37,6 +44,7 @@ func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	}
 }
 
+// WithPlugin registers plugin for protocol. A nil plugin is an error.
 func WithPlugin(protocol types.SupportedPresentationProtocol, plugin types.Presenter) func(*PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
 		return d.registerPlugin(protocol, plugin)
@@ -92,6 +100,8 @@ func (d *PresentationDispatcher) Plugins() []types.Presenter {
 	return plugins
 }
 
+// Present sends serializedPresentation to endpoint with the plugin for
+// protocol and returns the redirect URI the plugin reports, which may be empty.
 func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *PresentationRequest) (string, error) {
 	if len(serializedPresentation) == 0 {
 		return "", types.NewPresenterError(protocol, endpoint.String(), "present", types.ErrInvalidPresentation)

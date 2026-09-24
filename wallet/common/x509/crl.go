@@ -15,16 +15,29 @@ import (
 // CRLCheckErrorKind distinguishes an unavailable status from a revoked certificate.
 type CRLCheckErrorKind string
 
+// CRL check error kinds.
 const (
+	// CRLErrorUnsupported reports an invalid input path, a certificate without a
+	// usable CRL distribution point, or a CRL feature this package does not handle.
 	CRLErrorUnsupported CRLCheckErrorKind = "unsupported"
-	CRLErrorBudget      CRLCheckErrorKind = "budget"
-	CRLErrorFetch       CRLCheckErrorKind = "fetch"
-	CRLErrorParse       CRLCheckErrorKind = "parse"
-	CRLErrorIssuer      CRLCheckErrorKind = "issuer"
-	CRLErrorSignature   CRLCheckErrorKind = "signature"
-	CRLErrorStale       CRLCheckErrorKind = "stale"
-	CRLErrorScope       CRLCheckErrorKind = "scope"
-	CRLErrorRevoked     CRLCheckErrorKind = "revoked"
+	// CRLErrorBudget reports that the checker's CRL fetch budget was exhausted.
+	CRLErrorBudget CRLCheckErrorKind = "budget"
+	// CRLErrorFetch reports a failed or cancelled CRL download.
+	CRLErrorFetch CRLCheckErrorKind = "fetch"
+	// CRLErrorParse reports a CRL that could not be parsed.
+	CRLErrorParse CRLCheckErrorKind = "parse"
+	// CRLErrorIssuer reports a CRL issuer that does not match the certificate
+	// issuer, or an issuer not permitted to sign CRLs.
+	CRLErrorIssuer CRLCheckErrorKind = "issuer"
+	// CRLErrorSignature reports a CRL whose signature does not verify.
+	CRLErrorSignature CRLCheckErrorKind = "signature"
+	// CRLErrorStale reports a CRL without nextUpdate or not current at the
+	// verification time.
+	CRLErrorStale CRLCheckErrorKind = "stale"
+	// CRLErrorScope reports a CRL whose scope does not cover the certificate.
+	CRLErrorScope CRLCheckErrorKind = "scope"
+	// CRLErrorRevoked reports a certificate listed as revoked.
+	CRLErrorRevoked CRLCheckErrorKind = "revoked"
 )
 
 // CRLCheckError retains the cause for errors.Is/errors.As and observability.
@@ -37,10 +50,12 @@ type CRLCheckError struct {
 	Err          error
 }
 
+// Error implements error.
 func (e *CRLCheckError) Error() string {
 	return fmt.Sprintf("certificate revocation %s: %s", e.Kind, e.Reason)
 }
 
+// Unwrap returns the wrapped error.
 func (e *CRLCheckError) Unwrap() error { return e.Err }
 
 // ErrorCode names the revocation verdict this check reached. Only a revoked
@@ -103,6 +118,9 @@ type CRLChecker struct {
 	loads         map[string]*crlDownload
 }
 
+// NewCRLChecker returns a CRLChecker for options. HTTPClient is required and is
+// used without following redirects; zero MaxFetches, FetchTimeout and ClockSkew
+// default to 16 fetches, 10 seconds and five minutes.
 func NewCRLChecker(options CRLCheckerOptions) (*CRLChecker, error) {
 	if options.HTTPClient == nil {
 		return nil, fmt.Errorf("CRL HTTP client is required")

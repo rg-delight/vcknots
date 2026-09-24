@@ -1,3 +1,6 @@
+// Package oid4vci implements the OpenID for Verifiable Credential Issuance
+// receiver plugin, which performs the HTTP exchanges with a Credential Issuer
+// and its authorization server.
 package oid4vci
 
 import (

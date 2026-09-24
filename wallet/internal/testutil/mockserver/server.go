@@ -1,3 +1,5 @@
+// Package mockserver provides HTTP test servers that stand in for credential
+// issuers, verifiers and JWKS endpoints.
 package mockserver
 
 import (

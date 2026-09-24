@@ -32,6 +32,8 @@ type SigningChainOptions struct {
 	Revocation *CRLChecker
 }
 
+// SigningChainResult is the certification path a signing certificate was
+// accepted under and the outcome of its revocation check.
 type SigningChainResult struct {
 	// Chain is leaf first, ending at the selected configured trust anchor.
 	Chain []*x509.Certificate
@@ -55,7 +57,10 @@ type SigningChainError struct {
 	Err  error
 }
 
+// Error implements error.
 func (e *SigningChainError) Error() string { return fmt.Sprintf("x509 %s: %v", e.Kind, e.Err) }
+
+// Unwrap returns the wrapped error.
 func (e *SigningChainError) Unwrap() error { return e.Err }
 
 // ErrorCode names why the signing certificate was not accepted. A revocation

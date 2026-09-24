@@ -5,22 +5,34 @@ import (
 	"strings"
 )
 
+// OID4VPClientID is a parsed OpenID4VP Client Identifier: its Client
+// Identifier Prefix and the identifier that follows it.
 type OID4VPClientID struct {
 	original string
 	prefix   OID4VPClientIDPrefix
 }
+
+// OID4VPClientIDPrefix is an OpenID4VP Client Identifier Prefix.
 type OID4VPClientIDPrefix string
 
+// OpenID4VP Client Identifier Prefixes.
 const (
-	OID4VPClientIDPrefixRedirectURI   OID4VPClientIDPrefix = "redirect_uri"
+	// OID4VPClientIDPrefixRedirectURI is the redirect_uri prefix.
+	OID4VPClientIDPrefixRedirectURI OID4VPClientIDPrefix = "redirect_uri"
+	// OID4VPClientIDPrefixOIDFederation is the openid_federation prefix.
 	OID4VPClientIDPrefixOIDFederation OID4VPClientIDPrefix = "openid_federation"
 	// OID4VPClientIDPrefixDID is parsed, but the parse entry points refuse it:
 	// this library does not resolve DIDs to authenticate a Request Object.
-	OID4VPClientIDPrefixDID                 OID4VPClientIDPrefix = "decentralized_identifier"
+	OID4VPClientIDPrefixDID OID4VPClientIDPrefix = "decentralized_identifier"
+	// OID4VPClientIDPrefixVerifierAttestation is the verifier_attestation prefix.
 	OID4VPClientIDPrefixVerifierAttestation OID4VPClientIDPrefix = "verifier_attestation"
-	OID4VPClientIDPrefixX509SanDNS          OID4VPClientIDPrefix = "x509_san_dns"
-	OID4VPClientIDPrefixX509Hash            OID4VPClientIDPrefix = "x509_hash"
-	OID4VPClientIDPrefixOriginal            OID4VPClientIDPrefix = "origin"
+	// OID4VPClientIDPrefixX509SanDNS is the x509_san_dns prefix.
+	OID4VPClientIDPrefixX509SanDNS OID4VPClientIDPrefix = "x509_san_dns"
+	// OID4VPClientIDPrefixX509Hash is the x509_hash prefix.
+	OID4VPClientIDPrefixX509Hash OID4VPClientIDPrefix = "x509_hash"
+	// OID4VPClientIDPrefixOriginal is the origin prefix, reserved for Digital
+	// Credentials API requests; ParseOID4VPClientID refuses it.
+	OID4VPClientIDPrefixOriginal OID4VPClientIDPrefix = "origin"
 	// OID4VPClientIDPrefixPreRegistered is the pseudo-prefix used when the
 	// client_id contains no ":" character (OID4VP 1.0 §5.9.2).
 	OID4VPClientIDPrefixPreRegistered OID4VPClientIDPrefix = "pre-registered"

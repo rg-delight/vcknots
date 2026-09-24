@@ -41,6 +41,7 @@ type VerificationError struct {
 	Cause     error                   `json:"cause,omitempty"`
 }
 
+// Error implements error.
 func (e *VerificationError) Error() string {
 	if e.Cause != nil {
 		return fmt.Sprintf("verification error (algorithm: %s): %s: %v", e.Algorithm, e.Message, e.Cause)
@@ -48,6 +49,7 @@ func (e *VerificationError) Error() string {
 	return fmt.Sprintf("verification error (algorithm: %s): %s", e.Algorithm, e.Message)
 }
 
+// Unwrap returns the wrapped error.
 func (e *VerificationError) Unwrap() error {
 	return e.Cause
 }

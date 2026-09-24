@@ -27,6 +27,7 @@ type OAuthAuthzRequest struct {
 	ResponseMode OAuthAuthzReqResponseMode `json:"response_mode"`          // required in OID4VP, but optional in OIDC
 }
 
+// OAuthAuthzReqResponseMode is an Authorization Request response_mode value.
 type OAuthAuthzReqResponseMode string
 
 const (
@@ -72,6 +73,7 @@ type OAuthAuthzErrorResponse struct {
 	State            string          `json:"state,omitempty"`             // required if the state parameter was present in the client authorization request
 }
 
+// OAuthAuthzError is an OAuth 2.0 or OpenID4VP authorization error code.
 type OAuthAuthzError string
 
 const (
@@ -149,6 +151,7 @@ func (r *CredentialPresentationRequest) responseEndpoint() string {
 	return r.RedirectURI
 }
 
+// RequestURIMethod is an OpenID4VP request_uri_method value.
 type RequestURIMethod string
 
 const (
@@ -197,6 +200,8 @@ const (
 	encryptionPolicyHAIP
 )
 
+// FetchKeyWithKID returns the key of v.Jwks whose kid is kid, or an error when
+// there is none.
 func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) {
 	for _, key := range v.Jwks.Keys {
 		if key.KeyID == kid {
@@ -252,6 +257,9 @@ const (
 	RefreshTokenGrantType GrantTypes = "refresh_token"
 )
 
+// CredentialPresentationRequestBuilder describes a builder that assembles a
+// CredentialPresentationRequest from query parameters, a Request Object or a
+// request_uri.
 type CredentialPresentationRequestBuilder interface {
 	WithQueryParams(params map[string][]string) *CredentialPresentationRequestBuilder
 	WithRequestObject(obj string) *CredentialPresentationRequestBuilder

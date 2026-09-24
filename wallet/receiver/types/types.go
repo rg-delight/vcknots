@@ -40,6 +40,7 @@ type ReceiverError struct {
 	Err      error                   `json:"error"`
 }
 
+// Error implements error.
 func (e *ReceiverError) Error() string {
 	if e.Endpoint != "" {
 		return fmt.Sprintf("receiver %v operation %s at %s: %v", e.Protocol, e.Op, e.Endpoint, e.Err)
@@ -47,6 +48,7 @@ func (e *ReceiverError) Error() string {
 	return fmt.Sprintf("receiver %v operation %s: %v", e.Protocol, e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *ReceiverError) Unwrap() error {
 	return e.Err
 }
@@ -61,11 +63,15 @@ func NewReceiverError(protocol SupportedReceivingTypes, endpoint, op string, err
 	}
 }
 
+// DPoPNonceError reports that a server rejected a request with use_dpop_nonce
+// (RFC 9449) and carries the DPoP-Nonce value it supplied for the retry.
 type DPoPNonceError struct {
 	Nonce string
 	Err   error
 }
 
+// NewDPoPNonceError returns a DPoPNonceError for nonce with surrounding
+// whitespace trimmed. A nil err is replaced by ErrUseDPoPNonce.
 func NewDPoPNonceError(nonce string, err error) *DPoPNonceError {
 	if err == nil {
 		err = ErrUseDPoPNonce
@@ -76,6 +82,7 @@ func NewDPoPNonceError(nonce string, err error) *DPoPNonceError {
 	}
 }
 
+// Error implements error.
 func (e *DPoPNonceError) Error() string {
 	message := fmt.Sprintf("%s (use_dpop_nonce)", e.Err)
 	if e.Nonce == "" {
@@ -84,14 +91,18 @@ func (e *DPoPNonceError) Error() string {
 	return fmt.Sprintf("%s, DPoP-Nonce: %q", message, e.Nonce)
 }
 
+// Unwrap returns the wrapped error.
 func (e *DPoPNonceError) Unwrap() error {
 	return e.Err
 }
 
+// Is reports whether target is ErrUseDPoPNonce.
 func (e *DPoPNonceError) Is(target error) bool {
 	return target == ErrUseDPoPNonce
 }
 
+// DPoPNonceFromError returns the nonce of the first DPoPNonceError in err's
+// chain and true, or "" and false when there is none.
 func DPoPNonceFromError(err error) (string, bool) {
 	var nonceErr *DPoPNonceError
 	if errors.As(err, &nonceErr) {
@@ -139,6 +150,7 @@ func (e *CredentialEndpointError) ErrorCode() string {
 	return "credential_endpoint_rejected"
 }
 
+// Error implements error.
 func (e *CredentialEndpointError) Error() string {
 	if e == nil {
 		return "credential endpoint error"
@@ -180,14 +192,22 @@ func (e *CredentialEndpointError) Is(target error) bool {
 	}
 }
 
+// SupportedReceivingTypes identifies the protocol a receiver plugin implements.
 type SupportedReceivingTypes int
+
+// SignatureAlgorithm is a JWA signature algorithm name.
 type SignatureAlgorithm jose.SignatureAlgorithm
 
+// Receiving protocols.
 const (
+	// Oid4vci selects the OpenID4VCI receiver plugin.
 	Oid4vci SupportedReceivingTypes = iota
-	Mock                            // For mock receiver plugin that reads VC from txt files
+	// Mock selects the mock receiver plugin, which reads credentials from text files.
+	Mock
 )
 
+// CredentialIssuerMetadata is the OpenID4VCI 1.0 Section 12.2 Credential
+// Issuer Metadata document.
 type CredentialIssuerMetadata struct {
 	CredentialIssuer                 string                             `json:"credential_issuer"`
 	CredentialEndpoint               common.URIField                    `json:"credential_endpoint"`
@@ -298,6 +318,8 @@ type BatchCredentialIssuance struct {
 	BatchSize int `json:"batch_size"`
 }
 
+// CredentialConfiguration is one entry of the Credential Issuer Metadata
+// credential_configurations_supported map.
 type CredentialConfiguration struct {
 	Display             *[]CredentialConfigurationDisplay `json:"display,omitempty"`
 	ProofTypesSupported *map[string]ProofType             `json:"proof_types_supported,omitempty"`
@@ -336,6 +358,8 @@ var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
 	-39:  jose.PS512,
 }
 
+// UnmarshalJSON implements json.Unmarshaler. It accepts a JWA algorithm name or
+// a numeric COSE algorithm identifier, which it maps to the matching JWA name.
 func (c *SignatureAlgorithm) UnmarshalJSON(raw []byte) error {
 	var coseID int64
 	if err := json.Unmarshal(raw, &coseID); err == nil {
@@ -357,6 +381,8 @@ func (c *SignatureAlgorithm) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// CredentialIssuerMetadataDisplay is one entry of the Credential Issuer
+// Metadata display array.
 type CredentialIssuerMetadataDisplay struct {
 	Name   *string      `json:"name,omitempty"`
 	Locale *string      `json:"locale,omitempty"`
@@ -364,6 +390,8 @@ type CredentialIssuerMetadataDisplay struct {
 	MdbBio *string      `json:"mdb_bio,omitempty"`
 }
 
+// CredentialConfigurationDisplay is one entry of a Credential
+// Configuration's display array.
 type CredentialConfigurationDisplay struct {
 	Name            string                                         `json:"name"`
 	Locale          *string                                        `json:"locale,omitempty"`
@@ -374,15 +402,20 @@ type CredentialConfigurationDisplay struct {
 	TextColor       *string                                        `json:"text_color,omitempty"`
 }
 
+// CredentialConfigurationDisplayBackgroundImage is the background_image member
+// of a CredentialConfigurationDisplay.
 type CredentialConfigurationDisplayBackgroundImage struct {
 	Uri common.URIField `json:"uri"`
 }
 
+// DisplayLogo is the logo member of a display entry.
 type DisplayLogo struct {
 	Uri     common.URIField `json:"uri"`
 	AltText *string         `json:"alt_text,omitempty"`
 }
 
+// ProofType is one entry of a Credential Configuration's
+// proof_types_supported map.
 type ProofType struct {
 	ProofSigningAlgValuesSupported []jose.SignatureAlgorithm `json:"proof_signing_alg_values_supported"`
 	// KeyAttestationsRequired is the OpenID4VCI 1.0 Appendix D
@@ -398,11 +431,15 @@ type KeyAttestationsRequired struct {
 	UserAuthentication []string `json:"user_authentication,omitempty"`
 }
 
+// CredentialDefinition is the credential_definition member that describes a
+// W3C Verifiable Credential by its type and credentialSubject.
 type CredentialDefinition struct {
 	Type              []string                               `json:"type"`
 	CredentialSubject *CredentialDefinitionCredentialSubject `json:"credentialSubject,omitempty"`
 }
 
+// CredentialDefinitionCredentialSubject is the credentialSubject member of a
+// CredentialDefinition.
 type CredentialDefinitionCredentialSubject struct {
 	Values    map[string]interface{}       `json:"values,omitempty"`
 	Mandatory *bool                        `json:"mandatory,omitempty"`
@@ -410,11 +447,16 @@ type CredentialDefinitionCredentialSubject struct {
 	Display   *CredentialDefinitionDisplay `json:"display,omitempty"`
 }
 
+// CredentialDefinitionDisplay is a display entry of a
+// CredentialDefinitionCredentialSubject.
 type CredentialDefinitionDisplay struct {
 	Name   *string `json:"name,omitempty"`
 	Locale *string `json:"locale,omitempty"`
 }
 
+// AuthorizationServerMetadata is the RFC 8414 OAuth 2.0 Authorization Server
+// Metadata document, including the OpenID4VCI and attestation-based client
+// authentication members the wallet reads.
 type AuthorizationServerMetadata struct {
 	PreAuthorizedGrantAnonymousAccessSupported *bool           `json:"pre-authorized_grant_anonymous_access_supported"`
 	Issuer                                     common.URIField `json:"issuer"`
@@ -447,47 +489,78 @@ type AuthorizationServerMetadata struct {
 	CodeChallengeMethodsSupported                      *[]PkceCodeChallengeMethod `json:"code_challenge_methods_supported,omitempty"`
 }
 
+// OAuthResponseType is an OAuth 2.0 response_type value.
 type OAuthResponseType string
 
+// OAuth 2.0 response_type values.
 const (
-	Code  OAuthResponseType = "code"
+	// Code is the "code" response type.
+	Code OAuthResponseType = "code"
+	// Token is the "token" response type.
 	Token OAuthResponseType = "token"
 )
 
+// OAuthResponseMode identifies an OAuth 2.0 response mode.
 type OAuthResponseMode int
 
+// OAuth 2.0 response modes.
 const (
+	// Query returns authorization response parameters in the query string.
 	Query OAuthResponseMode = iota
+	// Fragment returns authorization response parameters in the URI fragment.
 	Fragment
 )
 
+// OAuthGrantType is an OAuth 2.0 grant_type value.
 type OAuthGrantType string
 
+// OAuth 2.0 grant_type values.
 const (
+	// AuthorizationCode is the authorization code grant (RFC 6749).
 	AuthorizationCode OAuthGrantType = "authorization_code"
-	Password          OAuthGrantType = "password"
+	// Password is the resource owner password credentials grant (RFC 6749).
+	Password OAuthGrantType = "password"
+	// ClientCredentials is the client credentials grant (RFC 6749).
 	ClientCredentials OAuthGrantType = "client_credentials"
-	RefreshToken      OAuthGrantType = "refresh_token"
-	JwtBearer         OAuthGrantType = "urn:ietf:params:oauth:grant-type:jwt-bearer"
-	Saml2Bearer       OAuthGrantType = "urn:ietf:params:oauth:grant-type:saml2-bearer"
+	// RefreshToken is the refresh token grant (RFC 6749).
+	RefreshToken OAuthGrantType = "refresh_token"
+	// JwtBearer is the JWT bearer authorization grant (RFC 7523).
+	JwtBearer OAuthGrantType = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+	// Saml2Bearer is the SAML 2.0 bearer authorization grant (RFC 7522).
+	Saml2Bearer OAuthGrantType = "urn:ietf:params:oauth:grant-type:saml2-bearer"
 )
 
+// PkceCodeChallengeMethod is an RFC 7636 PKCE code_challenge_method value.
 type PkceCodeChallengeMethod string
 
+// PKCE code_challenge_method values.
 const (
+	// Plain is the "plain" code challenge method.
 	Plain PkceCodeChallengeMethod = "plain"
-	S256  PkceCodeChallengeMethod = "S256"
+	// S256 is the "S256" code challenge method.
+	S256 PkceCodeChallengeMethod = "S256"
 )
 
+// TokenEndpointAuthMethod is an OAuth 2.0 token endpoint client
+// authentication method.
 type TokenEndpointAuthMethod string
 
+// Token endpoint client authentication methods.
 const (
-	None                    TokenEndpointAuthMethod = "none"
-	ClientSecretPost        TokenEndpointAuthMethod = "client_secret_post"
-	ClientSecretBasic       TokenEndpointAuthMethod = "client_secret_basic"
-	ClientSecretJwt         TokenEndpointAuthMethod = "client_secret_jwt"
-	PrivateKeyJwt           TokenEndpointAuthMethod = "private_key_jwt"
-	TlsClientAuth           TokenEndpointAuthMethod = "tls_client_auth"
+	// None sends no client authentication.
+	None TokenEndpointAuthMethod = "none"
+	// ClientSecretPost sends the client secret in the request body.
+	ClientSecretPost TokenEndpointAuthMethod = "client_secret_post"
+	// ClientSecretBasic sends the client secret with HTTP Basic authentication.
+	ClientSecretBasic TokenEndpointAuthMethod = "client_secret_basic"
+	// ClientSecretJwt authenticates with a JWT signed with the client secret.
+	ClientSecretJwt TokenEndpointAuthMethod = "client_secret_jwt"
+	// PrivateKeyJwt authenticates with a JWT signed with the client's private key.
+	PrivateKeyJwt TokenEndpointAuthMethod = "private_key_jwt"
+	// TlsClientAuth authenticates with a PKI-bound mutual TLS certificate (RFC 8705).
+	TlsClientAuth TokenEndpointAuthMethod = "tls_client_auth"
+	// SelfSignedTlsClientAuth authenticates with a self-signed mutual TLS
+	// certificate (RFC 8705).
 	SelfSignedTlsClientAuth TokenEndpointAuthMethod = "self_signed_tls_client_auth"
 )
 
@@ -501,12 +574,16 @@ type CredentialIssuanceAuthorizationDetail struct {
 	CredentialIdentifiers     []string `json:"credential_identifiers,omitempty"`
 }
 
+// AuthorizationDetailTypeOpenIDCredential is the authorization_details type
+// OpenID4VCI uses to request a Credential.
 const AuthorizationDetailTypeOpenIDCredential = "openid_credential"
 
 // ClientAssertionTypeJWTBearer is the client_assertion_type value used for
 // private_key_jwt (and client_secret_jwt) client authentication per RFC 7523.
 const ClientAssertionTypeJWTBearer = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
+// CredentialIssuanceAccessToken is a token endpoint response: the access token
+// and the OpenID4VCI members returned with it.
 type CredentialIssuanceAccessToken struct {
 	Token                string                                  `json:"access_token"`
 	TokenType            string                                  `json:"token_type"`
@@ -517,18 +594,25 @@ type CredentialIssuanceAccessToken struct {
 	AuthorizationDetails []CredentialIssuanceAuthorizationDetail `json:"authorization_details,omitempty"`
 }
 
+// CredentialRequestOptions carries optional per-request settings for
+// Receiver.ReceiveCredential. DPoPProofJWT, when set, is sent as the DPoP proof.
 type CredentialRequestOptions struct {
 	DPoPProofJWT *string
 }
 
+// TokenRequestConfig holds the token request settings assembled from
+// TokenRequestOption values.
 type TokenRequestConfig struct {
 	DPoPProof       string
 	ClientID        string
 	ClientAssertion string
 }
 
+// TokenRequestOption configures a TokenRequestConfig.
 type TokenRequestOption func(*TokenRequestConfig)
 
+// NewTokenRequestConfig returns a TokenRequestConfig with opts applied in
+// order, skipping nil options.
 func NewTokenRequestConfig(opts ...TokenRequestOption) *TokenRequestConfig {
 	cfg := &TokenRequestConfig{}
 	for _, opt := range opts {
@@ -539,6 +623,7 @@ func NewTokenRequestConfig(opts ...TokenRequestOption) *TokenRequestConfig {
 	return cfg
 }
 
+// WithDPoPProof sets the DPoP proof sent with the token request.
 func WithDPoPProof(proof string) TokenRequestOption {
 	return func(cfg *TokenRequestConfig) {
 		cfg.DPoPProof = proof
@@ -573,6 +658,8 @@ func ResolveTokenEndpointURL(endpoint common.URIField) string {
 	return endpoint.String()
 }
 
+// PushedAuthorizationRequest holds the parameters of an RFC 9126 pushed
+// authorization request.
 type PushedAuthorizationRequest struct {
 	ResponseType string
 	ClientID     string
@@ -591,6 +678,7 @@ type PushedAuthorizationRequest struct {
 	IssuerState          string
 }
 
+// PushedAuthorizationResponse is the RFC 9126 pushed authorization response.
 type PushedAuthorizationResponse struct {
 	RequestURI string `json:"request_uri"`
 	ExpiresIn  int    `json:"expires_in,omitempty"`
@@ -600,10 +688,14 @@ type PushedAuthorizationResponse struct {
 // 7523 Section 3 requires a unique jti per assertion.
 type ClientAssertionFactory func() (string, error)
 
+// ClientAttestationChallengeResponse is the response of the authorization
+// server's challenge endpoint used for attestation-based client authentication.
 type ClientAttestationChallengeResponse struct {
 	AttestationChallenge string `json:"attestation_challenge,omitempty"`
 }
 
+// OAuthClientAttestationHeaders holds the OAuth-Client-Attestation and
+// OAuth-Client-Attestation-PoP header values sent with a request.
 type OAuthClientAttestationHeaders struct {
 	ClientAttestation    string
 	ClientAttestationPop string
@@ -626,21 +718,28 @@ type NonceResponse struct {
 	DPoPNonce string `json:"-"`
 }
 
+// CredentialRequest is the OpenID4VCI 1.0 Section 8.2 Credential Request body.
 type CredentialRequest struct {
 	CredentialConfigurationID    string                               `json:"credential_configuration_id,omitempty"`
 	Proofs                       *CredentialProofs                    `json:"proofs,omitempty"`
 	CredentialResponseEncryption *CredentialResponseEncryptionRequest `json:"credential_response_encryption,omitempty"`
 }
 
+// CredentialProofs is the proofs member of a Credential Request.
 type CredentialProofs struct {
 	JWT []string `json:"jwt,omitempty"`
 }
 
+// CredentialResponseEncryptionRequest is the credential_response_encryption
+// member of a Credential Request: the key and content encryption algorithm the
+// issuer is to encrypt the response with.
 type CredentialResponseEncryptionRequest struct {
 	Jwk jose.JSONWebKey `json:"jwk"`
 	Enc string          `json:"enc"`
 }
 
+// CredentialResponse is an OpenID4VCI Credential Response or Deferred
+// Credential Response body.
 type CredentialResponse struct {
 	Credential     any     `json:"credential,omitempty"`
 	Credentials    []any   `json:"credentials,omitempty"`
@@ -665,6 +764,7 @@ var (
 	ErrCredentialResponseShape = common.NewCodedError("credential_response_shape_invalid", "credential response has an invalid shape")
 )
 
+// DeferredCredentialRequest is the OpenID4VCI Deferred Credential Request body.
 type DeferredCredentialRequest struct {
 	TransactionID string `json:"transaction_id"`
 }
@@ -703,6 +803,8 @@ type Receiver interface {
 	) (*string, error)
 }
 
+// DPoPProofFactory builds a DPoP proof JWT for one HTTP attempt, embedding the
+// server-provided nonce when it is not empty.
 type DPoPProofFactory func(nonce string) (string, error)
 
 // CredentialRequestBodyFactory builds the credential request body (already
@@ -712,8 +814,12 @@ type DPoPProofFactory func(nonce string) (string, error)
 // rebuild the proof with a fresh c_nonce from the nonce endpoint.
 type CredentialRequestBodyFactory func(cNonce string) (body []byte, contentType string, err error)
 
+// OAuthClientAttestationHeadersFactory builds the client attestation headers
+// for one HTTP attempt.
 type OAuthClientAttestationHeadersFactory func() (OAuthClientAttestationHeaders, error)
 
+// CredentialEndpointHTTPResponse is the body and Content-Type of a successful
+// Credential or Deferred Credential Endpoint response, before decoding.
 type CredentialEndpointHTTPResponse struct {
 	Body        []byte
 	ContentType string

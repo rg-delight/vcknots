@@ -1,3 +1,6 @@
+// Package oid4vp implements the OpenID for Verifiable Presentations wallet
+// side: it parses and validates Authorization Requests and sends
+// Authorization Responses to the Verifier.
 package oid4vp
 
 import (
@@ -14,6 +17,8 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
+// Oid4vpPresenter is the OpenID4VP presenter plugin. Its fields configure the
+// HTTP client, trust and protocol policy applied to requests and responses.
 type Oid4vpPresenter struct {
 	HTTPClient *http.Client
 	// AllowHTTP permits HTTP response endpoints for a local test verifier.

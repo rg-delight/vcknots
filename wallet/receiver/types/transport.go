@@ -214,6 +214,7 @@ func (e *Draft13CredentialEndpointError) ErrorCode() string {
 	}
 }
 
+// Error implements error.
 func (e *Draft13CredentialEndpointError) Error() string {
 	if e == nil {
 		return "draft13 credential endpoint error"

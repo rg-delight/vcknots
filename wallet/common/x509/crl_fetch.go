@@ -13,6 +13,8 @@ import (
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
+// MaxCRLBytes is the largest CRL, in bytes, that is downloaded or accepted
+// from a CRLCache.
 const MaxCRLBytes = 8 * 1024 * 1024
 
 // MaxCRLCacheAge is how long a downloaded CRL may be served from a durable
@@ -29,6 +31,8 @@ type CRLCache interface {
 	Store(ctx context.Context, entry CRLCacheEntry) error
 }
 
+// CRLCacheEntry is one DER-encoded CRL held in a CRLCache, with its validity
+// window, download time and cache expiry. Build entries with NewCRLCacheEntry.
 type CRLCacheEntry struct {
 	URL        string
 	DER        []byte

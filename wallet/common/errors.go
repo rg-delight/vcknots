@@ -21,10 +21,12 @@ type ComponentError struct {
 	Err       error  `json:"error"`
 }
 
+// Error implements error.
 func (e *ComponentError) Error() string {
 	return fmt.Sprintf("%s component operation %s: %v", e.Component, e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *ComponentError) Unwrap() error {
 	return e.Err
 }

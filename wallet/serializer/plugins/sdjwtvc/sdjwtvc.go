@@ -1,3 +1,5 @@
+// Package sdjwtvc serializes SD-JWT VCs and builds their presentations with
+// selected disclosures and an optional Key Binding JWT.
 package sdjwtvc
 
 import (
@@ -59,12 +61,14 @@ type SdJwtVcPresentationOptions struct {
 // IsSerializePresentationOptions implements the marker interface
 func (o *SdJwtVcPresentationOptions) IsSerializePresentationOptions() {}
 
+// SetAudience sets Audience. It is a no-op on a nil receiver.
 func (o *SdJwtVcPresentationOptions) SetAudience(audience string) {
 	if o != nil {
 		o.Audience = audience
 	}
 }
 
+// SetNonce sets Nonce. It is a no-op on a nil receiver.
 func (o *SdJwtVcPresentationOptions) SetNonce(nonce string) {
 	if o != nil {
 		o.Nonce = nonce
@@ -789,6 +793,8 @@ func (s *SdJwtVcSerializer) DeserializePresentation(flavor credential.SupportedS
 	return presentation, nil
 }
 
+// GetDefaultOption returns empty SdJwtVcPresentationOptions for
+// credential.SDJwtVC and an error for any other flavor.
 func (s *SdJwtVcSerializer) GetDefaultOption(flavor credential.SupportedSerializationFlavor) (types.SerializePresentationOptions, error) {
 	if flavor != credential.SDJwtVC {
 		return nil, types.NewFormatError(flavor, types.ErrUnsupportedFormat, "expected SD-JWT VC format")

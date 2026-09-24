@@ -162,6 +162,8 @@ func (d *SerializationDispatcher) DeserializePresentation(flavor credential.Supp
 	return result, nil
 }
 
+// GetDefaultOption returns the default presentation options of the plugin
+// registered for flavor.
 func (d *SerializationDispatcher) GetDefaultOption(flavor credential.SupportedSerializationFlavor) (types.SerializePresentationOptions, error) {
 	plugin, err := d.getPlugin(flavor)
 	if err != nil {

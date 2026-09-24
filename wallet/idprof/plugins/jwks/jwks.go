@@ -15,6 +15,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/idprof/types"
 )
 
+// IDProfileTypeID is the identity profile type handled by JWKSPlugin.
 const IDProfileTypeID = "jwks"
 
 // JWKSPlugin implements the IdentityProfiler interface for JWKS-based profiles

@@ -188,15 +188,19 @@ func (p *DIDKeyPlugin) Validate(profile *types.IdentityProfile) error {
 	return nil
 }
 
+// DIDKeyProfile is a DID profile for the did:key method.
 type DIDKeyProfile struct {
 	DIDProfile
 }
 
+// DIDKeyProfileCreateOptions holds the options for NewDIDKeyProfile.
 type DIDKeyProfileCreateOptions struct {
 	DIDProfileCreateOptions
 	PublicKey *jose.JSONWebKey
 }
 
+// NewDIDKeyProfile returns the did:key profile of opts.PublicKey, which must be a
+// P-256 or Ed25519 public key. The key is the profile's only key.
 func NewDIDKeyProfile(opts *DIDKeyProfileCreateOptions) (*DIDKeyProfile, error) {
 	if opts.PublicKey == nil {
 		return nil, fmt.Errorf("public key is required to create a DIDKeyProfile")
@@ -255,13 +259,19 @@ func (p *DIDKeyProfile) ToDIDProfile() *DIDProfile {
 	return &p.DIDProfile
 }
 
+// Limits of the multiformats unsigned varint encoding.
 const (
-	MaxLenUvarint63   = 9
+	// MaxLenUvarint63 is the maximum length in bytes of an unsigned varint.
+	MaxLenUvarint63 = 9
+	// MaxValueUvarint63 is the largest value an unsigned varint may encode.
 	MaxValueUvarint63 = (1 << 63) - 1
 )
 
+// Multicodec codes of the public key types did:key supports.
 const (
-	P256Pub    = 0x1200
+	// P256Pub is the multicodec code of a compressed P-256 public key.
+	P256Pub = 0x1200
+	// Ed25519Pub is the multicodec code of an Ed25519 public key.
 	Ed25519Pub = 0xed
 )
 

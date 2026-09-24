@@ -1,3 +1,5 @@
+// Package types defines the presenter plugin interface, presentation request
+// parameters and errors.
 package types
 
 import (
@@ -29,6 +31,7 @@ type PresenterError struct {
 	Err      error                         `json:"error"`
 }
 
+// Error implements error.
 func (e *PresenterError) Error() string {
 	if e.Endpoint != "" {
 		return fmt.Sprintf("presenter %v operation %s at %s: %v", e.Protocol, e.Op, e.Endpoint, e.Err)
@@ -36,6 +39,7 @@ func (e *PresenterError) Error() string {
 	return fmt.Sprintf("presenter %v operation %s: %v", e.Protocol, e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *PresenterError) Unwrap() error {
 	return e.Err
 }
@@ -66,13 +70,17 @@ type PresentationRequest struct {
 	AuthorizationEncryptedRespEnc string
 }
 
+// Presenter sends a serialized presentation to a verifier endpoint and returns
+// the redirect URI from the verifier's response, if any.
 type Presenter interface {
 	Present(protocol SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *PresentationRequest) (string, error)
 }
 
+// SupportedPresentationProtocol identifies a presentation protocol.
 type SupportedPresentationProtocol int
 
 const (
+	// Oid4vp is OpenID for Verifiable Presentations.
 	Oid4vp SupportedPresentationProtocol = iota
 )
 
@@ -83,6 +91,7 @@ type PresentationSubmission struct {
 	DescriptorMap []DescriptorMapItem `json:"descriptor_map"`
 }
 
+// DescriptorMapItem is one descriptor_map entry of a PresentationSubmission.
 type DescriptorMapItem struct {
 	ID         string             `json:"id"`
 	Format     string             `json:"format"`

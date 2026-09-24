@@ -49,7 +49,10 @@ const (
 type AuthorizationRequestType string
 
 const (
-	AuthorizationRequestScope   AuthorizationRequestType = "scope"
+	// AuthorizationRequestScope requests the configuration with its scope value.
+	AuthorizationRequestScope AuthorizationRequestType = "scope"
+	// AuthorizationRequestDetails requests the configuration with an
+	// openid_credential authorization_details entry.
 	AuthorizationRequestDetails AuthorizationRequestType = "authorization_details"
 )
 
@@ -222,9 +225,14 @@ type IssuanceResult struct {
 type NotificationEvent string
 
 const (
+	// NotificationCredentialAccepted reports that the credential was stored.
 	NotificationCredentialAccepted NotificationEvent = "credential_accepted"
-	NotificationCredentialFailure  NotificationEvent = "credential_failure"
-	NotificationCredentialDeleted  NotificationEvent = "credential_deleted"
+	// NotificationCredentialFailure reports an unsuccessful issuance not caused
+	// by a holder action.
+	NotificationCredentialFailure NotificationEvent = "credential_failure"
+	// NotificationCredentialDeleted reports an unsuccessful issuance caused by a
+	// holder action, such as deleting or rejecting the credential.
+	NotificationCredentialDeleted NotificationEvent = "credential_deleted"
 )
 
 // ReceiveCredentialRequest holds parameters for receiving a credential.
@@ -300,6 +308,7 @@ func (e *KeyAttestationRequiredError) sentinel() error {
 	return ErrKeyAttestationRequired
 }
 
+// Error implements error.
 func (e *KeyAttestationRequiredError) Error() string {
 	if e == nil {
 		return ErrKeyAttestationRequired.Error()
@@ -328,6 +337,7 @@ func (e *AuthorizationResponseError) ErrorCode() string {
 	return "authorization_error_response"
 }
 
+// Error implements error.
 func (e *AuthorizationResponseError) Error() string {
 	if e == nil {
 		return "authorization response error"

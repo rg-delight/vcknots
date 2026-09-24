@@ -1,3 +1,5 @@
+// Package env reads the VCKNOTS_WALLET_* environment variables that configure
+// the wallet.
 package env
 
 import (

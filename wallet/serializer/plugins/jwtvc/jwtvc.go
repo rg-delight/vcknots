@@ -34,14 +34,17 @@ type JwtVcPresentationOptions struct {
 	Nonce    string
 }
 
+// IsSerializePresentationOptions implements types.SerializePresentationOptions.
 func (o *JwtVcPresentationOptions) IsSerializePresentationOptions() {}
 
+// SetAudience sets Audience. It is a no-op on a nil receiver.
 func (o *JwtVcPresentationOptions) SetAudience(audience string) {
 	if o != nil {
 		o.Audience = audience
 	}
 }
 
+// SetNonce sets Nonce. It is a no-op on a nil receiver.
 func (o *JwtVcPresentationOptions) SetNonce(nonce string) {
 	if o != nil {
 		o.Nonce = nonce
@@ -247,6 +250,8 @@ func (s *JwtVcSerializer) DeserializePresentation(flavor credential.SupportedSer
 	return nil, types.NewFormatError(flavor, errors.New("not implemented"), "DeserializePresentation not implemented for JWT VC format")
 }
 
+// GetDefaultOption returns empty JwtVcPresentationOptions for credential.JwtVc
+// and an error for any other flavor.
 func (s *JwtVcSerializer) GetDefaultOption(flavor credential.SupportedSerializationFlavor) (types.SerializePresentationOptions, error) {
 	if flavor != credential.JwtVc {
 		return nil, types.NewFormatError(flavor, types.ErrUnsupportedFormat, "expected JWT VC format")

@@ -32,6 +32,7 @@ type IdentityProfileError struct {
 	Err    error  `json:"error"`
 }
 
+// Error implements error.
 func (e *IdentityProfileError) Error() string {
 	if e.ID != "" {
 		return fmt.Sprintf("identity profile %s (type: %s) operation %s: %v", e.ID, e.TypeID, e.Op, e.Err)
@@ -39,6 +40,7 @@ func (e *IdentityProfileError) Error() string {
 	return fmt.Sprintf("identity profile type %s operation %s: %v", e.TypeID, e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *IdentityProfileError) Unwrap() error {
 	return e.Err
 }

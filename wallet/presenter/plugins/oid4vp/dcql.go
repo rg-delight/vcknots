@@ -79,6 +79,7 @@ type AuthorizationRequestError struct {
 	response *errorResponseTarget
 }
 
+// Error implements error.
 func (e *AuthorizationRequestError) Error() string {
 	return fmt.Sprintf("%s: %v", e.Code, e.Err)
 }
@@ -90,6 +91,7 @@ func (e *AuthorizationRequestError) ErrorCode() string {
 	return "oid4vp_request_rejected"
 }
 
+// Unwrap returns the wrapped error.
 func (e *AuthorizationRequestError) Unwrap() error {
 	return e.Err
 }

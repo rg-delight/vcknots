@@ -58,6 +58,7 @@ type EndpointError struct {
 	Err error
 }
 
+// Error implements error.
 func (e *EndpointError) Error() string {
 	if e == nil {
 		return "OpenID4VCI endpoint error"
@@ -99,6 +100,7 @@ func (e *EndpointError) ErrorCode() string {
 	}
 }
 
+// Unwrap returns the wrapped error.
 func (e *EndpointError) Unwrap() error {
 	if e == nil {
 		return nil

@@ -61,6 +61,7 @@ type LdpVcPresentationOptions struct {
 	Created time.Time
 }
 
+// IsSerializePresentationOptions implements types.SerializePresentationOptions.
 func (o *LdpVcPresentationOptions) IsSerializePresentationOptions() {}
 
 // SetAudience sets the proof domain.

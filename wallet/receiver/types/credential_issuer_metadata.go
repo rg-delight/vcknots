@@ -33,6 +33,8 @@ func (m *CredentialIssuerMetadata) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UnmarshalJSON implements json.Unmarshaler. It refuses an encryption_required
+// member that is not a JSON boolean, including null.
 func (e *CredentialRequestEncryption) UnmarshalJSON(data []byte) error {
 	type encryption CredentialRequestEncryption
 	var decoded encryption

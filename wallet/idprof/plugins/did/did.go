@@ -9,22 +9,27 @@ import (
 	"github.com/trustknots/vcknots/wallet/idprof/types"
 )
 
+// IDProfileTypeID is the identity profile type handled by DIDPlugin.
 const IDProfileTypeID = "did"
 
+// DIDProfile is an identity profile identified by a DID.
 type DIDProfile struct {
 	types.IdentityProfile
 
 	Method string // Method specifies the DID method, e.g., "key", "peer", etc.
 }
 
+// DIDProfileCreateOptions holds the options for creating a DID profile.
 type DIDProfileCreateOptions struct {
 	// Method specifies the DID method to be used for the profile.
 	Method string // e.g., "key", "peer", etc.
 }
 
+// DIDMethod identifies a DID method.
 type DIDMethod int
 
 const (
+	// DIDMethodKey is the did:key method.
 	DIDMethodKey DIDMethod = iota // did:key
 )
 

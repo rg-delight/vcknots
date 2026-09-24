@@ -1,3 +1,4 @@
+// Package types defines the credential store interface, entries and errors.
 package types
 
 import (
@@ -35,6 +36,7 @@ type CredStoreError struct {
 	Err      error                   `json:"error"`
 }
 
+// Error implements error.
 func (e *CredStoreError) Error() string {
 	if e.ID != "" {
 		return fmt.Sprintf("credential store %v operation %s for ID %s: %v", e.Location, e.Op, e.ID, e.Err)
@@ -42,6 +44,7 @@ func (e *CredStoreError) Error() string {
 	return fmt.Sprintf("credential store %v operation %s: %v", e.Location, e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *CredStoreError) Unwrap() error {
 	return e.Err
 }
@@ -56,6 +59,8 @@ func NewCredStoreError(location SupportedCredStoreTypes, id, op string, err erro
 	}
 }
 
+// CredentialEntry is a stored credential: its raw serialized form, media type
+// and the time it was received.
 type CredentialEntry struct {
 	// TODO: Define the actual fields for credential entry
 	Id         string
@@ -64,10 +69,13 @@ type CredentialEntry struct {
 	MimeType   string
 }
 
+// Serialize encodes the entry as JSON.
 func (ce *CredentialEntry) Serialize() ([]byte, error) {
 	return json.Marshal(ce)
 }
 
+// SerializationFlavor returns the credential format named by MimeType, or an
+// error when it is not a known format.
 func (ce *CredentialEntry) SerializationFlavor() (credential.SupportedSerializationFlavor, error) {
 	switch ce.MimeType {
 	case string(credential.JwtVc):
@@ -83,8 +91,10 @@ func (ce *CredentialEntry) SerializationFlavor() (credential.SupportedSerializat
 	}
 }
 
+// SupportedCredStoreTypes identifies a credential storage location.
 type SupportedCredStoreTypes int
 
+// CredStore stores and retrieves credential entries at a storage location.
 type CredStore interface {
 	SaveCredentialEntry(credentialEntry CredentialEntry, location SupportedCredStoreTypes) error
 
@@ -93,11 +103,14 @@ type CredStore interface {
 	GetCredentialEntry(id string, location SupportedCredStoreTypes) (*CredentialEntry, error)
 }
 
+// GetCredentialEntriesResult is one page of credential entries and the total
+// number of stored entries.
 type GetCredentialEntriesResult struct {
 	Entries    *[]CredentialEntry
 	TotalCount *int
 }
 
+// ParseCredentialEntry decodes a CredentialEntry from its JSON encoding.
 func ParseCredentialEntry(data []byte) (CredentialEntry, error) {
 	var entry CredentialEntry
 	err := json.Unmarshal(data, &entry)

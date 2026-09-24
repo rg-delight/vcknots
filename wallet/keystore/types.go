@@ -35,6 +35,7 @@ type KeyStoreError struct {
 	Err       error             `json:"error"`
 }
 
+// Error implements error.
 func (e *KeyStoreError) Error() string {
 	if e.KeyID != "" {
 		return fmt.Sprintf("keystore operation %s for key %s (algorithm: %s): %v", e.Op, e.KeyID, e.Algorithm, e.Err)
@@ -45,6 +46,7 @@ func (e *KeyStoreError) Error() string {
 	return fmt.Sprintf("keystore operation %s: %v", e.Op, e.Err)
 }
 
+// Unwrap returns the wrapped error.
 func (e *KeyStoreError) Unwrap() error {
 	return e.Err
 }
