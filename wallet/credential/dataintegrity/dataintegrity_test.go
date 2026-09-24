@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -13,11 +14,10 @@ import (
 	"github.com/btcsuite/btcd/btcutil/base58"
 )
 
-// typescriptVectors are produced by the wallet's independent TypeScript
-// implementation (jsonld.js canonize + node:crypto Ed25519) with fixed seeds, so
-// a byte-identical proofValue here means both implementations sign the same
-// canonical dataset.
-type typescriptVectors struct {
+// referenceVectors are produced by an independent implementation (jsonld.js
+// canonize and node:crypto Ed25519) with fixed seeds, so a byte-identical
+// proofValue here means both implementations sign the same canonical dataset.
+type referenceVectors struct {
 	Issuer     vectorKey      `json:"issuer"`
 	Holder     vectorKey      `json:"holder"`
 	Cases      []vectorCase   `json:"cases"`
@@ -48,13 +48,13 @@ type vectorDocument struct {
 	ProofOptionsNQuads string         `json:"proofOptionsNQuads"`
 }
 
-func loadVectors(t *testing.T) typescriptVectors {
+func loadVectors(t *testing.T) referenceVectors {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/typescript_vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vectors typescriptVectors
+	var vectors referenceVectors
 	if err := json.Unmarshal(raw, &vectors); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func withoutProof(document map[string]any) map[string]any {
 	return unsecured
 }
 
-func TestCanonicalizeMatchesTypeScriptImplementation(t *testing.T) {
+func TestCanonicalizeMatchesReferenceVectors(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, vector := range vectors.Cases {
 		got, err := Canonicalize(withoutProof(vector.Presentation), vectors.Contexts)
@@ -105,7 +105,7 @@ func TestCanonicalizeMatchesTypeScriptImplementation(t *testing.T) {
 	}
 }
 
-func TestVerifyAcceptsTypeScriptProofs(t *testing.T) {
+func TestVerifyAcceptsReferenceProofs(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, vector := range vectors.Cases {
 		if err := VerifyEddsaRdfc2022(vector.Presentation, vectors.Contexts, vectors.Holder.publicKey(t)); err != nil {
@@ -122,7 +122,7 @@ func TestVerifyAcceptsTypeScriptProofs(t *testing.T) {
 	}
 }
 
-func TestSignReproducesTypeScriptProofValue(t *testing.T) {
+func TestSignReproducesReferenceProofValue(t *testing.T) {
 	vectors := loadVectors(t)
 	holderKey := vectors.Holder.privateKey(t)
 	for _, vector := range vectors.Cases {
@@ -146,7 +146,7 @@ func TestSignReproducesTypeScriptProofValue(t *testing.T) {
 		gotProof := signed["proof"].(map[string]any)
 		for _, name := range []string{"type", "cryptosuite", "created", "proofPurpose", "verificationMethod", "challenge", "domain", "proofValue"} {
 			if gotProof[name] != want[name] {
-				t.Fatalf("status=%v: proof %s = %v, TypeScript produced %v", vector.WithStatus, name, gotProof[name], want[name])
+				t.Fatalf("status=%v: proof %s = %v, reference produced %v", vector.WithStatus, name, gotProof[name], want[name])
 			}
 		}
 	}
@@ -270,5 +270,53 @@ func TestVerifyRefusesMalformedProofs(t *testing.T) {
 	}
 	if err := VerifyEddsaRdfc2022(withoutProof(base), vectors.Contexts, publicKey); !errors.Is(err, ErrProofInvalid) {
 		t.Fatalf("missing proof: got %v", err)
+	}
+}
+
+// blankNodeClique is a JSON-LD document of size blank nodes that all link to
+// each other, so every node has the same first-degree hash: the shape that
+// makes RDFC-1.0 run in factorial time.
+func blankNodeClique(size int) map[string]any {
+	graph := make([]any, size)
+	for i := range graph {
+		var links []any
+		for j := 0; j < size; j++ {
+			if j != i {
+				links = append(links, fmt.Sprintf("_:b%d", j))
+			}
+		}
+		graph[i] = map[string]any{"@id": fmt.Sprintf("_:b%d", i), "p": links}
+	}
+	return map[string]any{
+		"@context": map[string]any{"p": map[string]any{"@id": "https://example.test/p", "@type": "@id"}},
+		"@graph":   graph,
+	}
+}
+
+func TestCanonicalizeRefusesADatasetPoisoningCliqueBeforeCanonicalizing(t *testing.T) {
+	started := time.Now()
+	_, err := Canonicalize(blankNodeClique(9), nil)
+	if !errors.Is(err, ErrCanonicalizationTooComplex) {
+		t.Fatalf("got %v, want ErrCanonicalizationTooComplex", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("refusal took %v", elapsed)
+	}
+	if _, err := Canonicalize(blankNodeClique(maxAmbiguousBlankNodes), nil); err != nil {
+		t.Fatalf("a clique within the bound: %v", err)
+	}
+}
+
+func TestCanonicalizeRefusesTooManyBlankNodes(t *testing.T) {
+	graph := make([]any, maxBlankNodes+1)
+	for i := range graph {
+		graph[i] = map[string]any{"@id": fmt.Sprintf("_:b%d", i), "p": fmt.Sprintf("https://example.test/%d", i)}
+	}
+	document := map[string]any{
+		"@context": map[string]any{"p": map[string]any{"@id": "https://example.test/p", "@type": "@id"}},
+		"@graph":   graph,
+	}
+	if _, err := Canonicalize(document, nil); !errors.Is(err, ErrCanonicalizationTooComplex) {
+		t.Fatalf("got %v, want ErrCanonicalizationTooComplex", err)
 	}
 }

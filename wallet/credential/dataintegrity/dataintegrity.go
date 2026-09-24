@@ -10,6 +10,13 @@
 // entry, and a document naming any other URL is refused with
 // ErrContextNotPinned (VC Data Integrity 1.0 Section 2.4.1 and the security
 // considerations of Section 5.1 recommend exactly this).
+//
+// RDFC-1.0 canonicalization can take time exponential in the number of blank
+// nodes that share a first-degree hash (RDFC-1.0 Section 4.4 and its security
+// considerations on dataset poisoning), and the underlying processor offers no
+// cancellation. Canonicalize therefore refuses, before canonicalizing, a
+// dataset with more than 1024 blank nodes or with more than 6 blank nodes whose
+// first-degree hash is not unique, with ErrCanonicalizationTooComplex.
 package dataintegrity
 
 import (
@@ -18,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +50,15 @@ const (
 
 	// ed25519SignatureSize is the size of an Ed25519 signature (RFC 8032).
 	ed25519SignatureSize = ed25519.SignatureSize
+
+	// maxBlankNodes bounds the blank nodes of a dataset Canonicalize accepts.
+	maxBlankNodes = 1024
+	// maxAmbiguousBlankNodes bounds the blank nodes whose first-degree hash is
+	// shared with another blank node, the only ones RDFC-1.0 runs the
+	// exponential Hash N-Degree Quads algorithm on. Six such nodes in one
+	// clique canonicalize in tens of milliseconds; each further node costs
+	// roughly ten times more.
+	maxAmbiguousBlankNodes = 6
 )
 
 var (
@@ -57,6 +74,10 @@ var (
 	ErrCanonicalizationFailed = common.NewCodedError("data_integrity_canonicalization_failed", "RDFC-1.0 canonicalization failed")
 	// ErrSigningFailed reports a signer error or a signature of the wrong size.
 	ErrSigningFailed = common.NewCodedError("data_integrity_signing_failed", "Data Integrity proof signing failed")
+	// ErrCanonicalizationTooComplex reports a dataset whose RDFC-1.0
+	// canonicalization this package refuses to attempt because its blank nodes
+	// exceed the bounds described in the package documentation.
+	ErrCanonicalizationTooComplex = common.NewCodedError("data_integrity_canonicalization_too_complex", "RDFC-1.0 canonicalization exceeds the blank node bounds")
 	// ErrProofInvalid reports a proof that does not verify.
 	ErrProofInvalid = common.NewCodedError("data_integrity_proof_invalid", "Data Integrity proof is invalid")
 )
@@ -237,7 +258,9 @@ func HashData(unsecured map[string]any, proofConfig map[string]any, contexts Pin
 // Canonicalize returns the RDFC-1.0 canonical N-Quads of a JSON-LD document
 // expanded against the pinned contexts only. A term that does not expand to
 // an absolute IRI fails the canonicalization instead of being dropped, so a
-// claim the signer cannot vouch for is never silently left unsigned.
+// claim the signer cannot vouch for is never silently left unsigned. A dataset
+// beyond the blank node bounds of the package documentation fails with
+// ErrCanonicalizationTooComplex before any canonicalization work.
 func Canonicalize(document map[string]any, contexts PinnedContexts) (string, error) {
 	loader, err := newPinnedLoader(contexts)
 	if err != nil {
@@ -271,6 +294,9 @@ func Canonicalize(document map[string]any, contexts PinnedContexts) (string, err
 	if !ok {
 		return "", fmt.Errorf("%w: unexpected RDF dataset %T", ErrCanonicalizationFailed, dataset)
 	}
+	if err := checkBlankNodeBounds(rdfDataset); err != nil {
+		return "", err
+	}
 	options.Algorithm = ld.AlgorithmURDNA2015 // RDFC-1.0 with SHA-256
 	options.Format = "application/n-quads"
 	normalized, err := ld.NewJsonLdApi().Normalize(rdfDataset, options)
@@ -282,6 +308,75 @@ func Canonicalize(document map[string]any, contexts PinnedContexts) (string, err
 		return "", fmt.Errorf("%w: unexpected canonicalization output %T", ErrCanonicalizationFailed, normalized)
 	}
 	return nquads, nil
+}
+
+// checkBlankNodeBounds refuses a dataset whose canonicalization could take
+// exponential time. It groups the blank nodes by their first-degree quads
+// (RDFC-1.0 Section 4.6: every quad naming the node, with the node written as
+// one label and every other blank node as another) and counts the nodes whose
+// group has more than one member.
+func checkBlankNodeBounds(dataset *ld.RDFDataset) error {
+	quadsOf := map[string][]string{}
+	for graphName, quads := range dataset.Graphs {
+		for _, quad := range quads {
+			graph := quad.Graph
+			if graph == nil && strings.HasPrefix(graphName, "_:") {
+				graph = ld.NewBlankNode(graphName)
+			}
+			nodes := []ld.Node{quad.Subject, quad.Predicate, quad.Object, graph}
+			for _, node := range nodes {
+				if node == nil || !ld.IsBlankNode(node) {
+					continue
+				}
+				label := node.GetValue()
+				if len(quadsOf) >= maxBlankNodes {
+					if _, known := quadsOf[label]; !known {
+						return fmt.Errorf("%w: more than %d blank nodes", ErrCanonicalizationTooComplex, maxBlankNodes)
+					}
+				}
+				quadsOf[label] = append(quadsOf[label], firstDegreeQuad(nodes, label))
+			}
+		}
+	}
+	groups := map[string]int{}
+	for _, quads := range quadsOf {
+		slices.Sort(quads)
+		groups[strings.Join(quads, "\n")]++
+	}
+	ambiguous := 0
+	for _, size := range groups {
+		if size > 1 {
+			ambiguous += size
+		}
+	}
+	if ambiguous > maxAmbiguousBlankNodes {
+		return fmt.Errorf("%w: %d blank nodes share a first-degree hash, the limit is %d", ErrCanonicalizationTooComplex, ambiguous, maxAmbiguousBlankNodes)
+	}
+	return nil
+}
+
+// firstDegreeQuad serializes one quad for the blank node label: label becomes
+// "_:a" and every other blank node "_:z" (RDFC-1.0 Section 4.6 step 3). The
+// encoding need only be injective, not N-Quads.
+func firstDegreeQuad(nodes []ld.Node, label string) string {
+	parts := make([]string, len(nodes))
+	for index, node := range nodes {
+		switch {
+		case node == nil:
+			parts[index] = "-"
+		case ld.IsBlankNode(node) && node.GetValue() == label:
+			parts[index] = "_:a"
+		case ld.IsBlankNode(node):
+			parts[index] = "_:z"
+		default:
+			if literal, ok := node.(*ld.Literal); ok {
+				parts[index] = fmt.Sprintf("L%q^%q@%q", literal.Value, literal.Datatype, literal.Language)
+			} else {
+				parts[index] = fmt.Sprintf("I%q", node.GetValue())
+			}
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // pinnedLoader is the only document loader the canonicalization uses. It
