@@ -48,7 +48,7 @@ var (
 	// ErrStatusListIssuerKeyUnresolved reports that no candidate public key was
 	// available for the token's `iss`: the resolution hook is absent, it
 	// failed, or it returned no key. It is deliberately distinct from
-	// ErrStatusListSignatureInvalid, because it describes this wallet's own
+	// ErrStatusListSignatureInvalid, because it describes the caller's
 	// configuration or connectivity, not a fault of the issuer.
 	ErrStatusListIssuerKeyUnresolved = common.NewCodedError("status_list_issuer_key_unresolved", "status list token issuer keys could not be resolved")
 	// ErrStatusListTokenExpired reports that the token's `exp`

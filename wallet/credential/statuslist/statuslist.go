@@ -34,7 +34,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
-	"mime"
 	"net/http"
 	"net/url"
 	"slices"
@@ -42,7 +41,10 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 const (
@@ -54,37 +56,16 @@ const (
 	// Status List Token. It is both what the wallet asks for and what the
 	// response must be typed as.
 	statusListTokenMediaType = "application/statuslist+jwt"
-	// defaultMaxTokenBytes bounds a Status List Token response when the caller
-	// sets no bound of its own. The token is a JWT over a compressed bit
-	// string; 64 KiB is generous for one and small enough that a hostile
-	// endpoint cannot stream a wallet out of memory.
-	defaultMaxTokenBytes int64 = 64 * 1024
-	// defaultFetchTimeout bounds a Status List Token request when the caller
-	// supplies no HTTP client of its own. An http.Client with no timeout waits
-	// forever, which would let one unreachable endpoint stall a status check
-	// indefinitely.
-	defaultFetchTimeout = 30 * time.Second
 )
 
 // DefaultStatusListSigningAlgorithms is the JWS signature algorithm set a
 // Status List Token may be signed with when a Checker names none of its own:
-// the ECDSA family of RFC 7518 Section 3.4, EdDSA over Ed25519 (RFC 8037), the
-// RSASSA-PSS family of Section 3.5 and RSASSA-PKCS1-v1_5 SHA-256 of
-// Section 3.3.
-//
-// The MAC algorithms of RFC 7518 Section 3.2 and the unsigned `none` of
-// RFC 7515 Section 3.6 are deliberately absent and must never be added: a
-// wallet holds only the issuer's public key, so a MAC proves nothing about who
-// produced the token, and `none` proves nothing at all.
+// the library's accepted asymmetric algorithms (common/jose
+// AcceptedSignatureAlgorithms). MAC algorithms and `none` are never included.
 //
 // Callers must not modify this slice; assign a copy to Checker.SigningAlgorithms
 // to narrow or widen the set for one checker.
-var DefaultStatusListSigningAlgorithms = []jose.SignatureAlgorithm{
-	jose.ES256, jose.ES384, jose.ES512,
-	jose.EdDSA,
-	jose.PS256, jose.PS384, jose.PS512,
-	jose.RS256,
-}
+var DefaultStatusListSigningAlgorithms = commonjose.AcceptedSignatureAlgorithms()
 
 // Reference is a parsed `status.status_list` credential claim: the Status List
 // Token URI and the index of this credential's entry within the list that token
@@ -355,34 +336,9 @@ func (c *Checker) signingAlgorithms() []jose.SignatureAlgorithm {
 
 func (c *Checker) maxTokenBytes() int64 {
 	if c.MaxTokenBytes <= 0 {
-		return defaultMaxTokenBytes
+		return httpfetch.DefaultBodyLimit
 	}
 	return c.MaxTokenBytes
-}
-
-// httpClient returns the client this request is performed with. A caller-owned
-// client is copied rather than reconfigured: the redirect policy below belongs
-// to this request, and mutating a shared client to install it would change the
-// behaviour of every other request the integrator makes with the same client.
-func (c *Checker) httpClient() *http.Client {
-	if c.HTTPClient == nil {
-		return &http.Client{Timeout: defaultFetchTimeout, CheckRedirect: refuseRedirect}
-	}
-	client := *c.HTTPClient
-	client.CheckRedirect = refuseRedirect
-	return &client
-}
-
-// refuseRedirect stops the client from following a redirect and hands the 3xx
-// response back instead, so the checker classifies it itself.
-//
-// A Status List URI identifies the list: the token's `sub` must equal the URI
-// the credential named, and following a redirect would fetch a token that
-// cannot satisfy that equality while making the wallet issue an unannounced
-// request to wherever the endpoint pointed. Refusing is therefore both the
-// safer and the more honest behaviour.
-func refuseRedirect(*http.Request, []*http.Request) error {
-	return http.ErrUseLastResponse
 }
 
 // parseStatusListURI validates the `uri` member as a Status List endpoint.
@@ -438,7 +394,10 @@ func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, er
 	}
 	request.Header.Set("Accept", statusListTokenMediaType)
 
-	response, err := c.httpClient().Do(request)
+	// Redirects are refused: the token's `sub` must equal the URI the
+	// credential named, so a token served from elsewhere cannot be the one
+	// asked for.
+	response, err := httpfetch.NoRedirect(c.HTTPClient).Do(request)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
 	}
@@ -450,14 +409,13 @@ func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, er
 	case response.StatusCode < 200 || response.StatusCode >= 300:
 		return "", fmt.Errorf("%w: status list endpoint answered with status %d", ErrStatusListFetchFailed, response.StatusCode)
 	}
-	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != statusListTokenMediaType {
+	if !httpfetch.MediaTypeIs(response.Header, statusListTokenMediaType) {
 		return "", fmt.Errorf("%w: response content type %q is not %s", ErrStatusListFetchFailed, response.Header.Get("Content-Type"), statusListTokenMediaType)
 	}
 
-	body, err := readBoundedBody(response, c.maxTokenBytes())
+	body, err := httpfetch.ReadLimited(response, c.maxTokenBytes())
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
 	}
 	// A compact JWS carries no whitespace, so trimming the surrounding bytes
 	// accepts an endpoint that serves the token as a text file with a trailing
@@ -468,24 +426,4 @@ func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, er
 		return "", fmt.Errorf("%w: status list endpoint answered with an empty body", ErrStatusListFetchFailed)
 	}
 	return token, nil
-}
-
-// readBoundedBody reads at most maxBytes of a response body.
-//
-// A declared Content-Length is checked first, so a response that announces more
-// than the cap is refused before a single byte of it is read. net/http has
-// already parsed the header into response.ContentLength (-1 when the length is
-// unknown, as for a chunked or transparently decompressed body) and refused a
-// malformed one. The declaration is not trusted afterwards: accumulation stops
-// as soon as one byte past the cap arrives, which is what bounds a response
-// that declares no length at all.
-func readBoundedBody(response *http.Response, maxBytes int64) ([]byte, error) {
-	if response.ContentLength > maxBytes {
-		return nil, fmt.Errorf("%w: declared Content-Length %d exceeds the %d byte cap", ErrStatusListFetchFailed, response.ContentLength, maxBytes)
-	}
-	body, err := readAllBounded(response.Body, maxBytes)
-	if err != nil {
-		return nil, err
-	}
-	return body, nil
 }

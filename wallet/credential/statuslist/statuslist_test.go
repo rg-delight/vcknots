@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 const (
@@ -568,7 +570,7 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			},
 			configure:      func(_ *harness, c *Checker) { c.MaxTokenBytes = 1024 },
 			want:           ErrStatusListFetchFailed,
-			wantMessage:    "declared Content-Length 2048",
+			wantMessage:    "2048 bytes declared, limit 1024",
 			hookMustNotRun: true,
 		},
 		{
@@ -584,7 +586,7 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			},
 			configure:      func(_ *harness, c *Checker) { c.MaxTokenBytes = 1024 },
 			want:           ErrStatusListFetchFailed,
-			wantMessage:    "response body exceeds the 1024 byte cap",
+			wantMessage:    "exceeds the size limit: limit 1024",
 			hookMustNotRun: true,
 		},
 		{
@@ -593,7 +595,7 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 				return func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", statusListTokenMediaType)
 					w.(http.Flusher).Flush()
-					_, _ = w.Write(make([]byte, defaultMaxTokenBytes+1))
+					_, _ = w.Write(make([]byte, httpfetch.DefaultBodyLimit+1))
 				}
 			},
 			want:           ErrStatusListFetchFailed,
@@ -988,5 +990,40 @@ func TestCheckReferenceHonoursContextCancellation(t *testing.T) {
 	assertSentinel(t, err, ErrStatusListFetchFailed)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+	}
+}
+
+func TestCheckReferenceAcceptsEveryAcceptedAlgorithmByDefault(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, algorithm := range []jose.SignatureAlgorithm{jose.RS384, jose.RS512} {
+		t.Run(string(algorithm), func(t *testing.T) {
+			h := newHarness(t)
+			signer, err := jose.NewSigner(
+				jose.SigningKey{Algorithm: algorithm, Key: jose.JSONWebKey{Key: private, KeyID: "rsa-key"}},
+				(&jose.SignerOptions{}).WithType("statuslist+jwt"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(defaultClaims(h.uri))
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := signer.Sign(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := signed.CompactSerialize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.serveToken(token)
+			if _, err := h.checker(jose.JSONWebKey{Key: &private.PublicKey, KeyID: "rsa-key"}).CheckReference(context.Background(), h.reference(1)); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
