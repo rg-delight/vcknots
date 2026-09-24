@@ -1,78 +1,70 @@
 # 公開 Wallet API driver
 
-この独立した Go module は公開 Wallet API を呼び出します。stdin から 1 つの JSON
-操作を受け取り、stdout へ 1 つの JSON 結果を返します。protocol error は exit code
-1、不正な command / 設定入力は exit code 2 で終了します。
+この独立した Go モジュールは、公開 Wallet API を実行します。
+stdin から JSON の操作を 1 つ読み、stdout に JSON の結果を 1 つ書きます。
+プロトコルのエラーでは終了コード 1 で `{"operation": ..., "error": ...}` を書き、コマンドや構成の入力が不正な場合は終了コード 2 で終了します。
 
-この driver は、SD-JWT VC の pre-authorized 発行経路、OpenID4VCI 1.0 Final の
-authorization code フロー、永続化された credential の一覧、公開 presentation
-メソッド、W3C Digital Credentials API 上の OpenID4VP 1.0 に対応します。mdoc と
-remote attestation provider は後続の作業です。この software JWK の設定は
-ハードウェア保護を主張しません。
+driver は、OpenID4VCI 1.0 の Pre-Authorized Code Flow と Authorization Code Flow で Credential を受領し、保存済み Credential を列挙し、起動 URI または W3C Digital Credentials API を通じて OpenID4VP 1.0 で提示し、指定があれば HAIP 1.0 プロファイルを適用します。
+ソフトウェアの JWK を使うため、ハードウェアによる保護はありません。
 
-## 設定と実行
+## 構成と実行
 
-リポジトリの検証環境には Go 1.26.6 を使用します。このディレクトリから実行します。
+`wallet/mise.toml` に固定された Go（Go 1.26.6）を使います。
+このディレクトリで次を実行します。
 
 ```sh
 go build -o official_driver .
 ```
 
-holder、DPoP、client 用に別々の EC 署名 JWK ファイルを用意します。鍵ファイルには
-秘密成分を含める必要があり、client の公開 JWK は issuer に登録しておく必要が
-あります。テストに本番鍵を使わないでください。設定には絶対パスを使用します。
+holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイルを用意します。
+鍵ファイルは秘密鍵の成分を含み、client の公開 JWK は issuer に登録されていなければなりません。
+テストに本番の鍵を使わないでください。
+構成では絶対パスを使います。
 
-### 設定フィールド
+### 構成フィールド
 
 | フィールド | 型 | 既定値 | 効果 |
 | --- | --- | --- | --- |
-| `stateDirectory` | string | 必須 | bbolt credential store のディレクトリ。 |
-| `clientId` | string | 必須 | issuer token endpoint で使う OAuth2 `client_id`。 |
-| `holderKeyFile` | string | 必須 | credential holder 鍵として使う秘密 JWK。 |
-| `dpopKeyFile` | string | 必須 | DPoP proof に使う秘密 JWK。 |
-| `clientKeyFile` | string | 必須 | `private_key_jwt` クライアント認証に使う秘密 JWK。 |
-| `tlsCAFiles` | []string | `[]` | TLS のシステムルートに追加する PEM ルート。CRL 取得（issuer と Request Object）にも使います。 |
-| `profile` | string | `""` | protocol policy: `""`/`"final"`/`"haip"` → `profile.Profile`。`wallet.Config.Profile` と構築する両 plugin に適用し、一致している必要があります。未知の値は拒否します。 |
-| `verifierCAFiles` | []string | `[]` | 署名付き Request Object の PEM trust anchor → `RequestObjectValidation.TrustAnchors`。すべての CERTIFICATE ブロックを parse し、無いファイルは拒否します。空の場合 `RequestObjectValidation` は nil のままで、X.509 Request Object を拒否します（fail-closed）。 |
-| `verifierAllowUnadvertisedRevocation` | bool | `false` | → `RequestObjectValidation.AllowUnadvertisedRevocation`。`verifierCAFiles` が必要です。 |
-| `walletAudience` | []string | `[]` | → `RequestObjectValidation.WalletAudience`。`verifierCAFiles` が必要です。 |
-| `issuerCAFiles` | []string | `[]` | credential の `x5c` チェーン用 PEM issuer trust anchor → `IssuerX509TrustOptions.TrustAnchors`。parse と拒否の規則は `verifierCAFiles` と同じです。 |
-| `issuerAllowUnadvertisedRevocation` | bool | `false` | → `IssuerX509TrustOptions.AllowUnadvertisedRevocation`。`issuerCAFiles` が必要です。 |
-| `issuerJWKSFiles` | []string | `[]` | `x5c` ヘッダを持たない credential 用の公開 issuer 鍵の JWKS ファイル（`{"keys":[...]}`）。空でない場合 `CredentialAcceptancePolicy.ResolveIssuerKeys` を設定し、operator が選んだすべての鍵を返します。library は `kid` で照合します。秘密鍵は拒否します。 |
-| `requireHolderBinding` | bool | `false` | → `CredentialAcceptancePolicy.RequireHolderBinding`。`cnf` の無い credential を拒否します。 |
-| `redirectUri` | string | `""` | authorization code フローの Wallet 登録済み redirect URI。`receive-code` と `receive-code-wallet-initiated` で必須です。 |
-| `authorizationRequestType` | string | `""` | → `OID4VCIFinalReceiveRequest.AuthorizationRequestType`。`receive-code`/`receive-code-wallet-initiated` が Credential Configuration を要求する方法を選びます（OpenID4VCI 1.0 §5.1.1/§5.1.2）。`""` は configuration が広告する scope があれば `scope`、無ければ `authorization_details` を使います。`"scope"` は広告された scope を必須とし（無ければ PAR 前にエラー）、`"authorization_details"` は `[{"type":"openid_credential","credential_configuration_id":...}]` を送り scope を付けません。HAIP では `scope` のみを受け付けます（HAIP §4.1/§4.2 が `scope` での Credential Type 伝達を要求するため、明示的な `"authorization_details"` は拒否します）。 |
-| `attesterKeyFile` | string | `""` | テスト専用 `wallet.StaticClientAttester` の秘密 JWK → `wallet.Config.ClientAttestation`。`attesterIssuer` と同時に設定が必要です。JWK の `x5c` チェーンがあれば client attestation の header チェーンになります。 |
-| `attesterIssuer` | string | `""` | static client attester の `iss`。`attesterKeyFile` と同時に設定が必要です。 |
-| `keyAttesterKeyFile` | string | `""` | テスト専用 `wallet.StaticKeyAttester` の秘密 JWK → `wallet.Config.KeyAttestation`。`keyAttesterIssuer` と同時に設定が必要です。 |
-| `keyAttesterIssuer` | string | `""` | static key attester の `iss`。`keyAttesterKeyFile` と同時に設定が必要です。 |
-| `includeKeyAttestation` | bool | `false` | → `OID4VCIFinalReceiveRequest.IncludeKeyAttestation`。issuer が要求しなくても OpenID4VCI Appendix D の key attestation を要求します。 |
-| `deferredPollAttempts` | int | `10` | → `OID4VCIFinalReceiveRequest.DeferredPollAttempts`。0 以下は既定の 10 を選びます。 |
-| `credentialResponseEncryption` | bool | `false` | true のとき authorization code 操作は実行ごとに一時 P-256 鍵を生成し、`CredentialResponseEncryptionKey` として渡すので issuer が credential 応答を暗号化します。 |
-| `followRedirect` | bool | `true` | true（または未指定）のとき、`present` が返した `redirect_uri` を same-device ブラウザのように開きます。TLS 設定済み client で HTTP GET、`Accept: text/html,*/*`、`User-Agent: official_driver`、15 秒 timeout、最大 5 回の redirect 追跡です。false にすると URI を開かずに返します。 |
+| `stateDirectory` | string | 必須 | bbolt の Credential ストアのディレクトリです。 |
+| `clientId` | string | 必須 | `wallet.Config.ClientAuth.ClientID` です。 |
+| `holderKeyFile` | string | 必須 | holder 鍵（`CredentialRequest.HolderKeys`、`Presentation.Key`）の秘密 JWK です。 |
+| `dpopKeyFile` | string | 必須 | `wallet.Config.DPoP.Key` の秘密 JWK です。 |
+| `clientKeyFile` | string | 必須 | `private_key_jwt` の鍵（`Config.ClientAuth.Key`）と、client attestation が束縛する鍵（`Config.Attestation.ClientKey`）の秘密 JWK です。 |
+| `tlsCAFiles` | []string | `[]` | TLS のためにシステムのルートに追加する PEM で、CRL の取得にも使います。 |
+| `profile` | string | `""` | `""`、`"final"`、`"haip"` のいずれかです。`Config.Profile` と driver が構築する両 plugin に適用します。未知の値は拒否します。 |
+| `verifierCAFiles` | []string | `[]` | 署名付き Request Object の PEM トラストアンカー（`oid4vp.RequestObjectValidationOptions.TrustAnchors`）です。証明書を含まないファイルは拒否します。空の場合 `RequestObjectValidation` は nil のままで、X.509 の Request Object は拒否されます。 |
+| `verifierAllowUnadvertisedRevocation` | bool | `false` | `RequestObjectValidationOptions.AllowUnadvertisedRevocation` です。`verifierCAFiles` が必要です。 |
+| `walletAudience` | []string | `[]` | `RequestObjectValidationOptions.WalletAudience` です。`verifierCAFiles` が必要です。 |
+| `issuerCAFiles` | []string | `[]` | Credential の `x5c` チェーンに対する PEM の Issuer トラストアンカー（`acceptance.IssuerX509TrustOptions.TrustAnchors`）です。 |
+| `issuerAllowUnadvertisedRevocation` | bool | `false` | `acceptance.IssuerX509TrustOptions.AllowUnadvertisedRevocation` です。`issuerCAFiles` が必要です。 |
+| `issuerJWKSFiles` | []string | `[]` | `x5c` のない Credential のための Issuer 公開鍵の JWKS ファイルです。構成したすべての鍵を返す `acceptance.Policy.ResolveIssuerKeys` を設定します。秘密鍵は拒否します。 |
+| `requireHolderBinding` | bool | `false` | `acceptance.Policy.RequireHolderBinding` です。 |
+| `redirectUri` | string | `""` | `Config.Issuance.RedirectURI` です。`receive-code` と `receive-code-wallet-initiated` で必須です。 |
+| `authorizationRequestType` | string | `""` | `IssuanceRequest.AuthorizationRequestType` で、`""`、`"scope"`、`"authorization_details"` のいずれかです。HAIP が受け付けるのは `scope` だけです。 |
+| `attesterKeyFile` | string | `""` | テスト専用の `attestation.StaticClientAttester`（`Config.Attestation.Client`）の秘密 JWK です。`x5c` チェーンがあれば attestation の `x5c` になり、HAIP ではそれが必須です。`attesterIssuer` と一緒に設定します。 |
+| `attesterIssuer` | string | `""` | 静的 client attester の `iss` です。 |
+| `keyAttesterKeyFile` | string | `""` | テスト専用の `attestation.StaticKeyAttester`（`Config.Attestation.Key`）の秘密 JWK です。`keyAttesterIssuer` と一緒に設定します。 |
+| `keyAttesterIssuer` | string | `""` | 静的 key attester の `iss` です。 |
+| `includeKeyAttestation` | bool | `false` | `CredentialRequest.IncludeKeyAttestation` で、Issuer が要求しなくても key attestation を送ります。 |
+| `deferredPollAttempts` | int | `10` | 発行が保留中の間に driver が送る Deferred Credential Request の回数です。ゼロ以下なら 10 です。 |
+| `credentialResponseEncryption` | bool | `false` | `Config.Issuance.CredentialEncryption.Response` を `CredentialEncryptionRequired` にし、応答の暗号化を提供しない Issuer を拒否します。応答用の鍵は一時鍵です。 |
+| `additionalHolderKeys` | int | `0` | `receive-code` と `receive-code-wallet-initiated` の batch 要求に使う、追加の一時 P-256 holder 鍵の数です。 |
+| `followRedirect` | bool | `true` | `present` が返された `redirect_uri` を開くかどうかです。 |
 
-`wallet.Config.CredentialAcceptance` は常に設定します。OpenID4VCI 1.0 Final / HAIP
-の発行経路は policy 無しでは credential を保存しないためです。`issuerCAFiles` か
-`issuerJWKSFiles` がある場合、policy は issuer 鍵を認証します。どちらも無い場合、
-driver は `CredentialAcceptancePolicy.UnverifiedIssuer` を設定するので、任意の
-テスト issuer に対する実行はそのまま動き、そのことを 1 か所で明示します。
+OpenID4VCI 1.0 のメソッドは `Config.CredentialAcceptance` がないと実行を拒否するため、driver は常にこれを設定します。
+`issuerCAFiles` か `issuerJWKSFiles` があれば、ポリシーは Issuer の鍵を認証します。
+どちらもなければ driver は `acceptance.Policy.UnverifiedIssuer` を設定し、鍵を認証できないテスト用 Issuer に対して実行していることを 1 か所で明示します。
+HAIP では、SD-JWT VC にはそれでも `issuerCAFiles` が必要です。
 `requireHolderBinding` はどちらの場合にも適用されます。
 
-TLS 設定済み HTTP client は `IssuerX509TrustOptions.HTTPClient` と
-`RequestObjectValidationOptions.CRL.HTTPClient` に渡すので、CRL 取得も
-`tlsCAFiles` を尊重します。未知の profile 値や不整合なオプション（CA ファイルを
-伴わない `*AllowUnadvertisedRevocation` フラグ、`verifierCAFiles` 無しの
-`walletAudience` など）は、操作が走る前に compose 時に拒否します。attester 鍵と
-その issuer、key-attester 鍵とその issuer はそれぞれ同時に設定が必要で、
-`redirectUri` 無しの `receive-code` は拒否します。
+TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であり、`IssuerX509TrustOptions` と `RequestObjectValidationOptions` の CRL 用クライアントでもあるので、CRL の取得も `tlsCAFiles` に従います。
+矛盾するオプション（CA ファイルのない `*AllowUnadvertisedRevocation`、`verifierCAFiles` のない `walletAudience`、issuer のない attester 鍵）と、`redirectUri` のない Authorization Code の操作は、どの操作を実行するよりも前に拒否します。
 
-`StaticClientAttester` と `StaticKeyAttester` は、ローカルに保持した attester 鍵で
-attestation を自己発行します。これはテストと単独運用者専用です。静的 attester は
-テスト専用の evidence であり、本番 attestation として扱ってはいけません。本番では
-Wallet が attester の秘密鍵を持たず、remote attester から attestation を取得する
-分割に従います。
+`StaticClientAttester` と `StaticKeyAttester` は、ローカルに保持した attester 鍵で attestation を自己発行します。
+これらはテストと単一運用者の構成のためのものです。
+本番の wallet はリモートの attester から attestation を取得し、attester の秘密鍵を保持しません。
 
-設定例:
+構成の例です。
 
 ```json
 {
@@ -102,9 +94,9 @@ Wallet が attester の秘密鍵を持たず、remote attester から attestatio
 }
 ```
 
-Transport の検証にはシステムルートと `tlsCAFiles` を使います。この例は TLS や
-X.509 検証を無効化しません。各プロトコルの trust 要件を強制するのは library の
-責務のままです。credential は library の bbolt ローカルストレージ plugin を使います。
+通信の検証にはシステムのルートと `tlsCAFiles` を使います。
+driver は TLS や X.509 の検査を無効にしません。
+Credential はライブラリの bbolt ローカルストレージ plugin で保存します。
 
 ### 操作と出力
 
@@ -132,56 +124,50 @@ JSON
 JSON
 ```
 
-`receive-preauth` は OpenID4VCI 1.0 Final の Pre-Authorized Code フロー
-（`ReceiveOID4VCIFinalPreAuthorizedCredential`）を実行し、`txCode` を `tx_code`
-として送り、`clientId` でクライアントを名乗り、`clientKeyFile` で DPoP proof に
-署名します。`attesterKeyFile` を設定すると、token request は `receive-code` と同じ
-`OAuth-Client-Attestation` header を運ぶので、クライアント認証を要求する HAIP issuer
-でも受理されます。出力は `receive-code` と同じ形です。`receive-code` は offer URI から OpenID4VCI 1.0
-Final authorization code フローを実行し（`credential_offer_uri` は解決されます）、
-`clientId`、`redirectUri`、`holderKeyFile`、`clientKeyFile` を使い、`credentialIds`、
-credential 順の `verification` 配列、`notificationId`、`transactionId` を返します。
-issuer が deferred ポーリング後も pending のままなら `pending` が `true` です。driver は
-`OID4VCIFinalReceiveRequest.AllowSelfDrivenAuthorization` を設定するので、library が
-authorization endpoint 自体を駆動します。同じ TLS client が redirect を追わずに取得し、
-302 `code` 応答を期待します。ここにブラウザエミュレーションは追加しません。ユーザーの
-いる Wallet は逆に、`BeginOID4VCIFinalAuthorization` を呼び、返された
-`authorization_url` をシステムブラウザで開き、redirect を
-`ResumeOID4VCIFinalAuthorization` へ渡します。`present` は `redirectUri` と
-`redirectFollowed`（driver が開いたか）、`redirectStatus`（最後の HTTP status、開かない
-場合は `0`）を返します。`list` は `credentialIds` と `total` を返します。既存の
-フィールド名は維持します。`receive-code` の protocol error はそのまま伝播し、driver は
-再試行も修復もしません。
+`public-keys` は holder、DPoP、client の鍵の公開 JWK を返します。
 
-`receive-code-wallet-initiated` は Credential Offer 無しで同じ OpenID4VCI 1.0
-authorization code フローを実行します（OpenID4VCI 1.0 §5: "The Wallet can also start
-the issuance without a Credential Offer"）。`uri` の代わりに `credentialIssuer` と
-`credentialConfigurationId` を取り、Credential Issuer metadata を自身で取得し、その
-Credential Configuration を `scope` または `authorization_details` で要求し
-（§5.1.1/§5.1.2）、`issuer_state` を送りません。出力は `pending` を含め `receive-code`
-と同じです。
+`receive-preauth` は値渡しの Offer を `wallet.ParseCredentialOfferURL` で解析し、`txCode` を `tx_code` として `AuthorizePreAuthorizedIssuance` を呼び、holder 鍵で `RequestCredential` を呼びます。
+token リクエストは `clientId` で client を名乗り、DPoP proof を付け、`attesterKeyFile` があれば client attestation のヘッダーも付けます。
 
-`present-dcapi` は launch URI の代わりに W3C Digital Credentials API の invocation に
-応答します。`dcapiRequest` は platform request の entry（`protocol` とプロトコルの
-`data` object）で、`origin` は platform が認証した呼出し元 origin です。origin は
-`data` からは読みません。3 種すべてを受け付けます: `openid4vp-v1-unsigned`、
-`openid4vp-v1-signed`、`openid4vp-v1-multisigned`。結果は runner が verifier へ提出する
-`DCAPIResponse` object です: `dc_api` は `{"protocol":<同じ protocol>,"data":{"vp_token":{...}}}`、
-`dc_api.jwt` は `{"protocol":...,"data":{"response":"<JWE compact>"}}`。driver は HTTP
-呼出しをしません。Key Binding JWT の `aud` は `origin:<origin>`（OID4VP 1.0
-Appendix A.4）で、request の `client_id` ではありません。
+`receive-code` は Offer URI を `ResolveCredentialOffer` で解決し（`credential_offer_uri` は取得します）、`BeginIssuance` を呼び、返された認可 URL を自ら開きます。
+TLS を構成したクライアントで GET を送り、認可サーバー内のリダイレクトには最大 5 回まで従い、認可サーバーの外へ出る最初の `Location` をリダイレクトとして受け取ります。
+これはユーザー操作なしで応答するテスト用 Issuer で機能します。
+ユーザーのいる wallet は、代わりにシステムブラウザで URL を開きます。
+driver はその後、そのリダイレクトで `AuthorizeIssuance` を呼び、holder 鍵と `additionalHolderKeys` の鍵で `RequestCredential` を呼びます。
 
-呼出しごとに新しいプロセスなので、一覧と提示は永続化された credential を使います。
-issuer / verifier の完全な launch URI をそのまま使ってください。driver は query の補正、
-独自 credential の発行、protocol 失敗の再試行、presentation response の構築を行いません。
-`followRedirect` が有効で verifier が `redirect_uri` を返すと、driver は same-device
-ブラウザと同様にそれを開きます（HAIP §5.1、OpenID4VP §8.2）。fragment は送信しません。
-2xx/3xx 以外の最終 status は status を名指しするエラーとして報告します。
+`receive-code-wallet-initiated` は、同じフローを Credential Offer なしで実行します（OpenID4VCI 1.0 §5）。
+`uri` の代わりに `credentialIssuer` と `credentialConfigurationId` を受け取ります。
+
+3 つの受領操作は、`RequestCredential` の後、保留中の発行を自らポーリングします。
+Issuer が指定した間隔（最短 1 秒、最長 1 分）だけ待って `RequestDeferredCredential` を呼び、これを最大 `deferredPollAttempts` 回繰り返します。
+その後 `NotifyIssuer` で結果を報告します。
+Credential を保存したら `credential_accepted`、拒否したら `credential_failure` です。
+保存後の通知の失敗はエラーとして報告します。
+出力は `credentialIds`、Credential 順の `verification` 配列（`acceptance.Verification`）、Issuer が通知を求めた場合の `notificationId`、最後のポーリングの後も保留中の場合の `transactionId` と `pending: true` です。
+
+`present` は holder 鍵で `PresentCredential` を呼びます。
+要求を解析して受け付け、DCQL クエリを満たす保存済み Credential を選び、応答を送ります。
+`redirectUri`、`redirectFollowed`、`redirectStatus`（リダイレクトを開かなかった場合は `0`）を返します。
+`followRedirect` が有効な場合、driver は返された `redirect_uri` を同一端末のブラウザと同じように開きます。
+TLS を構成したクライアントで GET を送り、`Accept: text/html,*/*`、`User-Agent: official_driver`、15 秒のタイムアウト、最大 5 回のリダイレクトを使います。
+フラグメントは送信しません。
+最終的なステータスが 2xx と 3xx 以外ならエラーです。
+
+`present-dcapi` は W3C Digital Credentials API の呼出しに応答します。
+`dcapiRequest` は platform の要求 entry（`protocol` とプロトコルの `data` オブジェクト）で、`origin` は platform が認証した呼出し元の origin です。
+driver は `ParseDCAPIRequest`、`SelectCredentials`、`SubmitPresentation` を呼び、`SubmitResult.DCAPIResponse` を出力します。
+`dc_api` では `{"protocol":...,"data":{"vp_token":{...}}}`、`dc_api.jwt` では `{"protocol":...,"data":{"response":"<JWE>"}}` です。
+HTTP 呼出しは行いません。
+Key Binding JWT の `aud` は `origin:<origin>` です（OpenID4VP 1.0 Appendix A.4）。
+
+`list` は `credentialIds` と `total` を返します。
+
+呼出しのたびに新しいプロセスになるので、列挙と提示は永続化された Credential を使います。
+Issuer や Verifier の起動 URI はそのまま渡してください。
+driver は要求を修正せず、プロトコルの失敗を再試行せず、提示の応答を自ら組み立てることもしません。
 
 ### additionalHolderKeys
 
-`additionalHolderKeys`（integer、既定 0）は authorization code 操作に、その数だけ
-一時 P-256 鍵で追加 proof を送らせ、`batch_credential_issuance` を広告する issuer が
-複数の credential を返せるようにします（OpenID4VCI 1.0 §14.6）。一時鍵は実行後に
-破棄され、得られた credential は保存されますが後から提示はできません。batch の
-control にのみ使用してください。
+`additionalHolderKeys` を指定すると、Authorization Code の操作は一時 P-256 鍵による key proof をその数だけ追加で送り、`batch_credential_issuance` を広告する Issuer が複数の Credential を返すようにします（OpenID4VCI 1.0 §8.2）。
+一時鍵は実行後に破棄されるため、得られた Credential は保存されますが、後で提示することはできません。
+batch 発行を試すときだけ使ってください。
