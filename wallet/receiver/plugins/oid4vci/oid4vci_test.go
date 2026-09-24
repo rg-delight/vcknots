@@ -2178,9 +2178,11 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 					// identifier the wallet requested (VCI 1.0 §12.2.4): the
 					// request origin with the well-known prefix removed and any
 					// trailing slash kept.
+					// RFC 8414 §3.3 holds the authorization server issuer
+					// to the same rule.
 					credentialIssuer := "http://" + r.Host + tt.identifier
 					mockserver.JSONResponse(w, http.StatusOK, map[string]string{
-						"issuer":            "https://example.com",
+						"issuer":            credentialIssuer,
 						"credential_issuer": credentialIssuer,
 					})
 					return

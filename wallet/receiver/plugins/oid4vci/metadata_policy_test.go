@@ -816,3 +816,46 @@ func TestFetchIssuerMetadataKeepsTheAcceptedDocument(t *testing.T) {
 		})
 	}
 }
+
+// RFC 8414 Section 3.3: "The "issuer" value returned MUST be identical to the
+// authorization server's issuer identifier value into which the well-known URI
+// string was inserted to create the URL used to retrieve the metadata. If
+// these values are not identical, the data contained in the response MUST NOT
+// be used." Every caller, Draft 13 included, gets the check from the plugin.
+func TestAuthorizationServerMetadataIssuerMustMatch(t *testing.T) {
+	var published string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":"https://as.example/token"}`, published)
+	}))
+	defer server.Close()
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+
+	for name, tc := range map[string]struct {
+		endpoint, issuer string
+		ok               bool
+	}{
+		"identical":                       {endpoint: server.URL + "/as", issuer: server.URL + "/as", ok: true},
+		"another issuer":                  {endpoint: server.URL + "/as", issuer: "https://attacker.example/as"},
+		"trailing slash differs":          {endpoint: server.URL + "/as", issuer: server.URL + "/as/"},
+		"well-known endpoint, identical":  {endpoint: server.URL + "/.well-known/oauth-authorization-server/as", issuer: server.URL + "/as", ok: true},
+		"well-known endpoint, other path": {endpoint: server.URL + "/.well-known/oauth-authorization-server/as", issuer: server.URL + "/other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			published = tc.issuer
+			endpoint, err := common.ParseURIField(tc.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := receiver.FetchAuthorizationServerMetadata(*endpoint, types.Oid4vci)
+			if tc.ok {
+				if err != nil || metadata.Issuer.String() != tc.issuer {
+					t.Fatalf("metadata = %+v, err = %v", metadata, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrAuthorizationServerIssuerMismatch) || metadata != nil {
+				t.Fatalf("metadata = %+v, err = %v; want ErrAuthorizationServerIssuerMismatch", metadata, err)
+			}
+		})
+	}
+}

@@ -39,6 +39,11 @@ const (
 // declares its own alias of this sentinel.
 var ErrIssuerIdentifierMismatch = common.NewCodedError("issuer_metadata_identity_mismatch", "credential_issuer does not match the requested Credential Issuer Identifier")
 
+// ErrAuthorizationServerIssuerMismatch reports that authorization server
+// metadata names an issuer other than the identifier it was requested for,
+// which RFC 8414 Section 3.3 forbids using.
+var ErrAuthorizationServerIssuerMismatch = common.NewCodedError("authorization_server_metadata_issuer_mismatch", "authorization server metadata issuer does not match the requested identifier")
+
 // Sentinel errors of OpenID4VCI 1.0 Section 12.2.3 signed Credential Issuer
 // Metadata. They exist so a caller can branch on why a signed document was not
 // accepted — with errors.Is, which holds through every wrapping this package
@@ -502,8 +507,10 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 }
 
 // FetchAuthorizationServerMetadata fetches the RFC 8414 authorization server
-// metadata. It is a legacy Draft 13 types.Receiver method and therefore carries
-// no context; it binds its request to context.Background().
+// metadata of the identifier endpoint names, and refuses a document whose
+// issuer is not that identifier (RFC 8414 Section 3.3, compared exactly). It
+// is a types.Receiver method and carries no context; it binds its request to
+// context.Background().
 func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIField, receivingTypes types.SupportedReceivingTypes) (*types.AuthorizationServerMetadata, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
@@ -520,8 +527,23 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	if err := o.fetchMetadataDocument(observe.WithEndpoint(context.Background(), observe.EndpointAuthorizationServerMetadata), authorizationServerMetadataURL(url.URL(endpoint)), &metadata); err != nil {
 		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf("failed to fetch authorization server metadata: %w", err))
 	}
-
+	if identifier := authorizationServerIdentifier(url.URL(endpoint)); metadata.Issuer.String() != identifier {
+		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf(
+			"authorization server metadata issuer %q is not the requested identifier %q: %w",
+			metadata.Issuer.String(), identifier, ErrAuthorizationServerIssuerMismatch))
+	}
 	return &metadata, nil
+}
+
+// authorizationServerIdentifier is the issuer identifier endpoint names: the
+// endpoint itself, or, for an endpoint that already is the RFC 8414 Section
+// 3.1 well-known URL, the URL with the well-known path removed.
+func authorizationServerIdentifier(endpointURL url.URL) string {
+	if rest, found := strings.CutPrefix(endpointURL.Path, wellKnownAuthorizationServer); found {
+		endpointURL.Path = rest
+		endpointURL.RawPath = ""
+	}
+	return endpointURL.String()
 }
 
 // authorizationServerMetadataURL inserts the RFC 8414 Section 3.1 well-known
