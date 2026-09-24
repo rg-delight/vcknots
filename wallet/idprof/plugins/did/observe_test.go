@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
 
 // TestObserveLabelsDIDWebDocumentFetch: the did:web document fetch is labelled
@@ -19,7 +20,7 @@ func TestObserveLabelsDIDWebDocumentFetch(t *testing.T) {
 			"assertionMethod": []any{verificationMethod(t, identifier+"#key-1", testPublicJWK(t))},
 		})
 	})
-	recorder := observe.NewRecorder(4)
+	recorder := &observetest.Recorder{}
 	plugin.HTTPClient.Transport = observe.Transport(plugin.HTTPClient.Transport, recorder)
 
 	if _, err := plugin.Resolve(identifier); err != nil {
@@ -31,8 +32,8 @@ func TestObserveLabelsDIDWebDocumentFetch(t *testing.T) {
 		t.Fatalf("recorded %d exchanges, want 1: %+v", len(exchanges), exchanges)
 	}
 	exchange := exchanges[0]
-	if exchange.Endpoint != observe.EndpointIssuerKeyMaterial || exchange.Method != http.MethodGet || exchange.URL.Path != "/bank/did.json" {
+	if exchange.Endpoint != observe.EndpointIssuerKeyMaterial || exchange.Request.Method != http.MethodGet || exchange.Request.URL.Path != "/bank/did.json" {
 		t.Fatalf("exchange = %s %s labelled %q, want GET /bank/did.json labelled %q",
-			exchange.Method, exchange.URL.Path, exchange.Endpoint, observe.EndpointIssuerKeyMaterial)
+			exchange.Request.Method, exchange.Request.URL.Path, exchange.Endpoint, observe.EndpointIssuerKeyMaterial)
 	}
 }

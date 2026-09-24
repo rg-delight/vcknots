@@ -45,9 +45,7 @@ func parseResponseURI(responseURI string, allowHTTP bool) (*url.URL, error) {
 // httpfetch.DefaultBodyLimit; a non-2xx status keeps only the OAuth error code,
 // because the body is under the Verifier's control.
 func postAuthorizationResponse(ctx context.Context, client *http.Client, endpoint string, formData url.Values) ([]byte, error) {
-	// A JWE travels in the "response" member (OID4VP 1.0 §8.3).
-	encrypted := formData.Get("response") != ""
-	ctx = observe.WithResponseEncryption(observe.WithEndpoint(ctx, observe.EndpointResponse), encrypted)
+	ctx = observe.WithEndpoint(ctx, observe.EndpointResponse)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return nil, err

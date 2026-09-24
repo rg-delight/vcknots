@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
 
 // TestObserveLabelsStatusListTokenFetch: the Status List Token fetch carries
@@ -14,7 +15,7 @@ func TestObserveLabelsStatusListTokenFetch(t *testing.T) {
 	h := newHarness(t)
 	h.serveToken(signES256(t, h.key, defaultHeader(), defaultClaims(h.uri)))
 	checker := h.checker()
-	recorder := observe.NewRecorder(4)
+	recorder := &observetest.Recorder{}
 	client := *checker.HTTPClient
 	client.Transport = observe.Transport(client.Transport, recorder)
 	checker.HTTPClient = &client
@@ -28,11 +29,11 @@ func TestObserveLabelsStatusListTokenFetch(t *testing.T) {
 		t.Fatalf("recorded %d exchanges, want 1: %+v", len(exchanges), exchanges)
 	}
 	exchange := exchanges[0]
-	if exchange.Endpoint != observe.EndpointStatusList || exchange.Method != http.MethodGet || exchange.URL.Path != statusPath {
+	if exchange.Endpoint != observe.EndpointStatusList || exchange.Request.Method != http.MethodGet || exchange.Request.URL.Path != statusPath {
 		t.Fatalf("exchange = %s %s labelled %q, want GET %s labelled %q",
-			exchange.Method, exchange.URL.Path, exchange.Endpoint, statusPath, observe.EndpointStatusList)
+			exchange.Request.Method, exchange.Request.URL.Path, exchange.Endpoint, statusPath, observe.EndpointStatusList)
 	}
-	if exchange.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", exchange.StatusCode)
+	if exchange.Response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", exchange.Response.StatusCode)
 	}
 }

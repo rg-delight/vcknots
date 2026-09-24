@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
 
 // TestObserveLabelsIssuerKeyMaterialFetches: every fetch of the ladder (JWT VC
@@ -55,7 +56,7 @@ func TestObserveLabelsIssuerKeyMaterialFetches(t *testing.T) {
 			t.Parallel()
 			f := newLadderFixture(t)
 			resolver := f.origin.resolver(allMechanisms())
-			recorder := observe.NewRecorder(8)
+			recorder := &observetest.Recorder{}
 			client := *resolver.HTTPClient
 			client.Transport = observe.Transport(client.Transport, recorder)
 			resolver.HTTPClient = &client
@@ -70,9 +71,9 @@ func TestObserveLabelsIssuerKeyMaterialFetches(t *testing.T) {
 				t.Fatalf("recorded %d exchanges, want %d: %+v", len(exchanges), len(test.wantPaths), exchanges)
 			}
 			for i, exchange := range exchanges {
-				if exchange.Endpoint != observe.EndpointIssuerKeyMaterial || exchange.Method != http.MethodGet || exchange.URL.Path != test.wantPaths[i] {
+				if exchange.Endpoint != observe.EndpointIssuerKeyMaterial || exchange.Request.Method != http.MethodGet || exchange.Request.URL.Path != test.wantPaths[i] {
 					t.Errorf("exchange %d = %s %s labelled %q, want GET %s labelled %q",
-						i, exchange.Method, exchange.URL.Path, exchange.Endpoint, test.wantPaths[i], observe.EndpointIssuerKeyMaterial)
+						i, exchange.Request.Method, exchange.Request.URL.Path, exchange.Endpoint, test.wantPaths[i], observe.EndpointIssuerKeyMaterial)
 				}
 			}
 		})

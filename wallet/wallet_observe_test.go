@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -27,14 +28,14 @@ var fixtureEndpointByPath = map[string]observe.Endpoint{
 
 // observedClient routes client through an observe.Transport, the way an
 // integrator wires the client it injects into the library.
-func observedClient(client *http.Client, recorder *observe.Recorder) *http.Client {
+func observedClient(client *http.Client, recorder *observetest.Recorder) *http.Client {
 	observed := *client
 	observed.Transport = observe.Transport(client.Transport, recorder)
 	return &observed
 }
 
 // observeFixtureTransport observes the fixture receiver's client.
-func observeFixtureTransport(recorder *observe.Recorder) func(*finalIssuanceFixture) {
+func observeFixtureTransport(recorder *observetest.Recorder) func(*finalIssuanceFixture) {
 	return func(f *finalIssuanceFixture) {
 		f.wrapReceiverPlugin = func(plugin receiverTypes.Receiver) receiverTypes.Receiver {
 			receiver := plugin.(*oid4vci.Oid4vciReceiver)
@@ -48,10 +49,10 @@ func requireFixtureEndpointLabels(t *testing.T, exchanges []observe.Exchange) []
 	t.Helper()
 	labels := make([]observe.Endpoint, 0, len(exchanges))
 	for _, exchange := range exchanges {
-		want, known := fixtureEndpointByPath[exchange.URL.Path]
-		require.True(t, known, "unexpected request to %s", exchange.URL.Path)
-		require.Equal(t, want, exchange.Endpoint, "role of %s %s", exchange.Method, exchange.URL.Path)
-		require.NotZero(t, exchange.StatusCode)
+		want, known := fixtureEndpointByPath[exchange.Request.URL.Path]
+		require.True(t, known, "unexpected request to %s", exchange.Request.URL.Path)
+		require.Equal(t, want, exchange.Endpoint, "role of %s %s", exchange.Request.Method, exchange.Request.URL.Path)
+		require.NotNil(t, exchange.Response)
 		labels = append(labels, exchange.Endpoint)
 	}
 	return labels
@@ -62,7 +63,7 @@ func requireFixtureEndpointLabels(t *testing.T, exchanges []observe.Exchange) []
 // labelled with the role it was sent for, so an integrator never classifies a
 // URL itself.
 func TestObserveLabelsEveryFinalIssuanceRequest(t *testing.T) {
-	recorder := observe.NewRecorder(64)
+	recorder := &observetest.Recorder{}
 	fixture := newFinalIssuanceFixture(t, observeFixtureTransport(recorder), func(f *finalIssuanceFixture) {
 		f.includeNotification = true
 		f.responseEncryption = true
@@ -94,24 +95,22 @@ func TestObserveLabelsEveryFinalIssuanceRequest(t *testing.T) {
 	for _, exchange := range exchanges {
 		switch exchange.Endpoint {
 		case observe.EndpointToken, observe.EndpointCredential, observe.EndpointNotification:
-			require.True(t, exchange.DPoP, "%s carries a DPoP proof", exchange.Endpoint)
+			require.NotEmpty(t, exchange.Request.Header.Get("DPoP"), "%s carries a DPoP proof", exchange.Endpoint)
 		case observe.EndpointIssuerMetadata:
-			require.False(t, exchange.DPoP)
+			require.Empty(t, exchange.Request.Header.Get("DPoP"))
 		}
 		if exchange.Endpoint == observe.EndpointCredential {
-			require.True(t, exchange.RequestJWT, "the encrypted Credential Request is application/jwt")
-			require.True(t, exchange.ResponseJWT, "the encrypted Credential Response is application/jwt")
+			require.Equal(t, "application/jwt", exchange.Request.Header.Get("Content-Type"), "the encrypted Credential Request is application/jwt")
+			require.Equal(t, "application/jwt", exchange.Response.Header.Get("Content-Type"), "the encrypted Credential Response is application/jwt")
 		}
-		require.Nil(t, exchange.ResponseEncrypted, "only an OpenID4VP response is annotated")
 	}
-	require.False(t, recorder.Truncated())
 }
 
 // TestObserveLabelsDeferredCredentialPoll checks that the Credential Endpoint
 // call the deferred poll shares with the first request is labelled by the
 // endpoint it actually addresses.
 func TestObserveLabelsDeferredCredentialPoll(t *testing.T) {
-	recorder := observe.NewRecorder(64)
+	recorder := &observetest.Recorder{}
 	fixture := newFinalIssuanceFixture(t, observeFixtureTransport(recorder), func(f *finalIssuanceFixture) {
 		f.includeDeferredEndpoint = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
