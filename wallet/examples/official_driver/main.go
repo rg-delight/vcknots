@@ -16,13 +16,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
 	"github.com/trustknots/vcknots/wallet/keystore"
@@ -64,8 +64,8 @@ type configuration struct {
 	// DeferredPollAttempts is the number of deferred credential endpoint polls;
 	// zero or negative selects the default of 10.
 	DeferredPollAttempts int `json:"deferredPollAttempts"`
-	// CredentialResponseEncryption generates an ephemeral P-256 key per run so
-	// the issuer encrypts the credential response.
+	// CredentialResponseEncryption requires an encrypted credential response
+	// (the wallet's key is ephemeral); an issuer that offers none is refused.
 	CredentialResponseEncryption bool `json:"credentialResponseEncryption"`
 	// AdditionalHolderKeys generates that many ephemeral P-256 holder keys for a
 	// batch credential request (OpenID4VCI 1.0 §14.6). The keys live only for
@@ -410,6 +410,10 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		keyAttestation = &wallet.StaticKeyAttester{Key: entry, Chain: key.Certificates, Issuer: config.KeyAttesterIssuer}
 	}
 
+	var encryption wallet.CredentialEncryptionPolicy
+	if config.CredentialResponseEncryption {
+		encryption.Response = wallet.CredentialEncryptionRequired
+	}
 	return wallet.NewWalletWithConfig(wallet.Config{
 		CredStore:            store,
 		Receiver:             receiving,
@@ -418,41 +422,117 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		CredentialAcceptance: acceptance,
 		DPoP:                 wallet.DPoPConfig{Enabled: true, Key: dpop},
 		ClientAuth:           wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: config.ClientID, Key: client},
-		ClientAttestation:    clientAttestation,
-		KeyAttestation:       keyAttestation,
+		Issuance:             wallet.IssuanceConfig{RedirectURI: config.RedirectURI, CredentialEncryption: encryption},
+		// The client attestation binds the client key, as the DPoP key signs
+		// the proofs.
+		Attestation: wallet.AttestationConfig{Client: clientAttestation, ClientKey: client, Key: keyAttestation},
 	})
 }
 
-// finalReceiveOutput renders an OpenID4VCI 1.0 Final issuance result. A §9
-// deferred transaction the issuer never completed is reported as pending rather
-// than as a failure, because the transaction_id it carries is what resumes it.
-func finalReceiveOutput(result *wallet.OID4VCIFinalReceiveResult, receiveErr error) (any, error) {
-	if result == nil {
-		return nil, receiveErr
-	}
-	credentialIds := make([]string, 0, len(result.SavedCredentials))
-	verification := make([]*wallet.CredentialVerification, 0, len(result.SavedCredentials))
-	for _, saved := range result.SavedCredentials {
+// receiveOutput renders an issuance result. A deferred transaction the
+// issuer did not complete within the polls is reported as pending.
+func receiveOutput(result *wallet.IssuanceResult) map[string]any {
+	credentialIds := make([]string, 0, len(result.Credentials))
+	verification := make([]*wallet.CredentialVerification, 0, len(result.Credentials))
+	for _, saved := range result.Credentials {
 		if saved == nil || saved.Entry == nil {
 			continue
 		}
 		credentialIds = append(credentialIds, saved.Entry.Id)
 		verification = append(verification, saved.Verification)
 	}
-	output := map[string]any{
-		"credentialIds":  credentialIds,
-		"verification":   verification,
-		"notificationId": result.NotificationID,
-		"transactionId":  result.TransactionID,
+	output := map[string]any{"credentialIds": credentialIds, "verification": verification}
+	if result.Notification != nil {
+		output["notificationId"] = result.Notification.NotificationID
 	}
-	if receiveErr != nil {
-		if errors.Is(receiveErr, receiverTypes.ErrIssuancePending) {
-			output["pending"] = true
-			return output, nil
+	if result.Deferred != nil {
+		output["transactionId"] = result.Deferred.TransactionID
+		output["pending"] = true
+	}
+	return output
+}
+
+// finishIssuance requests the credential, polls a deferred transaction up
+// to attempts times, and reports the outcome to the issuer's notification
+// endpoint: the library itself neither polls nor notifies.
+func finishIssuance(ctx context.Context, w *wallet.Wallet, grant *wallet.IssuanceGrant, request wallet.CredentialRequest, attempts int) (any, error) {
+	result, err := w.RequestCredential(ctx, grant, request)
+	for polls := 0; err == nil && result.Deferred != nil && polls < attempts; polls++ {
+		interval := min(max(result.Deferred.Interval, time.Second), time.Minute)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
 		}
-		return nil, receiveErr
+		result, err = w.RequestDeferredCredential(ctx, result.Deferred)
 	}
-	return output, nil
+	if err != nil {
+		if result != nil && result.Notification != nil {
+			_ = w.NotifyIssuer(ctx, result.Notification, wallet.NotificationCredentialFailure, "")
+		}
+		return nil, err
+	}
+	if result.Notification != nil {
+		if err := w.NotifyIssuer(ctx, result.Notification, wallet.NotificationCredentialAccepted, ""); err != nil {
+			return nil, fmt.Errorf("credential stored, notification failed: %w", err)
+		}
+	}
+	return receiveOutput(result), nil
+}
+
+// driveAuthorization opens the authorization request as a browser that needs
+// no user interaction would, and returns the redirect the authorization
+// server answered with. It follows redirects within the authorization server
+// and stops at the first Location outside it.
+func driveAuthorization(ctx context.Context, client *http.Client, authorization *wallet.IssuanceAuthorization) (string, error) {
+	if authorization.RequestURIExpired(time.Now()) {
+		return "", fmt.Errorf("the pushed authorization request has expired")
+	}
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	target := authorization.AuthorizationURL
+	for hops := 0; hops < 5; hops++ {
+		request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointAuthorization), http.MethodGet, target, nil)
+		if err != nil {
+			return "", err
+		}
+		response, err := noRedirect.Do(request)
+		if err != nil {
+			return "", fmt.Errorf("authorization request failed: %w", err)
+		}
+		_ = response.Body.Close()
+		location := response.Header.Get("Location")
+		if location == "" {
+			return "", fmt.Errorf("authorization endpoint did not redirect: status %d", response.StatusCode)
+		}
+		next, err := request.URL.Parse(location)
+		if err != nil {
+			return "", fmt.Errorf("invalid authorization redirect: %w", err)
+		}
+		if next.Scheme != request.URL.Scheme || next.Host != request.URL.Host {
+			return next.String(), nil
+		}
+		target = next.String()
+	}
+	return "", fmt.Errorf("authorization endpoint redirected too often")
+}
+
+// holderKeys returns the holder key and additional ephemeral holder keys
+// for a batch request.
+func holderKeys(holder keystore.KeyEntry, additional int) ([]wallet.IKeyEntry, error) {
+	keys := []wallet.IKeyEntry{holder}
+	for index := 0; index < additional; index++ {
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate additional holder key: %w", err)
+		}
+		entry, err := keystore.NewKeyEntryFromJWK(jose.JSONWebKey{Key: privateKey, Algorithm: string(jose.ES256)})
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, entry)
+	}
+	return keys, nil
 }
 
 func run(config configuration, request operation) (any, error) {
@@ -486,54 +566,18 @@ func run(config configuration, request operation) (any, error) {
 	}
 	switch request.Name {
 	case "receive-code", "receive-code-wallet-initiated":
-		holderKey, err := readPrivateJWK(config.HolderKeyFile)
+		ctx := context.Background()
+		keys, err := holderKeys(holder, config.AdditionalHolderKeys)
 		if err != nil {
 			return nil, err
 		}
-		clientKey, err := readPrivateJWK(config.ClientKeyFile)
-		if err != nil {
-			return nil, err
-		}
-		var encryptionKey *jose.JSONWebKey
-		if config.CredentialResponseEncryption {
-			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate credential response encryption key: %w", err)
-			}
-			generated := jose.JSONWebKey{Key: privateKey}
-			encryptionKey = &generated
-		}
-		var additionalHolderKeys []jose.JSONWebKey
-		for index := 0; index < config.AdditionalHolderKeys; index++ {
-			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate additional holder key: %w", err)
-			}
-			additionalHolderKeys = append(additionalHolderKeys, jose.JSONWebKey{Key: privateKey})
-		}
-		receiveRequest := wallet.OID4VCIFinalReceiveRequest{
-			// The conformance issuers this driver targets answer the
-			// authorization endpoint with the code redirect and need no
-			// browser, which is what AllowSelfDrivenAuthorization opts into.
-			AllowSelfDrivenAuthorization:    true,
-			AdditionalHolderKeys:            additionalHolderKeys,
-			Type:                            receiverTypes.Oid4vci,
-			ClientID:                        config.ClientID,
-			RedirectURI:                     config.RedirectURI,
-			AuthorizationRequestType:        config.AuthorizationRequestType,
-			HolderKey:                       holderKey,
-			ClientKey:                       clientKey,
-			CredentialResponseEncryptionKey: encryptionKey,
-			HTTPClient:                      httpClient,
-			DeferredPollAttempts:            config.deferredPollAttempts(),
-			IncludeKeyAttestation:           config.IncludeKeyAttestation,
-		}
+		issuance := wallet.IssuanceRequest{AuthorizationRequestType: wallet.AuthorizationRequestType(config.AuthorizationRequestType)}
 		if request.Name == "receive-code" {
-			offer, err := w.ResolveCredentialOffer(request.URI)
+			offer, err := w.ResolveCredentialOffer(ctx, request.URI)
 			if err != nil {
 				return nil, err
 			}
-			receiveRequest.CredentialOffer = offer
+			issuance.CredentialOffer = offer
 		} else {
 			if request.CredentialIssuer == "" {
 				return nil, fmt.Errorf("receive-code-wallet-initiated requires credentialIssuer")
@@ -541,46 +585,37 @@ func run(config configuration, request operation) (any, error) {
 			if request.CredentialConfigurationID == "" {
 				return nil, fmt.Errorf("receive-code-wallet-initiated requires credentialConfigurationId")
 			}
-			issuerURL, err := url.Parse(request.CredentialIssuer)
-			if err != nil {
-				return nil, fmt.Errorf("invalid credentialIssuer: %w", err)
-			}
-			receiveRequest.CredentialIssuer = issuerURL
-			receiveRequest.CredentialConfigurationID = request.CredentialConfigurationID
+			issuance.CredentialIssuer = request.CredentialIssuer
+			issuance.CredentialConfigurationID = request.CredentialConfigurationID
 		}
-		result, receiveErr := w.ReceiveOID4VCIFinalCredential(receiveRequest)
-		return finalReceiveOutput(result, receiveErr)
+		authorization, err := w.BeginIssuance(ctx, issuance)
+		if err != nil {
+			return nil, err
+		}
+		// The conformance issuers this driver targets answer the
+		// authorization endpoint with the code redirect and need no browser.
+		redirect, err := driveAuthorization(ctx, httpClient, authorization)
+		if err != nil {
+			return nil, err
+		}
+		grant, err := w.AuthorizeIssuance(ctx, authorization, redirect)
+		if err != nil {
+			return nil, err
+		}
+		return finishIssuance(ctx, w, grant, wallet.CredentialRequest{HolderKeys: keys, IncludeKeyAttestation: config.IncludeKeyAttestation}, config.deferredPollAttempts())
 	case "receive-preauth":
+		ctx := context.Background()
 		offer, err := wallet.ParseCredentialOfferURL(request.URI)
 		if err != nil {
 			return nil, err
 		}
-		holderKey, err := readPrivateJWK(config.HolderKeyFile)
+		// Section 6.1 makes client_id OPTIONAL for this grant; the wallet
+		// sends Config.ClientAuth.ClientID, which HAIP requires.
+		grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{CredentialOffer: offer, TxCode: request.TxCode})
 		if err != nil {
 			return nil, err
 		}
-		clientKey, err := readPrivateJWK(config.ClientKeyFile)
-		if err != nil {
-			return nil, err
-		}
-		// OpenID4VCI 1.0 §4.1.1 / §6.1 through the Final API. The Draft-13
-		// ReceiveCredential path this used before spoke a different Credential
-		// Request, and this driver only ever runs the final or haip profile.
-		result, receiveErr := w.ReceiveOID4VCIFinalPreAuthorizedCredential(context.Background(), wallet.OID4VCIFinalPreAuthorizedReceiveRequest{
-			CredentialOffer: offer,
-			Type:            receiverTypes.Oid4vci,
-			TxCode:          request.TxCode,
-			// §6.1 makes client_id OPTIONAL for this grant; the driver names
-			// itself whenever the operator configured an identifier, which is
-			// what an authorization server that expects to know the client
-			// needs. HAIP requires it.
-			ClientID:              config.ClientID,
-			HolderKey:             holderKey,
-			ClientKey:             clientKey,
-			IncludeKeyAttestation: config.IncludeKeyAttestation,
-			DeferredPollAttempts:  config.deferredPollAttempts(),
-		})
-		return finalReceiveOutput(result, receiveErr)
+		return finishIssuance(ctx, w, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holder}, IncludeKeyAttestation: config.IncludeKeyAttestation}, config.deferredPollAttempts())
 	case "present":
 		redirectURI, err := w.PresentCredential(request.URI, holder, nil)
 		if err != nil {
