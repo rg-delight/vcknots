@@ -498,11 +498,7 @@ func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request 
 	if err := commonX509.RequireLeafDNSName(leaf, clientID.original, false); err != nil {
 		return fmt.Errorf("%w: %w", err, ErrRequestObjectClientIDMismatch)
 	}
-	boundURI := request.RedirectURI
-	if request.ResponseMode == OAuthAuthzReqResponseModeDirectPost || request.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		boundURI = request.ResponseURI
-	}
-	uri, err := url.Parse(boundURI)
+	uri, err := url.Parse(request.responseEndpoint())
 	if err != nil || !strings.EqualFold(uri.Hostname(), clientID.original) {
 		return fmt.Errorf("redirect_uri/response_uri and client_id (origin) must be same: %w", ErrRequestObjectClientIDMismatch)
 	}

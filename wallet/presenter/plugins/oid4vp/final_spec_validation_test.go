@@ -48,7 +48,9 @@ func TestFinalResponseTypeMustBeVPToken(t *testing.T) {
 func TestFinalPreRegisteredClientID(t *testing.T) {
 	// §5.9.2 also requires the Client Identifier to be "known to the Wallet in
 	// advance of the Authorization Request", so these cases register it.
-	registry := map[string]PreRegisteredClient{"example-client": {}}
+	registry := map[string]PreRegisteredClient{"example-client": {
+		Metadata: &VerifierMetadata{RedirectURIs: []string{"https://verifier.example/cb"}},
+	}}
 
 	t.Run("accepted on the Final path", func(t *testing.T) {
 		uri := finalQueryURI(url.Values{
@@ -62,20 +64,6 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 		req, err := (&Oid4vpPresenter{PreRegisteredClients: registry}).ParsePresentationRequest(uri)
 		require.NoError(t, err)
 		require.Equal(t, "example-client", req.ClientID)
-	})
-
-	t.Run("signed pre-registered request object stays unsupported", func(t *testing.T) {
-		f := newRequestObjectFixture(t)
-		claims := f.claims()
-		claims["client_id"] = "example-client"
-		uri := "openid4vp://authorize?" + url.Values{
-			"client_id": {"example-client"},
-			"request":   {f.sign(t, claims, nil)},
-		}.Encode()
-		p := f.presenter()
-		p.PreRegisteredClients = registry
-		_, err := p.ParsePresentationRequest(uri)
-		require.ErrorContains(t, err, "no configured authentication method")
 	})
 }
 
@@ -498,7 +486,7 @@ func TestPreRegisteredClientIDAcceptedFromRegistry(t *testing.T) {
 		"dcql_query":    {finalDcqlParam},
 	})
 	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
-		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
+		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier", RedirectURIs: []string{"https://verifier.example/cb"}}},
 	}}
 	req, err := p.ParsePresentationRequest(uri)
 	require.NoError(t, err)
@@ -521,12 +509,12 @@ func TestPreRegisteredClientIDResolverConsultedWhenMapMisses(t *testing.T) {
 	var asked []string
 	p := &Oid4vpPresenter{
 		PreRegisteredClients: map[string]PreRegisteredClient{
-			"mapped-client": {Metadata: &VerifierMetadata{ClientName: "From map"}},
+			"mapped-client": {Metadata: &VerifierMetadata{ClientName: "From map", RedirectURIs: []string{"https://verifier.example/cb"}}},
 		},
 		ResolvePreRegisteredClient: func(clientID string) (*PreRegisteredClient, error) {
 			asked = append(asked, clientID)
 			if clientID == "resolved-client" {
-				return &PreRegisteredClient{Metadata: &VerifierMetadata{ClientName: "From resolver"}}, nil
+				return &PreRegisteredClient{Metadata: &VerifierMetadata{ClientName: "From resolver", RedirectURIs: []string{"https://verifier.example/cb"}}}, nil
 			}
 			return nil, nil
 		},

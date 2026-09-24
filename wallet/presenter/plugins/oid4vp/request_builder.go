@@ -158,38 +158,6 @@ func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
 	return b
 }
 
-// lookupPreRegisteredClient resolves a pre-registered Client Identifier against
-// the wallet's registry: the in-memory map first, then the caller's resolver.
-// OID4VP 1.0 §5.9.2: "the Client Identifier needs to be known to the Wallet in
-// advance of the Authorization Request", so an unresolved identifier is an
-// error rather than an unauthenticated Verifier.
-func (b *requestBuilder) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
-	if registered, exists := b.preRegisteredClients[clientID]; exists {
-		return preRegisteredClientWithID(&registered, clientID), nil
-	}
-	if b.resolvePreRegisteredClient != nil {
-		resolved, err := b.resolvePreRegisteredClient(clientID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve pre-registered client_id %q: %w", clientID, err)
-		}
-		if resolved != nil {
-			copied := *resolved
-			return preRegisteredClientWithID(&copied, clientID), nil
-		}
-	}
-	return nil, fmt.Errorf("pre-registered client_id %q is not known to this wallet: %w", clientID, ErrPreRegisteredClientUnknown)
-}
-
-// preRegisteredClientWithID fills in the registration's ClientID from the
-// request when a map registration left it empty, so consumers never have to
-// consult the map key.
-func preRegisteredClientWithID(client *PreRegisteredClient, clientID string) *PreRegisteredClient {
-	if client.ClientID == "" {
-		client.ClientID = clientID
-	}
-	return client
-}
-
 // isDirectPostMode reports whether the Response Mode delivers the Authorization
 // Response to the Verifier's Response URI (OID4VP 1.0 §8.2), which is what
 // binds response_uri to the Client Identifier in §5.9.3 and makes redirect_uri
@@ -468,6 +436,9 @@ func AuthorityKeyIdentifiersFromCredential(rawCredential string) []string {
 func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
+	}
+	if err := b.checkPreRegisteredClient(); err != nil {
+		return nil, err
 	}
 	if err := b.validateResponseEncryptionMetadata(); err != nil {
 		// The Verifier asked for an encrypted response and left nothing to

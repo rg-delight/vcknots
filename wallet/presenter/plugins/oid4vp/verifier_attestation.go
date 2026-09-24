@@ -133,6 +133,8 @@ func (b *requestBuilder) authenticateRequestObjectByClientIdentifier(obj string,
 		return b.authenticateVerifierAttestationRequestObject(parsed, clientID, options)
 	case OID4VPClientIDPrefixOIDFederation:
 		return b.authenticateFederationRequestObject(obj, parsed, clientID, options)
+	case OID4VPClientIDPrefixPreRegistered:
+		return b.authenticatePreRegisteredRequestObject(parsed, options)
 	default:
 		// Final 5.1: client_metadata keys are never request-signature keys, so
 		// a prefix with no other authentication method cannot be authenticated
@@ -408,10 +410,7 @@ func requireVerifierAttestationResponseEndpoint(redirectURIs []string, request *
 	if len(redirectURIs) == 0 {
 		return nil
 	}
-	bound := request.RedirectURI
-	if request.ResponseMode == OAuthAuthzReqResponseModeDirectPost || request.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		bound = request.ResponseURI
-	}
+	bound := request.responseEndpoint()
 	if bound == "" || !slices.Contains(redirectURIs, bound) {
 		return fmt.Errorf("%w: the response endpoint %q is not one of the verifier attestation redirect_uris",
 			ErrVerifierAttestationInvalid, bound)

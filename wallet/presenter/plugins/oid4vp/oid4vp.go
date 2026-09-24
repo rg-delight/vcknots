@@ -41,14 +41,11 @@ type Oid4vpPresenter struct {
 	// transaction_data type, so any request carrying transaction_data is
 	// rejected with invalid_transaction_data (OID4VP 1.0 §5.1, §8.4).
 	SupportedTransactionDataTypes []string
-	// PreRegisteredClients is the wallet's registry of Verifiers registered out
-	// of band, keyed by Client Identifier. OID4VP 1.0 §5.9.2: a Client
-	// Identifier without a ":" references a pre-registered client, and "the
-	// Client Identifier needs to be known to the Wallet in advance of the
-	// Authorization Request". A Final request whose client_id resolves neither
-	// here nor through ResolvePreRegisteredClient is rejected with
-	// ErrPreRegisteredClientUnknown. The Draft24 entrypoints keep refusing
-	// every pre-registered Client Identifier.
+	// PreRegisteredClients is the registry of Verifiers registered out of
+	// band, keyed by Client Identifier (OID4VP 1.0 §5.9.2). A Final request
+	// whose client_id has no ":" and resolves neither here nor through
+	// ResolvePreRegisteredClient is refused with ErrPreRegisteredClientUnknown.
+	// The Draft24 entry points refuse every pre-registered Client Identifier.
 	PreRegisteredClients map[string]PreRegisteredClient
 	// ResolvePreRegisteredClient is consulted when PreRegisteredClients holds no
 	// entry for the Client Identifier, so a wallet can keep its registry in a

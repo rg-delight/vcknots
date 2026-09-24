@@ -97,14 +97,8 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 				// The request is authenticated by
 				// authenticateRequestObjectByClientIdentifier.
 			case OID4VPClientIDPrefixPreRegistered:
-				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
-				// Client Identifier, the Wallet MUST treat the Client Identifier
-				// as referencing a pre-registered client", and "the Client
-				// Identifier needs to be known to the Wallet in advance of the
-				// Authorization Request". The wallet's registry is therefore the
-				// only source of Verifier metadata and request-signature keys
-				// for this prefix; an unregistered identifier is refused instead
-				// of accepted unauthenticated.
+				// OID4VP 1.0 §5.9.2: the client must be known in advance; the
+				// registration is checked in checkPreRegisteredClient.
 				if b.draft24 {
 					b.errValidation = fmt.Errorf("invalid client_id format")
 					return
@@ -299,11 +293,14 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ClientMetadata = &clientMeta
 	}
 
-	// OID4VP 1.0 §5.9.2: a pre-registered Verifier's metadata "needs to be known
-	// to the Wallet in advance of the Authorization Request", so the registered
-	// metadata wins over a client_metadata parameter, which nothing
-	// authenticates for this Client Identifier Prefix.
+	// A pre-registered Verifier's metadata is the registered one (OID4VP 1.0
+	// §5.9.2); a request that also carries client_metadata is invalid_client
+	// (§8.5).
 	if b.preRegisteredClient != nil && b.preRegisteredClient.Metadata != nil {
+		if cm, exists := params["client_metadata"]; exists && cm != nil {
+			b.errValidation = newAuthorizationRequestError(InvalidClientError, "client_metadata must not be sent by a pre-registered client")
+			return
+		}
 		registeredMetadata := *b.preRegisteredClient.Metadata
 		b.req.ClientMetadata = &registeredMetadata
 	}

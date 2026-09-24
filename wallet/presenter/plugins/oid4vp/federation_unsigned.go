@@ -47,7 +47,7 @@ func (b *requestBuilder) authenticateUnsignedFederationRequest(params map[string
 	if err != nil {
 		return err
 	}
-	if err := federation.AssertResponseURIAllowed(trust.Metadata, b.federationResponseEndpoint()); err != nil {
+	if err := federation.AssertResponseURIAllowed(trust.Metadata, b.req.responseEndpoint()); err != nil {
 		return err
 	}
 	if err := b.adoptFederationVerifierMetadata(trust.Metadata); err != nil {
