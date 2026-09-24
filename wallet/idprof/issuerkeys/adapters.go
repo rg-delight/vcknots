@@ -214,6 +214,10 @@ func (r *Resolver) StatusListKeyFunc(template Request, x5c *X5CTrust) func(ctx c
 //     equals issuer: the JWT's `iss` must be the identifier the key was
 //     resolved for.
 //
+// issuer must be the issuer the caller bound the JWT to, not a value the JWT
+// asserts on its own: the status list checker passes the credential's `iss`
+// (statuslist.Checker.Check), so a token of another issuer finds no key here.
+//
 // No candidate at all is an *UnresolvedError with the diagnostics; a DID with
 // no binding is a *DIDOnlyTrustError, as from Resolve. Every returned key is a
 // public key. The returned Resolution's Candidates are exactly the returned

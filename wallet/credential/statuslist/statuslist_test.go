@@ -184,7 +184,7 @@ func TestCheckReferenceReportsTheVerifiedEntryAndItsEvidence(t *testing.T) {
 	// Served with a trailing newline: the trimmed token is what is digested.
 	h.serveToken(token + "\n")
 
-	status, err := h.checker().CheckReference(context.Background(), h.reference(1))
+	status, err := h.checker().CheckReference(context.Background(), testIssuer, h.reference(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestCheckReadsEveryIndexOfTheIETFExample(t *testing.T) {
 	want := []int{1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1}
 	for index, value := range want {
 		// idx as a json.Number, as a UseNumber decoder produces it.
-		status, err := checker.Check(context.Background(), map[string]any{
+		status, err := checker.Check(context.Background(), testIssuer, map[string]any{
 			"status_list": map[string]any{"idx": json.Number(fmt.Sprint(index)), "uri": h.uri},
 		})
 		if err != nil {
@@ -240,7 +240,7 @@ func TestCheckReadsEveryIndexOfTheIETFExample(t *testing.T) {
 			t.Fatalf("index %d: value = %d, want %d", index, status.Value, value)
 		}
 	}
-	_, err := checker.Check(context.Background(), map[string]any{
+	_, err := checker.Check(context.Background(), testIssuer, map[string]any{
 		"status_list": map[string]any{"idx": float64(16), "uri": h.uri},
 	})
 	assertSentinel(t, err, ErrStatusListIndexOutOfRange)
@@ -263,7 +263,7 @@ func TestCheckReferenceReadsMultiBitLists(t *testing.T) {
 			claims := defaultClaims(h.uri)
 			claims["status_list"] = map[string]any{"bits": test.bits, "lst": zlibList(t, test.raw)}
 			h.serveToken(signES256(t, h.key, defaultHeader(), claims))
-			status, err := h.checker().CheckReference(context.Background(), h.reference(test.index))
+			status, err := h.checker().CheckReference(context.Background(), testIssuer, h.reference(test.index))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -331,7 +331,7 @@ func TestCheckReferenceAcceptsOptionalClaimVariants(t *testing.T) {
 			h.serveToken(signES256(t, h.key, defaultHeader(), claims))
 			checker := h.checker()
 			checker.ClockSkew = test.skew
-			status, err := checker.CheckReference(context.Background(), h.reference(1))
+			status, err := checker.CheckReference(context.Background(), testIssuer, h.reference(1))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +348,7 @@ func TestCheckReferenceAcceptsMediaTypeParameters(t *testing.T) {
 		body:        signES256(t, h.key, defaultHeader(), defaultClaims(h.uri)),
 		contentType: "Application/StatusList+JWT; charset=utf-8",
 	})
-	if _, err := h.checker().CheckReference(context.Background(), h.reference(1)); err != nil {
+	if _, err := h.checker().CheckReference(context.Background(), testIssuer, h.reference(1)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -402,7 +402,7 @@ func TestCheckReferenceUsesTheKidOnlyAsAHint(t *testing.T) {
 				header["kid"] = test.headerKid
 			}
 			h.serveToken(signES256(t, signer, header, defaultClaims(h.uri)))
-			status, err := h.checker(test.keys...).CheckReference(context.Background(), h.reference(0))
+			status, err := h.checker(test.keys...).CheckReference(context.Background(), testIssuer, h.reference(0))
 			if test.wantErr != nil {
 				assertSentinel(t, err, test.wantErr)
 				return
@@ -478,7 +478,7 @@ func runFailureCases(t *testing.T, cases []failureCase) {
 			if test.uri != nil {
 				reference.URI = test.uri(h)
 			}
-			status, err := checker.CheckReference(context.Background(), reference)
+			status, err := checker.CheckReference(context.Background(), testIssuer, reference)
 			if status != nil {
 				t.Fatalf("status = %+v, want nil", status)
 			}
@@ -724,7 +724,7 @@ func TestCheckReferenceRefusesUnresolvedKeys(t *testing.T) {
 		h.serveToken(signES256(t, h.key, defaultHeader(), defaultClaims(h.uri)))
 		checker := h.checker()
 		resolveWith(nil, hookFailure)(h, checker)
-		_, err := checker.CheckReference(context.Background(), h.reference(0))
+		_, err := checker.CheckReference(context.Background(), testIssuer, h.reference(0))
 		if !errors.Is(err, hookFailure) {
 			t.Fatalf("err = %v, want it to wrap the hook error", err)
 		}
@@ -921,7 +921,7 @@ func TestParseReference(t *testing.T) {
 func TestCheckRefusesAnUnparsableStatusClaimWithoutFetching(t *testing.T) {
 	h := newHarness(t)
 	h.serveToken("unused")
-	_, err := h.checker().Check(context.Background(), map[string]any{"status_list": map[string]any{"idx": "0", "uri": h.uri}})
+	_, err := h.checker().Check(context.Background(), testIssuer, map[string]any{"status_list": map[string]any{"idx": "0", "uri": h.uri}})
 	assertSentinel(t, err, ErrStatusReferenceInvalid)
 	if h.requests.Load() != 0 {
 		t.Fatal("endpoint was requested")
@@ -944,11 +944,11 @@ func TestCheckReferenceAllowsCleartextOnlyWhenEnabled(t *testing.T) {
 			return []jose.JSONWebKey{publicJWK(key, "key-1")}, nil
 		},
 	}
-	_, err := checker.CheckReference(context.Background(), Reference{URI: uri, Index: 0})
+	_, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri, Index: 0})
 	assertSentinel(t, err, ErrStatusReferenceInvalid)
 
 	checker.AllowHTTP = true
-	status, err := checker.CheckReference(context.Background(), Reference{URI: uri, Index: 0})
+	status, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri, Index: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -964,7 +964,7 @@ func TestCheckReferenceDoesNotMutateTheCallerClient(t *testing.T) {
 	if checker.HTTPClient.CheckRedirect != nil {
 		t.Fatal("precondition: test client has a redirect policy")
 	}
-	if _, err := checker.CheckReference(context.Background(), h.reference(0)); err != nil {
+	if _, err := checker.CheckReference(context.Background(), testIssuer, h.reference(0)); err != nil {
 		t.Fatal(err)
 	}
 	if checker.HTTPClient.CheckRedirect != nil {
@@ -977,7 +977,7 @@ func TestCheckReferenceHonoursContextCancellation(t *testing.T) {
 	h.serveToken(signES256(t, h.key, defaultHeader(), defaultClaims(h.uri)))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := h.checker().CheckReference(ctx, h.reference(0))
+	_, err := h.checker().CheckReference(ctx, testIssuer, h.reference(0))
 	assertSentinel(t, err, ErrStatusListFetchFailed)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
@@ -1012,7 +1012,7 @@ func TestCheckReferenceAcceptsEveryAcceptedAlgorithmByDefault(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.serveToken(token)
-			if _, err := h.checker(jose.JSONWebKey{Key: &private.PublicKey, KeyID: "rsa-key"}).CheckReference(context.Background(), h.reference(1)); err != nil {
+			if _, err := h.checker(jose.JSONWebKey{Key: &private.PublicKey, KeyID: "rsa-key"}).CheckReference(context.Background(), testIssuer, h.reference(1)); err != nil {
 				t.Fatal(err)
 			}
 		})

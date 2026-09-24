@@ -51,6 +51,11 @@ var (
 	// ErrStatusListSignatureInvalid, because it describes the caller's
 	// configuration or connectivity, not a fault of the issuer.
 	ErrStatusListIssuerKeyUnresolved = common.NewCodedError("status_list_issuer_key_unresolved", "status list token issuer keys could not be resolved")
+	// ErrStatusListIssuerMismatch reports that the token's `iss` is not the
+	// issuer of the credential being checked, and Checker.AcceptStatusIssuer
+	// did not accept it as a Status Issuer for that credential, or that no
+	// credential issuer was given. It is decided before any key is resolved.
+	ErrStatusListIssuerMismatch = common.NewCodedError("status_list_issuer_mismatch", "status list token issuer is not the credential issuer")
 	// ErrStatusListTokenExpired reports that the token's `exp`
 	// (RFC 7519 Section 4.1.4) has passed, after the configured clock skew is
 	// allowed for. draft-ietf-oauth-status-list Section 10.1 lets a Status List

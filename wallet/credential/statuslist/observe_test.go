@@ -20,7 +20,7 @@ func TestObserveLabelsStatusListTokenFetch(t *testing.T) {
 	client.Transport = observe.Transport(client.Transport, recorder)
 	checker.HTTPClient = &client
 
-	if _, err := checker.CheckReference(context.Background(), h.reference(1)); err != nil {
+	if _, err := checker.CheckReference(context.Background(), testIssuer, h.reference(1)); err != nil {
 		t.Fatal(err)
 	}
 
