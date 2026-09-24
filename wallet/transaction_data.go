@@ -130,3 +130,19 @@ func assignTransactionDataOwners(encoded []string, selections []oid4vp.DCQLCrede
 	}
 	return owners, nil
 }
+
+// ownedTransactionData returns, in request order, the transaction_data entries
+// that reference queryID and that assignTransactionDataOwners gave to it.
+func ownedTransactionData(encoded []string, queryID string, owners map[string]string) ([]string, error) {
+	referenced, err := transactionDataForQuery(encoded, queryID)
+	if err != nil {
+		return nil, err
+	}
+	var owned []string
+	for _, entry := range referenced {
+		if owners[entry] == queryID {
+			owned = append(owned, entry)
+		}
+	}
+	return owned, nil
+}

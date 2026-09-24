@@ -303,3 +303,21 @@ func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
 	_, err = assignTransactionDataOwners([]string{"not-base64!"}, selections)
 	require.ErrorContains(t, err, "transaction_data entry 0")
 }
+
+// OID4VP 1.0 Section 8.4: the presentation that authorizes a transaction_data
+// entry must carry it. Only an SD-JWT VC Key Binding JWT can here, so an entry
+// owned by any other credential fails the presentation instead of being
+// dropped. The request is built directly because the parser refuses it.
+func TestWallet_TransactionDataOwnedByANonSDJWTCredentialFails(t *testing.T) {
+	controller, key := receiveCredentialForPresentationTest(t)
+	req := &oid4vp.CredentialPresentationRequest{
+		OAuthAuthzRequest: &oid4vp.OAuthAuthzRequest{ResponseType: "vp_token", ClientID: "redirect_uri:https://verifier.example/response", Nonce: "n"},
+		DcqlQuery: &oid4vp.DcqlQuery{Credentials: []oid4vp.CredentialQuery{{
+			ID: "vc", Format: "jwt_vc_json", Meta: map[string]any{"type_values": [][]string{{"VerifiableCredential"}}},
+		}}},
+		TransactionData: []string{base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["vc"]}`))},
+	}
+
+	_, err := controller.buildDCQLVPToken(req, key, nil)
+	require.ErrorContains(t, err, "invalid_transaction_data")
+}
