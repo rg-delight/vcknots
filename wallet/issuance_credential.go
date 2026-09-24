@@ -18,6 +18,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/idprof/plugins/did"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -486,6 +487,9 @@ func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializat
 	}
 	cnf, _ := claims["cnf"].(map[string]any)
 	if cnf == nil || cnf["jwk"] == nil {
+		if flavor == credential.JwtVc {
+			return subjectDIDKey(claims)
+		}
 		return nil, nil
 	}
 	encoded, err := json.Marshal(cnf["jwk"])
@@ -496,6 +500,33 @@ func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializat
 	if err := key.UnmarshalJSON(encoded); err != nil {
 		return nil, fmt.Errorf("cnf jwk is invalid: %w: %w", acceptance.ErrCredentialParse, err)
 	}
+	return &key, nil
+}
+
+// subjectDIDKey returns the key a W3C VC is bound to through its subject DID
+// (the JWT sub, or vc.credentialSubject.id), for the did:key and did:jwk
+// methods, which resolve without network access. Any other subject yields no
+// key, so a configuration that requires binding refuses the credential.
+func subjectDIDKey(claims map[string]any) (*jose.JSONWebKey, error) {
+	subject, _ := claims["sub"].(string)
+	if subject == "" {
+		if vc, ok := claims["vc"].(map[string]any); ok {
+			if credentialSubject, ok := vc["credentialSubject"].(map[string]any); ok {
+				subject, _ = credentialSubject["id"].(string)
+			}
+		}
+	}
+	if !strings.HasPrefix(subject, "did:key:") && !strings.HasPrefix(subject, "did:jwk:") {
+		return nil, nil
+	}
+	profile, err := did.NewDIDPlugin().Resolve(subject)
+	if err != nil {
+		return nil, fmt.Errorf("credential subject DID cannot be resolved: %w: %w", acceptance.ErrHolderBindingMismatch, err)
+	}
+	if profile == nil || profile.Keys == nil || len(profile.Keys.Keys) != 1 {
+		return nil, fmt.Errorf("credential subject DID must name exactly one key: %w", acceptance.ErrHolderBindingMismatch)
+	}
+	key := profile.Keys.Keys[0]
 	return &key, nil
 }
 
