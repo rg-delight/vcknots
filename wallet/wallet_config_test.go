@@ -74,6 +74,10 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{}), SupportedTransactionDataTypes: []string{"example"}},
 			want:   ErrInvalidArgument,
 		},
+		"a presenter plugin other than the bundled OpenID4VP presenter": {
+			config: Config{Storeless: true, Presenter: presenterWith(t, plainPresenter{})},
+			want:   ErrInvalidArgument,
+		},
 		"unknown profile": {
 			config: Config{Profile: "haip-draft", Storeless: true},
 			want:   profile.ErrUnknownProfile,
@@ -89,7 +93,6 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		_, err := NewWalletWithConfig(Config{
 			Storeless: true,
 			Receiver:  receiverWith(t, mock.NewMockReceiver(t.TempDir())),
-			Presenter: presenterWith(t, plainPresenter{}),
 		})
 		require.NoError(t, err)
 	})

@@ -97,7 +97,11 @@ type Config struct {
 	Receiver   *receiver.ReceivingDispatcher
 	Serializer *serializer.SerializationDispatcher
 	Verifier   *verifier.VerificationDispatcher
-	Presenter  *presenter.PresentationDispatcher
+	// Presenter's OpenID4VP plugin must be an *oid4vp.Oid4vpPresenter,
+	// because the presentation methods take and return its
+	// *oid4vp.AdmittedRequest handles; any other plugin is refused
+	// (ErrInvalidArgument).
+	Presenter *presenter.PresentationDispatcher
 
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
@@ -364,6 +368,9 @@ func newWallet(config Config) (*Wallet, error) {
 	if err := checkPluginProfiles(config.Presenter.Plugins(), walletProfile); err != nil {
 		return nil, fmt.Errorf("presenter: %w", err)
 	}
+	if err := checkBundledPresenter(config.Presenter); err != nil {
+		return nil, err
+	}
 
 	if config.DPoP.Enabled && config.DPoP.Key == nil {
 		key, err := newInMemoryECKeyEntry()
@@ -473,6 +480,18 @@ func validateClientAuthConfig(config ClientAuthConfig) error {
 	default:
 		return fmt.Errorf("unsupported client authentication method: %q", method)
 	}
+}
+
+// checkBundledPresenter refuses a presenter plugin other than the bundled
+// *oid4vp.Oid4vpPresenter: the presentation methods answer the
+// *oid4vp.AdmittedRequest handles only that plugin admits.
+func checkBundledPresenter(d *presenter.PresentationDispatcher) error {
+	for _, plugin := range d.Plugins() {
+		if _, ok := plugin.(*oid4vp.Oid4vpPresenter); !ok {
+			return fmt.Errorf("%w: the OpenID4VP presenter plugin must be an *oid4vp.Oid4vpPresenter, got %T", ErrInvalidArgument, plugin)
+		}
+	}
+	return nil
 }
 
 // SetReceiver replaces the receiver dispatcher after checking its plugins as

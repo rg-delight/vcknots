@@ -458,7 +458,7 @@ Input for `NewWalletWithConfig`. Every field is optional.
 
 | Field | Meaning |
 | --- | --- |
-| `CredStore`, `IDProfiler`, `Receiver`, `Serializer`, `Verifier`, `Presenter` | The dispatchers. `nil` builds the default. |
+| `CredStore`, `IDProfiler`, `Receiver`, `Serializer`, `Verifier`, `Presenter` | The dispatchers. `nil` builds the default. The OpenID4VP plugin of an injected `Presenter` must be an `*oid4vp.Oid4vpPresenter`, because the presentation methods answer its `*oid4vp.AdmittedRequest` handles. |
 | `Profile` | `profile.Final` (zero value) or `profile.HAIP`. |
 | `Storeless` | No credential store. `CredStore` must then be `nil`; methods that need a store return `ErrNoCredentialStore`. |
 | `CredentialAcceptance` | `*acceptance.Policy` applied before a received credential is returned or stored. `nil` makes every OpenID4VCI 1.0 method, every `Draft13()` method and `VerifyCredentialForAcceptance` fail with `ErrCredentialAcceptancePolicyRequired`. |
@@ -1094,7 +1094,7 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 * An unknown profile is refused (`profile.ErrUnknownProfile`).
 * A receiver or presenter plugin that implements `profile.Carrier` must report the wallet's profile (`ErrProfileMismatch`). Under HAIP a plugin that does not implement `profile.Carrier` is refused (`ErrProfilePluginUnsupported`); under Final it is accepted.
 * Under HAIP, `TestHooks` is refused and every `Draft13()` / `Draft24()` method and `ReceiveCredential` returns `ErrProfileForbidsDraft`.
-* `Storeless` together with `CredStore`, and `SupportedTransactionDataTypes` together with `Presenter`, are refused (`ErrInvalidArgument`).
+* `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
 `SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `AllowHTTP` and `InsecureSkipX509Verify` are refused.
 
@@ -1189,7 +1189,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 
 * `Config` is no longer comparable with `==`.
 * `Config` has new fields: `Profile`, `Storeless`, `CredentialAcceptance`, `SupportedTransactionDataTypes`, `Issuance`, `Attestation`, `TestHooks`. `CredentialOfferGrant` has `IssuerState` and `AuthorizationServer`; `SavedCredential` has `Verification`.
-* `NewWalletWithConfig` refuses an unknown `Profile`, a plugin whose profile differs from the wallet's, and under HAIP a plugin that does not implement `profile.Carrier` and any `TestHooks`. It refuses `Storeless` with a `CredStore`, and `SupportedTransactionDataTypes` with an injected `Presenter`. Its errors carry codes.
+* `NewWalletWithConfig` refuses an unknown `Profile`, a plugin whose profile differs from the wallet's, and under HAIP a plugin that does not implement `profile.Carrier` and any `TestHooks`. It refuses `Storeless` with a `CredStore`, `SupportedTransactionDataTypes` with an injected `Presenter`, and a presenter plugin other than `*oid4vp.Oid4vpPresenter`. Its errors carry codes.
 * `SetReceiver` is deprecated. It checks the dispatcher's plugins as `NewWalletWithConfig` does; a refused dispatcher is not installed, and every method that needs the receiver returns the refusal.
 * `VerifyCredential` returns true only when the proof verifies, and only for `acceptance.DefaultSigningAlgorithms()` (ES256); a nil credential returns false.
 * `ReceiveCredential` returns `ErrProfileForbidsDraft` under HAIP. The credential is checked before it is stored: under `Config.CredentialAcceptance` when set, otherwise by parsing it (`typ`, `alg`, and a `cnf` that must match `Key`). A credential that fails is not stored. A storeless wallet returns `ErrNoCredentialStore` after the check.

@@ -490,7 +490,7 @@ receiver は、`credential_issuer` が要求した識別子と異なるメタデ
 
 | フィールド | 意味 |
 | --- | --- |
-| `CredStore`、`IDProfiler`、`Receiver`、`Serializer`、`Verifier`、`Presenter` | ディスパッチャです。`nil` なら既定のものを構築します。 |
+| `CredStore`、`IDProfiler`、`Receiver`、`Serializer`、`Verifier`、`Presenter` | ディスパッチャです。`nil` なら既定のものを構築します。注入した `Presenter` の OpenID4VP plugin は `*oid4vp.Oid4vpPresenter` でなければなりません。提示メソッドはその `*oid4vp.AdmittedRequest` handle に応答するためです。 |
 | `Profile` | `profile.Final`（ゼロ値）または `profile.HAIP` です。 |
 | `Storeless` | Credential ストアを持ちません。このとき `CredStore` は `nil` でなければならず、ストアを必要とするメソッドは `ErrNoCredentialStore` を返します。 |
 | `CredentialAcceptance` | 受領した Credential を返す、または保存する前に適用する `*acceptance.Policy` です。`nil` の場合、OpenID4VCI 1.0 の全メソッド、`Draft13()` の全メソッド、`VerifyCredentialForAcceptance` が `ErrCredentialAcceptancePolicyRequired` で失敗します。 |
@@ -1233,7 +1233,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 * 未知の profile は拒否します（`profile.ErrUnknownProfile`）。
 * `profile.Carrier` を実装する receiver / presenter の plugin は、wallet の profile を報告しなければなりません（`ErrProfileMismatch`）。HAIP では `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、Final では受け入れます。
 * HAIP では `TestHooks` を拒否し、`Draft13()` / `Draft24()` のすべてのメソッドと `ReceiveCredential` は `ErrProfileForbidsDraft` を返します。
-* `Storeless` と `CredStore` の併用、`SupportedTransactionDataTypes` と `Presenter` の併用は拒否します（`ErrInvalidArgument`）。
+* `Storeless` と `CredStore` の併用、`SupportedTransactionDataTypes` と `Presenter` の併用、`*oid4vp.Oid4vpPresenter` 以外の `Presenter` plugin は拒否します（`ErrInvalidArgument`）。
 
 `SetReceiver` も同じ plugin の確認を行います。
 plugin のフィールドは登録後に変更してはなりません。
@@ -1349,7 +1349,7 @@ observer は応答ヘッダーが届いた後に呼ばれます。
 
 * `Config` は `==` で比較できなくなりました。
 * `Config` に新しいフィールド `Profile`、`Storeless`、`CredentialAcceptance`、`SupportedTransactionDataTypes`、`Issuance`、`Attestation`、`TestHooks` があります。`CredentialOfferGrant` に `IssuerState` と `AuthorizationServer` が、`SavedCredential` に `Verification` があります。
-* `NewWalletWithConfig` は、未知の `Profile`、wallet と異なる profile の plugin、HAIP では `profile.Carrier` を実装しない plugin と `TestHooks` を拒否します。`CredStore` を伴う `Storeless` と、注入した `Presenter` を伴う `SupportedTransactionDataTypes` も拒否します。エラーにはコードがあります。
+* `NewWalletWithConfig` は、未知の `Profile`、wallet と異なる profile の plugin、HAIP では `profile.Carrier` を実装しない plugin と `TestHooks` を拒否します。`CredStore` を伴う `Storeless`、注入した `Presenter` を伴う `SupportedTransactionDataTypes`、`*oid4vp.Oid4vpPresenter` 以外の presenter plugin も拒否します。エラーにはコードがあります。
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
 * `VerifyCredential` は、proof が検証できたときだけ、かつ `acceptance.DefaultSigningAlgorithms()`（ES256）に限り true を返します。nil の Credential には false を返します。
 * `ReceiveCredential` は HAIP で `ErrProfileForbidsDraft` を返します。Credential は保存前に検査します。`Config.CredentialAcceptance` があればそれで、なければ解析（`typ`、`alg`、`Key` と一致すべき `cnf`）で検査し、失敗した Credential は保存しません。storeless の wallet は検査の後に `ErrNoCredentialStore` を返します。
