@@ -19,6 +19,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
@@ -372,8 +373,9 @@ func draft13DecodeProof(t *testing.T, compact string, segment int) map[string]an
 	return decoded
 }
 
-// draft13JWTVC signs a W3C VC JWT with issuerKey.
-func draft13JWTVC(t *testing.T, issuerKey *ecdsa.PrivateKey) string {
+// draft13JWTVC signs a W3C VC JWT with issuerKey, bound to holder through
+// cnf.jwk.
+func draft13JWTVC(t *testing.T, issuerKey *ecdsa.PrivateKey, holder jose.JSONWebKey) string {
 	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("JWT"))
 	require.NoError(t, err)
@@ -382,6 +384,7 @@ func draft13JWTVC(t *testing.T, issuerKey *ecdsa.PrivateKey) string {
 		"iss": "https://issuer.example.test",
 		"iat": now.Unix(),
 		"exp": now.Add(time.Hour).Unix(),
+		"cnf": map[string]any{"jwk": holder.Public()},
 		"vc": map[string]any{
 			"@context":          []string{"https://www.w3.org/2018/credentials/v1"},
 			"id":                "urn:uuid:3f1c0b1e-6a0e-4c43-9d0b-2b8f3f7b1a01",
@@ -472,7 +475,7 @@ func TestDraft13NamesJWTVCByTypeOnly(t *testing.T) {
 			"cryptographic_binding_methods_supported": []string{"did:key"},
 		}
 	})
-	jwtVC := draft13JWTVC(t, fixture.issuerKey)
+	jwtVC := draft13JWTVC(t, fixture.issuerKey, fixture.key.PublicKey())
 	fixture.set(func(f *draft13Fixture) {
 		f.credentialResponse = func(int, map[string]any) (int, any) {
 			return http.StatusOK, map[string]any{"credential": jwtVC}
@@ -1195,4 +1198,23 @@ func TestDraft13RefusesUnderHAIPBeforeReadingTheState(t *testing.T) {
 	_, err = w.AuthorizeIssuance(context.Background(), nil, "")
 	require.ErrorIs(t, err, ErrProfileForbidsDraft)
 	require.ErrorIs(t, w.NotifyIssuer(context.Background(), nil, NotificationCredentialAccepted, ""), ErrProfileForbidsDraft)
+}
+
+// A configuration that lists cryptographic_binding_methods_supported requires a
+// cnf, as on the Final path: an unbound credential is refused, not stored.
+func TestDraft13RefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	unbound := flowTestUnboundSDJWTVC(t, fixture.issuerKey)
+	fixture.set(func(f *draft13Fixture) {
+		f.credentialResponse = func(int, map[string]any) (int, any) {
+			return 200, map[string]any{"credential": unbound, "notification_id": "notification-1"}
+		}
+	})
+	grant := fixture.preAuthorize(t, fixture.wallet)
+	result, err := fixture.wallet.Draft13().RequestCredential(context.Background(), grant, fixture.holder())
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMissing)
+	require.NotNil(t, result)
+	require.Empty(t, result.Credentials)
+	require.NotNil(t, result.Notification)
+	require.Zero(t, draft13StoredCount(t, fixture.wallet))
 }

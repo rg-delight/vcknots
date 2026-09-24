@@ -580,11 +580,13 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 	if err != nil {
 		return result, fmt.Errorf("unsupported credential format %q: %w: %w", config.Format, acceptance.ErrCredentialParse, err)
 	}
-	var holderKey *jose.JSONWebKey
-	if len(holderKeys) > 0 {
-		holderKey = &holderKeys[0]
-	}
 	raw := []byte(response.Credential)
+	// The same binding rule as the 1.0 path: a configuration that lists
+	// binding methods requires a cnf, and a cnf must name the holder key.
+	holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, make([]bool, len(holderKeys)), configurationRequiresBinding(config))
+	if err != nil {
+		return result, err
+	}
 	parsed, verification, err := d.w.verifyCredentialForAcceptanceContext(ctx, raw, flavor, holderKey, true)
 	if err != nil {
 		return result, fmt.Errorf("failed to verify credential: %w", err)

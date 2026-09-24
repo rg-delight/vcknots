@@ -415,7 +415,13 @@ func credentialBindingRequired(md *receiverTypes.CredentialIssuerMetadata, confi
 		return false
 	}
 	config, ok := md.CredentialConfigurationSupported[configurationID]
-	return ok && config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0
+	return ok && configurationRequiresBinding(config)
+}
+
+// configurationRequiresBinding reports whether config lists
+// cryptographic_binding_methods_supported.
+func configurationRequiresBinding(config receiverTypes.CredentialConfiguration) bool {
+	return config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0
 }
 
 // matchBatchHolderKey selects the holder key whose RFC 7638 thumbprint equals
