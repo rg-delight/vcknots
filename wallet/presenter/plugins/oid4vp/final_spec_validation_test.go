@@ -218,6 +218,29 @@ func TestFinalTransactionDataValidation(t *testing.T) {
 		require.NoError(t, parse(`{"type":"example","credential_ids":["pid"]}`))
 	})
 
+	// Only an SD-JWT VC Key Binding JWT carries transaction_data_hashes
+	// (OID4VP 1.0 Appendix B.3.3), so a transaction naming a query of another
+	// format could never be authorized by the presentation.
+	t.Run("credential query whose format cannot carry transaction data", func(t *testing.T) {
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		query := claims["dcql_query"].(map[string]any)["credentials"].([]any)
+		query = append(query, map[string]any{
+			"id": "jwt", "format": "jwt_vc_json", "meta": map[string]any{"type_values": [][]string{{"VerifiableCredential"}}},
+		})
+		claims["dcql_query"] = map[string]any{"credentials": query}
+		claims["transaction_data"] = []any{encode(`{"type":"example","credential_ids":["jwt"]}`)}
+		p := f.presenter()
+		p.SupportedTransactionDataTypes = []string{"example"}
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id": {f.clientID()},
+			"request":   {f.sign(t, claims, nil)},
+		}.Encode()
+		_, err := p.ParsePresentationRequest(uri)
+		assertAuthzErrorCode(t, err, InvalidTransactionDataError)
+		require.ErrorContains(t, err, "cannot carry transaction data")
+	})
+
 	t.Run("query-encoded transaction_data is validated", func(t *testing.T) {
 		entry := encode(`{"type":"example","credential_ids":["cred"]}`)
 		raw, err := json.Marshal([]string{entry})

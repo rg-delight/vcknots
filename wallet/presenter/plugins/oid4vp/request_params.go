@@ -388,19 +388,17 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 // validateFinalTransactionData enforces OID4VP 1.0 §5.1 and §8.4/§8.5 for the
 // Final path: every transaction_data entry must be base64url-encoded JSON with
-// a supported type and a non-empty credential_ids array referencing the DCQL
-// queries. Any failure is invalid_transaction_data.
+// a supported type and a non-empty credential_ids array naming dc+sd-jwt
+// queries that require holder binding. Any failure is invalid_transaction_data.
 func (b *requestBuilder) validateFinalTransactionData() error {
 	supported := make(map[string]bool, len(b.supportedTransactionDataTypes))
 	for _, dataType := range b.supportedTransactionDataTypes {
 		supported[dataType] = true
 	}
-	// queryIDs maps each Credential Query id to whether it requires
-	// cryptographic holder binding.
-	queryIDs := make(map[string]bool)
+	queries := make(map[string]CredentialQuery)
 	if b.req.DcqlQuery != nil {
 		for _, query := range b.req.DcqlQuery.Credentials {
-			queryIDs[query.ID] = query.RequiresHolderBinding()
+			queries[query.ID] = query
 		}
 	}
 	resolvedAlg := ""
@@ -428,15 +426,18 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 		}
 		for _, rawID := range credentialIDs {
 			id, ok := rawID.(string)
-			bindingRequired, known := queryIDs[id]
+			query, known := queries[id]
 			if !ok || !known {
 				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
 			}
-			// OID4VP 1.0 Section 8.4 carries the transaction data hashes in
-			// the Key Binding of the presentation, so a Credential Query that
-			// waives cryptographic holder binding has nowhere to carry them
-			// and cannot authorize the transaction.
-			if !bindingRequired {
+			// The transaction data hashes travel in the SD-JWT VC Key Binding
+			// JWT (OID4VP 1.0 §8.4, Appendix B.3.3), the only place this
+			// wallet can put them: the query must be dc+sd-jwt with holder
+			// binding.
+			if query.Format != "dc+sd-jwt" {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a %s credential query, which cannot carry transaction data", i, query.Format)
+			}
+			if !query.RequiresHolderBinding() {
 				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a credential query without cryptographic holder binding", i)
 			}
 		}
