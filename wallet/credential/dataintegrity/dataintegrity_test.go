@@ -50,7 +50,7 @@ type vectorDocument struct {
 
 func loadVectors(t *testing.T) referenceVectors {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/typescript_vectors.json")
+	raw, err := os.ReadFile("testdata/vectors.json")
 	if err != nil {
 		t.Fatal(err)
 	}

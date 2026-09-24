@@ -85,8 +85,7 @@ func TestWallet_SubmitPresentationDraft24UsesCallerChoice(t *testing.T) {
 	require.Equal(t, "$[1]", submission.DescriptorMap[1].Path)
 }
 
-// A single selection keeps the vp_token a bare presentation at path "$", which
-// is what every existing Draft24 verifier of this fork reads.
+// A single selection keeps the vp_token a bare presentation at path "$".
 func TestWallet_SubmitPresentationDraft24SingleCredentialKeepsRootPath(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()

@@ -17,7 +17,7 @@ type PresentationDefinition struct {
 // OAuthAuthzRequest represents a OAuth 2.0 Authorization Request
 // These fields are defined in RFC6749 and OIDC.
 type OAuthAuthzRequest struct {
-	// Scope is retained for legacy Draft24 requests. Final requests use DcqlQuery.
+	// Scope is the Draft 24 scope parameter. OpenID4VP 1.0 requests use DcqlQuery.
 	Scope        string                    `json:"scope,omitempty"`
 	ResponseType string                    `json:"response_type"`          // required
 	ClientID     string                    `json:"client_id"`              // required

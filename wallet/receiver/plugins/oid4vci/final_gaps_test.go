@@ -564,8 +564,7 @@ func TestEncodeCredentialRequestTakesTheJWEAlgFromTheChosenKey(t *testing.T) {
 		}
 	})
 
-	// An RSA JWK used to be handed to jose.NewEncrypter with ECDH-ES, which is
-	// simply the wrong algorithm for the key type.
+	// ECDH-ES is the wrong algorithm for an RSA key.
 	t.Run("an RSA key without alg is encrypted with RSA-OAEP-256", func(t *testing.T) {
 		privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {

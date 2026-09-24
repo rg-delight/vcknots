@@ -71,23 +71,13 @@ var didWebDocumentContentTypes = []string{"application/did+json", "application/d
 // method specification places on the identified web origin, and returns the
 // document's assertion keys as the profile's verification keys.
 //
-// The did:web method (https://w3c-ccg.github.io/did-method-web/) derives the
-// document URL from the method-specific identifier: the first colon-separated
-// part is the domain, with a port written percent-encoded, and every further
-// part is a path segment. A bare domain resolves to
-// https://<domain>/.well-known/did.json; anything else to
-// https://<domain>/<segment>/.../did.json.
-//
-// Key selection follows W3C DID Core section 5.3: only verification methods
-// reachable through the `assertionMethod` relationship are returned, because
-// that is the relationship a DID controller declares for expressing claims. A
-// method declared solely for `authentication` is never returned, so a key the
-// controller published for logging in cannot be mistaken for a key that signs
-// credentials. Each returned key keeps the verification method's `id` as its
-// KeyID, so a caller can match it against a JWS `kid`.
-//
-// Nothing here decides whether the DID may be trusted for a given issuer: a
-// DID document proves only that its controller published these keys.
+// The document URL follows the did:web method specification
+// (https://w3c-ccg.github.io/did-method-web/): a bare domain resolves to
+// https://<domain>/.well-known/did.json, a path to
+// https://<domain>/<segment>/.../did.json. Only verification methods of the
+// assertionMethod relationship are returned (W3C DID Core Section 5.3), each
+// with the verification method id as its KeyID. Resolving a DID does not make
+// it trusted for an issuer.
 type DIDWebPlugin struct {
 	// HTTPClient retrieves the DID document. A nil value uses a client with a
 	// 30 second timeout. The client's redirect policy is never used: this

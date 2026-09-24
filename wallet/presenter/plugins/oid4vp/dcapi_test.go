@@ -309,9 +309,8 @@ func TestParseDCAPIRequestHAIPRejectsDirectPost(t *testing.T) {
 
 // TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs covers HAIP Section 5 on the DC
 // API path: "The X.509 certificate of the trust anchor MUST NOT be included in
-// the x5c JOSE header of the signed request." The rule used to be inert
-// whenever trust was configured as a *x509.CertPool instead of explicit
-// TrustAnchors.
+// the x5c JOSE header of the signed request." It holds when trust is
+// configured as a *x509.CertPool instead of explicit TrustAnchors.
 func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	pool := x509.NewCertPool()

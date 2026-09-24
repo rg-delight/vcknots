@@ -113,8 +113,8 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (
 		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
 	}
 
-	// The key's own alg wins; authorization_encrypted_response_alg is retained
-	// only as a compatibility fallback, then ECDH-ES is the default.
+	// The key's own alg wins, then authorization_encrypted_response_alg, then
+	// ECDH-ES.
 	algName := key.Algorithm
 	if algName == "" {
 		algName = metadata.AuthorizationEncryptedResponseAlg

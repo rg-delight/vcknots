@@ -105,8 +105,8 @@ func TestDraft24RequestObjectHonoursWalletAudience(t *testing.T) {
 }
 
 // TestDraft24RequestObjectRejectsExpiredRequestObject shows the shared
-// registered-claim policy reaching Draft24, which previously authenticated an
-// x509 Request Object without ever reading exp.
+// registered-claim policy, exp included, applying to a Draft 24 x509 Request
+// Object.
 func TestDraft24RequestObjectRejectsExpiredRequestObject(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
 	claims := draft24X509Claims(f)

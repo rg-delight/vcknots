@@ -171,22 +171,12 @@ func RequireLeafThumbprint(leaf *x509.Certificate, expectedB64u string) error {
 // RequireLeafDNSName enforces that host appears as a dNSName Subject
 // Alternative Name of the leaf certificate.
 //
-// wildcard selects the matching rule, and every caller in this library passes
-// false. OpenID4VP 1.0 Section 5.9.3 says of x509_san_dns that "the original
-// Client Identifier (the part after the `x509_san_dns:` prefix) MUST be a DNS
-// name and match a `dNSName` Subject Alternative Name (SAN) [@!RFC5280] entry
-// in the leaf certificate passed with the request", and the same exact match is
-// what OpenID4VCI Section 12.2.2 leaves for a credential issuer host: the
-// identifier is the name being authenticated, not a server the wallet happens
-// to be connected to. A wildcard SAN such as *.example.com would let one
-// certificate speak for every subdomain, so a Client Identifier is matched
-// exactly (case-insensitively, RFC 4343) and never through a wildcard.
-//
-// wildcard true applies the RFC 6125 Section 6.4.3 left-most-label rule
-// instead, for a caller that is authenticating a TLS server name rather than a
-// protocol identifier. The wildcard must be the entire left-most label and
-// matches exactly one label, so *.example.com matches a.example.com but neither
-// example.com nor a.b.example.com.
+// With wildcard false the name matches exactly (case-insensitively, RFC 4343)
+// and a wildcard SAN never matches, as OpenID4VP 1.0 Section 5.9.3 requires
+// for x509_san_dns and OpenID4VCI 1.0 Section 12.2.2 for an issuer host; every
+// caller in this library passes false. With wildcard true the RFC 6125
+// Section 6.4.3 rule applies: a wildcard left-most label matches exactly one
+// label.
 func RequireLeafDNSName(leaf *x509.Certificate, host string, wildcard bool) error {
 	if leaf == nil || len(leaf.Raw) == 0 {
 		return fmt.Errorf("x5c leaf certificate is empty: %w", ErrX5CInvalid)

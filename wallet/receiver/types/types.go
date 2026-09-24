@@ -264,29 +264,11 @@ func (m *CredentialIssuerMetadata) BatchSize() int {
 	return m.BatchCredentialIssuance.BatchSize
 }
 
-// CredentialRequestEncryption mirrors the OpenID4VCI 1.0 §12.2.4
-// credential_request_encryption metadata member, which is defined with exactly
-// four members: jwks ("REQUIRED. A JSON Web Key Set ... that contains one or
-// more public keys, to be used by the Wallet as an input to a key agreement for
-// encryption of the Credential Request. Each JWK in the set MUST have a kid
-// (Key ID) parameter that uniquely identifies the key"), enc_values_supported
-// ("REQUIRED. A non-empty array containing a list of the JWE encryption
-// algorithms (`enc` values) supported by the Credential Endpoint to decode the
-// Credential Request from a JWT"), zip_values_supported (OPTIONAL) and
-// encryption_required ("REQUIRED. Boolean value specifying whether the
-// Credential Issuer requires the additional encryption on top of TLS for the
-// Credential Requests").
-//
-// There is deliberately no alg_values_supported member: §12.2.4 defines that
-// one on credential_response_encryption only, and §10 fixes the request's JWE
-// alg from the chosen key instead — "The `alg` parameter MUST be present. The
-// JWE `alg` algorithm used MUST be equal to the `alg` value of the chosen JWK."
-//
-// zip_values_supported is not modelled either, because §10 makes compression
-// the Wallet's own option ("If a `zip` (Compression Algorithm) value is
-// specified, then compression is performed before encryption ... If absent, no
-// compression is performed") and this wallet never compresses a Credential
-// Request, so the issuer's list would change nothing.
+// CredentialRequestEncryption is the OpenID4VCI 1.0 Section 12.2.4
+// credential_request_encryption metadata member. It has no
+// alg_values_supported: Section 10 takes the JWE alg from the chosen key.
+// zip_values_supported is not modelled because the wallet never compresses a
+// Credential Request.
 type CredentialRequestEncryption struct {
 	// Jwks carries the issuer's request encryption keys.
 	Jwks jose.JSONWebKeySet `json:"jwks"`

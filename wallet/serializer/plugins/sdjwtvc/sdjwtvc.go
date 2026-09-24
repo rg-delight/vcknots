@@ -34,13 +34,13 @@ type SdJwtVcPresentationOptions struct {
 	// SelectedClaims specifies which claims to disclose in the presentation
 	SelectedClaims []string
 	// LimitDisclosureToSelectedClaims makes SelectedClaims authoritative even
-	// when it is empty. When false, an empty SelectedClaims preserves the
-	// historical behavior of disclosing all available disclosures.
+	// when it is empty. When false, an empty SelectedClaims discloses every
+	// available disclosure.
 	LimitDisclosureToSelectedClaims bool
 	// RequireRootClaimMatch resolves SelectedClaims against issuer-signed root
 	// properties and root disclosure commitments. Public Final DCQL APIs enable
-	// this for one-segment paths. False preserves the legacy name-based selector,
-	// which callers also use for disclosures inside issuer-signed objects.
+	// this for one-segment paths. False selects disclosures by name alone,
+	// including disclosures inside issuer-signed objects.
 	RequireRootClaimMatch bool
 	// RequireKeyBinding indicates whether a Key Binding JWT is required
 	RequireKeyBinding bool

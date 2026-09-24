@@ -56,7 +56,7 @@ type PresentationRequest struct {
 	// ResponseMode is the Authorization Request response_mode. For the Final
 	// DCQL path "direct_post.jwt" requires an encrypted response and
 	// "direct_post" a plaintext one; an empty value lets the presenter infer the
-	// mode from the verifier's encryption metadata (legacy direct plugin use).
+	// mode from the verifier's encryption metadata.
 	ResponseMode string
 	// CredentialQueryID is the id of the DCQL Credential Query the presentation
 	// responds to. It becomes the key of the vp_token JSON object.

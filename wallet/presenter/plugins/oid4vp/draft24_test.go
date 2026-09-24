@@ -124,7 +124,7 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 					require.Equal(t, "credential~kb-jwt", payload["vp_token"])
 					var encoded []byte
 					if encrypted {
-						// Preserve the legacy fork's double-encoded Draft24 JARM field.
+						// Draft 24 JARM carries presentation_submission as a JSON string.
 						value, ok := payload["presentation_submission"].(string)
 						require.True(t, ok)
 						encoded = []byte(value)

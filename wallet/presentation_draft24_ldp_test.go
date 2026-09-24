@@ -33,9 +33,9 @@ func (k ed25519KeyEntry) PublicKey() jose.JSONWebKey {
 }
 func (k ed25519KeyEntry) Sign(data []byte) ([]byte, error) { return ed25519.Sign(k.private, data), nil }
 
-// ldpPresentationVectors reuses the credential/dataintegrity vectors, which
-// the wallet's TypeScript Data Integrity implementation produced: a credential
-// the issuer signed there must present here, under the same holder DID.
+// ldpPresentationVectors reuses the credential/dataintegrity vectors, which an
+// independent Data Integrity implementation produced: a credential the issuer
+// signed there must present here, under the same holder DID.
 type ldpPresentationVectors struct {
 	Issuer struct {
 		PrivateJWK struct{ D string } `json:"privateJwk"`
@@ -53,7 +53,7 @@ type ldpPresentationVectors struct {
 
 func loadLdpPresentationVectors(t *testing.T) ldpPresentationVectors {
 	t.Helper()
-	raw, err := os.ReadFile("credential/dataintegrity/testdata/typescript_vectors.json")
+	raw, err := os.ReadFile("credential/dataintegrity/testdata/vectors.json")
 	require.NoError(t, err)
 	var vectors ldpPresentationVectors
 	require.NoError(t, json.Unmarshal(raw, &vectors))

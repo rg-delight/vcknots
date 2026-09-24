@@ -36,8 +36,8 @@ func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, raw []byte, 
 
 // verifyCredentialForAcceptanceContext applies Config.CredentialAcceptance to
 // raw. With no policy it fails closed when requirePolicy is set, and otherwise
-// runs only acceptance.Acceptor.Parse: legacy ReceiveCredential stores without
-// a policy outside HAIP.
+// runs only acceptance.Acceptor.Parse: ReceiveCredential stores without a
+// policy outside HAIP.
 func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *acceptance.Verification, error) {
 	if w.credentialAcceptance == nil && requirePolicy {
 		return nil, nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)

@@ -13,22 +13,22 @@ type DCQLCredentialCandidate struct {
 	Format string
 	VCT    string
 	Claims []string
-	// ClaimValues contains the actual top-level claim values used for values
-	// restrictions. Existing callers can omit it for queries without values;
-	// a restricted claim with no supplied value cannot satisfy the query.
-	// Supply json.Number for integers beyond the exact float range.
+	// ClaimValues contains the top-level claim values used for values
+	// restrictions. It may be omitted for queries without values; a restricted
+	// claim with no supplied value cannot satisfy the query. Supply
+	// json.Number for integers beyond the exact float range.
 	ClaimValues map[string]any
 	// ClaimObject is the decoded credential root object with all selectively
 	// disclosable claims applied, including nested object properties and array
 	// element disclosures. When non-nil it is the authoritative source for
-	// claims path pointer evaluation; Claims and ClaimValues remain the legacy
-	// single-segment fallback.
+	// claims path pointer evaluation; otherwise Claims and ClaimValues answer
+	// single-segment paths only.
 	ClaimObject map[string]any
 	// HolderBound reports whether the credential carries a cryptographic holder
-	// binding key (SD-JWT VC cnf claim). A nil value means the caller did not
-	// evaluate holder binding and the credential is not excluded for backward
-	// compatibility. A query that requires holder binding must not be satisfied
-	// by a candidate explicitly marked unbound (OID4VP 1.0 Appendix B.3).
+	// binding key (SD-JWT VC cnf claim). Nil means the caller did not evaluate
+	// holder binding, and the candidate is not excluded. A query that requires
+	// holder binding is not satisfied by a candidate marked unbound (OID4VP 1.0
+	// Appendix B.3).
 	HolderBound *bool
 	// AuthorityKeyIDs lists the base64url-encoded Authority Key Identifiers of
 	// the X.509 certificates in the credential's issuer chain. It is matched
@@ -505,8 +505,8 @@ func evaluateDCQLClaimPath(root map[string]any, path []any) ([]dcqlClaimElement,
 }
 
 // encodeDCQLClaimPath serializes a path for the serializer's disclosure
-// selector. A single string component keeps its plain name for backward
-// compatibility; anything else is JSON-encoded, e.g. ["address","postal_code"]
+// selector. A single string component is its plain name; anything else is
+// JSON-encoded, e.g. ["address","postal_code"]
 // or ["degrees",null,"type"] or ["nationalities",1].
 func encodeDCQLClaimPath(path []any) string {
 	if len(path) == 1 {

@@ -187,8 +187,8 @@ func postJSON(t *testing.T, url string, payload string, headers map[string]strin
 }
 
 // TestTokenEndpointRejectsWhatARealIssuerRejects covers the grant rules the
-// mock used to answer 200 to: RFC 6749 §5.2 unsupported_grant_type, the
-// per-grant required parameter and the RFC 7636 §4.6 PKCE comparison.
+// mock enforces: RFC 6749 §5.2 unsupported_grant_type, the per-grant required
+// parameter and the RFC 7636 §4.6 PKCE comparison.
 func TestTokenEndpointRejectsWhatARealIssuerRejects(t *testing.T) {
 	verifier := strings.Repeat("a", 43)
 	digest := sha256.Sum256([]byte(verifier))
