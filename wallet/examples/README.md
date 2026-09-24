@@ -1,8 +1,8 @@
 # vcknots-wallet Local Server Integration Test and Conformance Test Sample
 
-The independent [public Wallet API driver](official_driver/README.md) is used for
-the new official-suite controls. It preserves received credentials between
-processes and reports current API limitations explicitly.
+The [public Wallet API driver](official_driver/README.md) is a separate program
+that drives the staged OpenID4VCI 1.0 and OpenID4VP 1.0 API, for example against
+the OpenID Foundation conformance suite.
 
 This directory contains sample code that demonstrates two key testing scenarios for vcknots-wallet:
 
@@ -18,234 +18,19 @@ Conformance test mode seeds a local credential and tests only the OpenID4VP pres
 | Sample | OpenID4VCI credential issuance | OpenID4VP presentation | Key binding |
 | --- | --- | --- | --- |
 | `server_integration_jwtvc` | JWT-VC | JWT-VC | Not applicable |
-| `server_integration_sdjwt` | SD-JWT VC (`dc+sd-jwt`) | Selective disclosure | Without KB-JWT |
+| `server_integration_sdjwt` | SD-JWT VC (`dc+sd-jwt`) | Selective disclosure | KB-JWT, because the DCQL query requires holder binding by default |
 | `server_integration_sdjwt+kbjwt` | SD-JWT VC (`dc+sd-jwt`) | Selective disclosure | With KB-JWT |
 
 Regardless of the credential format shown above, every local server integration test mode sample uses `private_key_jwt` client authentication and DPoP.
 
-## Supported protocols
+## Wallet API used by the samples
 
-This Go wallet implements OpenID4VCI 1.0 and OpenID4VP 1.0. HAIP 1.0 is available as an explicit profile: the zero value of `profile.Profile` normalizes to `profile.Final`, and `profile.HAIP` adds the HAIP constraints on top. The matrix lists behaviour found in the public API and its tests. `Partial` marks a feature whose interface exists but whose production integration is the caller's responsibility.
+The samples call the one-call methods `ReceiveCredential` (OpenID4VCI Pre-Authorized Code Flow) and `PresentCredential` (OpenID4VP 1.0).
+A wallet with a user uses the staged API instead: `ResolveCredentialOffer`, `BeginIssuance`, `AuthorizeIssuance` or `AuthorizePreAuthorizedIssuance`, and `RequestCredential` for issuance, and `ParsePresentationRequest`, `SelectCredentials` and `SubmitPresentation` for presentation.
+The [wallet guide](../../docs/en/wallet.md) describes that API, the supported protocols, the HAIP profile and the security defaults, and the [public Wallet API driver](official_driver/README.md) shows a complete configuration.
 
-| Protocol / feature | Status | Public API entry point | Notes |
-| --- | --- | --- | --- |
-| OpenID4VCI 1.0 pre-authorized code | Implemented | `Wallet.ReceiveOID4VCIFinalPreAuthorizedCredential` (`OID4VCIFinalPreAuthorizedReceiveRequest`); `Wallet.ReceiveCredential` is the legacy Draft 13 entry point | `tx_code` is required exactly when the offer declares one; `client_id` is optional under Final and required under HAIP; DPoP is used whenever a `ClientKey` is supplied and is mandatory under HAIP; client authentication is `private_key_jwt` when the authorization server advertises it, or attestation-based with `Config.ClientAttestation`, whose headers this grant carries like the authorization code grant. The public driver exposes it as `receive-preauth`. |
-| OpenID4VCI 1.0 authorization code with PAR / PKCE / DPoP / `private_key_jwt` / client attestation | Implemented | `Wallet.BeginOID4VCIFinalAuthorization` + `Wallet.ResumeOID4VCIFinalAuthorization`, or `Wallet.ReceiveOID4VCIFinalCredential` (`OID4VCIFinalReceiveRequest`) | Pushed Authorization Request is used when the authorization server advertises one and is required only under HAIP (HAIP §4); PKCE is always `S256`; DPoP is configured with `Config.DPoP` and `ClientKey`; `private_key_jwt` is used when the authorization server advertises it; attestation-based client authentication uses `Config.ClientAttestation`. |
-| Deferred issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`DeferredPollAttempts`), `Wallet.ResumeOID4VCIFinalDeferredCredential` | Polls at the advertised interval, capped at 60 seconds (`MaxDeferredInterval` overrides it) and cancellable through the `…Context` variants, and returns a pending result when the attempt budget is exhausted. The deferred request repeats `credential_response_encryption` (§9.1). The `OID4VCIFinalDeferredRequest` can resume in another process. |
-| Notification endpoint | Implemented | `Wallet.NotifyOID4VCIFinalCredentialDeleted` (`OID4VCIFinalNotificationRequest`) | Sends `credential_deleted`. `credential_accepted` and `credential_failure` are sent internally by `storeAndNotifyOID4VCIFinalCredentials` only after storage has succeeded or failed. |
-| Batch issuance | Implemented | `Wallet.ReceiveOID4VCIFinalCredential` (`AdditionalHolderKeys`) | Sends one proof per holder key, bounded by `batch_credential_issuance.batch_size`; each response credential is matched to its own key. |
-| Credential response encryption | Implemented | `OID4VCIFinalReceiveRequest.CredentialResponseEncryptionKey` | OpenID4VCI 1.0 §8.2 (`jwk`, `enc`, optional `zip`, no `alg`). Fails closed when the issuer requires encryption and no key was supplied. |
-| Key attestation | Partial | `Config.KeyAttestation` (`KeyAttestationProvider`), `StaticKeyAttester`, `OID4VCIFinalReceiveRequest.IncludeKeyAttestation` | Provider interface plus a test-only static attester. The library validates the provider JWT (`typ`, `attested_keys`, `exp`) but does not verify the attester's signature; a production attester or HSM is caller-supplied. |
-| OpenID4VP 1.0 redirect flow (`x509_hash` / `x509_san_dns` / `redirect_uri` / pre-registered) | Implemented | `Wallet.PresentCredential`, `Wallet.PresentCredentialWithOptions`, `Oid4vpPresenter.ParsePresentationRequest` | All four client identifier forms are parsed by `parseOID4VPClientID`. Signed Request Objects are authenticated for `x509_san_dns` and `x509_hash` (`authenticateFinalRequestObject`); a colon-less identifier is a pre-registered client (OpenID4VP §5.9.2). HAIP requires `x509_hash`. |
-| `request_uri` GET / POST with `wallet_nonce` | Implemented | `Oid4vpPresenter.ParsePresentationRequest`, `requestBuilder.WithRequestObjectURI`, `Oid4vpPresenter.RequestURINonce` | Both methods are accepted. A Final POST always carries a fresh `wallet_nonce` (32 random bytes) and optional `wallet_metadata`; the echo is exposed as `RequestObjectVerification.WalletNonce`. |
-| DCQL `credential_sets` | Implemented | `Oid4vpPresenter.ParsePresentationRequest`, `ResolveSatisfiableDCQLCredentials` | `options` with `required`. All required queries must be satisfiable before any response is sent. |
-| DCQL `claims` / `claim_sets` / `values` | Implemented | as above | Claim identifiers and `values` (string, integer or boolean) are validated; `claim_sets` selects one option. |
-| DCQL `trusted_authorities` (`aki`) and `multiple` | Implemented | as above, `AuthorityKeyIdentifiersFromCredential` | Only the `aki` authority type is evaluated (HAIP §5); entries of other types are ignored. `multiple: true` returns every match. |
-| DCQL nested / array claim paths | Implemented | `evaluateDCQLClaimPath`, `sdjwtvc.selectTopLevelDisclosures` | String keys, `null` (all array elements) and non-negative array indices (OID4VP §7). The `_sd` / `...` disclosures for the selected leaves only are emitted. |
-| `direct_post` / `direct_post.jwt` | Implemented | `Wallet.PresentCredential`, `Oid4vpPresenter.PresentDCQL`, `Oid4vpPresenter.CreateEncryptedAuthorizationResponse` | Plain form POST for `direct_post`; ECDH-ES JWE for `direct_post.jwt`. Error responses are encrypted when the verifier metadata allows and otherwise sent in plaintext per §8.3.1. |
-| `transaction_data` | Implemented | `Config.SupportedTransactionDataTypes`, `Oid4vpPresenter.SetSupportedTransactionDataTypes` | Each object is base64url-encoded JSON with known `credential_ids`; the hash is bound into the KB-JWT. With an empty list every `transaction_data` request is rejected with `invalid_transaction_data`. |
-| W3C Digital Credentials API (`dc_api` / `dc_api.jwt`, unsigned / signed / multi-signed) | Implemented (protocol only) | `Wallet.PresentCredentialToDCAPI`, `Oid4vpPresenter.ParseDCAPIRequest`, `Oid4vpPresenter.BuildDCAPIResponse` | Accepts `openid4vp-v1-unsigned`, `-signed` and `-multisigned`. The caller supplies the platform-authenticated `origin`; there is no browser or OS integration in this library. |
-| HAIP 1.0 profile switch | Implemented | `profile.HAIP`, `Config.Profile`, `Oid4vpPresenter.Profile`, `Oid4vciReceiver.Profile` | `profile.Final` is the default. The profile is propagated to every plugin; a caller-injected dispatcher whose plugin reports a different profile is rejected. |
-| Draft 13 / Draft 24 legacy entry points | Implemented | `Wallet.ReceiveCredential`; `Wallet.PresentDraft24Credential`, `Oid4vpPresenter.ParseDraft24PresentationRequest`, `NewDraft24RequestBuilder`, `PresentDraft24` | The Draft paths keep their historical behaviour, including `InsecureSkipX509Verify`, and ignore the Final / HAIP profile. |
-| Formats: SD-JWT VC (`dc+sd-jwt`, `vc+sd-jwt`) and `jwt_vc_json` | Implemented | `credential.SDJwtVC`, `credential.JwtVc`, the SD-JWT VC and JWT VC serializer plugins | Serialization and presentation for both. An SD-JWT VC issuer `typ` may be `dc+sd-jwt` or `vc+sd-jwt`. |
-| Formats: ISO mdoc (`mso_mdoc`) | Not implemented | - | No mdoc / COSE / CBOR serializer exists. The HAIP format allow-list mentions `mso_mdoc`, but no presentation can be built. Out of scope for this integration. |
-
-**Conformance evidence.** The public driver in `examples/official_driver` passed the official modules recorded in the Final / HAIP roadmap against a locally built copy of the OIDF conformance suite: the HAIP VCI plan `oid4vci-1_0-wallet-haip-test-plan` (credential-issuance, notification, client-attestation-challenge, deferred and batch modules) and the Final / HAIP VP plans `oid4vp-1final-wallet-test-plan` and `oid4vp-1final-wallet-haip-test-plan` over `direct_post.jwt`, `request_uri_signed`, `x509_hash` and the `dc_api.jwt` variant (unsigned, signed and multi-signed). This is a partial suite run, not a full profile conformance claim and not a certification; see the roadmap record for the exact module and variant list.
-
-## Quick start
-
-The runnable reference is the independent [public Wallet API driver](official_driver/README.md), which composes a `wallet.Wallet` with explicit trust and acceptance policy and then drives receive and present. The essential composition is:
-
-```go
-// Trust anchors for signed OID4VP Request Objects. Config has no direct
-// verifier-trust field: inject a presenter plugin that carries
-// RequestObjectValidation. With none, the library has no anchors and rejects
-// every X.509 Request Object (fail-closed).
-requestObjectValidation := &oid4vp.RequestObjectValidationOptions{
-	TrustAnchors:                verifierAnchors, // []*x509.Certificate
-	AllowUnadvertisedRevocation: false,
-	WalletAudience:              []string{"https://self-issued.me/v2"},
-}
-
-// Issuer authentication before storage. With a nil policy only the library's
-// minimum rules apply: the credential must parse, carry a supported alg and
-// (for SD-JWT VC) a dc+sd-jwt / vc+sd-jwt typ, and a cnf that does not match
-// the holder key is rejected.
-acceptance := &wallet.CredentialAcceptancePolicy{
-	IssuerX509:           &wallet.IssuerX509TrustOptions{TrustAnchors: issuerAnchors},
-	RequireHolderBinding: true,
-}
-
-receiving, _ := receiver.NewReceivingDispatcher(receiver.WithPlugin(
-	receiverTypes.Oid4vci,
-	&oid4vci.Oid4vciReceiver{HTTPClient: httpClient, Profile: profile.HAIP},
-))
-presenting, _ := presenter.NewPresentationDispatcher(presenter.WithPlugin(
-	presenter.Oid4vp,
-	&oid4vp.Oid4vpPresenter{
-		HTTPClient:              httpClient,
-		RequestObjectValidation: requestObjectValidation,
-		Profile:                 profile.HAIP,
-	},
-))
-
-w, err := wallet.NewWalletWithConfig(wallet.Config{
-	Receiver:                      receiving,
-	Presenter:                     presenting,
-	Profile:                       profile.HAIP, // profile.Final is the default
-	CredentialAcceptance:          acceptance,
-	SupportedTransactionDataTypes: []string{"payment"}, // empty rejects every transaction_data request
-	DPoP:                          wallet.DPoPConfig{Enabled: true, Key: dpopKey},
-	ClientAuth:                    wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: clientID, Key: clientKey},
-	ClientAttestation:             clientAttestation, // wallet.ClientAttestationProvider, or nil
-	KeyAttestation:                keyAttestation,    // wallet.KeyAttestationProvider, or nil
-})
-```
-
-Receive with the authorization-code flow, or with a pre-authorized code. The
-authorization endpoint needs a system browser, so the flow splits in two around
-it: `BeginOID4VCIFinalAuthorization` returns the URL to open and the state to
-keep, and `ResumeOID4VCIFinalAuthorization` continues from the redirect.
-
-```go
-offer, _ := w.ResolveCredentialOffer(offerURI) // offer by reference; ParseCredentialOfferURL for an inline offer
-request := wallet.OID4VCIFinalReceiveRequest{
-	CredentialOffer:                 offer,
-	Type:                            receiverTypes.Oid4vci,
-	ClientID:                        clientID,
-	RedirectURI:                     redirectURI,
-	HolderKey:                       holderKey,
-	ClientKey:                       clientKey,
-	CredentialResponseEncryptionKey: encryptionKey, // nil requests a plaintext response
-	DeferredPollAttempts:            10,
-}
-
-authorization, err := w.BeginOID4VCIFinalAuthorization(ctx, request)
-// open authorization.AuthorizationURL in the system browser; authorization is
-// JSON-serialisable, so it survives a process restart
-result, err := w.ResumeOID4VCIFinalAuthorization(ctx, request, authorization, redirectURLFromBrowser)
-```
-
-A test or conformance issuer that answers the authorization endpoint with the
-code redirect and needs no user interaction can be driven in one call instead:
-
-```go
-request.AllowSelfDrivenAuthorization = true
-result, err := w.ReceiveOID4VCIFinalCredentialContext(ctx, request)
-```
-
-A pre-authorized code needs no browser, so the whole OpenID4VCI 1.0 §4.1.1 /
-§6.1 flow runs in one call. `ClientID` and `ClientKey` are optional under Final
-(§6.1 makes client authentication OPTIONAL for this grant) and required under
-HAIP; without a `ClientKey` the wallet is anonymous and only a Bearer access
-token is accepted.
-
-```go
-result, err := w.ReceiveOID4VCIFinalPreAuthorizedCredential(ctx, wallet.OID4VCIFinalPreAuthorizedReceiveRequest{
-	CredentialOffer:      offer,
-	Type:                 receiverTypes.Oid4vci,
-	TxCode:               txCode, // required exactly when the offer carries a tx_code object
-	ClientID:             clientID,
-	HolderKey:            holderKey,
-	ClientKey:            clientKey,
-	DeferredPollAttempts: 10,
-})
-```
-
-#### Signing the key attestation in another process
-
-OpenID4VCI 1.0 Appendix D binds a key attestation to the issuer's `c_nonce`, so
-a wallet whose attester lives elsewhere cannot sign it up front. Both flows
-split at that point: `AuthorizeOID4VCIFinalToken` (or
-`AuthorizeOID4VCIFinalPreAuthorizedToken`) returns a JSON-serialisable
-`OID4VCIFinalTokenGrant`, and `RequestOID4VCIFinalCredential` spends it. The
-grant holds an access token, so persist it encrypted and keep it out of logs.
-
-```go
-request.ExternalKeyAttestation = true
-grant, err := w.AuthorizeOID4VCIFinalToken(ctx, request, authorization, redirectURLFromBrowser)
-
-result, err := w.RequestOID4VCIFinalCredential(ctx, request, grant)
-var required *wallet.KeyAttestationRequiredError
-if errors.As(err, &required) {
-	// sign a key-attestation+jwt over required.HolderKeys with required.CNonce
-	// and required.Audience, wherever the attester key lives
-	request.KeyAttestation = &wallet.KeyAttestation{JWT: signed}
-	result, err = w.RequestOID4VCIFinalCredential(ctx, request, required.Grant)
-}
-var stale *wallet.KeyAttestationNonceError
-if errors.As(err, &stale) {
-	// the issuer answered invalid_nonce: sign once more for stale.Grant.CNonce
-}
-```
-
-`ResumeOID4VCIFinalAuthorization` and
-`ReceiveOID4VCIFinalPreAuthorizedCredential` are those two calls back to back,
-so a wallet with an in-process `Config.KeyAttestation` provider never sees the
-split.
-
-Present through a launch URI, or answer a W3C Digital Credentials API invocation:
-
-```go
-redirectURI, err := w.PresentCredential(requestURI, holderKey, nil)
-
-response, err := w.PresentCredentialToDCAPI(
-	oid4vp.DCAPIInvocation{
-		Request: oid4vp.DCAPIRequest{Protocol: oid4vp.DCAPIProtocolSigned, Data: data},
-		Origin:  origin, // platform-authenticated, never read from data
-	},
-	holderKey, nil,
-)
-```
-
-Fail-closed defaults:
-- No verifier trust anchors: `RequestObjectValidation` stays nil and every X.509 (signed) Request Object is rejected.
-- Nil `CredentialAcceptance`: the Final and HAIP issuance paths refuse to store anything (`ErrCredentialAcceptancePolicyRequired`), and `ReceiveCredential` under HAIP does the same. Draft-13 `ReceiveCredential` under `profile.Final` keeps running the minimum rules. Set `CredentialAcceptancePolicy.UnverifiedIssuer` to accept an unauthenticated issuer on purpose.
-- An unknown `credential_configuration_id` fails with `ErrUnknownCredentialConfiguration` before any authorization request is sent.
-- The authorization code flow needs a browser: `ReceiveOID4VCIFinalCredential` refuses unless `AllowSelfDrivenAuthorization` is set.
-- Empty `SupportedTransactionDataTypes`: every request carrying `transaction_data` is rejected.
-- HAIP is not chosen by default: the zero `Config.Profile` normalizes to `profile.Final`.
-
-### Receiver plugin contract: transport and signer
-
-A receiver plugin implements `receiverTypes.Receiver` for the Draft 13 flow and
-`receiverTypes.OID4VCIFinalTransport` for Final / HAIP. The transport contract
-is HTTP only — the Pushed Authorization Request, the token endpoint, the
-client-attestation challenge and nonce endpoints, the credential and
-notification endpoints, and the Credential Request / Credential Response codec
-— so a plugin never holds the wallet's private keys.
-
-Those keys are used behind `receiverTypes.OID4VCIFinalSigner`: `CreateDpopProof`,
-`CreateCredentialRequestJWTProofWithOptions` and `CreateClientAttestationPop`.
-`Config.OID4VCISigner` selects the implementation, so a wallet can sign in a
-hardware module or a remote signing service and still use the bundled transport:
-
-```go
-w, err := wallet.NewWalletWithConfig(wallet.Config{
-	Receiver:      receiving,   // any OID4VCIFinalTransport plugin
-	OID4VCISigner: hsmSigner,   // nil keeps the software signer
-})
-```
-
-With a nil `OID4VCISigner` the receiver plugin signs when it also implements the
-signer — the bundled `oid4vci.Oid4vciReceiver` does, by embedding
-`oid4vcisign.Default` — and `oid4vcisign.Default` signs otherwise. A third-party
-transport plugin embeds `oid4vcisign.Default` to get the same software
-behaviour. The wallet never mints a Client Attestation: it is issued by the
-attester and reaches the wallet through `Config.ClientAttestation`.
-
-`receiverTypes.OID4VCIFinalReceiver` is the deprecated union of the two
-interfaces; it is kept so plugins and callers written against it still compile.
-
-## Security model
-
-**What the library authenticates.** Signed OID4VP Request Objects are verified against the caller's X.509 anchors, with `aud` / `exp` / `nbf`, an optional EKU and CRL policy, and the `x509_san_dns` or `x509_hash` binding (`authenticateFinalRequestObject`, `verifyRequestObjectCertificateChain`). The outcome is exposed only in `CredentialPresentationRequest.RequestObjectVerification` and is never read from the request. Credentials are authenticated before storage by `verifyCredentialForAcceptanceContext`, which checks the signature, `exp` / `nbf` and SD-JWT disclosure integrity. Attestations from providers are checked by `ValidateClientAttestation` / `validateKeyAttestation` for `typ`, `sub`, RFC 7638 `cnf.jwk`, `exp` and, under HAIP, a non-self-signed `x5c` leaf; the attester's own signature is not verified.
-
-**What the application must keep.** Trust-anchor selection and distribution (`RequestObjectValidation.TrustAnchors` / `RootCAs`, `IssuerX509TrustOptions`); the inputs to the revocation policy (reachable CRLs, `AllowUnadvertisedRevocation`). The shared signing-chain path consults CRLs only and does not implement OCSP (`common/x509.NewCRLChecker` never follows OCSP). It also keeps consent and any ecosystem policy above the protocol; persistence and resumption of the protocol state the migration guide describes (deferred token and transaction identifiers, notification identifiers); and the platform-authenticated origin for DC API.
-
-**Explicit escapes, for local development and tests only.** `AllowHTTP` (and the `VCKNOTS_WALLET_HTTP_ALLOWED` environment variable) permits plain HTTP endpoints and is rejected under HAIP. `InsecureSkipX509Verify` applies to the Draft24 entry points only; the Final path rejects it. `AllowUnadvertisedRevocation` keeps certificates without published CRL / OCSP information on the trust path and reports them separately, never as positively checked. `DeliveredByReference` is a caller attestation that a `request=` Request Object was originally fetched through `request_uri`, letting the request satisfy the HAIP §5.1 delivery check; set it only when the application's own admission path recorded the fetch.
-
-See the [API migration guide](../API-MIGRATION.md) for the integrated API changes and the [public Wallet API driver](official_driver/README.md) for a complete configuration.
+The samples set no `Config.CredentialAcceptance`, so `ReceiveCredential` parses the received credential without authenticating its issuer.
+The OpenID4VCI 1.0 methods refuse to run without an acceptance policy.
 
 ## Prerequisites
 
@@ -336,7 +121,7 @@ pnpm -F @trustknots/server build
 pnpm -F @trustknots/server start
 ```
 
-### Confirm the server is running
+#### Confirm the server is running
 
 When the server starts, you should see output similar to:
 
@@ -392,16 +177,22 @@ The samples read this registration from `examples/config/`, which the wallet loa
 | `examples/config/client-private.sample.jwks.json` | The matching private JWK used to sign the `client_assertion` |
 
 ```go
-clientAuth, err := clientconfig.Load(
-	"../config/wallet-clients.json",
-	clientconfig.WithClientID("test-client-id"),
-	clientconfig.WithPrivateJWKFile("../config/client-private.sample.jwks.json"),
+import (
+	"github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/clientconfig"
 )
-if err != nil {
-	return err
-}
 
-w, err := wallet.NewWalletWithConfig(wallet.Config{ClientAuth: clientAuth})
+func newClientWallet() (*wallet.Wallet, error) {
+	clientAuth, err := clientconfig.Load(
+		"../config/wallet-clients.json",
+		clientconfig.WithClientID("test-client-id"),
+		clientconfig.WithPrivateJWKFile("../config/client-private.sample.jwks.json"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return wallet.NewWalletWithConfig(wallet.Config{ClientAuth: clientAuth})
+}
 ```
 
 The two files are kept apart on purpose. OpenID Connect Dynamic Client Registration 1.0 states that a `jwks` member MUST NOT contain private key values, so `wallet-clients.json` holds public keys only and can be handed to the authorization server as-is. `clientconfig.Load` rejects a `jwks` that carries a private key, and requires the private JWK file to be mode `0600`.
@@ -421,7 +212,7 @@ Open a new terminal, navigate to each test directory, and run the local server i
 cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 go run server_integration_jwtvc.go
 
-# SD-JWT integration test (without kb-jwt)
+# SD-JWT integration test (key binding from the DCQL query)
 cd /path/to/vcknots/wallet/examples/server_integration_sdjwt
 go run server_integration_sdjwt.go
 
@@ -445,7 +236,7 @@ go run server_integration_sdjwt.go --credential-offer-uri "$OFFER_URI" --tx-code
 
 
 
-### Step 3: Check the results
+#### Step 3: Check the results
 
 If everything works, you should see output similar to:
 
@@ -478,7 +269,7 @@ Reaching this point also means that the authorization server accepted the client
 
 ---
 
-For SD-JWT VC, the public `PresentCredential` API follows the answered DCQL query's `require_cryptographic_holder_binding` value (default: `true`). Caller serialization options can require a KB-JWT when the query permits omission, but cannot disable a required proof. Credentials without a matching `cnf.jwk` are rejected before submission when binding is required.
+For SD-JWT VC, `PresentCredential` attaches a Key Binding JWT when the answered DCQL query requires cryptographic holder binding (`require_cryptographic_holder_binding`, default `true`) or when `SdJwtVcPresentationOptions.RequireKeyBinding` is set; the options cannot remove a required one. A query that requires holder binding is not answered with a credential that has no `cnf`.
 
 ### Mode 2: Conformance Test Mode (External URL)
 
@@ -499,14 +290,15 @@ go run server_integration_sdjwt.go "openid4vp://authorize?client_id=...&request_
 
 Conformance Test mode automatically applies the following settings:
 
-- **Certificate Verification**: Uses system root certificate pool
-- **Certificate Chain Verification Skip**: `InsecureSkipX509Verify: true` is automatically set, enabling communication with conformance test servers that use self-signed or non-standard certificates
-- **Selected Claims**: Selects `given_name` and `family_name`
+- **Credential**: The SD-JWT VC in `example_sd_jwt.txt` is stored and presented
+- **Certificate Verification**: The system root certificate pool is set as `X509TrustChainRoots`
+- **`InsecureSkipX509Verify: true`**: Set automatically. It applies to the OpenID4VP Draft 24 entry points only; on the OpenID4VP 1.0 path that `PresentCredential` uses, it makes the wallet refuse every signed Request Object. With it, this mode answers unsigned requests only. For a signed request, configure the suite's root certificate as a trust anchor instead (see the Troubleshooting section of the [wallet guide](../../docs/en/wallet.md))
+- **Selected Claims**: `given_name`
 - **Key Binding**: Required (`RequireKeyBinding: true`)
-- **Audience/Nonce**: Automatically extracted from the request URI
-- **OID4VCI Client Authentication and DPoP**: Not configured; this mode tests the OpenID4VP presentation flow only
+- **Audience/Nonce**: Taken from the request
+- **OpenID4VCI Client Authentication and DPoP**: Not configured; this mode tests the OpenID4VP presentation flow only
 
-> ⚠️ **Warning**: `InsecureSkipX509Verify: true` should only be used in conformance tests and local development. **Never** use this in production environments.
+> ⚠️ **Warning**: `InsecureSkipX509Verify: true` is for conformance tests and local development only. **Never** use it in production environments.
 
 ---
 
@@ -536,7 +328,7 @@ go run server_integration_sdjwt.go "openid4vp://authorize?..."
 ```
 - Tests against external OpenID4VP conformance test services
 - Uses system root certificate pool
-- `InsecureSkipX509Verify: true` is automatically set (supports non-standard certificates)
+- `InsecureSkipX509Verify: true` is automatically set, so only unsigned OpenID4VP 1.0 requests are answered
 
 ### File Structure
 
@@ -549,13 +341,14 @@ examples/
 ├── server_integration_jwtvc/
 │   └── server_integration_jwtvc.go   # JWT-VC integration test
 ├── server_integration_sdjwt/
-│   ├── server_integration_sdjwt.go   # SD-JWT integration test (without kb-jwt)
+│   ├── server_integration_sdjwt.go   # SD-JWT integration test (key binding from the DCQL query)
 │   └── example_sd_jwt.txt            # Sample SD-JWT credential
 ├── server_integration_sdjwt+kbjwt/
 │   ├── server_integration_sdjwt_kbjwt.go # SD-JWT integration test with kb-jwt
 │   └── example_sd_jwt.txt                 # Sample SD-JWT credential
 ├── custom_dispatcher/                 # Example: custom dispatcher implementation
 ├── custom_plugin/                     # Example: custom plugin implementation
+├── official_driver/                   # Public Wallet API driver (staged API, JSON in/out)
 ├── README.md                          # This file
 └── README.ja.md                       # Japanese version
 ```
@@ -573,23 +366,6 @@ cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 ```
 
-### DCQL presentation selection
-
-`PresentCredential` and `BuildOID4VPFinalAuthorizationResponse` match each DCQL
-query by credential format, `vct_values`, and requested claims. All required
-queries must be satisfied before any response is sent. The response maps each
-query ID to its own presentation array; `credential_sets` can express alternatives.
-For SD-JWT VC, omitted `claims` means no selective disclosures. Plaintext claims
-already in the issuer JWT remain present. Explicit `SelectedClaims` is a caller
-limit, so requested claims outside that limit cause an error.
-
-The current claim selector handles top-level string paths. General nested and
-array paths remain unsupported. This does not establish full Final/HAIP
-conformance, issuer authentication before storage, or platform DC API support.
-The existing single-query `Oid4vpPresenter.Present` API remains available;
-`PresentDCQL` adds submission of a complete map of query presentations. Custom
-presenter plugins opt into that additional capability.
-
 ### Wallet Runtime Environment Variables
 
 In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by environment variables defined in `wallet/env/env.go`.
@@ -601,6 +377,8 @@ In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by
 
 Behavior summary:
 - `IsHTTPAllowed()` becomes `true` only when `VCKNOTS_WALLET_HTTP_ALLOWED=true`.
+- The variable is read when the default dispatchers and plugins are built. A plugin constructed directly uses its own `AllowHTTP` field.
+- The local server integration test mode samples call `env.SetHTTPAllowed(true)` in their own process before they build the wallet, so the variable need not be set for them.
 - `VCKNOTS_WALLET_DEBUG=true` does not enable HTTP allowance; to use a local `http://` endpoint, set `VCKNOTS_WALLET_HTTP_ALLOWED=true` as well.
 - If `VCKNOTS_WALLET_HTTP_ALLOWED` is unset (or not equal to `true`), `IsHTTPAllowed()` is `false`, and HTTPS-only validation remains active.
 
@@ -630,4 +408,4 @@ The conformance test suite intentionally sends malformed `client_id` values to t
 Conformance test servers may use self-signed or non-standard certificate structures for testing purposes.
 
 - **When running local server integration test mode (no arguments)**: Check that the certificate file is correctly placed at `../../../server/samples/certificate-openid-test/certificate_openid.pem`, or specify it via `VCKNOTS_CERT_PATH`.
-- **When running conformance test mode (with URI argument)**: `InsecureSkipX509Verify: true` is set automatically, so this error should not appear.
+- **When running conformance test mode (with URI argument)**: `InsecureSkipX509Verify: true` is set automatically, which makes the OpenID4VP 1.0 path refuse signed Request Objects. Configure the suite's root certificate as a trust anchor for signed requests.
