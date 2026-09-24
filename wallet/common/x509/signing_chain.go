@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // SigningChainOptions contains the relying party's trust policy. Trust anchors
@@ -37,6 +39,14 @@ type SigningChainResult struct {
 	Revocation   CRLCheckResult
 }
 
+// ErrNoTrustAnchor reports that no valid certification path from the signing
+// certificate reaches a configured trust anchor (crypto/x509's
+// UnknownAuthorityError, which also covers a certificate in the chain that does
+// not validly certify the one below it). A self-signed or CA leaf, an expired
+// or mis-used certificate, a name-constraint violation and a revocation
+// failure are reported without it.
+var ErrNoTrustAnchor = common.NewCodedError("x509_chain_no_trust_anchor", "certificate chain reaches no configured trust anchor")
+
 // SigningChainError keeps configuration, certificate, path and revocation
 // failures distinguishable. Underlying x509 and CRL errors support errors.As.
 type SigningChainError struct {
@@ -48,10 +58,9 @@ func (e *SigningChainError) Error() string { return fmt.Sprintf("x509 %s: %v", e
 func (e *SigningChainError) Unwrap() error { return e.Err }
 
 // ErrorCode names why the signing certificate was not accepted. A revocation
-// failure is reported as a path failure that joins the underlying
-// *CRLCheckError, so the revocation verdict is the more specific answer and
-// this error defers to it; everything else is a chain that does not reach a
-// configured trust anchor.
+// failure defers to the underlying *CRLCheckError; every other refusal is
+// "x509_chain_untrusted". Use errors.Is(err, ErrNoTrustAnchor) to tell a chain
+// that merely reaches no configured anchor from one that is invalid.
 func (e *SigningChainError) ErrorCode() string {
 	var revocationError *CRLCheckError
 	if errors.As(e.Err, &revocationError) {
@@ -91,6 +100,10 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 	}
 	chains, err := signingPaths(certificates, options)
 	if err != nil {
+		var unknownAuthority x509.UnknownAuthorityError
+		if errors.As(err, &unknownAuthority) {
+			err = fmt.Errorf("%w: %w", ErrNoTrustAnchor, err)
+		}
 		return invalid("path", err)
 	}
 	// Prefer the nearest reached anchor, without requiring certificates carried

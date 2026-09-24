@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"errors"
 	"math/big"
 	"net/http"
@@ -218,6 +219,7 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 		_, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), false, resolved))
 		require.Error(t, err)
 		requireChainErrorCode(t, err, "x509_chain_untrusted")
+		require.ErrorIs(t, err, commonX509.ErrNoTrustAnchor)
 		require.Zero(t, resolved.calls)
 	})
 
@@ -245,6 +247,35 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 		require.ErrorAs(t, err, &revocation)
 		require.Equal(t, commonX509.CRLErrorRevoked, revocation.Kind)
 		require.NotErrorIs(t, err, ErrIssuerKeyUnresolved)
+		require.Zero(t, resolved.calls)
+	})
+
+	t.Run("a self-signed leaf is refused and never falls back to key resolution", func(t *testing.T) {
+		signerKey := newTestECKey(t)
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(9), Subject: pkix.Name{CommonName: "Self-signed Issuer"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, template, &signerKey.PublicKey, signerKey)
+		require.NoError(t, err)
+		wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: signerKey, x5c: []string{base64.StdEncoding.EncodeToString(der)}}))
+		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &signerKey.PublicKey}}}
+
+		_, err = acceptor.Verify(t.Context(), wire, policy(unrelated.anchors(), true, resolved))
+		require.Error(t, err)
+		require.NotErrorIs(t, err, commonX509.ErrNoTrustAnchor)
+		require.Zero(t, resolved.calls)
+	})
+
+	t.Run("an expired leaf is refused and never falls back to key resolution", func(t *testing.T) {
+		resolved := &resolution{keys: []jose.JSONWebKey{leafJWK}}
+		expired := policy(unrelated.anchors(), true, resolved)
+		expired.Now = func() time.Time { return time.Now().Add(48 * time.Hour) }
+
+		_, err := acceptor.Verify(t.Context(), untrustedWire, expired)
+		requireChainErrorCode(t, err, "x509_chain_untrusted")
+		require.NotErrorIs(t, err, commonX509.ErrNoTrustAnchor)
 		require.Zero(t, resolved.calls)
 	})
 

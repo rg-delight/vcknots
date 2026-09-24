@@ -47,14 +47,11 @@ type CredentialAcceptancePolicy struct {
 	// ResolveIssuerKeys.
 	ResolveIssuerKeysFromClaims func(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysWhenX5CUntrusted lets ResolveIssuerKeys establish the
-	// issuer key when the credential carries an x5c chain that reaches none of
-	// IssuerX509's trust anchors. An issuer may publish a chain this wallet does
-	// not recognise together with a key its metadata or a DID binds, and a
-	// chain that merely reaches no anchor says nothing about the signer. Every
-	// other chain refusal - a revoked certificate, an unknown revocation
-	// status, a failed DNS binding, a HAIP trust anchor inside x5c, an
-	// undecodable x5c - still refuses the credential, because it is evidence
-	// about the signer rather than about this wallet's configuration.
+	// issuer key when the credential's x5c chain reaches none of IssuerX509's
+	// trust anchors (commonX509.ErrNoTrustAnchor). Every other chain refusal
+	// (an undecodable x5c, a self-signed or CA leaf, an expired or mis-used
+	// certificate, a name-constraint violation, revocation) still refuses the
+	// credential.
 	ResolveIssuerKeysWhenX5CUntrusted bool
 	// RequireHolderBinding rejects a credential whose holder binding this
 	// wallet cannot establish: one that carries no cnf claim at all, and one
@@ -478,7 +475,7 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
-			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && chainReachesNoAnchor(err) {
+			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && errors.Is(err, commonX509.ErrNoTrustAnchor) {
 				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 				if resolveErr != nil {
 					// The chain was only this wallet's configuration; the
@@ -584,14 +581,6 @@ func (a *CredentialAcceptor) verifyIssuerSignatureWithCandidates(
 	return nil
 }
 
-// chainReachesNoAnchor reports whether an x5c chain refusal says only that the
-// chain reaches none of the configured trust anchors, as opposed to something
-// about the signer itself (revocation). It is the one refusal
-// ResolveIssuerKeysWhenX5CUntrusted lets the key-resolution hook take over from.
-func chainReachesNoAnchor(err error) bool {
-	var chainError *commonX509.SigningChainError
-	return errors.As(err, &chainError) && chainError.ErrorCode() == "x509_chain_untrusted"
-}
 
 func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.Duration) error {
 	nowUnix := float64(now.Unix()) + float64(now.Nanosecond())/1e9
