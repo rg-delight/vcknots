@@ -180,6 +180,9 @@ func TestOid4vciReceiver_ProfileAllowHTTP(t *testing.T) {
 	haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
 	_, err := haip.FetchIssuerMetadata(endpoint, types.Oid4vci)
 	require.ErrorContains(t, err, "HAIP profile does not permit AllowHTTP")
+	code, coded := common.CodeOf(err)
+	require.True(t, coded)
+	require.Equal(t, "invalid_argument", code)
 
 	final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
 	_, err = final.FetchIssuerMetadata(endpoint, types.Oid4vci)

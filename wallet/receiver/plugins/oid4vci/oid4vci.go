@@ -85,7 +85,7 @@ func (o *Oid4vciReceiver) normalizedProfile() (profile.Profile, error) {
 // HAIP §4 requires TLS for issuer and authorization server endpoints.
 func (o *Oid4vciReceiver) requireHAIPTransport(normalized profile.Profile) error {
 	if normalized.IsHAIP() && o.AllowHTTP {
-		return fmt.Errorf("HAIP profile does not permit AllowHTTP")
+		return fmt.Errorf("%w: HAIP profile does not permit AllowHTTP", common.ErrInvalidInput)
 	}
 	return nil
 }
