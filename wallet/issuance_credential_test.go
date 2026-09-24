@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 )
@@ -438,7 +439,7 @@ func TestRequestCredential_BatchCredentialForForeignKeyIsRefused(t *testing.T) {
 		}
 	})
 	_, err := fixture.receiveWith(fixture.issuanceRequest(), CredentialRequest{HolderKeys: []IKeyEntry{fixture.holderEntry, fixture.additionalEntry}})
-	require.ErrorIs(t, err, ErrHolderBindingMismatch)
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)
 	require.ErrorContains(t, err, "not part of the request")
 	entries, total, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
 	require.NoError(t, err)

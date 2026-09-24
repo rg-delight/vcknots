@@ -430,7 +430,7 @@ func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFla
 		return nil, err
 	}
 	if claimed == nil && bindingRequired {
-		return nil, fmt.Errorf("the credential configuration requires cryptographic binding: %w", ErrHolderBindingMissing)
+		return nil, fmt.Errorf("the credential configuration requires cryptographic binding: %w", acceptance.ErrHolderBindingMissing)
 	}
 	if len(holderKeys) == 0 {
 		return nil, nil
@@ -447,7 +447,7 @@ func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFla
 	}
 	claimedThumbprint, err := claimed.Thumbprint(crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("cnf jwk thumbprint failed: %w: %w", ErrHolderBindingMismatch, err)
+		return nil, fmt.Errorf("cnf jwk thumbprint failed: %w: %w", acceptance.ErrHolderBindingMismatch, err)
 	}
 	for index := range holderKeys {
 		publicKey := holderKeys[index].Public()
@@ -459,12 +459,12 @@ func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFla
 			continue
 		}
 		if usedKeys[index] {
-			return nil, fmt.Errorf("credential response bound two credentials to the same holder key: %w", ErrHolderBindingMismatch)
+			return nil, fmt.Errorf("credential response bound two credentials to the same holder key: %w", acceptance.ErrHolderBindingMismatch)
 		}
 		usedKeys[index] = true
 		return &publicKey, nil
 	}
-	return nil, fmt.Errorf("credential is bound to a holder key that was not part of the request: %w", ErrHolderBindingMismatch)
+	return nil, fmt.Errorf("credential is bound to a holder key that was not part of the request: %w", acceptance.ErrHolderBindingMismatch)
 }
 
 // credentialConfirmationKey reads cnf.jwk from the issuer-signed JWT without

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	commonx509 "github.com/trustknots/vcknots/wallet/common/x509"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -31,10 +32,10 @@ func codedErrorValues() map[string]error {
 		"acceptance.ErrCredentialParse":                      acceptance.ErrCredentialParse,
 		"acceptance.ErrCredentialTypInvalid":                 acceptance.ErrCredentialTypInvalid,
 		"acceptance.ErrCredentialAlgUnsupported":             acceptance.ErrCredentialAlgUnsupported,
-		"ErrHolderBindingMissing":                            ErrHolderBindingMissing,
-		"ErrHolderBindingMismatch":                           ErrHolderBindingMismatch,
+		"acceptance.ErrHolderBindingMissing":                 acceptance.ErrHolderBindingMissing,
+		"acceptance.ErrHolderBindingMismatch":                acceptance.ErrHolderBindingMismatch,
 		"acceptance.ErrIssuerKeyUnresolved":                  acceptance.ErrIssuerKeyUnresolved,
-		"ErrIssuerSignatureInvalid":                          ErrIssuerSignatureInvalid,
+		"acceptance.ErrIssuerSignatureInvalid":               acceptance.ErrIssuerSignatureInvalid,
 		"acceptance.ErrIssuerDNSBindingFailed":               acceptance.ErrIssuerDNSBindingFailed,
 		"acceptance.ErrCredentialExpired":                    acceptance.ErrCredentialExpired,
 		"acceptance.ErrCredentialNotYetValid":                acceptance.ErrCredentialNotYetValid,
@@ -62,8 +63,8 @@ func codedErrorValues() map[string]error {
 		"ErrAuthorizationIssMismatch":                        ErrAuthorizationIssMismatch,
 		"ErrAuthorizationIssMissing":                         ErrAuthorizationIssMissing,
 		"ErrAuthorizationCodeMissing":                        ErrAuthorizationCodeMissing,
-		"ErrClientAttestationInvalid":                        ErrClientAttestationInvalid,
-		"ErrKeyAttestationInvalid":                           ErrKeyAttestationInvalid,
+		"attestation.ErrClientAttestationInvalid":            attestation.ErrClientAttestationInvalid,
+		"attestation.ErrKeyAttestationInvalid":               attestation.ErrKeyAttestationInvalid,
 
 		"oid4vp.ErrRequestObjectTypInvalid":       oid4vp.ErrRequestObjectTypInvalid,
 		"oid4vp.ErrRequestObjectSignatureInvalid": oid4vp.ErrRequestObjectSignatureInvalid,

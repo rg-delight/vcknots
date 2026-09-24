@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -255,7 +256,7 @@ func TestRequestCredentialRefusalCarriesTheNotification(t *testing.T) {
 		}
 	})
 	result, err := fixture.receive(fixture.issuanceRequest())
-	require.ErrorIs(t, err, ErrHolderBindingMismatch)
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)
 	require.ErrorContains(t, err, "not part of the request")
 	require.NotNil(t, result)
 	require.Empty(t, result.Credentials)

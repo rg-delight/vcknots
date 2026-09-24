@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -92,10 +93,10 @@ func publicSigningJWK(key jose.JSONWebKey) jose.JSONWebKey {
 
 // fixedClientAttestationProvider returns a prebuilt client attestation.
 type fixedClientAttestationProvider struct {
-	attestation *ClientAttestation
+	attestation *attestation.ClientAttestation
 }
 
-func (p fixedClientAttestationProvider) ClientAttestation(context.Context, ClientAttestationRequest) (*ClientAttestation, error) {
+func (p fixedClientAttestationProvider) ClientAttestation(context.Context, attestation.ClientRequest) (*attestation.ClientAttestation, error) {
 	return p.attestation, nil
 }
 
@@ -129,17 +130,17 @@ func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 			w := &Wallet{
 				clientAuth: ClientAuthConfig{ClientID: "client-1"},
 				attestation: AttestationConfig{
-					Client:    fixedClientAttestationProvider{attestation: &ClientAttestation{JWT: token}},
+					Client:    fixedClientAttestationProvider{attestation: &attestation.ClientAttestation{JWT: token}},
 					ClientKey: testKeyEntry(t, clientKey),
 				},
 			}
 			if !tc.unsigned {
-				w.attestation.Trust = AttestationTrustPolicy{ResolveKey: func(AttestationJOSEHeader) (any, error) {
+				w.attestation.Trust = attestation.TrustPolicy{ResolveKey: func(attestation.JOSEHeader) (any, error) {
 					return attesterKey.Public().Key, nil
 				}}
 			}
 			_, err := w.clientAttestationFactory(t.Context(), nil, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
-			require.ErrorIs(t, err, ErrClientAttestationInvalid)
+			require.ErrorIs(t, err, attestation.ErrClientAttestationInvalid)
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
@@ -150,18 +151,18 @@ func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 // and that HAIP raises RequireX5C.
 func TestAttestationPolicyForStaticAttesters(t *testing.T) {
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
-	attester := &StaticClientAttester{Key: testKeyEntry(t, newPrivateJWKForFinalVCITest(t, "attester-key-1")), Issuer: "https://attester.example"}
-	request := ClientAttestationRequest{ClientID: "client-1", ClientKey: clientKey}
-	attestation, err := attester.ClientAttestation(t.Context(), request)
+	attester := &attestation.StaticClientAttester{Key: testKeyEntry(t, newPrivateJWKForFinalVCITest(t, "attester-key-1")), Issuer: "https://attester.example"}
+	request := attestation.ClientRequest{ClientID: "client-1", ClientKey: clientKey}
+	issued, err := attester.ClientAttestation(t.Context(), request)
 	require.NoError(t, err)
 
 	final := &Wallet{profile: profile.Final}
-	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, final.attestationPolicyFor(attester)))
-	require.ErrorContains(t, ValidateClientAttestation(t.Context(), attestation, request, final.attestationPolicyFor(nil)), "no x5c chain")
+	require.NoError(t, attestation.ValidateClientAttestation(t.Context(), issued, request, final.attestationPolicyFor(attester)))
+	require.ErrorContains(t, attestation.ValidateClientAttestation(t.Context(), issued, request, final.attestationPolicyFor(nil)), "no x5c chain")
 
 	haip := &Wallet{profile: profile.HAIP}
 	require.True(t, haip.attestationPolicyFor(attester).RequireX5C)
-	require.ErrorContains(t, ValidateClientAttestation(t.Context(), attestation, request, haip.attestationPolicyFor(attester)), "x5c")
+	require.ErrorContains(t, attestation.ValidateClientAttestation(t.Context(), issued, request, haip.attestationPolicyFor(attester)), "x5c")
 }
 
 // TestJWSHeaderRefusesWhatItCannotRead covers the unverified header decode the

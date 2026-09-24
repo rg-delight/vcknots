@@ -18,6 +18,8 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
@@ -760,7 +762,7 @@ func TestIssuanceRefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
 		}
 	})
 	result, err := fixture.receive(fixture.issuanceRequest())
-	require.ErrorIs(t, err, ErrHolderBindingMissing)
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMissing)
 	require.NotNil(t, result)
 	require.Empty(t, result.Credentials)
 	require.NotNil(t, result.Notification)
@@ -827,7 +829,7 @@ func TestIssuanceRefusesKeyAttestationWithUnlistedAlgorithm(t *testing.T) {
 	attesterKey := jose.JSONWebKey{Key: privateKey, KeyID: "key-attester-p384", Algorithm: string(jose.ES384), Use: "sig"}
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.keyAttestationsRequired = true
-		f.keyAttestation = &StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}
+		f.keyAttestation = &attestation.StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}
 	})
 
 	_, err = fixture.receive(fixture.issuanceRequest())
@@ -1255,7 +1257,7 @@ func TestIssuanceAgainstAStrictIssuer(t *testing.T) {
 		ClientAuth:           ClientAuthConfig{ClientID: "client-1"},
 		Issuance:             IssuanceConfig{RedirectURI: fixtureRedirectURI},
 		DPoP:                 DPoPConfig{Key: dpopKey},
-		Attestation:          AttestationConfig{Client: &StaticClientAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://client-attester.example.org/"}},
+		Attestation:          AttestationConfig{Client: &attestation.StaticClientAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://client-attester.example.org/"}},
 		CredentialAcceptance: acceptIssuerKeyPolicy(issuerKey),
 	})
 	require.NoError(t, err)

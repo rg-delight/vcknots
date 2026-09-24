@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
@@ -37,7 +38,7 @@ func newProfileCredStore(t *testing.T) *credstore.CredStoreDispatcher {
 // newProfileWallet builds a root wallet with an explicit profile. A non-nil
 // receiver/presenter plugin is registered as a caller-injected dispatcher;
 // otherwise the root constructs the default dispatcher for that component.
-func newProfileWallet(t *testing.T, p profile.Profile, receiverPlugin receiverTypes.Receiver, presenterPlugin presenterTypes.Presenter, acceptance *CredentialAcceptancePolicy) *Wallet {
+func newProfileWallet(t *testing.T, p profile.Profile, receiverPlugin receiverTypes.Receiver, presenterPlugin presenterTypes.Presenter, acceptance *acceptance.Policy) *Wallet {
 	t.Helper()
 	config := Config{Profile: p, CredStore: newProfileCredStore(t), CredentialAcceptance: acceptance}
 	if receiverPlugin != nil {
@@ -129,7 +130,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 			Profile:              p,
 			CredStore:            newProfileCredStore(t),
 			Receiver:             receiving,
-			CredentialAcceptance: &CredentialAcceptancePolicy{UnverifiedIssuer: true},
+			CredentialAcceptance: &acceptance.Policy{UnverifiedIssuer: true},
 			ClientAuth:           ClientAuthConfig{ClientID: "client-1"},
 			DPoP:                 DPoPConfig{Key: dpopKey},
 			Issuance:             IssuanceConfig{RedirectURI: "openid-credential-offer://callback"},
@@ -161,13 +162,13 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 	issuerKey := newTestECKey(t)
 	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
 
-	resolvePolicy := func() *CredentialAcceptancePolicy {
-		return &CredentialAcceptancePolicy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+	resolvePolicy := func() *acceptance.Policy {
+		return &acceptance.Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
 			return []jose.JSONWebKey{issuerJWK}, nil
 		}}
 	}
-	anchorPolicy := func() *CredentialAcceptancePolicy {
-		return &CredentialAcceptancePolicy{IssuerX509: &IssuerX509TrustOptions{
+	anchorPolicy := func() *acceptance.Policy {
+		return &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{
 			TrustAnchors:                chain.anchors(),
 			AllowUnadvertisedRevocation: true,
 		}}

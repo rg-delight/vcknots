@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -127,7 +128,7 @@ func TestIssuanceClientAttestationSupersedesPrivateKeyJWT(t *testing.T) {
 	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-1")
 	option, _ := clientAuthTestPrivateKeyJWT(t, receiverTypes.ClientSecretBasic)
 	fixture := newFinalIssuanceFixture(t, option, func(f *finalIssuanceFixture) {
-		f.clientAttestation = &StaticClientAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://attester.example"}
+		f.clientAttestation = &attestation.StaticClientAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://attester.example"}
 	})
 
 	_, err := fixture.receive(fixture.issuanceRequest())

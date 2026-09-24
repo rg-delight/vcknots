@@ -66,7 +66,7 @@ func acceptanceEntryCount(t *testing.T, store *credstore.CredStoreDispatcher) in
 // newAcceptanceWallet builds a wallet with an explicit protocol profile and no
 // receiver plugin: the acceptance path runs on a credential the test already
 // holds, so no issuance transport is needed to reach it.
-func newAcceptanceWallet(t *testing.T, p profile.Profile, policy *CredentialAcceptancePolicy) (*Wallet, *credstore.CredStoreDispatcher) {
+func newAcceptanceWallet(t *testing.T, p profile.Profile, policy *acceptance.Policy) (*Wallet, *credstore.CredStoreDispatcher) {
 	t.Helper()
 	store := newAcceptanceStore(t)
 	w, err := NewWalletWithConfig(Config{Profile: p, CredStore: store, CredentialAcceptance: policy})
@@ -74,7 +74,7 @@ func newAcceptanceWallet(t *testing.T, p profile.Profile, policy *CredentialAcce
 	return w, store
 }
 
-func newAcceptanceFixture(t *testing.T, policy *CredentialAcceptancePolicy) *acceptanceFixture {
+func newAcceptanceFixture(t *testing.T, policy *acceptance.Policy) *acceptanceFixture {
 	t.Helper()
 	store := newAcceptanceStore(t)
 
@@ -376,7 +376,7 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 	// under test here — one unusable credential discards the whole batch — is
 	// exercised with issuer authentication explicitly opted out of rather than
 	// with the policy missing.
-	fixture := newAcceptanceFixture(t, &CredentialAcceptancePolicy{UnverifiedIssuer: true})
+	fixture := newAcceptanceFixture(t, &acceptance.Policy{UnverifiedIssuer: true})
 	holder := fixture.holder.PublicKey()
 	valid := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
 	response := &receiverTypes.CredentialResponse{Credentials: []any{valid, "this-is-not-a-credential"}}
@@ -442,7 +442,7 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	t.Run("a configured policy satisfies the requirement", func(t *testing.T) {
 		issuerKey := newTestECKey(t)
 		signed := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey, kid: "issuer-key-1"})
-		fixture := newAcceptanceFixture(t, &CredentialAcceptancePolicy{
+		fixture := newAcceptanceFixture(t, &acceptance.Policy{
 			ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
 				return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}}, nil
 			},
@@ -458,10 +458,10 @@ func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
 
-	poolPolicy := func() *CredentialAcceptancePolicy {
+	poolPolicy := func() *acceptance.Policy {
 		roots := x509.NewCertPool()
 		roots.AddCert(chain.caCert)
-		return &CredentialAcceptancePolicy{IssuerX509: &IssuerX509TrustOptions{
+		return &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{
 			RootCAs:                     roots,
 			AllowUnadvertisedRevocation: true,
 		}}
@@ -488,7 +488,7 @@ func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 func TestCredentialAcceptanceStoresNothingOnFailure(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
-	policy := &CredentialAcceptancePolicy{IssuerX509: &IssuerX509TrustOptions{TrustAnchors: chain.anchors(), AllowUnadvertisedRevocation: true}}
+	policy := &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{TrustAnchors: chain.anchors(), AllowUnadvertisedRevocation: true}}
 	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
 
 	t.Run("an accepted credential is stored with its verification", func(t *testing.T) {
@@ -503,7 +503,7 @@ func TestCredentialAcceptanceStoresNothingOnFailure(t *testing.T) {
 		fixture := newAcceptanceFixture(t, policy)
 		tampered := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder, tamperSignature: true})
 		_, err := fixture.storeCredential(t, tampered, &holder)
-		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
+		require.ErrorIs(t, err, acceptance.ErrIssuerSignatureInvalid)
 		require.Equal(t, 0, fixture.entryCount(t))
 	})
 }
@@ -515,7 +515,7 @@ func TestVerifyCredentialForAcceptanceUsesTheWalletPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	issuerKey := newTestECKey(t)
 	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
-	w, store := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{
+	w, store := newAcceptanceWallet(t, profile.Final, &acceptance.Policy{
 		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
 			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}}, nil
 		},
@@ -530,7 +530,7 @@ func TestVerifyCredentialForAcceptanceUsesTheWalletPolicy(t *testing.T) {
 	other := newMockKeyEntry().PublicKey()
 	other.Key = &newTestECKey(t).PublicKey
 	_, _, err = w.VerifyCredentialForAcceptance(t.Context(), wire, credential.SDJwtVC, &other)
-	require.ErrorIs(t, err, ErrHolderBindingMismatch)
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)
 	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)
 	code, ok := ErrorCode(err)
 	require.True(t, ok)

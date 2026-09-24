@@ -28,6 +28,8 @@ import (
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common"
 	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credstore"
@@ -75,7 +77,7 @@ type Wallet struct {
 	attestation AttestationConfig
 	testHooks   *TestHooks
 
-	credentialAcceptance *CredentialAcceptancePolicy
+	credentialAcceptance *acceptance.Policy
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -115,7 +117,7 @@ type Config struct {
 
 	// CredentialAcceptance configures the minimum credential verification rules
 	// applied before a received credential is stored.
-	CredentialAcceptance *CredentialAcceptancePolicy
+	CredentialAcceptance *acceptance.Policy
 
 	// Storeless builds a wallet with no credential store, for a caller that
 	// keeps credentials elsewhere. Received credentials are returned and not
@@ -188,14 +190,14 @@ type IssuanceConfig struct {
 type AttestationConfig struct {
 	// Client supplies the OAuth 2.0 Client Attestation of this wallet
 	// instance (OpenID4VCI 1.0 Appendix E).
-	Client ClientAttestationProvider
+	Client attestation.ClientProvider
 	// ClientKey is the wallet instance key the Client Attestation binds and
 	// the PoP is signed with. Nil means DPoP.Key.
 	ClientKey IKeyEntry
 	// Key supplies key attestations (OpenID4VCI 1.0 Appendix D).
-	Key KeyAttestationProvider
+	Key attestation.KeyProvider
 	// Trust authenticates the attestations Client and Key return.
-	Trust AttestationTrustPolicy
+	Trust attestation.TrustPolicy
 }
 
 // TestHooks rewrite messages after the library built them, so a tester can

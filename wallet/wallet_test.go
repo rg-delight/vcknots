@@ -22,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
@@ -191,8 +192,8 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 // acceptIssuerKeyPolicy authenticates credentials signed by issuerKey. SD-JWT
 // VC §3.5 leaves issuer key resolution to ecosystem policy, so the tests model
 // a wallet that holds the issuer key out of band.
-func acceptIssuerKeyPolicy(issuerKey *ecdsa.PrivateKey) *CredentialAcceptancePolicy {
-	return &CredentialAcceptancePolicy{
+func acceptIssuerKeyPolicy(issuerKey *ecdsa.PrivateKey) *acceptance.Policy {
+	return &acceptance.Policy{
 		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
 			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, Algorithm: "ES256"}}, nil
 		},

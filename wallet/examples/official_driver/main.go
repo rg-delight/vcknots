@@ -22,6 +22,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
@@ -335,18 +337,18 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 	// require a policy, so absent issuer trust the driver states in one place
 	// that it accepts unauthenticated issuers, which is what a conformance
 	// driver run against arbitrary test issuers needs.
-	acceptance := &wallet.CredentialAcceptancePolicy{
+	acceptancePolicy := &acceptance.Policy{
 		RequireHolderBinding: config.RequireHolderBinding,
 		UnverifiedIssuer:     true,
 	}
 	if len(config.IssuerCAFiles) > 0 || len(config.IssuerJWKSFiles) > 0 {
-		acceptance.UnverifiedIssuer = false
+		acceptancePolicy.UnverifiedIssuer = false
 		if len(config.IssuerCAFiles) > 0 {
 			anchors, err := readTrustAnchors(config.IssuerCAFiles)
 			if err != nil {
 				return nil, err
 			}
-			acceptance.IssuerX509 = &wallet.IssuerX509TrustOptions{
+			acceptancePolicy.IssuerX509 = &acceptance.IssuerX509TrustOptions{
 				TrustAnchors:                anchors,
 				AllowUnadvertisedRevocation: config.IssuerAllowUnadvertisedRevocation,
 				HTTPClient:                  httpClient,
@@ -357,7 +359,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 			if err != nil {
 				return nil, err
 			}
-			acceptance.ResolveIssuerKeys = func(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+			acceptancePolicy.ResolveIssuerKeys = func(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
 				return keys, nil
 			}
 		}
@@ -385,7 +387,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 
 	// Static attesters are test-only evidence: the
 	// wallet must not hold an attester private key in production.
-	var clientAttestation wallet.ClientAttestationProvider
+	var clientAttestation attestation.ClientProvider
 	if config.AttesterKeyFile != "" {
 		key, err := readPrivateJWK(config.AttesterKeyFile)
 		if err != nil {
@@ -395,9 +397,9 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		if err != nil {
 			return nil, err
 		}
-		clientAttestation = &wallet.StaticClientAttester{Key: entry, Chain: key.Certificates, Issuer: config.AttesterIssuer}
+		clientAttestation = &attestation.StaticClientAttester{Key: entry, Chain: key.Certificates, Issuer: config.AttesterIssuer}
 	}
-	var keyAttestation wallet.KeyAttestationProvider
+	var keyAttestation attestation.KeyProvider
 	if config.KeyAttesterKeyFile != "" {
 		key, err := readPrivateJWK(config.KeyAttesterKeyFile)
 		if err != nil {
@@ -407,7 +409,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		if err != nil {
 			return nil, err
 		}
-		keyAttestation = &wallet.StaticKeyAttester{Key: entry, Chain: key.Certificates, Issuer: config.KeyAttesterIssuer}
+		keyAttestation = &attestation.StaticKeyAttester{Key: entry, Chain: key.Certificates, Issuer: config.KeyAttesterIssuer}
 	}
 
 	var encryption wallet.CredentialEncryptionPolicy
@@ -419,7 +421,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		Receiver:             receiving,
 		Presenter:            presenting,
 		Profile:              selectedProfile,
-		CredentialAcceptance: acceptance,
+		CredentialAcceptance: acceptancePolicy,
 		DPoP:                 wallet.DPoPConfig{Enabled: true, Key: dpop},
 		ClientAuth:           wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: config.ClientID, Key: client},
 		Issuance:             wallet.IssuanceConfig{RedirectURI: config.RedirectURI, CredentialEncryption: encryption},
@@ -433,7 +435,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 // issuer did not complete within the polls is reported as pending.
 func receiveOutput(result *wallet.IssuanceResult) map[string]any {
 	credentialIds := make([]string, 0, len(result.Credentials))
-	verification := make([]*wallet.CredentialVerification, 0, len(result.Credentials))
+	verification := make([]*acceptance.Verification, 0, len(result.Credentials))
 	for _, saved := range result.Credentials {
 		if saved == nil || saved.Entry == nil {
 			continue
