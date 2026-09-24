@@ -64,7 +64,7 @@ func (w *Wallet) resolveCredentialOffer(ctx context.Context, raw string) (*Crede
 	}
 	body, err := transport.FetchCredentialOffer(ctx, *offerURI)
 	if err != nil {
-		return nil, err
+		return nil, withCode(receiverTypes.ErrInvalidMetadata, err)
 	}
 	offer, err := parseCredentialOfferJSON(string(body))
 	if err != nil {

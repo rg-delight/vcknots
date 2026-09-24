@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
@@ -175,9 +176,10 @@ func invalidMetadata(format string, args ...any) error {
 }
 
 // withCode wraps err with sentinel unless err already has a code or is a
-// context error, which classify codes on its own.
+// context or network error, which classify codes on its own.
 func withCode(sentinel, err error) error {
-	if _, coded := common.CodeOf(err); coded || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	var netErr net.Error
+	if _, coded := common.CodeOf(err); coded || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", sentinel, err)
