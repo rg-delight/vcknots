@@ -509,7 +509,41 @@ const (
 	Query OAuthResponseMode = iota
 	// Fragment returns authorization response parameters in the URI fragment.
 	Fragment
+	// OtherResponseMode stands for a response mode this package does not
+	// name, such as form_post or a JARM mode, read from server metadata.
+	OtherResponseMode OAuthResponseMode = -1
 )
+
+// UnmarshalJSON reads a response mode as the string RFC 8414
+// response_modes_supported carries.
+func (m *OAuthResponseMode) UnmarshalJSON(data []byte) error {
+	var name string
+	if err := json.Unmarshal(data, &name); err != nil {
+		return fmt.Errorf("response mode must be a string: %w", err)
+	}
+	switch name {
+	case "query":
+		*m = Query
+	case "fragment":
+		*m = Fragment
+	default:
+		*m = OtherResponseMode
+	}
+	return nil
+}
+
+// MarshalJSON writes Query and Fragment by name. OtherResponseMode has no
+// name to write and is refused.
+func (m OAuthResponseMode) MarshalJSON() ([]byte, error) {
+	switch m {
+	case Query:
+		return []byte(`"query"`), nil
+	case Fragment:
+		return []byte(`"fragment"`), nil
+	default:
+		return nil, fmt.Errorf("response mode %d has no name", int(m))
+	}
+}
 
 // OAuthGrantType is an OAuth 2.0 grant_type value.
 type OAuthGrantType string
