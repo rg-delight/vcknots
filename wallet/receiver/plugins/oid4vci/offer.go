@@ -17,7 +17,7 @@ import (
 // returns the Credential Offer Object. Section 4.1.3 requires the response to
 // use the media type application/json. ctx bounds the request.
 func (o *Oid4vciReceiver) FetchCredentialOffer(ctx context.Context, uri common.URIField) ([]byte, error) {
-	response, err := o.do(observe.WithEndpoint(ctx, observe.EndpointOther), exchange{method: http.MethodGet, url: url.URL(uri)})
+	response, err := o.do(observe.WithEndpoint(ctx, observe.EndpointCredentialOffer), exchange{method: http.MethodGet, url: url.URL(uri)})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch credential_offer_uri: %w", err)
 	}

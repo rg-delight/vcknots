@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -574,7 +575,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 	}
 	flavor, err := receiverOid4vci.OID4VCICredentialFormatToSerializationFlavor(config.Format)
 	if err != nil {
-		return result, fmt.Errorf("unsupported credential format %q: %w: %w", config.Format, ErrCredentialParse, err)
+		return result, fmt.Errorf("unsupported credential format %q: %w: %w", config.Format, acceptance.ErrCredentialParse, err)
 	}
 	var holderKey *jose.JSONWebKey
 	if len(holderKeys) > 0 {

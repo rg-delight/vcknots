@@ -24,16 +24,21 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/common"
 	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/presenter"
+	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -54,7 +59,7 @@ import (
 type Wallet struct {
 	credStore  *credstore.CredStoreDispatcher
 	idProf     *idprof.IdentityProfileDispatcher
-	receiver   *receiver.ReceivingDispatcher
+	receiver   receivingDispatcher
 	serializer *serializer.SerializationDispatcher
 	verifier   *verifier.VerificationDispatcher
 	presenter  *presenter.PresentationDispatcher
@@ -62,9 +67,8 @@ type Wallet struct {
 	dpop       DPoPConfig
 	clientAuth ClientAuthConfig
 
-	// profile is the explicit Final/HAIP policy this wallet enforces. It is also
-	// propagated to every registered protocol plugin so no lower-level API can
-	// bypass the root policy.
+	// profile is the policy this wallet enforces. Every protocol plugin the
+	// wallet uses reports the same profile (see Config.Profile).
 	profile profile.Profile
 
 	issuance    IssuanceConfig
@@ -81,7 +85,9 @@ type Wallet struct {
 // implementation will be created automatically.
 //
 // This configuration is primarily used for dependency injection in testing
-// or when custom plugin implementations are required.
+// or when custom plugin implementations are required. The wallet never
+// modifies a dispatcher or plugin it is given, and the plugins' fields must
+// not change after they are registered.
 type Config struct {
 	CredStore  *credstore.CredStoreDispatcher
 	IDProfiler *idprof.IdentityProfileDispatcher
@@ -93,32 +99,28 @@ type Config struct {
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
 
-	// Profile selects the explicit Final/HAIP policy for the wallet. The zero
-	// value normalizes to profile.Final. Caller-injected dispatchers must have
-	// every protocol plugin carrying the same profile or NewWalletWithConfig
-	// fails.
+	// Profile selects the protocol policy; the zero value is profile.Final.
+	// Every plugin of Receiver and Presenter that implements profile.Carrier
+	// must report this profile (ErrProfileMismatch). Under profile.HAIP a
+	// plugin that does not implement profile.Carrier is refused
+	// (ErrProfilePluginUnsupported), and so is TestHooks
+	// (ErrProfileForbidsDraft).
 	Profile profile.Profile
 
-	// SupportedTransactionDataTypes lists the transaction_data "type" values
-	// the wallet can process. It is propagated to the default presenter plugin.
+	// SupportedTransactionDataTypes lists the OpenID4VP transaction_data
+	// "type" values the wallet can process (OpenID4VP 1.0 Section 5.1). It
+	// configures the presenter the wallet builds when Presenter is nil; with
+	// an injected Presenter, set it on the plugin instead.
 	SupportedTransactionDataTypes []string
 
 	// CredentialAcceptance configures the minimum credential verification rules
 	// applied before a received credential is stored.
 	CredentialAcceptance *CredentialAcceptancePolicy
 
-	// Storeless builds a wallet that holds no credential store at all. Nothing
-	// it receives is persisted — the credentials it verified are returned in
-	// OID4VCIFinalReceiveResult.SavedCredentials and it is the caller that
-	// keeps them — and every presentation names its credentials by value
-	// through PresentDCQLHolderSelection or Draft24CredentialSelection.Credential.
-	//
-	// It exists for a wallet whose durable state lives in another process: the
-	// default store writes a credential database to the user's configuration
-	// directory, so without this a component that only performs one protocol
-	// exchange would leave a copy of every credential behind. CredStore must be
-	// nil, and GetCredentialEntries, GetCredentialEntry and every presentation
-	// that resolves a credential through the store report
+	// Storeless builds a wallet with no credential store, for a caller that
+	// keeps credentials elsewhere. Received credentials are returned and not
+	// stored, and a presentation takes its credentials by value. CredStore
+	// must be nil; every operation that needs the store returns
 	// ErrNoCredentialStore.
 	Storeless bool
 
@@ -254,60 +256,10 @@ func curveForSignatureAlgorithm(alg jose.SignatureAlgorithm) (elliptic.Curve, er
 //
 // Returns an error if any dispatcher initialization fails.
 func NewWallet() (*Wallet, error) {
-	credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create credential store: %w", err)
-	}
-
-	receiver, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver: %w", err)
-	}
-
-	serializer, err := serializer.NewSerializationDispatcher(serializer.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create serializer: %w", err)
-	}
-
-	verifier, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create verifier: %w", err)
-	}
-
-	presenter, err := presenter.NewPresentationDispatcher(presenter.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create presenter: %w", err)
-	}
-
-	idProf, err := idprof.NewIdentityProfileDispatcher(idprof.WithDefaultConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create identity profiler: %w", err)
-	}
-
-	config := Config{
-		CredStore:  credStore,
-		IDProfiler: idProf,
-		Receiver:   receiver,
-		Serializer: serializer,
-		Verifier:   verifier,
-		Presenter:  presenter,
-		DPoP:       DPoPConfig{},
-		ClientAuth: ClientAuthConfig{},
-	}
-
-	return NewWalletWithConfig(config)
+	return NewWalletWithConfig(Config{})
 }
 
-// NewWalletWithoutStore creates a Wallet that persists nothing: it is
-// NewWalletWithConfig with Config.Storeless set, for a component that performs
-// one OpenID4VCI or OpenID4VP exchange and hands the result to whatever owns
-// the durable state. See Config.Storeless.
-func NewWalletWithoutStore(config Config) (*Wallet, error) {
-	config.Storeless = true
-	return NewWalletWithConfig(config)
-}
-
-// NewWallet creates a Wallet with custom dispatcher configurations.
+// NewWalletWithConfig creates a Wallet with custom dispatcher configurations.
 //
 // This allows injection of custom dispatcher implementations or configurations.
 // Any dispatcher field left nil in the config will be initialized with a default
@@ -320,23 +272,28 @@ func NewWalletWithoutStore(config Config) (*Wallet, error) {
 //
 // For typical usage, prefer NewWallet instead.
 func NewWalletWithConfig(config Config) (*Wallet, error) {
-	if err := validateClientAuthConfig(config.ClientAuth); err != nil {
-		return nil, err
-	}
+	w, err := newWallet(config)
+	return w, classify(err)
+}
 
-	normalizedProfile, err := config.Profile.Normalize()
+func newWallet(config Config) (*Wallet, error) {
+	if err := validateClientAuthConfig(config.ClientAuth); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
+	}
+	walletProfile, err := config.Profile.Normalize()
 	if err != nil {
 		return nil, fmt.Errorf("invalid wallet profile: %w", err)
 	}
-	// A dispatcher supplied by the caller keeps ownership of its plugin
-	// profiles; the root only verifies they match. Default dispatchers built
-	// here are configured by the root before being verified.
-	receiverInjected := config.Receiver != nil
-	presenterInjected := config.Presenter != nil
-
-	if config.Storeless && config.CredStore != nil {
-		return nil, fmt.Errorf("a storeless wallet cannot be configured with a credential store")
+	if walletProfile.IsHAIP() && config.TestHooks != nil {
+		return nil, fmt.Errorf("%w: TestHooks are refused under HAIP", ErrProfileForbidsDraft)
 	}
+	if config.Storeless && config.CredStore != nil {
+		return nil, fmt.Errorf("%w: a storeless wallet cannot be configured with a credential store", ErrInvalidArgument)
+	}
+	if config.Presenter != nil && len(config.SupportedTransactionDataTypes) > 0 {
+		return nil, fmt.Errorf("%w: SupportedTransactionDataTypes configures only the default presenter; set it on the injected presenter plugin", ErrInvalidArgument)
+	}
+
 	if config.CredStore == nil && !config.Storeless {
 		credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 		if err != nil {
@@ -354,7 +311,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}
 
 	if config.Receiver == nil {
-		receiver, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+		receiver, err := newDefaultReceiver(walletProfile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default receiver: %w", err)
 		}
@@ -378,25 +335,22 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}
 
 	if config.Presenter == nil {
-		presenter, err := presenter.NewPresentationDispatcher(presenter.WithDefaultConfig())
+		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{
+			AllowHTTP:                     env.IsHTTPAllowed(),
+			Profile:                       walletProfile,
+			SupportedTransactionDataTypes: slices.Clone(config.SupportedTransactionDataTypes),
+		}))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default presenter: %w", err)
 		}
 		config.Presenter = presenter
 	}
 
-	if !receiverInjected {
-		propagateReceiverProfile(config.Receiver, normalizedProfile)
+	if err := checkPluginProfiles(config.Receiver.Plugins(), walletProfile); err != nil {
+		return nil, fmt.Errorf("receiver: %w", err)
 	}
-	if err := validateReceiverPluginProfiles(config.Receiver, normalizedProfile); err != nil {
-		return nil, err
-	}
-	if !presenterInjected {
-		propagatePresenterProfile(config.Presenter, normalizedProfile)
-		propagatePresenterTransactionDataTypes(config.Presenter, config.SupportedTransactionDataTypes)
-	}
-	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
-		return nil, err
+	if err := checkPluginProfiles(config.Presenter.Plugins(), walletProfile); err != nil {
+		return nil, fmt.Errorf("presenter: %w", err)
 	}
 
 	if config.DPoP.Enabled && config.DPoP.Key == nil {
@@ -416,7 +370,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		dpop:       config.DPoP,
 		clientAuth: config.ClientAuth,
 
-		profile: normalizedProfile,
+		profile: walletProfile,
 
 		issuance:    config.Issuance,
 		attestation: config.Attestation,
@@ -426,70 +380,42 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}, nil
 }
 
-// setProtocolProfile is implemented by the built-in protocol plugins so the root
-// can propagate its profile to the default dispatchers it constructs itself.
-type setProtocolProfile interface {
-	SetProtocolProfile(profile.Profile)
+// newDefaultReceiver builds the receiver of a wallet whose Config.Receiver is
+// nil: the upstream defaults under Final, and only an OpenID4VCI plugin
+// constructed with the HAIP profile under HAIP.
+func newDefaultReceiver(walletProfile profile.Profile) (*receiver.ReceivingDispatcher, error) {
+	if !walletProfile.IsHAIP() {
+		return receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	}
+	return receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &receiverOid4vci.Oid4vciReceiver{
+		AllowHTTP: env.IsHTTPAllowed(),
+		Profile:   walletProfile,
+	}))
 }
 
-// setSupportedTransactionDataTypes is implemented by presenter plugins that can
-// accept the wallet's supported transaction_data types.
-type setSupportedTransactionDataTypes interface {
-	SetSupportedTransactionDataTypes([]string)
-}
-
-func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
-	for _, plugin := range dispatcher.Plugins() {
-		if setter, ok := plugin.(setProtocolProfile); ok {
-			setter.SetProtocolProfile(value)
-		}
-	}
-}
-func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, value profile.Profile) {
-	for _, plugin := range dispatcher.Plugins() {
-		if setter, ok := plugin.(setProtocolProfile); ok {
-			setter.SetProtocolProfile(value)
-		}
-	}
-}
-func propagatePresenterTransactionDataTypes(dispatcher *presenter.PresentationDispatcher, values []string) {
-	for _, plugin := range dispatcher.Plugins() {
-		if setter, ok := plugin.(setSupportedTransactionDataTypes); ok {
-			setter.SetSupportedTransactionDataTypes(values)
-		}
-	}
-}
-
-// validateReceiverPluginProfiles fails when a registered plugin that exposes a
-// protocol profile disagrees with the wallet. Draft-only plugins that do not
-// implement profile.Carrier are ignored.
-func validateReceiverPluginProfiles(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) error {
-	for _, plugin := range dispatcher.Plugins() {
-		carrier, ok := plugin.(profile.Carrier)
+// checkPluginProfiles refuses a plugin whose profile.Carrier reports another
+// profile than the wallet's and, under HAIP, a plugin that is not a Carrier:
+// HAIP adds checks a plugin must know to apply.
+func checkPluginProfiles[P any](plugins []P, walletProfile profile.Profile) error {
+	for _, plugin := range plugins {
+		carrier, ok := any(plugin).(profile.Carrier)
 		if !ok {
+			if walletProfile.IsHAIP() {
+				return fmt.Errorf("%w: %T does not implement profile.Carrier", ErrProfilePluginUnsupported, plugin)
+			}
 			continue
 		}
-		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
-			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
+		pluginProfile, err := carrier.ProtocolProfile().Normalize()
+		if err != nil {
+			return fmt.Errorf("%T: %w", plugin, err)
+		}
+		if pluginProfile != walletProfile {
+			return fmt.Errorf("%w: %T enforces %q, the wallet %q", ErrProfileMismatch, plugin, pluginProfile, walletProfile)
 		}
 	}
 	return nil
 }
 
-// validatePresenterPluginProfiles fails when a registered presenter plugin does
-// not carry the wallet profile.
-func validatePresenterPluginProfiles(dispatcher *presenter.PresentationDispatcher, value profile.Profile) error {
-	for _, plugin := range dispatcher.Plugins() {
-		carrier, ok := plugin.(profile.Carrier)
-		if !ok {
-			continue
-		}
-		if pluginProfile := carrier.ProtocolProfile(); pluginProfile != value {
-			return fmt.Errorf("plugin profile %q does not match wallet profile %q", pluginProfile, value)
-		}
-	}
-	return nil
-}
 func validateClientAuthConfig(config ClientAuthConfig) error {
 	method := config.Method
 	if method == "" {
@@ -536,16 +462,79 @@ func validateClientAuthConfig(config ClientAuthConfig) error {
 	}
 }
 
-// SetReceiver sets the receiver dispatcher.
+// SetReceiver replaces the receiver dispatcher after checking its plugins as
+// NewWalletWithConfig does. A refused dispatcher is not installed: every
+// method that needs the receiver then returns the refusal, until a later
+// SetReceiver succeeds.
+//
+// Deprecated: set Config.Receiver, which reports the refusal from
+// NewWalletWithConfig.
 func (w *Wallet) SetReceiver(r *receiver.ReceivingDispatcher) {
+	if r == nil {
+		w.receiver = refusedReceiver{err: fmt.Errorf("%w: SetReceiver got a nil dispatcher", ErrInvalidArgument)}
+		return
+	}
+	if err := checkPluginProfiles(r.Plugins(), w.profile); err != nil {
+		w.receiver = refusedReceiver{err: fmt.Errorf("SetReceiver: %w", err)}
+		return
+	}
 	w.receiver = r
+}
+
+// receivingDispatcher is the part of *receiver.ReceivingDispatcher the wallet
+// uses, so a dispatcher SetReceiver refused can stand in as refusedReceiver.
+type receivingDispatcher interface {
+	Plugins() []receiverTypes.Receiver
+	OID4VCITransport(receiverTypes.SupportedReceivingTypes) (receiverTypes.OID4VCITransport, error)
+	Draft13Transport(receiverTypes.SupportedReceivingTypes) (receiverTypes.Draft13Transport, error)
+	FetchIssuerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error)
+	FetchAuthorizationServerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error)
+	FetchAccessToken(receiverTypes.SupportedReceivingTypes, common.URIField, string, string, ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error)
+	FetchNonce(receiverTypes.SupportedReceivingTypes, common.URIField) (*string, error)
+	ReceiveCredential(receiverTypes.SupportedReceivingTypes, common.URIField, string, *string, receiverTypes.CredentialIssuanceAccessToken, *receiverTypes.CredentialDefinition, *string, ...*receiverTypes.CredentialRequestOptions) (*string, error)
+}
+
+var _ receivingDispatcher = (*receiver.ReceivingDispatcher)(nil)
+
+// refusedReceiver answers every call with the error SetReceiver refused a
+// dispatcher with.
+type refusedReceiver struct{ err error }
+
+func (r refusedReceiver) Plugins() []receiverTypes.Receiver { return nil }
+
+func (r refusedReceiver) OID4VCITransport(receiverTypes.SupportedReceivingTypes) (receiverTypes.OID4VCITransport, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) Draft13Transport(receiverTypes.SupportedReceivingTypes) (receiverTypes.Draft13Transport, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) FetchIssuerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) FetchAuthorizationServerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) FetchAccessToken(receiverTypes.SupportedReceivingTypes, common.URIField, string, string, ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) FetchNonce(receiverTypes.SupportedReceivingTypes, common.URIField) (*string, error) {
+	return nil, r.err
+}
+
+func (r refusedReceiver) ReceiveCredential(receiverTypes.SupportedReceivingTypes, common.URIField, string, *string, receiverTypes.CredentialIssuanceAccessToken, *receiverTypes.CredentialDefinition, *string, ...*receiverTypes.CredentialRequestOptions) (*string, error) {
+	return nil, r.err
 }
 
 // GenerateDID generates a DID from given options.
 func (w *Wallet) GenerateDID(options DIDCreateOptions) (*idprofTypes.IdentityProfile, error) {
 	parts := strings.SplitN(options.TypeID, ":", 2)
 	if len(parts) != 2 || parts[0] != "did" {
-		return nil, fmt.Errorf("invalid DID type ID format: %s", options.TypeID)
+		return nil, fmt.Errorf("%w: invalid DID type ID format: %s", ErrInvalidArgument, options.TypeID)
 	}
 	method := parts[1]
 
@@ -555,7 +544,8 @@ func (w *Wallet) GenerateDID(options DIDCreateOptions) (*idprofTypes.IdentityPro
 		return nil
 	}
 
-	return w.idProf.Create("did", createOption)
+	identity, err := w.idProf.Create("did", createOption)
+	return identity, classify(err)
 }
 
 // DIDCreateOptions holds options for DID creation.

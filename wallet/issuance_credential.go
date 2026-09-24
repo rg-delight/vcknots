@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
@@ -475,7 +476,7 @@ func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializat
 	}
 	claims, err := jwsClaims(token)
 	if err != nil {
-		return nil, fmt.Errorf("issuer JWT: %w: %w", ErrCredentialParse, err)
+		return nil, fmt.Errorf("issuer JWT: %w: %w", acceptance.ErrCredentialParse, err)
 	}
 	cnf, _ := claims["cnf"].(map[string]any)
 	if cnf == nil || cnf["jwk"] == nil {
@@ -483,11 +484,11 @@ func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializat
 	}
 	encoded, err := json.Marshal(cnf["jwk"])
 	if err != nil {
-		return nil, fmt.Errorf("cnf jwk is invalid: %w: %w", ErrCredentialParse, err)
+		return nil, fmt.Errorf("cnf jwk is invalid: %w: %w", acceptance.ErrCredentialParse, err)
 	}
 	var key jose.JSONWebKey
 	if err := key.UnmarshalJSON(encoded); err != nil {
-		return nil, fmt.Errorf("cnf jwk is invalid: %w: %w", ErrCredentialParse, err)
+		return nil, fmt.Errorf("cnf jwk is invalid: %w: %w", acceptance.ErrCredentialParse, err)
 	}
 	return &key, nil
 }

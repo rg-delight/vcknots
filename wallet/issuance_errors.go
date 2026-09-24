@@ -43,9 +43,6 @@ var (
 
 // Issuance conditions.
 var (
-	// ErrProfileForbidsDraft reports a draft protocol version used under the
-	// HAIP profile, which applies to OpenID4VCI and OpenID4VP 1.0 only.
-	ErrProfileForbidsDraft = common.NewCodedError("profile_forbids_draft", "the HAIP profile does not allow a draft protocol version")
 	// ErrIssuanceVersionMismatch reports a state of the other OpenID4VCI
 	// version: a Draft 13 state given to a 1.0 method or the reverse.
 	ErrIssuanceVersionMismatch = common.NewCodedError("issuance_version_mismatch", "issuance state belongs to another OpenID4VCI version")

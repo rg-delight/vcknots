@@ -1,9 +1,11 @@
 package wallet
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
+	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 )
 
@@ -14,14 +16,17 @@ import (
 // the DCAPIResponse object for the platform. Optional serialization options are
 // passed through to the serializer; the first non-nil option wins.
 func (w *Wallet) PresentCredentialToDCAPI(invocation oid4vp.DCAPIInvocation, key IKeyEntry, options ...serializerTypes.SerializePresentationOptions) (*oid4vp.DCAPIResponse, error) {
-	presenter, err := w.oid4vpPresenter()
+	ctx := context.Background()
+	admitted, err := w.presenter.ParseDCAPIRequest(ctx, presenterTypes.Oid4vp, invocation)
 	if err != nil {
 		return nil, err
 	}
-	request, err := presenter.ParseDCAPIRequest(invocation)
-	if err != nil {
-		return nil, err
+	handle, ok := admitted.(*oid4vp.AdmittedRequest)
+	if !ok {
+		return nil, fmt.Errorf("the registered OID4VP presenter returned an unsupported request handle")
 	}
+	admittedRequest := handle.Request()
+	request := &admittedRequest
 	if err := validateTransactionDataHolderBinding(request); err != nil {
 		return nil, err
 	}
@@ -50,7 +55,11 @@ func (w *Wallet) PresentCredentialToDCAPI(invocation oid4vp.DCAPIInvocation, key
 	if err != nil {
 		return nil, err
 	}
-	return presenter.BuildDCAPIResponse(request, vpToken)
+	result, err := w.presenter.SubmitDCQLResponse(ctx, handle, vpToken)
+	if err != nil {
+		return nil, err
+	}
+	return result.DCAPIResponse, nil
 }
 
 // oid4vpPresenter returns the registered OID4VP presenter plugin.

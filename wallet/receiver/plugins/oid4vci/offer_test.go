@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
 
 func TestFetchCredentialOffer(t *testing.T) {
@@ -31,10 +33,16 @@ func TestFetchCredentialOffer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	recorder := &observetest.Recorder{}
+	client := server.Client()
+	client.Transport = observe.Transport(client.Transport, recorder)
+	receiver := &Oid4vciReceiver{HTTPClient: client, AllowHTTP: true}
 	body, err := receiver.FetchCredentialOffer(t.Context(), mustURIField(t, server.URL+"/offer"))
 	if err != nil || string(body) != offer {
 		t.Fatalf("FetchCredentialOffer() = %q, %v", body, err)
+	}
+	if got := recorder.Endpoints(); len(got) != 1 || got[0] != observe.EndpointCredentialOffer {
+		t.Fatalf("labels = %v, want [%s]", got, observe.EndpointCredentialOffer)
 	}
 
 	for path, want := range map[string]error{

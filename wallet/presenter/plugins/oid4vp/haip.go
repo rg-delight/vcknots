@@ -5,18 +5,17 @@ import (
 )
 
 // enforceHAIPProfile applies the HAIP 1.0 constraints that can only be checked
-// once the Final Authorization Request parameters have been assembled. It is
-// deliberately inert on the Draft24 path and for the Final profile.
+// once the Authorization Request parameters have been assembled. It is inert
+// for the Final profile.
 func (b *requestBuilder) enforceHAIPProfile() error {
 	// Record the observed delivery and whether the caller's
 	// DeliveredByReference statement stood in for request_uri (HAIP §5.1).
-	deliveryAttested := b.profile.IsHAIP() && b.requestSource == sourceValue &&
-		b.requestObjectValidation != nil && b.requestObjectValidation.DeliveredByReference
+	deliveryAttested := b.profile.IsHAIP() && b.requestSource == sourceValue && b.deliveredByReference
 	if b.req.RequestObjectVerification != nil {
 		b.req.RequestObjectVerification.Delivery = b.requestSource.delivery()
 		b.req.RequestObjectVerification.DeliveryAttested = deliveryAttested
 	}
-	if b.draft24 || !b.profile.IsHAIP() {
+	if !b.profile.IsHAIP() {
 		return nil
 	}
 	// HAIP §5.2: "The Wallet MUST support the Response Mode dc_api.jwt" and

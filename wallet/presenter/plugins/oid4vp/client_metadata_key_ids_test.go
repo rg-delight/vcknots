@@ -92,7 +92,7 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 			values: func(responseURI string) url.Values {
 				return draft24RedirectURIValues(responseURI, responseURI)
 			},
-			parse: (*Oid4vpPresenter).ParseDraft24PresentationRequest,
+			parse: parseDraft24ForTest,
 		},
 	}
 	for _, wire := range wires {
@@ -154,8 +154,8 @@ func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
 		draft24 bool
 		parse   func(p *Oid4vpPresenter, requestObject string, clientID string) (*CredentialPresentationRequest, error)
 	}{
-		{name: "Final", parse: (*Oid4vpPresenter).ParseRequestObject},
-		{name: "Draft24", draft24: true, parse: (*Oid4vpPresenter).ParseDraft24RequestObject},
+		{name: "Final", parse: parseRequestObjectForTest},
+		{name: "Draft24", draft24: true, parse: parseDraft24RequestObjectForTest},
 	}
 	for _, entry := range entryPoints {
 		t.Run(entry.name, func(t *testing.T) {
@@ -196,9 +196,9 @@ func TestClientMetadataJWKKeyIDsOnDCAPIRequests(t *testing.T) {
 		Origin:  "https://verifier.example",
 	}
 
-	_, err := (&Oid4vpPresenter{}).ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest((&Oid4vpPresenter{}), invocation)
 	require.NoError(t, err)
 
-	_, err = (&Oid4vpPresenter{RequireClientMetadataJWKKeyIDs: true}).ParseDCAPIRequest(invocation)
+	_, err = parseDCAPIForTest((&Oid4vpPresenter{RequireClientMetadataJWKKeyIDs: true}), invocation)
 	require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
 }

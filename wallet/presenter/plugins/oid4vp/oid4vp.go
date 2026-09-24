@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -85,65 +86,60 @@ func (p *Oid4vpPresenter) ProtocolProfile() profile.Profile {
 	return normalized
 }
 
-// SetProtocolProfile is used by the wallet root to propagate its profile to the
-// default presenter plugin it constructs itself.
-func (p *Oid4vpPresenter) SetProtocolProfile(value profile.Profile) {
-	p.Profile = value
-}
-
 // SetSupportedTransactionDataTypes is used by the wallet root to propagate its
 // supported transaction_data types to the default presenter plugin.
-func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(types []string) {
-	p.SupportedTransactionDataTypes = types
+func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(values []string) {
+	p.SupportedTransactionDataTypes = values
 }
+
+var (
+	_ types.RequestParser      = (*Oid4vpPresenter)(nil)
+	_ types.DCAPIRequestParser = (*Oid4vpPresenter)(nil)
+	_ types.Responder          = (*Oid4vpPresenter)(nil)
+)
 
 // ParsePresentationRequest parses and authenticates an OpenID4VP 1.0
 // Authorization Request URI. The request arrives as a Request Object by
 // reference (request_uri), by value (request), or as plain query parameters
-// (OID4VP 1.0 §5, RFC 9101).
+// (OID4VP 1.0 §5, RFC 9101). ParseRequest returns the same request as a
+// handle that can be answered.
 func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
-	return p.parsePresentationRequest(uriString, false)
-}
-
-// ParseDraft24PresentationRequest accepts the existing Draft24 Presentation Exchange and DCQL request forms.
-// New Final integrations must use ParsePresentationRequest.
-func (p *Oid4vpPresenter) ParseDraft24PresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
-	return p.parsePresentationRequest(uriString, true)
-}
-
-// ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
-// already holds, with the same checks and typed errors as a Request Object
-// ParsePresentationRequest fetched. expectedClientID is the Authorization
-// Request client_id the Request Object's claim must equal (OID4VP 1.0
-// §5.10.1, ErrRequestObjectClientIDMismatch); pass "" only when there is no
-// outer client_id. A caller that fetched the object through request_uri
-// states so with RequestObjectValidationOptions.DeliveredByReference and
-// WalletNonce. DC API invocations use ParseDCAPIRequest.
-func (p *Oid4vpPresenter) ParseRequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
-	return p.parseRequestObject(requestObject, expectedClientID, false)
-}
-
-// ParseDraft24RequestObject is ParseRequestObject for the existing Draft24 wire
-// contract, the by-value counterpart of ParseDraft24PresentationRequest. New
-// Final integrations must use ParseRequestObject.
-func (p *Oid4vpPresenter) ParseDraft24RequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
-	return p.parseRequestObject(requestObject, expectedClientID, true)
-}
-func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 bool) (*CredentialPresentationRequest, error) {
-	builder, err := p.newParseBuilder(draft24)
+	handle, err := p.parseRequestURI(context.Background(), uriString)
 	if err != nil {
 		return nil, err
 	}
+	return handle.req, nil
+}
 
-	parsedURL, err := url.Parse(uriString)
+// ParseRequest parses and admits an OpenID4VP 1.0 Authorization Request URI,
+// dereferencing its request_uri when present. The result is an
+// *AdmittedRequest.
+func (p *Oid4vpPresenter) ParseRequest(ctx context.Context, uri string) (types.AdmittedRequest, error) {
+	return asAdmitted(p.parseRequestURI(ctx, uri))
+}
+
+// ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
+// already holds, with the same checks as one ParseRequest fetched. src.ClientID
+// is the Authorization Request client_id the Request Object's claim must equal
+// (OID4VP 1.0 §5.10.1, ErrRequestObjectClientIDMismatch); it is empty only when
+// there is no outer client_id. The result is an *AdmittedRequest.
+func (p *Oid4vpPresenter) ParseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
+	return asAdmitted(p.parseRequestObject(ctx, requestObject, src))
+}
+
+func (p *Oid4vpPresenter) parseRequestURI(ctx context.Context, uriString string) (*AdmittedRequest, error) {
+	builder, err := p.newRequestBuilder(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse URI: %w", err)
+		return nil, err
 	}
-	queryParams := parsedURL.Query()
+	queryParams, err := authorizationRequestQuery(uriString)
+	if err != nil {
+		return nil, err
+	}
 	// Reject malformed outer identifiers before dereferencing request_uri.
 	clientID := strings.TrimSpace(queryParams.Get("client_id"))
 	if clientID != "" {
-		if _, err := parseClientIDForWire(clientID, draft24); err != nil {
+		if _, err := parseOID4VPClientID(clientID); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
@@ -152,124 +148,122 @@ func (p *Oid4vpPresenter) parsePresentationRequest(uriString string, draft24 boo
 	requestURI := queryParams.Get("request_uri")
 	requestObj := queryParams.Get("request")
 	requestURIMethod := queryParams.Get("request_uri_method")
-	if !draft24 {
-		// RFC 9101 §5: "If this parameter is present in the authorization
-		// request, request_uri MUST NOT be present." The reciprocal sentence
-		// applies to request_uri. OID4VP 1.0 §5.10.2 requires terminating.
-		if requestURI != "" && requestObj != "" {
-			return nil, newAuthorizationRequestError(InvalidRequestError, "request and request_uri must not both be present in the same request")
-		}
+	// RFC 9101 §5: "If this parameter is present in the authorization request,
+	// request_uri MUST NOT be present." OID4VP 1.0 §5.10.2 requires
+	// terminating.
+	if requestURI != "" && requestObj != "" {
+		return nil, newAuthorizationRequestError(InvalidRequestError, "request and request_uri must not both be present in the same request")
 	}
 
-	// Request Object by Reference
-	if requestURI != "" {
-		method := RequestURIMethodGET // Default to GET if not specified
-		if requestURIMethod != "" {
-			if draft24 {
-				switch strings.ToLower(requestURIMethod) {
-				case "get":
-					method = RequestURIMethodGET
-				case "post":
-					method = RequestURIMethodPOST
-				default:
-					return nil, fmt.Errorf("unsupported request_uri_method: %s", requestURIMethod)
-				}
-			} else {
-				// OID4VP 1.0 §5.1: the two valid values are case-sensitive
-				// get and post; anything else is invalid_request_uri_method
-				// (OID4VP 1.0 §8.5).
-				switch requestURIMethod {
-				case "get":
-					method = RequestURIMethodGET
-				case "post":
-					method = RequestURIMethodPOST
-				default:
-					return nil, newAuthorizationRequestError(InvalidRequestURIMethodError, "request_uri_method must be 'get' or 'post' (case-sensitive), got %q", requestURIMethod)
-				}
-			}
+	switch {
+	case requestURI != "":
+		method := RequestURIMethodGET
+		// OID4VP 1.0 §5.1: the two valid values are case-sensitive get and
+		// post; anything else is invalid_request_uri_method (§8.5).
+		switch requestURIMethod {
+		case "", "get":
+		case "post":
+			method = RequestURIMethodPOST
+		default:
+			return nil, newAuthorizationRequestError(InvalidRequestURIMethodError, "request_uri_method must be 'get' or 'post' (case-sensitive), got %q", requestURIMethod)
 		}
-		builder = builder.WithRequestObjectURI(requestURI, method)
-	} else if requestObj != "" {
-		builder = builder.WithRequestObject(requestObj)
-	} else {
-		builder = builder.WithQueryParams(queryParams)
+		builder.WithRequestObjectURI(requestURI, method)
+	case requestObj != "":
+		builder.WithRequestObject(requestObj)
+	default:
+		builder.WithQueryParams(queryParams)
 	}
-
-	return p.buildParsedRequest(builder)
+	return p.finishParse(&builder.requestCore, builder.Build, wireOpenID4VP1)
 }
 
-// parseRequestObject is the by-value counterpart of parsePresentationRequest;
-// both share newParseBuilder and buildParsedRequest.
-func (p *Oid4vpPresenter) parseRequestObject(requestObject string, expectedClientID string, draft24 bool) (*CredentialPresentationRequest, error) {
-	builder, err := p.newParseBuilder(draft24)
+// parseRequestObject is the by-value counterpart of parseRequestURI.
+func (p *Oid4vpPresenter) parseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (*AdmittedRequest, error) {
+	builder, err := p.newRequestBuilder(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	clientID := strings.TrimSpace(expectedClientID)
+	clientID := strings.TrimSpace(src.ClientID)
 	if clientID != "" {
-		if _, err := parseClientIDForWire(clientID, draft24); err != nil {
+		if _, err := parseOID4VPClientID(clientID); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
-	builder.expectedClientID = clientID
-	builder.expectedClientIDAbsent = clientID == ""
-
-	return p.buildParsedRequest(builder.WithRequestObject(requestObject))
+	builder.applySource(clientID, src)
+	builder.WithRequestObject(requestObject)
+	return p.finishParse(&builder.requestCore, builder.Build, wireOpenID4VP1)
 }
 
-// newParseBuilder creates the requestBuilder of one parse operation with the
-// presenter's transport, trust and protocol policy.
-func (p *Oid4vpPresenter) newParseBuilder(draft24 bool) (*requestBuilder, error) {
-	// Normalize the profile once per parse so an unknown value fails closed
-	// before any network access and every checkpoint reads a validated value.
-	normalizedProfile, err := p.Profile.Normalize()
+// authorizationRequestQuery returns the query parameters of an Authorization
+// Request URI.
+func authorizationRequestQuery(uriString string) (url.Values, error) {
+	parsedURL, err := url.Parse(uriString)
 	if err != nil {
-		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
+		return nil, fmt.Errorf("failed to parse URI: %w", err)
 	}
-	if !draft24 && normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
-		// HAIP §5: the profile requires TLS verifier endpoints and verified
-		// X.509 request signing; the test-only escapes must not weaken it. The
-		// Draft24 entrypoints are exempt from the HAIP policy.
-		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
-	}
+	return parsedURL.Query(), nil
+}
 
-	builder, err := NewRequestBuilderForProfile(normalizedProfile)
+// normalizedProfile returns the presenter's profile, failing closed on an
+// unknown value before any network access.
+func (p *Oid4vpPresenter) normalizedProfile() (profile.Profile, error) {
+	normalized, err := p.Profile.Normalize()
+	if err != nil {
+		return "", fmt.Errorf("invalid OID4VP profile: %w", err)
+	}
+	return normalized, nil
+}
+
+// configureCore copies the presenter's transport and trust policy into the
+// state of one parse.
+func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) {
+	core.ctx = ctx
+	core.httpClient = p.httpClient()
+	core.allowHTTP = p.AllowHTTP
+	core.x509TrustChainRoots = p.X509TrustChainRoots
+	core.insecureSkipX509Verify = p.InsecureSkipX509Verify
+	core.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
+	if p.RequestObjectValidation != nil {
+		core.setRequestObjectValidation(*p.RequestObjectValidation)
+	}
+}
+
+// newRequestBuilder creates the builder of one OpenID4VP 1.0 parse with the
+// presenter's transport, trust and protocol policy.
+func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilder, error) {
+	normalizedProfile, err := p.normalizedProfile()
 	if err != nil {
 		return nil, err
 	}
-	builder.draft24 = draft24
-	builder.httpClient = p.httpClient()
-	builder.allowHTTP = p.AllowHTTP
-	builder.x509TrustChainRoots = p.X509TrustChainRoots
-	builder.insecureSkipX509Verify = p.InsecureSkipX509Verify
+	if normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
+		// HAIP §5: the profile requires TLS verifier endpoints and verified
+		// X.509 request signing; the test-only escapes must not weaken it.
+		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
+	}
+	builder := NewRequestBuilder()
+	builder.profile = normalizedProfile
+	p.configureCore(ctx, &builder.requestCore)
 	builder.walletMetadata = p.WalletMetadata
 	builder.requestURINonce = p.RequestURINonce
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
 	builder.preRegisteredClients = p.PreRegisteredClients
 	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
-	builder.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
-	if p.RequestObjectValidation != nil {
-		builder.WithRequestObjectValidation(*p.RequestObjectValidation)
-	}
 	return builder, nil
 }
 
-// buildParsedRequest finalizes one parse operation. A refusal records where an
-// error authorization response may go, and is posted there only when the
+// finishParse runs build and admits the result. On a refusal it records where
+// an error authorization response may go; it is posted there only when the
 // presenter opted in with SendParseErrorResponses.
-func (p *Oid4vpPresenter) buildParsedRequest(builder *requestBuilder) (*CredentialPresentationRequest, error) {
-	req, err := builder.Build()
+func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*CredentialPresentationRequest, error), wire wireContract) (*AdmittedRequest, error) {
+	req, err := build()
 	if err != nil {
-		builder.attachErrorResponseTarget(err)
+		core.attachErrorResponseTarget(err)
 		var authzErr *AuthorizationRequestError
 		if p.SendParseErrorResponses && errors.As(err, &authzErr) && authzErr.ResponseURI() != "" {
-			if sendErr := authzErr.SendErrorResponse(context.Background(), p.httpClient()); sendErr != nil {
+			if sendErr := authzErr.SendErrorResponse(core.context(), p.httpClient()); sendErr != nil {
 				return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w (also %v)", err, sendErr)
 			}
 		}
 		return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w", err)
 	}
-
-	return req, nil
+	return p.admit(req, wire, core.requestObject)
 }

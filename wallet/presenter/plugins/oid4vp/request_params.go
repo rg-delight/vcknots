@@ -8,58 +8,26 @@ import (
 	"strings"
 )
 
-// validateRedirectAndResponseURIExclusivity returns an error when the
-// redirect_uri and response_uri request parameters are both set. Per OID4VP
-// 1.0 §5.1/§8.2 they are mutually exclusive when response_mode is direct_post
-// (or direct_post.jwt); the Wallet MUST return an invalid_request Authorization
-// Response error. Callers scope this check to the direct_post modes.
-func validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam string) error {
-	if redirectURIFromParam != "" && responseURIFromParam != "" {
-		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not both be present in the same request")
-	}
-	return nil
-}
-
-// setParamsWithInterfaceMap sets the CredentialPresentationRequest fields from a map of any parameters,
-// tracking any missing required parameters.
-// Missing required parameters are recorded in b.errValidation and set as empty strings.
+// setParamsWithAnyMap sets the request fields from the Authorization Request
+// parameters, recording the first refusal in b.errValidation.
 func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	if b.errValidation != nil {
 		return
 	}
-
-	// OID4VP specification: MUST ignore 'iss' claim if present in Request Object
-	// Remove 'iss' claim from params to ensure it's not processed
-	if _, exists := params["iss"]; exists {
-		// Create a copy of params without 'iss' claim
-		filteredParams := make(map[string]any)
-		for k, v := range params {
-			if k != "iss" {
-				filteredParams[k] = v
-			}
-		}
-		params = filteredParams
-	}
+	params = withoutIssuerClaim(params)
 
 	missing := []string{}
-
 	getParam := func(key string, required bool) string {
 		if val, exists := params[key]; exists {
 			if strVal, ok := val.(string); ok {
 				return strVal
 			}
-			if !b.draft24 {
-				b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s must be a string", key)
-				return ""
-			}
-			// Convert non-string values to string representation if possible
-			return fmt.Sprintf("%v", val)
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s must be a string", key)
+			return ""
 		}
-
 		if required {
 			missing = append(missing, key)
 		}
-
 		return ""
 	}
 
@@ -70,51 +38,40 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		return
 	}
 
-	redirectURIFromParam := getParam("redirect_uri", false) // redirect_uri may be emitted
+	redirectURIFromParam := getParam("redirect_uri", false)
 	redirectURIFromClientID := ""
 	if cid := b.req.ClientID; cid != "" {
-		// The builder-scoped parse: only the unsigned DC API path may carry the
-		// Wallet-synthesised web-origin identifier (Appendix A.2).
-		if parsedCID, err := b.parseClientID(cid); err == nil {
-			switch parsedCID.prefix {
-			case OID4VPClientIDPrefixRedirectURI:
-				redirectURIFromClientID = parsedCID.original
-			case OID4VPClientIDPrefixX509SanDNS:
-				if b.draft24 {
-					redirectURIFromClientID = parsedCID.original
-				}
-			case OID4VPClientIDPrefixX509Hash:
-				// x509_hash binds the request object to an x5c certificate hash,
-				// so it does not derive a redirect URI from client_id.
-			case OID4VPClientIDPrefixWebOrigin:
-				// The DC API effective client identifier uses the platform
-				// Origin; no redirect URI is derived (OID4VP 1.0 Appendix A.2).
-			case OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
-				// OID4VP 1.0 §5.9.3: both prefixes name a Verifier whose
-				// response endpoints are constrained by what authenticated it
-				// (the Trust Chain metadata, or the attestation's
-				// redirect_uris), never derived from the Client Identifier.
-				// The request is authenticated by
-				// authenticateRequestObjectByClientIdentifier.
-			case OID4VPClientIDPrefixPreRegistered:
-				// OID4VP 1.0 §5.9.2: the client must be known in advance; the
-				// registration is checked in checkPreRegisteredClient.
-				if b.draft24 {
-					b.errValidation = fmt.Errorf("invalid client_id format")
-					return
-				}
-				registered, lookupErr := b.lookupPreRegisteredClient(parsedCID.original)
-				if lookupErr != nil {
-					b.errValidation = lookupErr
-					return
-				}
-				b.preRegisteredClient = registered
-			default: // unimplemented: other client_id prefixes
-				b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
-			}
-		} else {
+		// Only the unsigned DC API path may carry the Wallet-synthesised
+		// web-origin identifier (Appendix A.2).
+		parsedCID, err := b.parseClientID(cid)
+		if err != nil {
 			b.errValidation = fmt.Errorf("invalid client_id: %w", err)
 			return
+		}
+		switch parsedCID.prefix {
+		case OID4VPClientIDPrefixRedirectURI:
+			redirectURIFromClientID = parsedCID.original
+		case OID4VPClientIDPrefixX509SanDNS, OID4VPClientIDPrefixX509Hash:
+			// Bound to the signing certificate, not to a redirect URI.
+		case OID4VPClientIDPrefixWebOrigin:
+			// The DC API effective client identifier uses the platform
+			// Origin; no redirect URI is derived (OID4VP 1.0 Appendix A.2).
+		case OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
+			// OID4VP 1.0 §5.9.3: the response endpoints are constrained by
+			// what authenticates the Verifier (Trust Chain metadata, or the
+			// attestation's redirect_uris), never derived from the Client
+			// Identifier.
+		case OID4VPClientIDPrefixPreRegistered:
+			// OID4VP 1.0 §5.9.2: the client must be known in advance; the
+			// registration is checked in checkPreRegisteredClient.
+			registered, lookupErr := b.lookupPreRegisteredClient(parsedCID.original)
+			if lookupErr != nil {
+				b.errValidation = lookupErr
+				return
+			}
+			b.preRegisteredClient = registered
+		default:
+			b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
 		}
 	}
 
@@ -124,28 +81,19 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.RedirectURI = redirectURIFromClientID
-	if !b.draft24 && redirectURIFromParam != "" {
+	if redirectURIFromParam != "" {
 		b.req.RedirectURI = redirectURIFromParam
 	}
 	b.req.State = getParam("state", false)
 	b.req.Nonce = getParam("nonce", true)
-	if b.draft24 {
-		b.req.Scope = getParam("scope", false)
-	}
-
 	b.req.ResponseMode = OAuthAuthzReqResponseMode(getParam("response_mode", true))
 
-	// OID4VP 1.0 §5.9.3: with the redirect_uri Client Identifier Prefix "the
-	// original Client Identifier part (without the prefix redirect_uri:) is the
-	// Verifier's Redirect URI (or Response URI when Response Mode direct_post is
-	// used)", and "The Verifier MAY omit the redirect_uri Authorization Request
-	// parameter (or response_uri when Response Mode direct_post is used)". The
-	// Client Identifier already carries the Response URI, so the parameter is
-	// not required on the Final path.
-	responseURIRequired := isDirectPostMode(b.req.ResponseMode)
-	if !b.draft24 && redirectURIFromClientID != "" {
-		responseURIRequired = false
-	}
+	// OID4VP 1.0 §5.9.3: with the redirect_uri prefix "the original Client
+	// Identifier part ... is the Verifier's Redirect URI (or Response URI when
+	// Response Mode direct_post is used)", and "The Verifier MAY omit the
+	// redirect_uri Authorization Request parameter (or response_uri when
+	// Response Mode direct_post is used)".
+	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
 	responseURIFromParam := getParam("response_uri", responseURIRequired)
 
 	// OID4VP 1.0 §8.2: redirect_uri and response_uri are mutually exclusive
@@ -160,13 +108,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	b.req.ResponseURI = responseURIFromParam
 
 	// OID4VP 1.0 §5.9.3 binds the Response URI to the redirect_uri Client
-	// Identifier the same way it binds the Redirect URI: the value after the
-	// prefix "is the Verifier's Redirect URI (or Response URI when Response Mode
-	// direct_post is used)". Without this, a request carrying
-	// client_id=redirect_uri:https://verifier.example/cb together with
-	// response_mode=direct_post and a foreign response_uri would send the VP
-	// Token to an endpoint the Client Identifier does not authenticate.
-	if !b.draft24 && redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
+	// Identifier the same way it binds the Redirect URI, so a foreign
+	// response_uri never receives the VP Token.
+	if redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
 		if responseURIFromParam == "" {
 			b.req.ResponseURI = redirectURIFromClientID
 		} else if responseURIFromParam != redirectURIFromClientID {
@@ -182,22 +126,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		// used for this request.
 		b.req.RedirectURI = ""
 	}
-	if b.draft24 {
-		if err := bindDraft24RedirectURIResponseURI(params, b.req.ClientID, redirectURIFromClientID, responseURIFromParam, b.req.ResponseMode); err != nil {
-			// As on the Final path, the refused response_uri is not the
-			// Verifier's, so the error authorization response goes to the
-			// URI the Client Identifier authenticates.
-			b.req.ResponseURI = redirectURIFromClientID
-			b.errValidation = err
-			return
-		}
-	}
 
 	// OID4VP 1.0 Appendix A.2: the response is returned through the DC API, so
-	// response_uri and redirect_uri MUST be absent from the request. This is
-	// enforced on the DC API delivery paths only; a request_uri-delivered
-	// dc_api.jwt request is a different (rejected) delivery and keeps its own
-	// profile error.
+	// response_uri and redirect_uri MUST be absent from the request.
 	if b.requestSource.isDCAPI() && isDCAPIMode(b.req.ResponseMode) {
 		if redirectURIFromParam != "" || responseURIFromParam != "" {
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not be present with response_mode %s", b.req.ResponseMode)
@@ -207,54 +138,25 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ResponseURI = ""
 	}
 
-	if b.requestSource == sourceQuery && !b.draft24 {
+	if b.requestSource == sourceQuery {
 		if _, hasMethod := params["request_uri_method"]; hasMethod {
 			// OID4VP 1.0 §5.1: "request_uri_method parameter MUST NOT be
-			// present if a request_uri parameter is not present." This path is
-			// only reached when request_uri and request are both absent.
+			// present if a request_uri parameter is not present."
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "request_uri_method must not be present without request_uri")
 			return
 		}
 	}
 
-	if b.draft24 {
-		b.req.PresentationDefinitionURI = getParam("presentation_definition_uri", false)
-		raw, exists := params["presentation_definition"]
-		if exists {
-			var data []byte
-			var err error
-			if value, ok := raw.(string); ok {
-				data = []byte(value)
-			} else {
-				data, err = json.Marshal(raw)
-			}
-			var definition PresentationDefinition
-			if err == nil {
-				err = json.Unmarshal(data, &definition)
-			}
-			if err != nil {
-				b.errValidation = fmt.Errorf("invalid presentation_definition: %w", err)
-				return
-			}
-			b.req.PresentationDefinition = &definition
-			// The library keeps only the definition id. A caller that has to
-			// render or forward the Verifier's own Presentation Exchange
-			// definition keeps the wire value instead of re-encoding a lossy
-			// copy of it.
-			b.req.RawPresentationDefinition = json.RawMessage(bytes.Clone(data))
-		}
-	} else {
-		// Final uses DCQL. Keep Presentation Exchange behind the explicit Draft24 API.
-		for _, unsupported := range []string{"presentation_definition", "presentation_definition_uri", "presentation_submission"} {
-			if _, exists := params[unsupported]; exists {
-				b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s is not supported; use dcql_query instead", unsupported)
-				return
-			}
+	// Presentation Exchange belongs to the Draft 24 entry points.
+	for _, unsupported := range []string{"presentation_definition", "presentation_definition_uri", "presentation_submission"} {
+		if _, exists := params[unsupported]; exists {
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s is not supported; use dcql_query instead", unsupported)
+			return
 		}
 	}
 
 	// Requesting Credentials via the scope parameter is not supported by this wallet.
-	if scope, exists := params["scope"]; exists && !b.draft24 {
+	if scope, exists := params["scope"]; exists {
 		if scopeStr, ok := scope.(string); !ok || scopeStr != "" {
 			b.errValidation = newAuthorizationRequestError(InvalidScopeError, "scope parameter is not supported; use dcql_query instead")
 			return
@@ -262,34 +164,12 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		var rawMetadata []byte
-		if cmMap, ok := cm.(map[string]any); ok {
-			// Convert map to JSON and then unmarshal to struct
-			jsonBytes, err := json.Marshal(cmMap)
-			if err != nil {
-				b.errValidation = fmt.Errorf("failed to marshal client_metadata: %w", err)
-				return
-			}
-			rawMetadata = jsonBytes
-		} else if cmStr, ok := cm.(string); ok {
-			// Handle string format
-			rawMetadata = []byte(cmStr)
-		} else {
-			b.errValidation = fmt.Errorf("client_metadata must be a string or map")
+		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs)
+		if err != nil {
+			b.errValidation = err
 			return
 		}
-		var clientMeta VerifierMetadata
-		if err := json.Unmarshal(rawMetadata, &clientMeta); err != nil {
-			b.errValidation = fmt.Errorf("invalid client_metadata: %w", err)
-			return
-		}
-		if b.requireClientMetadataJWKKeyIDs {
-			if err := validateClientMetadataJWKKeyIDs(rawMetadata); err != nil {
-				b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", err)
-				return
-			}
-		}
-		b.req.ClientMetadata = &clientMeta
+		b.req.ClientMetadata = metadata
 	}
 
 	// A pre-registered Verifier's metadata is the registered one (OID4VP 1.0
@@ -305,21 +185,13 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if rawDcqlQuery, exists := params["dcql_query"]; exists {
-		var dcqlQuery *DcqlQuery
-		var err error
-		if b.draft24 {
-			dcqlQuery, err = parseDraft24DcqlQuery(rawDcqlQuery)
-		} else {
-			// The HAIP format restriction is applied where the Final DCQL query
-			// is validated (dcql.go), not by re-parsing after the fact.
-			dcqlQuery, err = parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
-		}
+		dcqlQuery, err := parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
 		if err != nil {
 			b.errValidation = err
 			return
 		}
 		b.req.DcqlQuery = dcqlQuery
-	} else if !b.draft24 {
+	} else {
 		missing = append(missing, "dcql_query")
 	}
 
@@ -330,55 +202,36 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if td, exists := params["transaction_data"]; exists && td != nil {
-		if b.draft24 {
-			switch v := td.(type) {
-			case []interface{}:
-				for _, item := range v {
-					if str, ok := item.(string); ok {
-						b.req.TransactionData = append(b.req.TransactionData, str)
-					}
-				}
-			case []string:
-				b.req.TransactionData = v
-			}
-		} else {
-			switch v := td.(type) {
-			case []interface{}:
-				for _, item := range v {
-					str, ok := item.(string)
-					if !ok {
-						b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data entries must be base64url strings")
-						return
-					}
-					b.req.TransactionData = append(b.req.TransactionData, str)
-				}
-			case []string:
-				b.req.TransactionData = v
-			case string:
-				// application/x-www-form-urlencoded transfers the array as a
-				// JSON-serialized string.
-				var entries []string
-				if err := json.Unmarshal([]byte(v), &entries); err != nil {
-					b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be a JSON array of strings")
+		switch v := td.(type) {
+		case []interface{}:
+			for _, item := range v {
+				str, ok := item.(string)
+				if !ok {
+					b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data entries must be base64url strings")
 					return
 				}
-				b.req.TransactionData = entries
-			default:
-				b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be an array of strings")
+				b.req.TransactionData = append(b.req.TransactionData, str)
+			}
+		case []string:
+			b.req.TransactionData = v
+		case string:
+			// application/x-www-form-urlencoded transfers the array as a
+			// JSON-serialized string.
+			var entries []string
+			if err := json.Unmarshal([]byte(v), &entries); err != nil {
+				b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be a JSON array of strings")
 				return
 			}
+			b.req.TransactionData = entries
+		default:
+			b.errValidation = newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data must be an array of strings")
+			return
 		}
 	}
 
-	if b.draft24 {
-		b.req.TransactionDataHashesAlg = getParam("transaction_data_hashes_alg", false)
-	}
-	// The Final profile carries transaction_data_hashes_alg inside each
-	// transaction_data object (OID4VP 1.0 Appendix B.3.3.1); it is resolved and
-	// set by validateFinalTransactionData below. A top-level value is not
-	// defined by the Final specification and is ignored.
-
-	if !b.draft24 && b.errValidation == nil && len(b.req.TransactionData) > 0 {
+	// transaction_data_hashes_alg travels inside each transaction_data object
+	// (OID4VP 1.0 Appendix B.3.3.1); validateFinalTransactionData resolves it.
+	if b.errValidation == nil && len(b.req.TransactionData) > 0 {
 		if err := b.validateFinalTransactionData(); err != nil {
 			b.errValidation = err
 			return

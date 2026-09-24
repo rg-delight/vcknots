@@ -1,10 +1,11 @@
 package presenter
 
 import (
+	"context"
 	"fmt"
-	"github.com/trustknots/vcknots/wallet/env"
 	"net/url"
 
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
@@ -58,6 +59,28 @@ func (d *PresentationDispatcher) getPlugin(protocol types.SupportedPresentationP
 	return plugin, nil
 }
 
+// capability returns the plugin registered for protocol as the capability C.
+func capability[C any](d *PresentationDispatcher, protocol types.SupportedPresentationProtocol, op string) (C, error) {
+	var zero C
+	plugin, err := d.getPlugin(protocol)
+	if err != nil {
+		return zero, err
+	}
+	capable, ok := plugin.(C)
+	if !ok {
+		return zero, types.NewPresenterError(protocol, "", op, types.ErrUnsupportedProtocol)
+	}
+	return capable, nil
+}
+
+// requestProtocol returns the protocol of an admitted request.
+func requestProtocol(req types.AdmittedRequest, op string) (types.SupportedPresentationProtocol, error) {
+	if req == nil {
+		return 0, types.NewPresenterError(0, "", op, types.ErrInvalidPresentation)
+	}
+	return req.Protocol(), nil
+}
+
 // Plugins returns the registered presenter plugins for profile propagation and
 // inspection. The returned slice is a copy, so callers cannot mutate the
 // dispatcher's registry.
@@ -86,134 +109,144 @@ func (d *PresentationDispatcher) Present(protocol SupportedPresentationProtocol,
 	return redirectURI, nil
 }
 
-// PresentDCQL uses the registered plugin's multiple-query presentation capability.
-func (d *PresentationDispatcher) PresentDCQL(protocol SupportedPresentationProtocol, endpoint url.URL, vpToken map[string][]string, request *PresentationRequest) (string, error) {
-	plugin, err := d.getPlugin(protocol)
-	if err != nil {
-		return "", err
-	}
-	dcql, ok := plugin.(interface {
-		PresentDCQL(types.SupportedPresentationProtocol, url.URL, map[string][]string, *PresentationRequest) (string, error)
-	})
-	if !ok {
-		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", types.ErrUnsupportedProtocol)
-	}
-	redirectURI, err := dcql.PresentDCQL(protocol, endpoint, vpToken, request)
-	if err != nil {
-		return "", types.NewPresenterError(protocol, endpoint.String(), "present_dcql", err)
-	}
-	return redirectURI, nil
-}
-
-func (d *PresentationDispatcher) SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *oid4vp.VerifierMetadata) (string, error) {
-	plugin, err := d.getPlugin(types.Oid4vp)
-	if err != nil {
-		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
-	}
-
-	finalPresenter, ok := plugin.(interface {
-		SubmitEncryptedAuthorizationResponse(url.URL, map[string]any, *oid4vp.VerifierMetadata) (string, error)
-	})
-	if !ok {
-		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", types.ErrUnsupportedProtocol)
-	}
-
-	body, err := finalPresenter.SubmitEncryptedAuthorizationResponse(endpoint, authzResponse, metadata)
-	if err != nil {
-		return "", types.NewPresenterError(types.Oid4vp, endpoint.String(), "submit_final", err)
-	}
-	return body, nil
-}
-
+// ParseRequestURI parses an OpenID4VP Authorization Request URI with the
+// plugin registered for types.Oid4vp.
 func (d *PresentationDispatcher) ParseRequestURI(uriString string) (*oid4vp.CredentialPresentationRequest, error) {
-	// Determine protocol from URI (currently only OID4VP is supported)
 	protocol := types.Oid4vp
+	admitted, err := d.ParseRequest(context.Background(), protocol, uriString)
+	if err != nil {
+		return nil, err
+	}
+	handle, ok := admitted.(*oid4vp.AdmittedRequest)
+	if !ok {
+		return nil, types.NewPresenterError(protocol, "", "parse_uri", types.ErrUnsupportedProtocol)
+	}
+	request := handle.Request()
+	return &request, nil
+}
 
-	// Get appropriate plugin
-	plugin, err := d.getPlugin(protocol)
+// ParseRequest parses and admits an OpenID4VP 1.0 Authorization Request URI
+// with the plugin registered for protocol.
+func (d *PresentationDispatcher) ParseRequest(ctx context.Context, protocol types.SupportedPresentationProtocol, uri string) (types.AdmittedRequest, error) {
+	parser, err := capability[types.RequestParser](d, protocol, "parse_uri")
+	if err != nil {
+		return nil, err
+	}
+	req, err := parser.ParseRequest(ctx, uri)
 	if err != nil {
 		return nil, types.NewPresenterError(protocol, "", "parse_uri", err)
 	}
-	// Cast to OID4VP plugin and call ParsePresentationRequest
-	if oid4vpPlugin, ok := plugin.(*oid4vp.Oid4vpPresenter); ok {
-		req, err := oid4vpPlugin.ParsePresentationRequest(uriString)
-		if err != nil {
-			return nil, types.NewPresenterError(protocol, "", "parse_uri", err)
-		}
-		return req, nil
-	}
-	return nil, types.NewPresenterError(protocol, "", "parse_uri", types.ErrUnsupportedProtocol)
+	return req, nil
 }
 
-// ParseDraft24RequestURI parses a Presentation Exchange request using the registered Draft24 capability.
-func (d *PresentationDispatcher) ParseDraft24RequestURI(uri string) (*oid4vp.CredentialPresentationRequest, error) {
-	plugin, err := d.getPlugin(types.Oid4vp)
+// ParseRequestObject authenticates a Request Object the caller already holds,
+// the by-value counterpart of ParseRequest.
+func (d *PresentationDispatcher) ParseRequestObject(ctx context.Context, protocol types.SupportedPresentationProtocol, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
+	parser, err := capability[types.RequestParser](d, protocol, "parse_request_object")
 	if err != nil {
 		return nil, err
 	}
-	draft, ok := plugin.(interface {
-		ParseDraft24PresentationRequest(string) (*oid4vp.CredentialPresentationRequest, error)
-	})
-	if !ok {
-		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_draft24", types.ErrUnsupportedProtocol)
+	req, err := parser.ParseRequestObject(ctx, requestObject, src)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "parse_request_object", err)
 	}
-	return draft.ParseDraft24PresentationRequest(uri)
+	return req, nil
 }
 
-// ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
-// already holds, instead of reading it out of an Authorization Request URI. It
-// is the by-value counterpart of ParseRequestURI and applies the same Request
-// Object authentication; expectedClientID is the Authorization Request client_id
-// the Request Object's own claim must match, and may be empty when the caller
-// has none.
-func (d *PresentationDispatcher) ParseRequestObject(requestObject string, expectedClientID string) (*oid4vp.CredentialPresentationRequest, error) {
-	plugin, err := d.getPlugin(types.Oid4vp)
-	if err != nil {
-		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", err)
-	}
-	parser, ok := plugin.(interface {
-		ParseRequestObject(string, string) (*oid4vp.CredentialPresentationRequest, error)
-	})
-	if !ok {
-		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", types.ErrUnsupportedProtocol)
-	}
-	request, err := parser.ParseRequestObject(requestObject, expectedClientID)
-	if err != nil {
-		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_request_object", err)
-	}
-	return request, nil
-}
-
-// ParseDraft24RequestObject is ParseRequestObject for the Presentation Exchange
-// wire contract, the by-value counterpart of ParseDraft24RequestURI.
-func (d *PresentationDispatcher) ParseDraft24RequestObject(requestObject string, expectedClientID string) (*oid4vp.CredentialPresentationRequest, error) {
-	plugin, err := d.getPlugin(types.Oid4vp)
+// ParseDCAPIRequest parses and admits a Digital Credentials API invocation.
+func (d *PresentationDispatcher) ParseDCAPIRequest(ctx context.Context, protocol types.SupportedPresentationProtocol, invocation types.DCAPIInvocation) (types.AdmittedRequest, error) {
+	parser, err := capability[types.DCAPIRequestParser](d, protocol, "parse_dc_api")
 	if err != nil {
 		return nil, err
 	}
-	parser, ok := plugin.(interface {
-		ParseDraft24RequestObject(string, string) (*oid4vp.CredentialPresentationRequest, error)
-	})
-	if !ok {
-		return nil, types.NewPresenterError(types.Oid4vp, "", "parse_draft24_request_object", types.ErrUnsupportedProtocol)
+	req, err := parser.ParseDCAPIRequest(ctx, invocation)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "parse_dc_api", err)
 	}
-	return parser.ParseDraft24RequestObject(requestObject, expectedClientID)
+	return req, nil
 }
 
-// PresentDraft24 submits a legacy Presentation Exchange response through the registered capability.
-func (d *PresentationDispatcher) PresentDraft24(protocol SupportedPresentationProtocol, endpoint url.URL, serialized []byte, submission types.PresentationSubmission, request *PresentationRequest) (string, error) {
-	if len(serialized) == 0 {
-		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrInvalidPresentation)
-	}
-	plugin, err := d.getPlugin(protocol)
+// ParseDraft24Request parses and admits an OpenID4VP Draft 24 Authorization
+// Request URI.
+func (d *PresentationDispatcher) ParseDraft24Request(ctx context.Context, protocol types.SupportedPresentationProtocol, uri string) (types.AdmittedRequest, error) {
+	parser, err := capability[types.Draft24RequestParser](d, protocol, "parse_draft24")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	draft, ok := plugin.(interface {
-		PresentDraft24(types.SupportedPresentationProtocol, url.URL, []byte, types.PresentationSubmission, *types.PresentationRequest) (string, error)
-	})
-	if !ok {
-		return "", types.NewPresenterError(protocol, endpoint.String(), "present_draft24", types.ErrUnsupportedProtocol)
+	req, err := parser.ParseDraft24Request(ctx, uri)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "parse_draft24", err)
 	}
-	return draft.PresentDraft24(protocol, endpoint, serialized, submission, request)
+	return req, nil
+}
+
+// ParseDraft24RequestObject is ParseRequestObject for the Draft 24 wire
+// contract.
+func (d *PresentationDispatcher) ParseDraft24RequestObject(ctx context.Context, protocol types.SupportedPresentationProtocol, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
+	parser, err := capability[types.Draft24RequestParser](d, protocol, "parse_draft24_request_object")
+	if err != nil {
+		return nil, err
+	}
+	req, err := parser.ParseDraft24RequestObject(ctx, requestObject, src)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "parse_draft24_request_object", err)
+	}
+	return req, nil
+}
+
+// SubmitDCQLResponse answers an admitted request with vp_token through the
+// plugin registered for the request's protocol.
+func (d *PresentationDispatcher) SubmitDCQLResponse(ctx context.Context, req types.AdmittedRequest, vpToken map[string][]string) (*types.SubmitResult, error) {
+	protocol, err := requestProtocol(req, "submit_dcql")
+	if err != nil {
+		return nil, err
+	}
+	responder, err := capability[types.Responder](d, protocol, "submit_dcql")
+	if err != nil {
+		return nil, err
+	}
+	result, err := responder.SubmitDCQLResponse(ctx, req, vpToken)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "submit_dcql", err)
+	}
+	return result, nil
+}
+
+// SubmitErrorResponse answers an admitted request with an error response
+// through the plugin registered for the request's protocol.
+func (d *PresentationDispatcher) SubmitErrorResponse(ctx context.Context, req types.AdmittedRequest, code, description string) (*types.SubmitResult, error) {
+	protocol, err := requestProtocol(req, "submit_error")
+	if err != nil {
+		return nil, err
+	}
+	responder, err := capability[types.Responder](d, protocol, "submit_error")
+	if err != nil {
+		return nil, err
+	}
+	result, err := responder.SubmitErrorResponse(ctx, req, code, description)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "submit_error", err)
+	}
+	return result, nil
+}
+
+// SubmitPresentationExchangeResponse answers an admitted Draft 24 request
+// through the plugin registered for the request's protocol.
+func (d *PresentationDispatcher) SubmitPresentationExchangeResponse(ctx context.Context, req types.AdmittedRequest, vpToken []byte, submission types.PresentationSubmission) (*types.SubmitResult, error) {
+	protocol, err := requestProtocol(req, "submit_presentation_exchange")
+	if err != nil {
+		return nil, err
+	}
+	if len(vpToken) == 0 {
+		return nil, types.NewPresenterError(protocol, "", "submit_presentation_exchange", types.ErrInvalidPresentation)
+	}
+	responder, err := capability[types.PresentationExchangeResponder](d, protocol, "submit_presentation_exchange")
+	if err != nil {
+		return nil, err
+	}
+	result, err := responder.SubmitPresentationExchangeResponse(ctx, req, vpToken, submission)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "submit_presentation_exchange", err)
+	}
+	return result, nil
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"regexp"
 	"strings"
 
@@ -188,32 +187,6 @@ func parseDcqlQueryWithHAIP(raw any, haip bool) (*DcqlQuery, error) {
 		}
 	}
 
-	return dcqlQueryFromObject(queryMap)
-}
-
-// parseDraft24DcqlQuery preserves the existing Draft24 parser's syntactic
-// decoding. Credential matching still decides which formats can be presented.
-func parseDraft24DcqlQuery(raw any) (*DcqlQuery, error) {
-	queryMap, err := decodeDcqlQueryObject(raw)
-	if err != nil {
-		return nil, err
-	}
-	// This Final field was ignored by the Draft24 decoder before it was added
-	// to the shared Go model. Preserve that behavior without mutating input.
-	if credentials, ok := queryMap["credentials"].([]any); ok {
-		queryMap = maps.Clone(queryMap)
-		filtered := make([]any, len(credentials))
-		for i, item := range credentials {
-			filtered[i] = item
-			if query, ok := item.(map[string]any); ok {
-				query = maps.Clone(query)
-				delete(query, "require_cryptographic_holder_binding")
-				delete(query, "trusted_authorities")
-				filtered[i] = query
-			}
-		}
-		queryMap["credentials"] = filtered
-	}
 	return dcqlQueryFromObject(queryMap)
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 // Sentinel errors the OID4VP Final Request Object authentication path returns.
@@ -114,28 +115,37 @@ func (e *AuthorizationRequestError) SendErrorResponse(ctx context.Context, clien
 	if target.state != "" {
 		values["state"] = target.state
 	}
-	formData := url.Values{}
-	if target.responseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		if payload, err := json.Marshal(values); err == nil {
-			if token, err := encryptAuthorizationResponse(payload, target.metadata, target.haip); err == nil {
-				formData.Set("response", token)
-			}
-		}
-	}
-	if formData.Get("response") == "" {
-		for name, value := range values {
-			formData.Set(name, value)
-		}
-	}
+	formData, _ := errorResponseForm(values, target.responseMode, func(payload []byte) (string, error) {
+		return encryptAuthorizationResponse(payload, target.metadata, target.haip)
+	})
 	if _, err := postAuthorizationResponse(ctx, client, target.responseURI, formData); err != nil {
 		return fmt.Errorf("failed to send error authorization response: %w", err)
 	}
 	return nil
 }
 
+// errorResponseForm builds the form of an error authorization response. Under
+// direct_post.jwt the members travel as a JWE when encrypt succeeds, and in
+// plaintext otherwise (OID4VP 1.0 §8.3.1). It reports whether the form is
+// encrypted.
+func errorResponseForm(values map[string]string, mode OAuthAuthzReqResponseMode, encrypt func([]byte) (string, error)) (url.Values, bool) {
+	if mode == OAuthAuthzReqResponseModeDirectPostJWT {
+		if payload, err := json.Marshal(values); err == nil {
+			if token, err := encrypt(payload); err == nil {
+				return url.Values{"response": {token}}, true
+			}
+		}
+	}
+	formData := url.Values{}
+	for name, value := range values {
+		formData.Set(name, value)
+	}
+	return formData, false
+}
+
 // attachErrorResponseTarget records on the refusal in err where an error
 // authorization response may be sent, when b's request binds one.
-func (b *requestBuilder) attachErrorResponseTarget(err error) {
+func (b *requestCore) attachErrorResponseTarget(err error) {
 	var authzErr *AuthorizationRequestError
 	if !b.errorResponseAllowed || !errors.As(err, &authzErr) || !isDirectPostMode(b.req.ResponseMode) {
 		return
@@ -240,55 +250,51 @@ func normalizeOAuthErrorCode(code string) string {
 	return normalized.String()
 }
 
-// SubmitAuthorizationErrorResponse posts an OAuth 2.0 error authorization
-// response (error, error_description and state) to the Verifier's Response
-// Endpoint as application/x-www-form-urlencoded, and returns the redirect_uri
-// the Verifier answered with, if any.
-//
-// It is the single transport for a Wallet that decides on the rejection before
-// it holds a CredentialPresentationRequest. OID4VP 1.0 §8.3.1 permits the error
-// response to be sent unencrypted, so this form is always plaintext. The
-// endpoint must use https unless the presenter enables AllowHTTP for a local
-// test. A non-2xx answer is reported as a *VerifierResponseError that does not
-// carry the response body.
-//
-// The two caller-supplied values that reach the wire are checked before
-// anything is sent: the endpoint through parseResponseURI (ErrResponseURIInvalid)
-// and description against the RFC 6749 §4.1.2.1 character set
-// (ErrErrorDescriptionInvalid), so an integrator branches on the refusal with
-// errors.Is instead of reproducing either rule ahead of the call.
-func (p *Oid4vpPresenter) SubmitAuthorizationErrorResponse(endpoint url.URL, code, description, state string) (string, error) {
-	if _, err := parseResponseURI(endpoint.String(), p.AllowHTTP); err != nil {
-		return "", err
+// SubmitErrorResponse answers an admitted request with an OAuth 2.0 error
+// response (OID4VP 1.0 §8.5, RFC 6749 §4.1.2.1): error, error_description and
+// state, posted to the request's response_uri. Under direct_post.jwt the
+// response is encrypted when the Verifier's metadata allows it and sent in
+// plaintext otherwise (§8.3.1). A DC API request gets
+// SubmitResult.DCAPIResponse whose data holds only error (Appendix A.4).
+// description is checked against the RFC 6749 character set first
+// (ErrErrorDescriptionInvalid). A request that failed admission is answered
+// only through AuthorizationRequestError.SendErrorResponse.
+func (p *Oid4vpPresenter) SubmitErrorResponse(ctx context.Context, req types.AdmittedRequest, code, description string) (*types.SubmitResult, error) {
+	handle, err := p.admittedHere(req)
+	if err != nil {
+		return nil, err
+	}
+	if code == "" {
+		return nil, errors.New("error code is required")
 	}
 	if err := validateOAuthErrorDescription(description); err != nil {
-		return "", err
+		return nil, err
+	}
+	if handle.isDCAPI() {
+		return &types.SubmitResult{DCAPIResponse: &DCAPIResponse{
+			Protocol: handle.req.DCAPIProtocol,
+			Data:     map[string]any{"error": code},
+		}}, nil
+	}
+	if !isDirectPostMode(handle.req.ResponseMode) {
+		return nil, fmt.Errorf("response_mode %q is not supported for an error response", handle.req.ResponseMode)
 	}
 
-	formData := url.Values{}
-	formData.Set("error", code)
+	values := map[string]string{"error": code}
 	if description != "" {
-		formData.Set("error_description", description)
+		values["error_description"] = description
 	}
-	if state != "" {
-		formData.Set("state", state)
+	if handle.req.State != "" {
+		values["state"] = handle.req.State
 	}
-
-	body, err := p.postAuthorizationResponse(endpoint.String(), formData)
+	formData, encrypted := errorResponseForm(values, handle.req.ResponseMode, func(payload []byte) (string, error) {
+		return p.encryptAuthorizationResponseJWE(payload, handle.req.ClientMetadata)
+	})
+	body, err := postAuthorizationResponse(ctx, p.httpClient(), handle.endpoint.String(), formData)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(body) == 0 {
-		return "", nil
-	}
-
-	var verifierResponse struct {
-		RedirectURI string `json:"redirect_uri"`
-	}
-	if err := json.Unmarshal(body, &verifierResponse); err != nil {
-		return "", nil
-	}
-	return verifierResponse.RedirectURI, nil
+	return &types.SubmitResult{RedirectURI: redirectURIFromVerifierResponse(body), Encrypted: encrypted}, nil
 }
 
 // validateOAuthErrorDescription checks error_description against the production

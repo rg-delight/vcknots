@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	commonx509 "github.com/trustknots/vcknots/wallet/common/x509"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -23,46 +25,45 @@ import (
 // which may live in another language, depends on.
 func codedErrorValues() map[string]error {
 	return map[string]error{
-		"ErrCredentialAcceptancePolicyRequired":   ErrCredentialAcceptancePolicyRequired,
-		"ErrUnknownCredentialConfiguration":       ErrUnknownCredentialConfiguration,
-		"ErrHolderBindingConfirmationUnsupported": ErrHolderBindingConfirmationUnsupported,
-		"ErrCredentialParse":                      ErrCredentialParse,
-		"ErrCredentialTypInvalid":                 ErrCredentialTypInvalid,
-		"ErrCredentialAlgUnsupported":             ErrCredentialAlgUnsupported,
-		"ErrHolderBindingMissing":                 ErrHolderBindingMissing,
-		"ErrHolderBindingMismatch":                ErrHolderBindingMismatch,
-		"ErrIssuerKeyUnresolved":                  ErrIssuerKeyUnresolved,
-		"ErrIssuerSignatureInvalid":               ErrIssuerSignatureInvalid,
-		"ErrIssuerDNSBindingFailed":               ErrIssuerDNSBindingFailed,
-		"ErrCredentialExpired":                    ErrCredentialExpired,
-		"ErrCredentialNotYetValid":                ErrCredentialNotYetValid,
-		"ErrDisclosureIntegrity":                  ErrDisclosureIntegrity,
-		"ErrSDAlgUnsupported":                     ErrSDAlgUnsupported,
-		"ErrHAIPX5CRequired":                      ErrHAIPX5CRequired,
-		"ErrHAIPTrustAnchorInX5C":                 ErrHAIPTrustAnchorInX5C,
-		"ErrKeyAttestationRequired":               ErrKeyAttestationRequired,
-		"ErrKeyAttestationNonceRejected":          ErrKeyAttestationNonceRejected,
-		"ErrIssuanceStateMismatch":                ErrIssuanceStateMismatch,
-		"ErrIssuanceVersionMismatch":              ErrIssuanceVersionMismatch,
-		"ErrProfileForbidsDraft":                  ErrProfileForbidsDraft,
-		"ErrDPoPKeyRequired":                      ErrDPoPKeyRequired,
-		"ErrProofAlgorithmNotSupported":           ErrProofAlgorithmNotSupported,
-		"ErrNonceEndpointRequired":                ErrNonceEndpointRequired,
-		"ErrPreAuthorizedGrantMissing":            ErrPreAuthorizedGrantMissing,
-		"ErrTransactionCodeRequired":              ErrTransactionCodeRequired,
-		"ErrTokenTypeUnsupported":                 ErrTokenTypeUnsupported,
-		"ErrDPoPKeyMismatch":                      ErrDPoPKeyMismatch,
-		"ErrCredentialResponsePlaintext":          ErrCredentialResponsePlaintext,
-		"ErrCredentialResponseDecrypt":            ErrCredentialResponseDecrypt,
-		"ErrCredentialResponseShape":              ErrCredentialResponseShape,
-		"ErrAuthorizationRedirectInvalid":         ErrAuthorizationRedirectInvalid,
-		"ErrAuthorizationRedirectURIMismatch":     ErrAuthorizationRedirectURIMismatch,
-		"ErrAuthorizationStateMismatch":           ErrAuthorizationStateMismatch,
-		"ErrAuthorizationIssMismatch":             ErrAuthorizationIssMismatch,
-		"ErrAuthorizationIssMissing":              ErrAuthorizationIssMissing,
-		"ErrAuthorizationCodeMissing":             ErrAuthorizationCodeMissing,
-		"ErrClientAttestationInvalid":             ErrClientAttestationInvalid,
-		"ErrKeyAttestationInvalid":                ErrKeyAttestationInvalid,
+		"ErrCredentialAcceptancePolicyRequired":              ErrCredentialAcceptancePolicyRequired,
+		"ErrUnknownCredentialConfiguration":                  ErrUnknownCredentialConfiguration,
+		"acceptance.ErrHolderBindingConfirmationUnsupported": acceptance.ErrHolderBindingConfirmationUnsupported,
+		"acceptance.ErrCredentialParse":                      acceptance.ErrCredentialParse,
+		"acceptance.ErrCredentialTypInvalid":                 acceptance.ErrCredentialTypInvalid,
+		"acceptance.ErrCredentialAlgUnsupported":             acceptance.ErrCredentialAlgUnsupported,
+		"ErrHolderBindingMissing":                            ErrHolderBindingMissing,
+		"ErrHolderBindingMismatch":                           ErrHolderBindingMismatch,
+		"acceptance.ErrIssuerKeyUnresolved":                  acceptance.ErrIssuerKeyUnresolved,
+		"ErrIssuerSignatureInvalid":                          ErrIssuerSignatureInvalid,
+		"acceptance.ErrIssuerDNSBindingFailed":               acceptance.ErrIssuerDNSBindingFailed,
+		"acceptance.ErrCredentialExpired":                    acceptance.ErrCredentialExpired,
+		"acceptance.ErrCredentialNotYetValid":                acceptance.ErrCredentialNotYetValid,
+		"acceptance.ErrDisclosureIntegrity":                  acceptance.ErrDisclosureIntegrity,
+		"acceptance.ErrSDAlgUnsupported":                     acceptance.ErrSDAlgUnsupported,
+		"acceptance.ErrHAIPX5CRequired":                      acceptance.ErrHAIPX5CRequired,
+		"acceptance.ErrHAIPTrustAnchorInX5C":                 acceptance.ErrHAIPTrustAnchorInX5C,
+		"ErrKeyAttestationRequired":                          ErrKeyAttestationRequired,
+		"ErrKeyAttestationNonceRejected":                     ErrKeyAttestationNonceRejected,
+		"ErrIssuanceStateMismatch":                           ErrIssuanceStateMismatch,
+		"ErrIssuanceVersionMismatch":                         ErrIssuanceVersionMismatch,
+		"ErrDPoPKeyRequired":                                 ErrDPoPKeyRequired,
+		"ErrProofAlgorithmNotSupported":                      ErrProofAlgorithmNotSupported,
+		"ErrNonceEndpointRequired":                           ErrNonceEndpointRequired,
+		"ErrPreAuthorizedGrantMissing":                       ErrPreAuthorizedGrantMissing,
+		"ErrTransactionCodeRequired":                         ErrTransactionCodeRequired,
+		"ErrTokenTypeUnsupported":                            ErrTokenTypeUnsupported,
+		"ErrDPoPKeyMismatch":                                 ErrDPoPKeyMismatch,
+		"ErrCredentialResponsePlaintext":                     ErrCredentialResponsePlaintext,
+		"ErrCredentialResponseDecrypt":                       ErrCredentialResponseDecrypt,
+		"ErrCredentialResponseShape":                         ErrCredentialResponseShape,
+		"ErrAuthorizationRedirectInvalid":                    ErrAuthorizationRedirectInvalid,
+		"ErrAuthorizationRedirectURIMismatch":                ErrAuthorizationRedirectURIMismatch,
+		"ErrAuthorizationStateMismatch":                      ErrAuthorizationStateMismatch,
+		"ErrAuthorizationIssMismatch":                        ErrAuthorizationIssMismatch,
+		"ErrAuthorizationIssMissing":                         ErrAuthorizationIssMissing,
+		"ErrAuthorizationCodeMissing":                        ErrAuthorizationCodeMissing,
+		"ErrClientAttestationInvalid":                        ErrClientAttestationInvalid,
+		"ErrKeyAttestationInvalid":                           ErrKeyAttestationInvalid,
 
 		"oid4vp.ErrRequestObjectTypInvalid":       oid4vp.ErrRequestObjectTypInvalid,
 		"oid4vp.ErrRequestObjectSignatureInvalid": oid4vp.ErrRequestObjectSignatureInvalid,
@@ -102,14 +103,18 @@ func codedErrorValues() map[string]error {
 
 		"x509.ErrX5CInvalid":                   commonx509.ErrX5CInvalid,
 		"ErrAuthorizationDetailsMissing":       ErrAuthorizationDetailsMissing,
+		"ErrProfileMismatch":                   ErrProfileMismatch,
+		"ErrProfilePluginUnsupported":          ErrProfilePluginUnsupported,
+		"ErrProfileForbidsDraft":               ErrProfileForbidsDraft,
+		"profile.ErrUnknownProfile":            profile.ErrUnknownProfile,
 		"oid4vp.ErrPreRegisteredClientUnknown": oid4vp.ErrPreRegisteredClientUnknown,
 
 		"*AuthorizationResponseError":       &AuthorizationResponseError{Code: "access_denied"},
-		"*oid4vp.AuthorizationRequestError": &oid4vp.AuthorizationRequestError{Code: oid4vp.InvalidRequestError, Err: ErrCredentialParse},
+		"*oid4vp.AuthorizationRequestError": &oid4vp.AuthorizationRequestError{Code: oid4vp.InvalidRequestError, Err: acceptance.ErrCredentialParse},
 		"*oid4vp.VerifierResponseError":     &oid4vp.VerifierResponseError{StatusCode: 400},
 		"*types.CredentialEndpointError":    &receiverTypes.CredentialEndpointError{StatusCode: 400, Code: "invalid_proof"},
 		"*oid4vci.EndpointError":            &receiverOid4vci.EndpointError{Stage: receiverOid4vci.StageToken},
-		"*x509.SigningChainError":           &commonx509.SigningChainError{Kind: "path", Err: ErrCredentialParse},
+		"*x509.SigningChainError":           &commonx509.SigningChainError{Kind: "path", Err: acceptance.ErrCredentialParse},
 		"*x509.CRLCheckError":               &commonx509.CRLCheckError{Kind: commonx509.CRLErrorRevoked},
 	}
 }
@@ -138,7 +143,7 @@ func TestCodedErrorsExposeUniqueStableCodes(t *testing.T) {
 // rests on: a wrapped condition is still found, and an error that classifies
 // what it wraps answers for it.
 func TestCodedErrorsSurviveWrapping(t *testing.T) {
-	wrapped := &receiverTypes.ReceiverError{Op: "receive", Err: ErrCredentialExpired}
+	wrapped := &receiverTypes.ReceiverError{Op: "receive", Err: acceptance.ErrCredentialExpired}
 	if code, _ := ErrorCode(wrapped); code != "credential_expired" {
 		t.Errorf("ErrorCode(wrapped) = %q, want credential_expired", code)
 	}

@@ -1,10 +1,12 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"net/url"
 	"reflect"
 	"strings"
@@ -31,7 +33,7 @@ func TestParseRequestObjectMatchesTheURIDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the URI delivery must be accepted: %v", err)
 	}
-	fromValue, err := f.presenter().ParseRequestObject(requestObject, f.clientID())
+	fromValue, err := parseRequestObjectForTest(f.presenter(), requestObject, f.clientID())
 	if err != nil {
 		t.Fatalf("the by-value delivery must be accepted: %v", err)
 	}
@@ -60,11 +62,11 @@ func TestParseDraft24RequestObjectMatchesTheURIDelivery(t *testing.T) {
 		"client_id": {f.clientID()},
 		"request":   {requestObject},
 	}.Encode()
-	fromURI, err := f.presenter().ParseDraft24PresentationRequest(uri)
+	fromURI, err := parseDraft24ForTest(f.presenter(), uri)
 	if err != nil {
 		t.Fatalf("the Draft24 URI delivery must be accepted: %v", err)
 	}
-	fromValue, err := f.presenter().ParseDraft24RequestObject(requestObject, f.clientID())
+	fromValue, err := parseDraft24RequestObjectForTest(f.presenter(), requestObject, f.clientID())
 	if err != nil {
 		t.Fatalf("the Draft24 by-value delivery must be accepted: %v", err)
 	}
@@ -80,11 +82,11 @@ func TestParseRequestObjectRejectsClientIDMismatch(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	requestObject := f.sign(t, f.claims(), nil)
 
-	_, err := f.presenter().ParseRequestObject(requestObject, "x509_hash:another")
+	_, err := parseRequestObjectForTest(f.presenter(), requestObject, "x509_hash:another")
 	if !errors.Is(err, ErrRequestObjectClientIDMismatch) {
 		t.Fatalf("want ErrRequestObjectClientIDMismatch, got %v", err)
 	}
-	if _, err := f.presenter().ParseRequestObject(requestObject, "not a client identifier:"); err == nil ||
+	if _, err := parseRequestObjectForTest(f.presenter(), requestObject, "not a client identifier:"); err == nil ||
 		!strings.Contains(err.Error(), "invalid client_id in initial request") {
 		t.Fatalf("want a malformed client_id refused before authentication, got %v", err)
 	}
@@ -96,7 +98,7 @@ func TestParseRequestObjectRejectsClientIDMismatch(t *testing.T) {
 // certificate that signed the Request Object.
 func TestParseRequestObjectWithoutExpectedClientID(t *testing.T) {
 	f := newRequestObjectFixture(t)
-	request, err := f.presenter().ParseRequestObject(f.sign(t, f.claims(), nil), "")
+	request, err := parseRequestObjectForTest(f.presenter(), f.sign(t, f.claims(), nil), "")
 	if err != nil {
 		t.Fatalf("a Request Object without an outer client_id must be accepted: %v", err)
 	}
@@ -107,7 +109,7 @@ func TestParseRequestObjectWithoutExpectedClientID(t *testing.T) {
 	other := newRequestObjectFixture(t)
 	claims := f.claims()
 	claims["client_id"] = other.clientID()
-	if _, err := f.presenter().ParseRequestObject(f.sign(t, claims, nil), ""); !errors.Is(err, ErrX509HashMismatch) {
+	if _, err := parseRequestObjectForTest(f.presenter(), f.sign(t, claims, nil), ""); !errors.Is(err, ErrX509HashMismatch) {
 		t.Fatalf("want ErrX509HashMismatch for a client_id the signer cannot speak for, got %v", err)
 	}
 }
@@ -130,14 +132,14 @@ func TestParseRequestObjectRefusesUnsignedRequests(t *testing.T) {
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." +
 		base64.RawURLEncoding.EncodeToString(payload) + "."
 
-	if _, err := f.presenter().ParseRequestObject(unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
+	if _, err := parseRequestObjectForTest(f.presenter(), unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
 		t.Fatalf("want ErrRequestObjectSignatureInvalid for an alg=none request object, got %v", err)
 	}
-	if _, err := f.presenter().ParseRequestObject(string(payload), f.clientID()); err == nil ||
+	if _, err := parseRequestObjectForTest(f.presenter(), string(payload), f.clientID()); err == nil ||
 		!strings.Contains(err.Error(), "bounded compact signed JWT") {
 		t.Fatalf("want a non-JWT request refused, got %v", err)
 	}
-	if _, err := f.presenter().ParseDraft24RequestObject(unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
+	if _, err := parseDraft24RequestObjectForTest(f.presenter(), unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
 		t.Fatalf("want the Draft24 entry point to refuse an alg=none request object, got %v", err)
 	}
 }
@@ -145,15 +147,15 @@ func TestParseRequestObjectRefusesUnsignedRequests(t *testing.T) {
 // TestParseRequestObjectHAIPDeliveryPolicy keeps the HAIP Section 5.1 delivery
 // rule on the by-value entry point: a Request Object the library did not fetch
 // through request_uri is refused unless the caller attests the fetch with
-// DeliveredByReference, exactly as the request= parameter is.
+// RequestObjectSource.DeliveredByReference.
 func TestParseRequestObjectHAIPDeliveryPolicy(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	requestObject := f.sign(t, f.claims(), nil)
 
-	if _, err := f.haipPresenter(false).ParseRequestObject(requestObject, f.clientID()); !errors.Is(err, ErrHAIPRequestURIRequired) {
+	if _, err := parseRequestObjectForTest(f.haipPresenter(), requestObject, f.clientID()); !errors.Is(err, ErrHAIPRequestURIRequired) {
 		t.Fatalf("want ErrHAIPRequestURIRequired without a delivery attestation, got %v", err)
 	}
-	request, err := f.haipPresenter(true).ParseRequestObject(requestObject, f.clientID())
+	request, err := parseRequestObjectWithSourceForTest(f.haipPresenter(), requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
 	if err != nil {
 		t.Fatalf("an attested delivery must be accepted under HAIP: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestParseRequestObjectIsNotTheDCAPIEntryPoint(t *testing.T) {
 	delete(claims, "response_uri")
 	requestObject := f.sign(t, claims, nil)
 
-	_, valueErr := f.haipPresenter(true).ParseRequestObject(requestObject, f.clientID())
+	_, valueErr := parseRequestObjectWithSourceForTest(f.haipPresenter(), requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
 	if valueErr == nil || !strings.Contains(valueErr.Error(), "only valid over the Digital Credentials API") {
 		t.Fatalf("want a DC API response mode refused by value, got %v", valueErr)
 	}
@@ -182,19 +184,17 @@ func TestParseRequestObjectIsNotTheDCAPIEntryPoint(t *testing.T) {
 		"client_id": {f.clientID()},
 		"request":   {requestObject},
 	}.Encode()
-	_, uriErr := f.haipPresenter(true).ParsePresentationRequest(uri)
+	_, uriErr := f.haipPresenter().ParsePresentationRequest(uri)
 	if uriErr == nil || uriErr.Error() != valueErr.Error() {
 		t.Fatalf("the two deliveries must refuse a DC API response mode alike: %v vs %v", valueErr, uriErr)
 	}
 }
 
-// haipPresenter builds a HAIP presenter whose validation options optionally
-// carry the caller's DeliveredByReference attestation.
-func (f *requestObjectFixture) haipPresenter(deliveredByReference bool) *Oid4vpPresenter {
+// haipPresenter builds a HAIP presenter that trusts the fixture root.
+func (f *requestObjectFixture) haipPresenter() *Oid4vpPresenter {
 	validation := RequestObjectValidationOptions{
-		TrustAnchors:         []*x509.Certificate{f.root},
-		Now:                  func() time.Time { return f.now },
-		DeliveredByReference: deliveredByReference,
+		TrustAnchors: []*x509.Certificate{f.root},
+		Now:          func() time.Time { return f.now },
 	}
 	return &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
@@ -205,16 +205,11 @@ func (f *requestObjectFixture) haipPresenter(deliveredByReference bool) *Oid4vpP
 
 // TestParseRequestObjectAttestsCallerWalletNonce: an application that fetched
 // the Request Object with its own request_uri POST names the wallet_nonce it
-// sent (RequestObjectValidationOptions.WalletNonce), and the by-value entry
+// sent (RequestObjectSource.WalletNonce), and the by-value entry
 // point holds the Request Object to it exactly as it would hold one this
 // library fetched (OpenID4VP 1.0 Section 5.10.1).
 func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
 	const sent = "caller-wallet-nonce"
-	presenterAttesting := func(f *requestObjectFixture, walletNonce string) *Oid4vpPresenter {
-		options := f.options()
-		options.WalletNonce = walletNonce
-		return &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
-	}
 	cases := []struct {
 		name        string
 		walletNonce string
@@ -239,7 +234,7 @@ func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
 				if tc.claim != nil {
 					claims["wallet_nonce"] = tc.claim
 				}
-				p := presenterAttesting(f, tc.walletNonce)
+				p := f.presenter()
 				parse := p.ParseRequestObject
 				if draft24 {
 					claims["response_mode"] = "direct_post"
@@ -247,7 +242,7 @@ func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
 					claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
 					parse = p.ParseDraft24RequestObject
 				}
-				request, err := parse(f.sign(t, claims, nil), f.clientID())
+				request, err := admittedRequest(parse(context.Background(), f.sign(t, claims, nil), types.RequestObjectSource{ClientID: f.clientID(), WalletNonce: tc.walletNonce}))
 				if tc.wantErr {
 					if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
 						t.Fatalf("want ErrRequestObjectWalletNonceMismatch, got %v", err)
@@ -262,28 +257,5 @@ func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-// TestRequestURIPostIgnoresCallerWalletNonce: when this library performs the
-// request_uri POST itself, the nonce it sent is the one the Verifier received,
-// so a caller attestation configured for by-value parsing never replaces it.
-func TestRequestURIPostIgnoresCallerWalletNonce(t *testing.T) {
-	f := newRequestObjectFixture(t)
-	captured := &capturedRequestURIForm{}
-	f.echoNonceHandler(t, captured, nil)
-	options := f.options()
-	options.WalletNonce = "caller-wallet-nonce"
-	p := &Oid4vpPresenter{
-		HTTPClient:              f.server.Client(),
-		RequestObjectValidation: &options,
-		RequestURINonce:         func() (string, error) { return "library-wallet-nonce", nil },
-	}
-	request, err := f.parseRequestURIPost(t, p)
-	if err != nil {
-		t.Fatalf("the echoed library nonce must be accepted: %v", err)
-	}
-	if got := request.RequestObjectVerification.WalletNonce; got != "library-wallet-nonce" {
-		t.Fatalf("RequestObjectVerification.WalletNonce = %q, want the nonce this library sent", got)
 	}
 }

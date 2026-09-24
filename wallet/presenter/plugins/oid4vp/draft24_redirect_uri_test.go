@@ -65,7 +65,7 @@ func TestDraft24RedirectURIClientIDBindsResponseURI(t *testing.T) {
 				return nil, errors.New("no network in this test")
 			})}
 			p := &Oid4vpPresenter{AllowHTTP: tt.allowHTTP, HTTPClient: client}
-			req, err := p.ParseDraft24PresentationRequest(finalQueryURI(values))
+			req, err := parseDraft24ForTest(p, finalQueryURI(values))
 			if tt.wantAccepted {
 				require.NoError(t, err)
 				require.Equal(t, tt.responseURI, req.ResponseURI)
@@ -89,7 +89,7 @@ func TestDraft24RedirectURIClientIDMismatchAnswersTheClientIdentifier(t *testing
 	verifier := newCountingResponseServer(t)
 	values := draft24RedirectURIValues(verifier.server.URL+"/response", attacker.server.URL+"/post")
 	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}
-	_, err := p.ParseDraft24PresentationRequest(finalQueryURI(values))
+	_, err := parseDraft24ForTest(p, finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseURIClientIDMismatch), "want ErrResponseURIClientIDMismatch, got %v", err)
 	require.Equal(t, int32(0), attacker.calls.Load(), "the foreign response_uri must receive nothing")
 	require.Equal(t, int32(1), verifier.calls.Load(), "the authenticated Client Identifier receives the error response")
@@ -100,7 +100,7 @@ func TestDraft24RedirectURIClientIDMismatchAnswersTheClientIdentifier(t *testing
 func TestDraft24RedirectURIClientIDStillRequiresResponseURI(t *testing.T) {
 	values := draft24RedirectURIValues("https://verifier.example/response", "")
 	values.Del("response_uri")
-	_, err := (&Oid4vpPresenter{}).ParseDraft24PresentationRequest(finalQueryURI(values))
+	_, err := parseDraft24ForTest((&Oid4vpPresenter{}), finalQueryURI(values))
 	require.ErrorContains(t, err, "response_uri")
 }
 

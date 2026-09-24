@@ -30,7 +30,7 @@ func fixtureCredStore(t *testing.T) *credstore.CredStoreDispatcher {
 // credential store at all and presents only what the caller names by value.
 func storelessPresentationWallet(t *testing.T, fixture sdjwtPresentationFixture) *Wallet {
 	t.Helper()
-	wallet, err := NewWalletWithoutStore(Config{Presenter: fixture.wallet.presenter})
+	wallet, err := NewWalletWithConfig(Config{Presenter: fixture.wallet.presenter, Storeless: true})
 	require.NoError(t, err)
 	require.Nil(t, wallet.credStore)
 	return wallet
@@ -312,7 +312,7 @@ func TestWallet_PresentDraft24SelectionFromAStorelessWallet(t *testing.T) {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
@@ -335,7 +335,7 @@ func TestWallet_PresentDraft24SelectionFromAStorelessWallet(t *testing.T) {
 
 // A storeless wallet has nothing to read a credential out of, and says so.
 func TestWallet_StorelessWalletHasNoCredentialStore(t *testing.T) {
-	wallet, err := NewWalletWithoutStore(Config{})
+	wallet, err := NewWalletWithConfig(Config{Storeless: true})
 	require.NoError(t, err)
 
 	_, _, err = wallet.GetCredentialEntries(GetCredentialEntriesRequest{})

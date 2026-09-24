@@ -30,21 +30,9 @@ type (
 )
 
 var (
-	ErrCredentialParse                      = acceptance.ErrCredentialParse
-	ErrCredentialTypInvalid                 = acceptance.ErrCredentialTypInvalid
-	ErrCredentialAlgUnsupported             = acceptance.ErrCredentialAlgUnsupported
-	ErrHolderBindingMissing                 = acceptance.ErrHolderBindingMissing
-	ErrHolderBindingMismatch                = acceptance.ErrHolderBindingMismatch
-	ErrHolderBindingConfirmationUnsupported = acceptance.ErrHolderBindingConfirmationUnsupported
-	ErrIssuerKeyUnresolved                  = acceptance.ErrIssuerKeyUnresolved
-	ErrIssuerSignatureInvalid               = acceptance.ErrIssuerSignatureInvalid
-	ErrIssuerDNSBindingFailed               = acceptance.ErrIssuerDNSBindingFailed
-	ErrCredentialExpired                    = acceptance.ErrCredentialExpired
-	ErrCredentialNotYetValid                = acceptance.ErrCredentialNotYetValid
-	ErrDisclosureIntegrity                  = acceptance.ErrDisclosureIntegrity
-	ErrSDAlgUnsupported                     = acceptance.ErrSDAlgUnsupported
-	ErrHAIPX5CRequired                      = acceptance.ErrHAIPX5CRequired
-	ErrHAIPTrustAnchorInX5C                 = acceptance.ErrHAIPTrustAnchorInX5C
+	ErrHolderBindingMissing   = acceptance.ErrHolderBindingMissing
+	ErrHolderBindingMismatch  = acceptance.ErrHolderBindingMismatch
+	ErrIssuerSignatureInvalid = acceptance.ErrIssuerSignatureInvalid
 
 	ErrClientAttestationInvalid = attestation.ErrClientAttestationInvalid
 	ErrKeyAttestationInvalid    = attestation.ErrKeyAttestationInvalid

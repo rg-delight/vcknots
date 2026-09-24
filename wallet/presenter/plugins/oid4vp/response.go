@@ -39,22 +39,13 @@ func parseResponseURI(responseURI string, allowHTTP bool) (*url.URL, error) {
 	return parsed, nil
 }
 
-// postAuthorizationResponse form-POSTs an authorization response (or error
-// response) to the Verifier with the presenter's client and returns the
-// response body of a 2xx answer.
-func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData url.Values) ([]byte, error) {
-	return postAuthorizationResponse(context.Background(), p.httpClient(), endpoint, formData)
-}
-
 // postAuthorizationResponse form-POSTs to the Verifier's Response Endpoint
 // without following redirects: a redirect could move the response to another
 // host or to plain http. The response body is read up to
 // httpfetch.DefaultBodyLimit; a non-2xx status keeps only the OAuth error code,
 // because the body is under the Verifier's control.
 func postAuthorizationResponse(ctx context.Context, client *http.Client, endpoint string, formData url.Values) ([]byte, error) {
-	// A JWE travels in the "response" member (OID4VP 1.0 §8.3).
-	encrypted := formData.Get("response") != ""
-	ctx = observe.WithResponseEncryption(observe.WithEndpoint(ctx, observe.EndpointResponse), encrypted)
+	ctx = observe.WithEndpoint(ctx, observe.EndpointResponse)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return nil, err
@@ -92,88 +83,107 @@ func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, 
 	}, request)
 }
 
-// PresentDCQL sends one authorization response containing all selected DCQL
-// queries. The existing Present API remains a single-query convenience wrapper.
-func (p *Oid4vpPresenter) PresentDCQL(protocol types.SupportedPresentationProtocol, endpoint url.URL, vpToken map[string][]string, request *types.PresentationRequest) (string, error) {
-	if protocol != types.Oid4vp {
-		return "", fmt.Errorf("plugin type mismatch")
+// SubmitDCQLResponse answers an admitted OpenID4VP 1.0 request with vp_token,
+// keyed by DCQL credential query id (OID4VP 1.0 §8.1). An empty non-nil map is
+// the Holder declining every optional query. direct_post posts the response,
+// direct_post.jwt posts it encrypted (§8.3), and a DC API request gets
+// SubmitResult.DCAPIResponse (Appendix A.4) with no HTTP call.
+func (p *Oid4vpPresenter) SubmitDCQLResponse(ctx context.Context, req types.AdmittedRequest, vpToken map[string][]string) (*types.SubmitResult, error) {
+	handle, err := p.admittedHere(req)
+	if err != nil {
+		return nil, err
 	}
+	if handle.wire != wireOpenID4VP1 {
+		return nil, fmt.Errorf("%w: a DCQL response answers an OpenID4VP 1.0 request", ErrResponseTypeMismatch)
+	}
+	if handle.isDCAPI() {
+		response, encrypted, err := p.dcapiResponse(handle.req, vpToken)
+		if err != nil {
+			return nil, err
+		}
+		return &types.SubmitResult{DCAPIResponse: response, Encrypted: encrypted}, nil
+	}
+	redirectURI, encrypted, err := p.postDCQLResponse(ctx, handle.endpoint.String(), vpToken, handle.req.State, string(handle.req.ResponseMode), handle.req.ClientMetadata)
+	if err != nil {
+		return nil, err
+	}
+	return &types.SubmitResult{RedirectURI: redirectURI, Encrypted: encrypted}, nil
+}
+
+// postDCQLResponse posts one Authorization Response carrying vpToken. mode is
+// the request's response_mode; "" encrypts when metadata asks for it.
+func (p *Oid4vpPresenter) postDCQLResponse(ctx context.Context, endpoint string, vpToken map[string][]string, state, mode string, metadata *VerifierMetadata) (string, bool, error) {
 	// A nil vp_token is a caller mistake: json.Marshal would send the JSON
 	// literal null, which is not the object OID4VP 1.0 §8.1 defines. An empty
 	// non-nil map is the answer to a request whose optional credential_sets the
 	// holder declined for every query (OID4VP 1.0 §6.4.2) and must be sent as
 	// the empty object {}.
-	if request == nil || vpToken == nil {
-		return "", fmt.Errorf("presentation request and vp_token are required")
+	if vpToken == nil {
+		return "", false, fmt.Errorf("presentation request and vp_token are required")
 	}
 	for id, tokens := range vpToken {
 		if id == "" || len(tokens) == 0 {
-			return "", fmt.Errorf("vp_token query id and presentations must not be empty")
+			return "", false, fmt.Errorf("vp_token query id and presentations must not be empty")
 		}
 		for _, token := range tokens {
 			if token == "" {
-				return "", fmt.Errorf("vp_token presentation must not be empty")
+				return "", false, fmt.Errorf("vp_token presentation must not be empty")
 			}
 		}
 	}
 	vpTokenJSON, err := json.Marshal(vpToken)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal vp_token: %w", err)
+		return "", false, fmt.Errorf("failed to marshal vp_token: %w", err)
 	}
 
-	// OID4VP 1.0 §8.3: a direct_post.jwt request carries the verifier's
-	// response-encryption metadata (client_metadata.jwks and/or
-	// encrypted_response_enc_values_supported), while a direct_post request
-	// does not. When encryption is requested the response MUST be encrypted;
-	// there is no plaintext fallback.
-	verifierMetadata, _ := request.ClientMetadata.(*VerifierMetadata)
+	// OID4VP 1.0 §8.3: direct_post.jwt is never answered in plaintext, even
+	// when the verifier omitted its metadata.
 	var encryptResponse bool
-	switch request.ResponseMode {
+	switch mode {
 	case string(OAuthAuthzReqResponseModeDirectPostJWT):
-		// The response mode is authoritative: direct_post.jwt is never
-		// answered in plaintext, even when the verifier omitted its metadata.
 		encryptResponse = true
 	case string(OAuthAuthzReqResponseModeDirectPost):
 		encryptResponse = false
 	case "":
-		encryptResponse = verifierEncryptionRequested(verifierMetadata)
+		encryptResponse = verifierEncryptionRequested(metadata)
 	default:
-		return "", fmt.Errorf("response_mode %q is not supported by PresentDCQL", request.ResponseMode)
+		return "", false, fmt.Errorf("response_mode %q is not supported for a DCQL response", mode)
 	}
 
 	// OID4VP direct_post requires application/x-www-form-urlencoded
 	formData := url.Values{}
-
 	if encryptResponse {
-		// Encrypted response: the JWE is sent as the "response" parameter.
-		jarmToken, err := p.createJARMResponse(vpTokenJSON, request, verifierMetadata)
+		// The JWE is sent as the "response" parameter.
+		jarmToken, err := p.createJARMResponse(vpTokenJSON, state, metadata)
 		if err != nil {
-			return "", fmt.Errorf("failed to create encrypted authorization response: %w", err)
+			return "", false, fmt.Errorf("failed to create encrypted authorization response: %w", err)
 		}
 		formData.Set("response", jarmToken)
 	} else {
-		// Standard response: Send the vp_token JSON object directly
 		formData.Set("vp_token", string(vpTokenJSON))
-
-		// Add state if present in the original request
-		if request.State != "" {
-			formData.Set("state", request.State)
+		if state != "" {
+			formData.Set("state", state)
 		}
 	}
 
-	respBody, err := p.postAuthorizationResponse(endpoint.String(), formData)
+	respBody, err := postAuthorizationResponse(ctx, p.httpClient(), endpoint, formData)
 	if err != nil {
-		return "", fmt.Errorf("failed to send presentation to verifier: %w", err)
+		return "", encryptResponse, fmt.Errorf("failed to send presentation to verifier: %w", err)
 	}
-	if len(respBody) == 0 {
-		return "", nil
+	return redirectURIFromVerifierResponse(respBody), encryptResponse, nil
+}
+
+// redirectURIFromVerifierResponse reads the redirect_uri member of a Response
+// Endpoint answer (OID4VP 1.0 §8.2), or "" when there is none.
+func redirectURIFromVerifierResponse(body []byte) string {
+	if len(body) == 0 {
+		return ""
 	}
 	var verifierResponse struct {
 		RedirectURI string `json:"redirect_uri"`
 	}
-	if err := json.Unmarshal(respBody, &verifierResponse); err != nil {
-		return "", nil
+	if err := json.Unmarshal(body, &verifierResponse); err != nil {
+		return ""
 	}
-
-	return verifierResponse.RedirectURI, nil
+	return verifierResponse.RedirectURI
 }

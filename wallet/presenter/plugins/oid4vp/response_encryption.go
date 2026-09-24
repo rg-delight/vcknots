@@ -5,27 +5,9 @@ import (
 	"crypto/elliptic"
 	"encoding/json"
 	"fmt"
-	"net/url"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
-
-// CreateEncryptedAuthorizationResponse creates an OID4VP Final direct_post.jwt
-// authorization response JWE. The authzResponse map is the JSON object that the
-// verifier receives after decrypting the form field named "response".
-func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map[string]any, metadata *VerifierMetadata) (string, error) {
-	if metadata == nil {
-		return "", fmt.Errorf("verifier metadata is required for encrypted authorization response")
-	}
-
-	payloadBytes, err := json.Marshal(authzResponse)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal authorization response: %w", err)
-	}
-
-	return p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
-}
 
 // encryptAuthorizationResponseJWE encrypts payload as an OID4VP 1.0 §8.3
 // authorization response JWE. Metadata of a parsed request is encrypted under
@@ -252,35 +234,15 @@ func verifierEncryptionRequested(metadata *VerifierMetadata) bool {
 		metadata.AuthorizationEncryptedResponseEnc != ""
 }
 
-// SubmitEncryptedAuthorizationResponse encrypts an OID4VP Final authorization
-// response and submits it to the verifier response_uri using the direct_post.jwt
-// form field named "response". It returns the verifier response body so callers
-// can perform browser-driver follow-up such as opening a returned redirect URI.
-func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL, authzResponse map[string]any, metadata *VerifierMetadata) (string, error) {
-	encryptedResponse, err := p.CreateEncryptedAuthorizationResponse(authzResponse, metadata)
-	if err != nil {
-		return "", err
-	}
-
-	formData := url.Values{"response": []string{encryptedResponse}}
-	body, err := p.postAuthorizationResponse(endpoint.String(), formData)
-	if err != nil {
-		return "", fmt.Errorf("failed to submit encrypted authorization response: %w", err)
-	}
-	return string(body), nil
-}
-
 // createJARMResponse creates the encrypted JWE authorization response for a
 // direct_post.jwt request, embedding vp_token and state.
-func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, request *types.PresentationRequest, metadata *VerifierMetadata) (string, error) {
-	// Create the response payload; vp_token is embedded as a JSON object.
+func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, state string, metadata *VerifierMetadata) (string, error) {
+	// vp_token is embedded as a JSON object.
 	payload := map[string]interface{}{
 		"vp_token": json.RawMessage(vpTokenJSON),
 	}
-
-	// Add state if present
-	if request != nil && request.State != "" {
-		payload["state"] = request.State
+	if state != "" {
+		payload["state"] = state
 	}
 
 	payloadBytes, err := json.Marshal(payload)
