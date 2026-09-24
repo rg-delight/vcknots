@@ -12,17 +12,10 @@ import (
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
-// withDraft24RequestObject authenticates a Draft24 Request Object. It uses the
-// provided JWT string as the request object to populate the
-// CredentialPresentationRequest, validating its claims and signature as per
-// OID4VP and RFC 9101.
-//
-// The Draft24 wire contract (the client_id_scheme parameter and
-// presentation_definition) is preserved here, but an X.509 signed Request
-// Object is authenticated by the same shared path Final uses whenever the
-// caller configured RequestObjectValidationOptions. A caller that configured
-// only the legacy X509TrustChainRoots pool, or the InsecureSkipX509Verify test
-// escape, keeps the original Draft24 behaviour.
+// withDraft24RequestObject authenticates a Draft24 Request Object and loads
+// its claims. X.509 Request Objects go through authenticateX509RequestObject,
+// except x509_san_dns with only X509TrustChainRoots configured and the
+// InsecureSkipX509Verify test escape.
 func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	if b.errValidation != nil {
 		return b
@@ -94,19 +87,20 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// A configured RequestObjectValidationOptions is the caller's request for
-	// the shared authentication path: trust anchors or a root pool, the CRL
-	// policy, the wallet audience, the clock skew and the signature algorithms
-	// all apply to Draft24 exactly as they do to Final.
-	if isX509ClientID && b.requestObjectValidation != nil && !b.insecureSkipX509Verify {
+	// The shared X.509 path applies when the caller configured
+	// RequestObjectValidationOptions, and always to x509_hash, whose thumbprint
+	// names a certificate without saying it is trusted. Only x509_san_dns
+	// without options keeps the X509TrustChainRoots check below.
+	useShared := b.requestObjectValidation != nil || (clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash)
+	if isX509ClientID && useShared && !b.insecureSkipX509Verify {
 		if err := b.authenticateX509RequestObject(obj, parsedJWT, options); err != nil {
 			b.errValidation = err
 		}
 		return b
 	}
 
-	// x509_hash, legacy configuration: the Client Identifier is the leaf
-	// certificate thumbprint, so no chain is verified.
+	// x509_hash under InsecureSkipX509Verify: the thumbprint and signature are
+	// checked, the chain is not.
 	if clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash {
 		certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
 		if err != nil {
