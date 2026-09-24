@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 const MaxCRLBytes = 8 * 1024 * 1024
@@ -187,18 +187,12 @@ func (c *CRLChecker) fetch(ctx context.Context, location string) ([]byte, error)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("CRL returned HTTP %d; redirects are not followed", response.StatusCode)
 	}
-	if declared := response.Header.Get("Content-Length"); declared != "" {
-		length, err := strconv.ParseInt(declared, 10, 64)
-		if err != nil || length < 0 || length > MaxCRLBytes {
-			return nil, fmt.Errorf("CRL Content-Length is invalid or exceeds 8 MiB")
-		}
-	}
-	der, err := io.ReadAll(io.LimitReader(response.Body, MaxCRLBytes+1))
+	der, err := httpfetch.ReadLimited(response, MaxCRLBytes)
 	if err != nil {
 		return nil, err
 	}
-	if len(der) == 0 || len(der) > MaxCRLBytes {
-		return nil, fmt.Errorf("CRL body is empty or exceeds 8 MiB")
+	if len(der) == 0 {
+		return nil, fmt.Errorf("CRL body is empty")
 	}
 	return der, nil
 }

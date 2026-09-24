@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -588,6 +589,23 @@ func TestVerifyCredential_ValidAndWrongKey(t *testing.T) {
 	require.False(t, fixture.wallet.VerifyCredential(saved.Credential, jose.JSONWebKey{Key: &wrongKey.PublicKey, Algorithm: "ES256"}))
 }
 
+// TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy pins that a valid
+// signature under an algorithm the dispatcher implements but the default
+// policy does not accept is not reported as verified.
+func TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy(t *testing.T) {
+	w, _ := newAcceptanceWallet(t, profile.Final, nil)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	payload := []byte("header.payload")
+	digest := sha256.Sum256(payload)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, digest[:])
+	require.NoError(t, err)
+	signed := &credential.Credential{Proof: &credential.CredentialProof{Algorithm: jose.RS256, Signature: signature, Payload: payload}}
+
+	require.False(t, w.VerifyCredential(signed, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
+	require.False(t, w.VerifyCredential(nil, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
+}
+
 func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
@@ -619,6 +637,27 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
 	})
+}
+
+// TestDraft13StoreRequiresAcceptancePolicy pins that the Draft 13 issuance
+// API, like every other exported acceptance entry point, refuses to store a
+// credential when Config.CredentialAcceptance is nil.
+func TestDraft13StoreRequiresAcceptancePolicy(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	fixture.configuration = map[string]any{
+		"format":                "jwt_vc_json",
+		"credential_definition": map[string]any{"type": []string{"VerifiableCredential", "UniversityDegree"}},
+		"cryptographic_binding_methods_supported": []string{"did:key"},
+	}
+	req := fixture.preAuthorizedRequest(t)
+	req.StoreCredential = true
+
+	_, err := fixture.wallet.ReceiveOID4VCIDraft13Credential(t.Context(), req)
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	entries, total, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.Empty(t, entries)
 }
 
 func TestUnverifiedIssuerOptOutAcceptsUnauthenticatedX5C(t *testing.T) {
@@ -853,7 +892,7 @@ func TestVerifyCredentialForAcceptance_SigningAlgorithms(t *testing.T) {
 			require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 
 			// The same credential under a policy that lists no algorithm falls
-			// back to DefaultCredentialSigningAlgorithms, which is ES256 alone.
+			// back to DefaultCredentialSigningAlgorithms(), which is ES256 alone.
 			unlisted, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{ResolveIssuerKeys: resolve})
 			_, _, err = unlisted.VerifyCredentialForAcceptance(t.Context(), []byte(wire), credential.SDJwtVC, &holder)
 			if issuer.algorithm == jose.ES256 {
@@ -864,6 +903,18 @@ func TestVerifyCredentialForAcceptance_SigningAlgorithms(t *testing.T) {
 			require.ErrorContains(t, err, "is not listed by the credential acceptance policy")
 		})
 	}
+}
+
+// TestAcceptancePolicyDefaultsAreCopies pins that the default algorithm lists
+// cannot be widened process-wide by a caller that modifies what it was given.
+func TestAcceptancePolicyDefaultsAreCopies(t *testing.T) {
+	algorithms := DefaultCredentialSigningAlgorithms()
+	algorithms[0] = jose.RS256
+	require.Equal(t, []jose.SignatureAlgorithm{jose.ES256}, DefaultCredentialSigningAlgorithms())
+
+	sdAlgorithms := AcceptedSDAlgorithms()
+	sdAlgorithms[0] = "md5"
+	require.Equal(t, []string{"sha-256", "sha-384", "sha-512"}, AcceptedSDAlgorithms())
 }
 
 // TestVerifyCredentialForAcceptance_AlgorithmWithoutPlugin covers the second
@@ -1116,8 +1167,7 @@ func TestVerifyCredentialForAcceptance_TypedFailures(t *testing.T) {
 }
 
 // TestVerifyCredentialWithPolicy covers the per-call form: the same wallet
-// judges one credential under two policies, and a nil policy runs the minimum
-// rules without authenticating an issuer.
+// judges one credential under several policies, and a nil policy is refused.
 func TestVerifyCredentialWithPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	otherHolder := newMockKeyEntry().PublicKey()
@@ -1147,15 +1197,33 @@ func TestVerifyCredentialWithPolicy(t *testing.T) {
 	_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, expiring)
 	require.ErrorIs(t, err, ErrCredentialExpired)
 
-	t.Run("a nil policy authenticates no issuer and still binds the holder", func(t *testing.T) {
-		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, nil)
+	t.Run("a nil policy is refused", func(t *testing.T) {
+		_, _, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, nil)
+		require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	})
+
+	t.Run("UnverifiedIssuer authenticates no issuer and still binds the holder", func(t *testing.T) {
+		permissive := &CredentialAcceptancePolicy{UnverifiedIssuer: true}
+		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, permissive)
 		require.NoError(t, err)
 		require.Empty(t, verification.IssuerKeyID)
+		require.Nil(t, verification.IssuerKey)
 		require.True(t, verification.HolderBound)
 
-		_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &otherHolder, nil)
+		_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &otherHolder, permissive)
 		require.ErrorIs(t, err, ErrHolderBindingMismatch)
 	})
+}
+
+// TestCredentialValidityRejectsOutOfRangeNumericDate pins that an exp beyond
+// any representable date is a malformed claim, not a credential that never
+// expires.
+func TestCredentialValidityRejectsOutOfRangeNumericDate(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	w, _ := newAcceptanceWallet(t, profile.Final, nil)
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holder, exp: time.Unix(9e15, 0)})
+	_, _, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, &CredentialAcceptancePolicy{UnverifiedIssuer: true})
+	require.ErrorIs(t, err, ErrCredentialParse)
 }
 
 func ptr[T any](value T) *T {

@@ -6,15 +6,34 @@ import (
 	"encoding/asn1"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 )
 
+// Object identifiers of RFC 5280 Sections 4.2 and 5.2-5.3.
 var (
 	crlDistributionPointsOID = asn1.ObjectIdentifier{2, 5, 29, 31}
 	crlAuthorityInfoOID      = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 1}
 	crlOCSPMethodOID         = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1}
 	crlIssuingPointOID       = asn1.ObjectIdentifier{2, 5, 29, 28}
+	crlNumberOID             = asn1.ObjectIdentifier{2, 5, 29, 20}
+	crlReasonCodeOID         = asn1.ObjectIdentifier{2, 5, 29, 21}
+	crlInvalidityDateOID     = asn1.ObjectIdentifier{2, 5, 29, 24}
+	crlDeltaIndicatorOID     = asn1.ObjectIdentifier{2, 5, 29, 27}
+	crlCertificateIssuerOID  = asn1.ObjectIdentifier{2, 5, 29, 29}
+	crlAuthorityKeyIDOID     = asn1.ObjectIdentifier{2, 5, 29, 35}
+	crlFreshestOID           = asn1.ObjectIdentifier{2, 5, 29, 46}
 )
+
+// oidIn reports whether id is one of oids.
+func oidIn(id asn1.ObjectIdentifier, oids ...asn1.ObjectIdentifier) bool {
+	for _, oid := range oids {
+		if id.Equal(oid) {
+			return true
+		}
+	}
+	return false
+}
 
 func crlDERValue(der []byte) (asn1.RawValue, error) {
 	var value asn1.RawValue
@@ -153,33 +172,32 @@ func crlPointURLs(field asn1.RawValue) ([]string, error) {
 
 func checkCRLExtensions(crl *x509.RevocationList) error {
 	for _, extension := range crl.Extensions {
-		switch extension.Id.String() {
-		case "2.5.29.27":
+		switch {
+		case extension.Id.Equal(crlDeltaIndicatorOID):
 			return fmt.Errorf("delta CRL is unsupported")
-		case "2.5.29.35", "2.5.29.20", "2.5.29.28", "2.5.29.46":
-		default:
-			if extension.Critical {
-				return fmt.Errorf("unrecognized critical CRL extension %s", extension.Id)
-			}
+		case oidIn(extension.Id, crlAuthorityKeyIDOID, crlNumberOID, crlIssuingPointOID, crlFreshestOID):
+		case extension.Critical:
+			return fmt.Errorf("unrecognized critical CRL extension %s", extension.Id)
 		}
 	}
 	for _, entry := range crl.RevokedCertificateEntries {
 		for _, extension := range entry.Extensions {
-			switch extension.Id.String() {
-			case "2.5.29.29":
+			switch {
+			case extension.Id.Equal(crlCertificateIssuerOID):
 				return fmt.Errorf("indirect CRL entry (certificateIssuer) is unsupported")
-			case "2.5.29.21", "2.5.29.24":
-			default:
-				if extension.Critical {
-					return fmt.Errorf("unrecognized critical CRL entry extension %s", extension.Id)
-				}
+			case oidIn(extension.Id, crlReasonCodeOID, crlInvalidityDateOID):
+			case extension.Critical:
+				return fmt.Errorf("unrecognized critical CRL entry extension %s", extension.Id)
 			}
 		}
 	}
 	return nil
 }
 
-func checkCRLScope(crl *x509.RevocationList, cert *x509.Certificate, location string) error {
+// checkCRLScope applies the Issuing Distribution Point of RFC 5280 Section
+// 5.2.5. A distribution point name in it must match one of the certificate's
+// own distribution point names (Section 6.3.3(b)(2)(i)).
+func checkCRLScope(crl *x509.RevocationList, cert *x509.Certificate, distributionPoints []string) error {
 	for _, extension := range crl.Extensions {
 		if !extension.Id.Equal(crlIssuingPointOID) {
 			continue
@@ -201,7 +219,7 @@ func checkCRLScope(crl *x509.RevocationList, cert *x509.Certificate, location st
 				}
 				matched := false
 				for _, name := range urls {
-					matched = matched || name == location
+					matched = matched || slices.Contains(distributionPoints, name)
 				}
 				if !matched {
 					return fmt.Errorf("CRL scope does not name the certificate distribution point")
@@ -268,20 +286,20 @@ func parseCRLExtensions(der []byte) ([]pkix.Extension, error) {
 			return nil, fmt.Errorf("duplicate CRL extension %s", extension.Id)
 		}
 		seen[extension.Id.String()] = true
-		switch extension.Id.String() {
-		case "2.5.29.20":
+		switch {
+		case extension.Id.Equal(crlNumberOID):
 			var number *big.Int
 			rest, err := asn1.Unmarshal(extension.Value, &number)
 			if err != nil || len(rest) != 0 || number.Sign() < 0 {
 				return nil, fmt.Errorf("malformed CRL number")
 			}
-		case "2.5.29.21":
+		case extension.Id.Equal(crlReasonCodeOID):
 			var reason asn1.Enumerated
 			rest, err := asn1.Unmarshal(extension.Value, &reason)
 			if err != nil || len(rest) != 0 || reason < 0 || reason > 10 || reason == 7 {
 				return nil, fmt.Errorf("malformed CRL entry reason code")
 			}
-		case "2.5.29.24":
+		case extension.Id.Equal(crlInvalidityDateOID):
 			var invalidityDate time.Time
 			rest, err := asn1.UnmarshalWithParams(extension.Value, &invalidityDate, "generalized")
 			if err != nil || len(rest) != 0 {

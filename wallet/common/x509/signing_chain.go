@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 // SigningChainOptions contains the relying party's trust policy. Trust anchors
@@ -37,6 +40,14 @@ type SigningChainResult struct {
 	Revocation   CRLCheckResult
 }
 
+// ErrNoTrustAnchor reports that no valid certification path from the signing
+// certificate reaches a configured trust anchor (crypto/x509's
+// UnknownAuthorityError, which also covers a certificate in the chain that does
+// not validly certify the one below it). A self-signed or CA leaf, an expired
+// or mis-used certificate, a name-constraint violation and a revocation
+// failure are reported without it.
+var ErrNoTrustAnchor = common.NewCodedError("x509_chain_no_trust_anchor", "certificate chain reaches no configured trust anchor")
+
 // SigningChainError keeps configuration, certificate, path and revocation
 // failures distinguishable. Underlying x509 and CRL errors support errors.As.
 type SigningChainError struct {
@@ -48,10 +59,9 @@ func (e *SigningChainError) Error() string { return fmt.Sprintf("x509 %s: %v", e
 func (e *SigningChainError) Unwrap() error { return e.Err }
 
 // ErrorCode names why the signing certificate was not accepted. A revocation
-// failure is reported as a path failure that joins the underlying
-// *CRLCheckError, so the revocation verdict is the more specific answer and
-// this error defers to it; everything else is a chain that does not reach a
-// configured trust anchor.
+// failure defers to the underlying *CRLCheckError; every other refusal is
+// "x509_chain_untrusted". Use errors.Is(err, ErrNoTrustAnchor) to tell a chain
+// that merely reaches no configured anchor from one that is invalid.
 func (e *SigningChainError) ErrorCode() string {
 	var revocationError *CRLCheckError
 	if errors.As(e.Err, &revocationError) {
@@ -83,7 +93,7 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 		}
 	}
 	leaf := certificates[0]
-	if leaf.IsCA || (bytes.Equal(leaf.RawIssuer, leaf.RawSubject) && leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature) == nil) {
+	if leaf.IsCA || IsSelfSigned(leaf) {
 		return invalid("certificate", errors.New("signer must be a non-self-signed end-entity certificate"))
 	}
 	if hasKeyUsage(leaf) && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
@@ -91,6 +101,10 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 	}
 	chains, err := signingPaths(certificates, options)
 	if err != nil {
+		var unknownAuthority x509.UnknownAuthorityError
+		if errors.As(err, &unknownAuthority) {
+			err = fmt.Errorf("%w: %w", ErrNoTrustAnchor, err)
+		}
 		return invalid("path", err)
 	}
 	// Prefer the nearest reached anchor, without requiring certificates carried
@@ -140,10 +154,12 @@ type SigningChainPolicy struct {
 	// AllowUnadvertisedRevocation; its HTTPClient, when set, wins over
 	// HTTPClient below.
 	CRL CRLCheckerOptions
-	// AllowUnadvertisedRevocation keeps certificates that publish no CRL/OCSP
-	// mechanism on the trust path, reported separately rather than positively
-	// checked. False requires positive status for every certificate below the
-	// anchor.
+	// AllowUnadvertisedRevocation keeps on the trust path a certificate that
+	// publishes no CRL distribution point, counted in
+	// CRLCheckResult.NoMechanismCertificates instead of checked. That includes
+	// a certificate that advertises only OCSP: OCSP is not consulted, so its
+	// status is not established either. False requires a current CRL for
+	// every certificate below the anchor.
 	AllowUnadvertisedRevocation bool
 	// CurrentTime is the single verification clock.
 	CurrentTime time.Time
@@ -183,7 +199,7 @@ func signingPaths(certificates []*x509.Certificate, options SigningChainOptions)
 	// explicit anchors we can defer only that check, on private copies, until
 	// after standard signature, constraints, EKU and policy validation. Original
 	// certificate fields and signed DER remain untouched. A CertPool cannot be
-	// enumerated, so legacy pools retain Go's stricter path-length behavior.
+	// enumerated, so a Roots pool keeps Go's stricter path-length behavior.
 	deferPathLength := len(options.TrustAnchors) != 0
 	originals := make(map[string]*x509.Certificate)
 	prepare := func(cert *x509.Certificate) *x509.Certificate {
@@ -191,10 +207,10 @@ func signingPaths(certificates []*x509.Certificate, options SigningChainOptions)
 		if !deferPathLength {
 			return cert
 		}
-		copy := *cert
-		copy.MaxPathLen = -1
-		copy.MaxPathLenZero = false
-		return &copy
+		clone := *cert
+		clone.MaxPathLen = -1
+		clone.MaxPathLenZero = false
+		return &clone
 	}
 	intermediates := x509.NewCertPool()
 	for _, cert := range certificates[1:] {
@@ -257,9 +273,14 @@ func validateSigningPath(path []*x509.Certificate, now time.Time) error {
 	return nil
 }
 
+// keyUsageOID is the key usage extension of RFC 5280 Section 4.2.1.3.
+var keyUsageOID = asn1.ObjectIdentifier{2, 5, 29, 15}
+
+// hasKeyUsage reports whether cert carries a key usage extension; RFC 5280
+// Section 6.1.4(n) and 6.3.3(f) check the bits only when it does.
 func hasKeyUsage(cert *x509.Certificate) bool {
 	for _, extension := range cert.Extensions {
-		if extension.Id.Equal([]int{2, 5, 29, 15}) {
+		if extension.Id.Equal(keyUsageOID) {
 			return true
 		}
 	}

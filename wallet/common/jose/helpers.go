@@ -15,17 +15,8 @@ import (
 	"github.com/trustknots/vcknots/wallet/serializer/types"
 )
 
-// acceptedSignatureAlgorithms is the canonical list of JWS signature
-// algorithms this wallet accepts when parsing a credential or presentation.
-// It holds the ECDSA family of RFC 7518 Section 3.4 (ES256, ES384, ES512), the
-// RSASSA-PKCS1-v1_5 family of Section 3.3 (RS256, RS384, RS512), the
-// RSASSA-PSS family of Section 3.5 (PS256, PS384, PS512) and EdDSA over Ed25519
-// (RFC 8037).
-//
-// The MAC algorithms of RFC 7518 Section 3.2 and the unsigned "none" of RFC
-// 7515 Section 3.6 are deliberately absent: neither authenticates an issuer to
-// a wallet holding only public keys. Callers must not modify this slice; use
-// AcceptedSignatureAlgorithms for a copy.
+// acceptedSignatureAlgorithms backs AcceptedSignatureAlgorithms and
+// ParseAlgorithm; it is never handed out.
 var acceptedSignatureAlgorithms = []jose.SignatureAlgorithm{
 	jose.ES256, jose.ES384, jose.ES512,
 	jose.RS256, jose.RS384, jose.RS512,
@@ -33,15 +24,11 @@ var acceptedSignatureAlgorithms = []jose.SignatureAlgorithm{
 	jose.EdDSA,
 }
 
-// AcceptedSignatureAlgorithms returns a copy of the canonical list of JWS
-// signature algorithms a wallet may parse a credential or presentation with: the
-// ECDSA family ES256/ES384/ES512 (RFC 7518 Section 3.4), the RSASSA-PKCS1-v1_5
-// family RS256/RS384/RS512 (Section 3.3), the RSASSA-PSS family
-// PS256/PS384/PS512 (Section 3.5) and EdDSA (RFC 8037).
-//
-// The MAC algorithms of RFC 7518 Section 3.2 and the unsigned "none" of RFC
-// 7515 Section 3.6 are never included. The returned slice is a copy, so callers
-// may modify it without affecting the canonical list or each other.
+// AcceptedSignatureAlgorithms returns a copy of the JWS algorithms this
+// library can verify: ES256/ES384/ES512 (RFC 7518 Section 3.4),
+// RS256/RS384/RS512 (Section 3.3), PS256/PS384/PS512 (Section 3.5) and EdDSA
+// (RFC 8037). The MAC algorithms and "none" are never included. Every other
+// algorithm list in the library is derived from, or narrower than, this one.
 func AcceptedSignatureAlgorithms() []jose.SignatureAlgorithm {
 	return slices.Clone(acceptedSignatureAlgorithms)
 }
@@ -66,20 +53,9 @@ func ReconstructJWT(proof *credential.CredentialProof) string {
 	return string(proof.Payload) + "." + sigEncoded
 }
 
-// ParseAlgorithm converts an algorithm name string to the corresponding jose.SignatureAlgorithm.
-// It returns the matching jose.SignatureAlgorithm for the digital signature
-// algorithms this wallet verifies: the ECDSA family "ES256", "ES384" and
-// "ES512" (RFC 7518 Section 3.4), the RSASSA families "RS256", "RS384",
-// "RS512" (Section 3.3) and "PS256", "PS384", "PS512" (Section 3.5), and
-// "EdDSA" (RFC 8037). The comparison is case sensitive, as the "alg" values of
-// RFC 7515 Section 4.1.1 are.
-//
-// The accepted set is AcceptedSignatureAlgorithms, so the parser and the
-// algorithm lists handed to go-jose can never disagree. The MAC algorithms of
-// RFC 7518 Section 3.2 and the unsigned "none" of RFC 7515 Section 3.6 are
-// deliberately absent: neither authenticates an issuer to a wallet holding only
-// public keys. If algStr is not supported it returns an empty algorithm and an
-// error wrapped with types.ErrUnsupportedAlgorithm.
+// ParseAlgorithm returns algStr as a jose.SignatureAlgorithm when it is one of
+// AcceptedSignatureAlgorithms, compared case-sensitively (RFC 7515 Section
+// 4.1.1). Otherwise it returns an error wrapping types.ErrUnsupportedAlgorithm.
 func ParseAlgorithm(algStr string) (jose.SignatureAlgorithm, error) {
 	alg := jose.SignatureAlgorithm(algStr)
 	if slices.Contains(acceptedSignatureAlgorithms, alg) {

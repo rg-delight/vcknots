@@ -217,6 +217,15 @@ func TestVerifySigningCertificateChainRejectsUntrustedOrInvalidCertificates(t *t
 			if !errors.As(err, &structured) || (structured.Kind != "certificate" && structured.Kind != "path") {
 				t.Fatalf("certificate/path failure lost its classification: %v", err)
 			}
+			// Only a chain with no valid path to a configured anchor is
+			// ErrNoTrustAnchor; a certificate that is itself unacceptable is not.
+			noAnchor := map[string]bool{
+				"untrusted-root": true, "missing-issuer": true, "wrong-issuer-key": true,
+				"invalid-leaf-signature": true, "issuer-no-key-cert-sign": true,
+			}[scenario]
+			if got := errors.Is(err, ErrNoTrustAnchor); got != noAnchor {
+				t.Fatalf("errors.Is(err, ErrNoTrustAnchor) = %v, want %v: %v", got, noAnchor, err)
+			}
 		})
 	}
 }

@@ -192,3 +192,38 @@ func TestCRLExtensionsAndAllEntryExtensionsAreChecked(t *testing.T) {
 		})
 	}
 }
+
+// TestCRLIssuingDistributionPointMatchesAnyCertificateDistributionPoint pins
+// RFC 5280 Section 6.3.3(b)(2)(i): the IDP scope must name one of the
+// certificate's distribution points, not necessarily the one fetched.
+func TestCRLIssuingDistributionPointMatchesAnyCertificateDistributionPoint(t *testing.T) {
+	ca := newCRLTestAuthority(t, nil)
+	var der []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(der) }))
+	defer server.Close()
+	fetched := server.URL + "/shard.crl"
+	mirror := "https://mirror.invalid/shard.crl"
+	for _, tc := range []struct {
+		name string
+		idp  string
+		dps  []string
+		kind CRLCheckErrorKind
+	}{
+		{"IDP names another DP of the certificate", mirror, []string{fetched, mirror}, ""},
+		{"IDP names a DP the certificate does not list", mirror, []string{fetched}, CRLErrorScope},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			der = issueCRLTestDER(t, ca, func(list *x509.RevocationList) {
+				list.ExtraExtensions = []pkix.Extension{crlTestIDP(t, tc.idp)}
+			})
+			leaf := issueCRLTestCertificate(t, ca, func(cert *x509.Certificate) { cert.CRLDistributionPoints = tc.dps })
+			checker := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: server.Client()})
+			result, err := checker.Check(context.Background(), []*x509.Certificate{leaf, ca.cert}, ca.now)
+			if tc.kind != "" {
+				assertCRLTestKind(t, err, tc.kind)
+			} else if err != nil || result.CheckedCertificates != 1 {
+				t.Fatalf("CRL in scope rejected: %+v, %v", result, err)
+			}
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/go-jose/go-jose/v4"
+	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/verifier/plugins/eddsa"
 	"github.com/trustknots/vcknots/wallet/verifier/plugins/es256"
@@ -41,38 +42,56 @@ func NewVerificationDispatcher(options ...func(*VerificationDispatcher) error) (
 	return d, nil
 }
 
-// WithDefaultConfig is an option function to configure the dispatcher with built-in components.
+// WithDefaultConfig registers a bundled verifier for every algorithm in
+// commonJOSE.AcceptedSignatureAlgorithms: ES256/ES384/ES512 (RFC 7518 Section
+// 3.4), RS256/RS384/RS512 and PS256/PS384/PS512 (Sections 3.3 and 3.5) and
+// EdDSA over Ed25519 (RFC 8037). "none" and the MAC algorithms are never
+// registered.
 //
-// It registers every JWS signature algorithm this library implements with the
-// standard library alone: the ECDSA family of RFC 7518 Section 3.4, the RSASSA
-// families of Sections 3.3 and 3.5 and EdDSA over Ed25519 (RFC 8037). Registering
-// a plugin only makes an algorithm verifiable; it does not decide which
-// algorithms a credential may be signed with. That stays a caller decision,
-// expressed in CredentialAcceptancePolicy.SigningAlgorithms, so that adding a
-// plugin here never widens what a deployment accepts.
-//
-// The "none" algorithm of RFC 7515 Section 3.6 is deliberately absent and can
-// never be registered by this option: an unsigned JWS has no signature to
-// verify.
+// Registering a plugin makes an algorithm verifiable, not acceptable. The
+// credential acceptance path and Wallet.VerifyCredential apply their own
+// algorithm policy (CredentialAcceptancePolicy.SigningAlgorithms, ES256 by
+// default); a caller of VerificationDispatcher.Verify gets every registered
+// algorithm.
 func WithDefaultConfig() func(*VerificationDispatcher) error {
 	return func(d *VerificationDispatcher) error {
-		// Register built-in verification components
-		for algorithm, component := range map[jose.SignatureAlgorithm]types.VerificationComponent{
-			jose.ES256: es256.NewES256Verifier(),
-			jose.ES384: es384.NewES384Verifier(),
-			jose.ES512: es512.NewES512Verifier(),
-			jose.RS256: rs256.NewRS256Verifier(),
-			jose.RS384: rs384.NewRS384Verifier(),
-			jose.RS512: rs512.NewRS512Verifier(),
-			jose.PS256: ps256.NewPS256Verifier(),
-			jose.PS384: ps384.NewPS384Verifier(),
-			jose.PS512: ps512.NewPS512Verifier(),
-			jose.EdDSA: eddsa.NewEdDSAVerifier(),
-		} {
+		for _, algorithm := range commonJOSE.AcceptedSignatureAlgorithms() {
+			component := bundledVerifier(algorithm)
+			if component == nil {
+				return types.NewVerificationError(algorithm, "no bundled verifier", types.ErrPluginNotFound)
+			}
 			if err := d.RegisterPlugin(algorithm, component); err != nil {
 				return err
 			}
 		}
+		return nil
+	}
+}
+
+// bundledVerifier returns the bundled plugin for algorithm, or nil.
+func bundledVerifier(algorithm jose.SignatureAlgorithm) types.VerificationComponent {
+	switch algorithm {
+	case jose.ES256:
+		return es256.NewES256Verifier()
+	case jose.ES384:
+		return es384.NewES384Verifier()
+	case jose.ES512:
+		return es512.NewES512Verifier()
+	case jose.RS256:
+		return rs256.NewRS256Verifier()
+	case jose.RS384:
+		return rs384.NewRS384Verifier()
+	case jose.RS512:
+		return rs512.NewRS512Verifier()
+	case jose.PS256:
+		return ps256.NewPS256Verifier()
+	case jose.PS384:
+		return ps384.NewPS384Verifier()
+	case jose.PS512:
+		return ps512.NewPS512Verifier()
+	case jose.EdDSA:
+		return eddsa.NewEdDSAVerifier()
+	default:
 		return nil
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 // CRLCheckErrorKind distinguishes an unavailable status from a revoked certificate.
@@ -58,21 +60,34 @@ func (e *CRLCheckError) ErrorCode() string {
 	}
 }
 
-// CRLCheckResult does not describe certificates without mechanisms as checked.
+// CRLCheckResult counts the certificates below the anchor by how their status
+// was established.
 type CRLCheckResult struct {
-	CheckedCertificates     int
+	// CheckedCertificates had their serial looked up in a current CRL.
+	CheckedCertificates int
+	// NoMechanismCertificates publish no CRL distribution point, so no status
+	// was established for them: they advertise no revocation mechanism at
+	// all, or only OCSP, which this package does not consult.
 	NoMechanismCertificates int
 }
 
 // CRLCheckerOptions supplies the guarded outbound client and optional durable
 // DER cache. A checker belongs to one verification session, never a global pool.
 type CRLCheckerOptions struct {
-	HTTPClient    *http.Client
-	Cache         CRLCache
-	MaxFetches    int
-	FetchTimeout  time.Duration
+	HTTPClient   *http.Client
+	Cache        CRLCache
+	MaxFetches   int
+	FetchTimeout time.Duration
+	// RequireStatus refuses a certificate that publishes no CRL distribution
+	// point, including one that advertises only OCSP. Without it such a
+	// certificate is counted in CRLCheckResult.NoMechanismCertificates.
 	RequireStatus bool
+	// ClockSkew is how far a CRL's thisUpdate may lie ahead of the
+	// verification time. Zero means defaultCRLClockSkew (five minutes).
+	ClockSkew time.Duration
 }
+
+const defaultCRLClockSkew = 5 * time.Minute
 
 // CRLChecker shares downloads (including failures) between candidate paths.
 // PKIX validation must succeed before a caller supplies a path to Check.
@@ -82,6 +97,7 @@ type CRLChecker struct {
 	maxFetches    int
 	fetchTimeout  time.Duration
 	requireStatus bool
+	clockSkew     time.Duration
 	mu            sync.Mutex
 	fetches       int
 	loads         map[string]*crlDownload
@@ -91,8 +107,11 @@ func NewCRLChecker(options CRLCheckerOptions) (*CRLChecker, error) {
 	if options.HTTPClient == nil {
 		return nil, fmt.Errorf("CRL HTTP client is required")
 	}
-	if options.MaxFetches < 0 || options.FetchTimeout < 0 {
-		return nil, fmt.Errorf("CRL fetch budget and timeout must not be negative")
+	if options.MaxFetches < 0 || options.FetchTimeout < 0 || options.ClockSkew < 0 {
+		return nil, fmt.Errorf("CRL fetch budget, timeout and clock skew must not be negative")
+	}
+	if options.ClockSkew == 0 {
+		options.ClockSkew = defaultCRLClockSkew
 	}
 	if options.MaxFetches == 0 {
 		options.MaxFetches = 16
@@ -100,17 +119,17 @@ func NewCRLChecker(options CRLCheckerOptions) (*CRLChecker, error) {
 	if options.FetchTimeout == 0 {
 		options.FetchTimeout = 10 * time.Second
 	}
-	client := *options.HTTPClient
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &CRLChecker{
-		client: &client, cache: options.Cache, maxFetches: options.MaxFetches,
-		fetchTimeout: options.FetchTimeout, requireStatus: options.RequireStatus,
+		client: httpfetch.NoRedirect(options.HTTPClient), cache: options.Cache, maxFetches: options.MaxFetches,
+		fetchTimeout: options.FetchTimeout, requireStatus: options.RequireStatus, clockSkew: options.ClockSkew,
 		loads: make(map[string]*crlDownload),
 	}, nil
 }
 
 // Check verifies revocation below the anchor in a leaf-first, anchor-last path.
-// It never follows OCSP and never treats missing mechanisms as a CRL verdict.
+// It never consults OCSP and never treats a missing CRL distribution point as
+// a CRL verdict. A distribution point extension that names no usable http(s)
+// CRL is always refused.
 func (c *CRLChecker) Check(ctx context.Context, path []*x509.Certificate, now time.Time) (CRLCheckResult, error) {
 	result := CRLCheckResult{}
 	if len(path) == 0 || now.IsZero() {
@@ -130,20 +149,21 @@ func (c *CRLChecker) Check(ctx context.Context, path []*x509.Certificate, now ti
 			return result, crlError(CRLErrorUnsupported, cert, "", err.Error(), err)
 		}
 		if len(urls) == 0 {
-			ocsp, err := certificateAdvertisesOCSP(cert)
-			if err != nil || advertised || ocsp || c.requireStatus {
-				return result, crlError(CRLErrorUnsupported, cert, "", "no usable CRL distribution point; OCSP is not consulted", err)
+			if advertised || c.requireStatus {
+				return result, crlError(CRLErrorUnsupported, cert, "", "no usable CRL distribution point; OCSP is not consulted", nil)
 			}
 			result.NoMechanismCertificates++
 			continue
 		}
 		issuer := path[i+1]
-		if issuer.KeyUsage&x509.KeyUsageCRLSign == 0 {
+		// RFC 5280 Section 6.3.3(f): cRLSign is required when the issuer
+		// carries a key usage extension, as keyCertSign is on the path.
+		if hasKeyUsage(issuer) && issuer.KeyUsage&x509.KeyUsageCRLSign == 0 {
 			return result, crlError(CRLErrorIssuer, cert, "", "issuer has no cRLSign key usage", nil)
 		}
 		var lastErr *CRLCheckError
 		for _, location := range urls {
-			lastErr = c.checkCRL(ctx, cert, issuer, location, now)
+			lastErr = c.checkCRL(ctx, cert, issuer, location, urls, now)
 			if lastErr == nil {
 				break
 			}
@@ -164,7 +184,9 @@ func crlError(kind CRLCheckErrorKind, cert *x509.Certificate, location, reason s
 		SerialNumber: cert.SerialNumber.Text(16), Reason: reason, Err: err}
 }
 
-func (c *CRLChecker) checkCRL(ctx context.Context, cert, issuer *x509.Certificate, location string, now time.Time) *CRLCheckError {
+// checkCRL checks cert against the CRL at location, one of the certificate's
+// distribution point URLs listed in distributionPoints.
+func (c *CRLChecker) checkCRL(ctx context.Context, cert, issuer *x509.Certificate, location string, distributionPoints []string, now time.Time) *CRLCheckError {
 	loaded, loadErr := c.load(ctx, location, now)
 	if loadErr != nil {
 		return crlError(loadErr.Kind, cert, location, loadErr.Reason, loadErr.Err)
@@ -180,7 +202,7 @@ func (c *CRLChecker) checkCRL(ctx context.Context, cert, issuer *x509.Certificat
 	if err := crl.CheckSignatureFrom(issuer); err != nil {
 		return crlError(CRLErrorSignature, cert, location, "CRL issuer signature does not verify", err)
 	}
-	if crl.NextUpdate.IsZero() || now.Before(crl.ThisUpdate) || now.After(crl.NextUpdate) {
+	if crl.NextUpdate.IsZero() || now.Add(c.clockSkew).Before(crl.ThisUpdate) || now.After(crl.NextUpdate) {
 		return crlError(CRLErrorStale, cert, location, "CRL has no nextUpdate or is not current", nil)
 	}
 	if err := checkCRLExtensions(crl); err != nil {
@@ -190,7 +212,7 @@ func (c *CRLChecker) checkCRL(ctx context.Context, cert, issuer *x509.Certificat
 	// that may be out of scope for this particular certificate. Every use
 	// verifies it again; neither scope nor non-revocation is cached.
 	c.remember(ctx, location, loaded, crl)
-	if err := checkCRLScope(crl, cert, location); err != nil {
+	if err := checkCRLScope(crl, cert, distributionPoints); err != nil {
 		return crlError(CRLErrorScope, cert, location, err.Error(), err)
 	}
 	for _, entry := range crl.RevokedCertificateEntries {

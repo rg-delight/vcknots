@@ -19,24 +19,30 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
 // CredentialAcceptancePolicy decides whether a received credential may be stored.
-// A nil policy keeps the minimum rules: the credential must parse, and a cnf that
-// does not match the holder key used for the credential request is rejected.
+// Every exported acceptance entry point requires one and refuses a nil policy
+// with ErrCredentialAcceptancePolicyRequired. A deployment that accepts
+// unauthenticated issuers says so with UnverifiedIssuer.
 type CredentialAcceptancePolicy struct {
-	// IssuerX509 authenticates the issuer key from the credential's x5c JOSE header.
+	// IssuerX509 authenticates the issuer key from the credential's x5c JOSE
+	// header. The HAIP profile requires it for SD-JWT VC (HAIP §6.1.1).
 	IssuerX509 *IssuerX509TrustOptions
 	// ResolveIssuerKeys returns candidate issuer public keys when the credential has
 	// no x5c header (JWKS, DID or a static registry chosen by the caller). header is
 	// the issuer JWT's protected header. It is not called when x5c is present and
 	// IssuerX509 is configured, unless ResolveIssuerKeysWhenX5CUntrusted lets it
-	// take over from a chain that reached no configured trust anchor.
+	// take over from a chain that reached no configured trust anchor. A
+	// returned key whose JWK use is not "sig", or whose alg differs from the
+	// JWS alg, is ignored.
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysFromClaims is ResolveIssuerKeys for a resolver that also
 	// reads the issuer-signed claims, such as the W3C JWT VC `vc.issuer`
@@ -46,14 +52,11 @@ type CredentialAcceptancePolicy struct {
 	// ResolveIssuerKeys.
 	ResolveIssuerKeysFromClaims func(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysWhenX5CUntrusted lets ResolveIssuerKeys establish the
-	// issuer key when the credential carries an x5c chain that reaches none of
-	// IssuerX509's trust anchors. An issuer may publish a chain this wallet does
-	// not recognise together with a key its metadata or a DID binds, and a
-	// chain that merely reaches no anchor says nothing about the signer. Every
-	// other chain refusal - a revoked certificate, an unknown revocation
-	// status, a failed DNS binding, a HAIP trust anchor inside x5c, an
-	// undecodable x5c - still refuses the credential, because it is evidence
-	// about the signer rather than about this wallet's configuration.
+	// issuer key when the credential's x5c chain reaches none of IssuerX509's
+	// trust anchors (commonX509.ErrNoTrustAnchor). Every other chain refusal
+	// (an undecodable x5c, a self-signed or CA leaf, an expired or mis-used
+	// certificate, a name-constraint violation, revocation) still refuses the
+	// credential. It never applies to an SD-JWT VC under the HAIP profile.
 	ResolveIssuerKeysWhenX5CUntrusted bool
 	// RequireHolderBinding rejects a credential whose holder binding this
 	// wallet cannot establish: one that carries no cnf claim at all, and one
@@ -62,66 +65,48 @@ type CredentialAcceptancePolicy struct {
 	// ErrHolderBindingMissing rather than stored with an unproven binding.
 	RequireHolderBinding bool
 	// UnverifiedIssuer stores credentials without authenticating the issuer
-	// key, which is what a nil policy does implicitly. It only takes effect
-	// when neither IssuerX509 nor ResolveIssuerKeys is configured: with either
-	// of them present the issuer signature is still verified. Everything else
-	// the policy checks — holder binding, exp/nbf and SD-JWT disclosure
-	// integrity — keeps applying, so this opts out of issuer authentication
-	// alone. It exists so that a deployment which accepts unauthenticated
-	// issuers says so in one greppable place instead of expressing it as an
-	// absent policy.
+	// key. It only takes effect when neither IssuerX509 nor ResolveIssuerKeys
+	// is configured: with either of them present the issuer signature is still
+	// verified. Everything else the policy checks (holder binding, exp/nbf and
+	// SD-JWT disclosure integrity) keeps applying. Under the HAIP profile an
+	// SD-JWT VC is refused instead, because HAIP requires x5c authentication.
 	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS "alg" values an issuer may sign a
-	// credential with. An empty list means DefaultCredentialSigningAlgorithms.
-	//
-	// It is a separate decision from which algorithms the verification
-	// dispatcher can compute: a registered plugin makes an algorithm
-	// verifiable, this list makes it acceptable. Keeping them apart means that
-	// adding a plugin — including the ones NewVerificationDispatcher registers
-	// by default — never widens what a deployment accepts on its own, and that
-	// a caller can narrow acceptance without rebuilding the dispatcher. An
-	// algorithm listed here that no plugin implements is still rejected.
+	// credential with. Empty means DefaultCredentialSigningAlgorithms(). The
+	// verification dispatcher must also implement the algorithm: a registered
+	// plugin makes an algorithm verifiable, this list makes it acceptable.
 	SigningAlgorithms []jose.SignatureAlgorithm
-	// ExpectedSDJWTVCType is the SD-JWT VC `vct` claim the credential must
-	// carry. An empty value checks nothing, which is the behaviour before this
-	// field existed; a non-empty value rejects a credential whose vct differs,
-	// so a wallet that asked one Credential Configuration for a credential
-	// cannot store a credential of another type under it.
+	// ExpectedSDJWTVCType, when set, is the SD-JWT VC vct the credential must
+	// carry, so a credential of another type is not stored under the
+	// requested Credential Configuration.
 	ExpectedSDJWTVCType string
-	Now                 func() time.Time
-	ClockSkew           time.Duration
+	// Now is the verification clock; nil means time.Now.
+	Now func() time.Time
+	// ClockSkew is the tolerance applied to exp and nbf.
+	ClockSkew time.Duration
 }
 
-// DefaultCredentialSigningAlgorithms is the issuer signature algorithm policy
-// applied when a CredentialAcceptancePolicy leaves SigningAlgorithms empty, and
-// when no policy is configured at all.
-//
-// It holds ES256 alone. HAIP Section "Requirements for Digital Signatures"
-// states that "Issuers, Verifiers, and Wallets MUST, at a minimum, support
-// ECDSA with P-256 and SHA-256 (JOSE algorithm identifier ES256 ...)" and that
-// "ecosystem-specific profiles of this specification MAY mandate additional
-// cryptographic suites": the floor is interoperable everywhere, anything above
-// it is an ecosystem decision, so a deployment that accepts more says so in its
-// policy. The wallet never modifies the slice; callers may read it and must not
-// modify it either.
-var DefaultCredentialSigningAlgorithms = []jose.SignatureAlgorithm{jose.ES256}
+// DefaultCredentialSigningAlgorithms returns the issuer signature algorithms
+// accepted when CredentialAcceptancePolicy.SigningAlgorithms is empty: ES256,
+// the algorithm HAIP Section "Requirements for Digital Signatures" requires
+// every wallet to support. Anything beyond it is an ecosystem decision stated
+// in the policy. The result is a fresh copy.
+func DefaultCredentialSigningAlgorithms() []jose.SignatureAlgorithm {
+	return []jose.SignatureAlgorithm{jose.ES256}
+}
 
 // acceptedSigningAlgorithms resolves the issuer signature algorithms one
 // acceptance run allows.
 func acceptedSigningAlgorithms(policy *CredentialAcceptancePolicy) []jose.SignatureAlgorithm {
 	if policy == nil || len(policy.SigningAlgorithms) == 0 {
-		return DefaultCredentialSigningAlgorithms
+		return DefaultCredentialSigningAlgorithms()
 	}
 	return policy.SigningAlgorithms
 }
 
 // CredentialAcceptor runs the credential acceptance rules over a raw
-// credential without a credential store. It holds only the profile,
-// serializer and verifier an acceptance run needs, so an integrator that
-// accepts credentials outside a Wallet build can construct it once and reuse
-// it for every credential instead of creating a Wallet — and with it a
-// credstore dispatcher — per credential. Its fields are never mutated after
-// construction, so concurrent calls are safe.
+// credential without a Wallet or credential store. It is safe for concurrent
+// use.
 type CredentialAcceptor struct {
 	profile    profile.Profile
 	serializer *serializer.SerializationDispatcher
@@ -207,7 +192,7 @@ type IssuerX509TrustOptions struct {
 	RootCAs                     *x509.CertPool     // exactly one of TrustAnchors / RootCAs
 	CertificateKeyUsages        []x509.ExtKeyUsage // optional ecosystem EKU policy
 	CRL                         commonX509.CRLCheckerOptions
-	AllowUnadvertisedRevocation bool // certificates without any CRL DP stay on the trust path, reported separately
+	AllowUnadvertisedRevocation bool // see commonX509.SigningChainPolicy.AllowUnadvertisedRevocation
 	// RequireIssuerDNSBinding is an ecosystem policy, not an SD-JWT VC §3.5 requirement:
 	// when iss is an https URL, the leaf certificate must carry a dNSName SAN equal to its host.
 	RequireIssuerDNSBinding bool
@@ -228,19 +213,16 @@ type CredentialVerification struct {
 	IssuerKey *jose.JSONWebKey
 }
 
-// verifyCredentialForAcceptanceContext authenticates a raw credential before it
-// is persisted. Any returned error means nothing may be stored.
+// verifyCredentialForAcceptanceContext authenticates a raw credential under
+// Config.CredentialAcceptance before it is persisted. Any returned error means
+// nothing may be stored.
 //
-// requirePolicy makes Config.CredentialAcceptance mandatory: with it set, a nil
-// policy is a fail-closed error rather than the permissive parse the Draft-13
-// entrypoints keep. The OpenID4VCI Final and HAIP issuance paths pass true,
-// because a credential arriving there has an issuer identity that the flow can
-// and must check. Draft-13 passes false: Config.CredentialAcceptance is
-// optional by design there, and SD-JWT VC Section 3.5 leaves issuer key
-// resolution to ecosystem policy.
+// requirePolicy false lets a nil Config.CredentialAcceptance through with the
+// minimum rules only (the credential parses and a cnf matches holderKey). Only
+// ReceiveCredential passes false, outside the HAIP profile, because it stored
+// credentials without an acceptance policy before the policy existed.
 //
-// ctx bounds the network work the policy performs, which today is CRL retrieval
-// while the issuer certificate chain is verified.
+// ctx bounds the network work the policy performs (CRL retrieval).
 func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
 	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, w.credentialAcceptance, requirePolicy)
 }
@@ -266,20 +248,10 @@ func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, raw []byte, 
 }
 
 // VerifyCredentialWithPolicy is VerifyCredentialForAcceptance with the policy
-// supplied per call instead of taken from the wallet configuration, for an
-// integrator that decides the trust rules per credential — a different trust
-// anchor set, a different issuer key resolution, a different clock — without
-// building a wallet for each. Nothing is written to the wallet's credential
-// store on this path, by either entrypoint.
-//
-// A nil policy runs the minimum rules only: the credential must parse, its typ
-// and alg must be acceptable, and a cnf that does not match holderKey is
-// rejected. No issuer is authenticated and no validity period is checked, which
-// is what the Draft-13 entrypoints do when Config.CredentialAcceptance is
-// absent. Pass a policy, or use VerifyCredentialForAcceptance, to fail closed
-// instead.
+// supplied per call instead of taken from the wallet configuration. It stores
+// nothing. A nil policy is refused with ErrCredentialAcceptancePolicyRequired.
 func (w *Wallet) VerifyCredentialWithPolicy(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy) (*credential.Credential, *CredentialVerification, error) {
-	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, policy, false)
+	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, policy, true)
 }
 
 // verifyCredentialForAcceptanceWithPolicy is the acceptance check itself, run
@@ -296,7 +268,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 // the exported CredentialAcceptor.Verify.
 func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
 	if requirePolicy && policy == nil {
-		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
+		return nil, nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 
 	header, err := IssuerSignedJOSEHeader(flavor, raw)
@@ -334,11 +306,12 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 		}
 	}
 
-	if a.profile.IsHAIP() && flavor == credential.SDJwtVC {
+	// HAIP §6.1.1 mandates X.509 issuer key resolution for SD-JWT VC: "The
+	// SD-JWT VC MUST contain the credential issuer's signing certificate along
+	// with a trust chain in the x5c JOSE header".
+	haipX5C := a.profile.IsHAIP() && flavor == credential.SDJwtVC
+	if haipX5C {
 		if _, present := header["x5c"]; !present {
-			// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's
-			// signing certificate along with a trust chain in the x5c JOSE
-			// header".
 			return nil, nil, ErrHAIPX5CRequired
 		}
 	}
@@ -424,7 +397,7 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, payload, issuer, now, verification); err != nil {
+	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, payload, issuer, now, haipX5C, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -443,9 +416,16 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
-// bounds the CRL retrieval the trust path may perform.
-func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
+// bounds the CRL retrieval the trust path may perform. requireX5C (HAIP
+// SD-JWT VC) makes the x5c chain the only way to establish the issuer key: the
+// policy must configure IssuerX509, and neither UnverifiedIssuer nor
+// ResolveIssuerKeysWhenX5CUntrusted applies.
+func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, payload map[string]any, issuer string, now time.Time, requireX5C bool, verification *CredentialVerification) error {
 	var candidateKeys []jose.JSONWebKey
+
+	if requireX5C && policy.IssuerX509 == nil {
+		return fmt.Errorf("%w: HAIP requires x5c issuer authentication (IssuerX509)", ErrIssuerKeyUnresolved)
+	}
 
 	// An x5c header is trust evidence only when the caller configured X.509
 	// issuer trust. A caller that resolves issuer keys itself (JWKS, DID or a
@@ -494,11 +474,9 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
-			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && chainReachesNoAnchor(err) {
+			if !requireX5C && policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && errors.Is(err, commonX509.ErrNoTrustAnchor) {
 				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 				if resolveErr != nil {
-					// The chain was only this wallet's configuration; the
-					// verdict that stands is the key resolution's own.
 					return fmt.Errorf("issuer certificate chain reaches no configured trust anchor, and %w", resolveErr)
 				}
 				candidateKeys = keys
@@ -531,11 +509,12 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 	return a.verifyIssuerSignatureWithCandidates(parsedCredential, candidateKeys, verification)
 }
 
-// resolveIssuerKeyCandidates asks the caller's ResolveIssuerKeys hook for the
-// issuer's keys and tries the ones the header's kid names first. The kid is a
-// hint, not a filter: the header is unauthenticated until a key verifies it,
-// and an issuer that rotated a key without renaming it must not be refused
-// because a stale identifier matched first.
+// resolveIssuerKeyCandidates asks the caller's resolution hook for the issuer's
+// keys, drops those whose JWK use or alg rules out verifying this signature
+// (RFC 7517 Sections 4.2 and 4.4), and tries the ones the header's kid names
+// first. The kid is a hint, not a filter: the header is unauthenticated until a
+// key verifies it, and an issuer that rotated a key without renaming it must
+// not be refused because a stale identifier matched first.
 func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error) {
 	var keys []jose.JSONWebKey
 	var err error
@@ -549,6 +528,13 @@ func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer strin
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("%w: no issuer key could be resolved", ErrIssuerKeyUnresolved)
+	}
+	algorithm, _ := header["alg"].(string)
+	keys = slices.DeleteFunc(slices.Clone(keys), func(key jose.JSONWebKey) bool {
+		return (key.Use != "" && key.Use != "sig") || (key.Algorithm != "" && key.Algorithm != algorithm)
+	})
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%w: no resolved issuer key is usable for signature algorithm %q", ErrIssuerKeyUnresolved, algorithm)
 	}
 	headerKeyID, _ := header["kid"].(string)
 	if headerKeyID == "" {
@@ -600,49 +586,20 @@ func (a *CredentialAcceptor) verifyIssuerSignatureWithCandidates(
 	return nil
 }
 
-// chainReachesNoAnchor reports whether an x5c chain refusal says only that the
-// chain reaches none of the configured trust anchors, as opposed to something
-// about the signer itself (revocation). It is the one refusal
-// ResolveIssuerKeysWhenX5CUntrusted lets the key-resolution hook take over from.
-func chainReachesNoAnchor(err error) bool {
-	var chainError *commonX509.SigningChainError
-	return errors.As(err, &chainError) && chainError.ErrorCode() == "x509_chain_untrusted"
-}
-
+// verifyCredentialValidity applies the exp and nbf claims (RFC 7519 Sections
+// 4.1.4 and 4.1.5) at now, tolerating skew.
 func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.Duration) error {
-	nowUnix := float64(now.Unix()) + float64(now.Nanosecond())/1e9
-	if exp, present, err := numericDateClaim(payload, "exp"); err != nil {
-		return err
-	} else if present && exp <= nowUnix-skew.Seconds() {
+	if exp, present, err := joseutil.NumericDateClaim(payload, "exp"); err != nil {
+		return fmt.Errorf("%w: %w", ErrCredentialParse, err)
+	} else if present && !exp.After(now.Add(-skew)) {
 		return ErrCredentialExpired
 	}
-	if nbf, present, err := numericDateClaim(payload, "nbf"); err != nil {
-		return err
-	} else if present && nbf > nowUnix+skew.Seconds() {
+	if nbf, present, err := joseutil.NumericDateClaim(payload, "nbf"); err != nil {
+		return fmt.Errorf("%w: %w", ErrCredentialParse, err)
+	} else if present && nbf.After(now.Add(skew)) {
 		return ErrCredentialNotYetValid
 	}
 	return nil
-}
-
-func numericDateClaim(payload map[string]any, name string) (float64, bool, error) {
-	raw, present := payload[name]
-	if !present {
-		return 0, false, nil
-	}
-	switch value := raw.(type) {
-	case json.Number:
-		parsed, err := value.Float64()
-		if err != nil {
-			return 0, false, fmt.Errorf("%w: %s claim is not a numeric date: %w", ErrCredentialParse, name, err)
-		}
-		return parsed, true, nil
-	case float64:
-		return value, true, nil
-	case string:
-		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date, not a string", ErrCredentialParse, name)
-	default:
-		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date", ErrCredentialParse, name)
-	}
 }
 
 func jsonWebKeyFromValue(value any) (jose.JSONWebKey, error) {
@@ -697,14 +654,14 @@ func issuerSignedJWT(flavor credential.SupportedSerializationFlavor, raw []byte)
 }
 
 // issuerRevocationHTTPClient resolves the CRL fetch client for issuer trust:
-// the caller's client when configured, otherwise a bounded default. A client
+// the caller's client when configured, otherwise httpfetch.NewClient. A client
 // already set on IssuerX509TrustOptions.CRL takes precedence inside
 // commonX509.VerifySigningChainWithPolicy.
 func issuerRevocationHTTPClient(client *http.Client) *http.Client {
 	if client != nil {
 		return client
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return httpfetch.NewClient()
 }
 
 // IssuerSignedJOSEHeader decodes the protected header of a credential's
@@ -729,14 +686,13 @@ func IssuerSignedJOSEHeader(flavor credential.SupportedSerializationFlavor, raw 
 	return header, nil
 }
 
-// AcceptedSDAlgorithms lists the _sd_alg values this wallet accepts on an
-// SD-JWT VC, written as the lowercase IANA "Named Information Hash Algorithm"
-// names that SD-JWT (draft-ietf-oauth-selective-disclosure-jwt) Section 4.1.1
-// requires. A credential naming anything else is rejected rather than verified
-// under a substituted hash, and "sha-256" is the default when _sd_alg is
-// absent. The wallet never modifies the slice; callers may read it to report
-// what they support and must not modify it either.
-var AcceptedSDAlgorithms = []string{"sha-256", "sha-384", "sha-512"}
+// AcceptedSDAlgorithms returns the SD-JWT _sd_alg values the wallet accepts,
+// as the lowercase IANA "Named Information Hash Algorithm" names SD-JWT
+// Section 4.1.1 uses. "sha-256" is the default when _sd_alg is absent. The
+// result is a fresh copy.
+func AcceptedSDAlgorithms() []string {
+	return []string{"sha-256", "sha-384", "sha-512"}
+}
 
 func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *credential.Credential) error {
 	sdAlg := "sha-256"
@@ -746,7 +702,7 @@ func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *cr
 			return fmt.Errorf("%w: _sd_alg must be a string", ErrSDAlgUnsupported)
 		}
 		sdAlg = strings.ToLower(text)
-		if !slices.Contains(AcceptedSDAlgorithms, sdAlg) {
+		if !slices.Contains(AcceptedSDAlgorithms(), sdAlg) {
 			return fmt.Errorf("%w: unsupported _sd_alg %q", ErrSDAlgUnsupported, text)
 		}
 	}
