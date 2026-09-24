@@ -121,7 +121,7 @@ func stageError(stage Stage, err error) error {
 	var statusError *httpStatusError
 	if errors.As(err, &statusError) {
 		endpointError.StatusCode = statusError.statusCode
-		endpointError.OAuthError = tokenErrorCode([]byte(statusError.body))
+		endpointError.OAuthError = oauthErrorCode([]byte(statusError.body))
 	}
 	return endpointError
 }

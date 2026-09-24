@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -19,6 +18,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -297,45 +297,36 @@ func signedIssuerMetadataAlgorithms() []jose.SignatureAlgorithm {
 // the Credential Issuer Identifier the request was derived from; signed metadata
 // is bound to it through the sub claim.
 func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, requestURL url.URL, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile, target *types.CredentialIssuerMetadata) error {
-	if !o.AllowHTTP && !strings.EqualFold(requestURL.Scheme, "https") {
-		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", requestURL.Scheme)
-	}
 	trustConfigured := len(signing.TrustAnchors) > 0 || signing.RootCAs != nil
 	if signing.Require && !trustConfigured {
 		return fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureRequired)
 	}
 
-	req, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointIssuerMetadata), http.MethodGet, requestURL.String(), nil)
-	if err != nil {
-		return err
-	}
 	// Section 12.2.2: the Wallet is RECOMMENDED to send an Accept header
 	// "to indicate the Content Type(s) it supports, and by doing so, signaling
 	// whether it supports signed metadata". Asking for a signed document the
 	// wallet could not authenticate would only invite a response it must reject.
+	accept := "application/json"
 	if signing.Request && trustConfigured {
-		req.Header.Set("Accept", "application/jwt, application/json;q=0.9")
-	} else {
-		req.Header.Set("Accept", "application/json")
+		accept = "application/jwt, application/json;q=0.9"
 	}
-
-	resp, err := o.httpClient().Do(req)
+	response, err := o.do(observe.WithEndpoint(ctx, observe.EndpointIssuerMetadata), exchange{
+		method: http.MethodGet,
+		url:    requestURL,
+		accept: accept,
+	})
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+	if response.statusCode != http.StatusOK {
+		return response.statusError()
 	}
-	if resp.StatusCode != http.StatusOK {
-		return &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
-	}
+	bodyBytes := response.body
 	if len(bodyBytes) == 0 {
 		return fmt.Errorf("empty response body")
 	}
 
-	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/jwt") {
+	if httpfetch.MediaTypeIs(response.header, "application/jwt") {
 		return o.decodeSignedIssuerMetadata(ctx, strings.TrimSpace(string(bodyBytes)), identifier, signing, normalized, target)
 	}
 	if signing.Require {
@@ -441,7 +432,7 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 		CRL:                         signing.CRL,
 		AllowUnadvertisedRevocation: signing.AllowUnadvertisedRevocation,
 		CurrentTime:                 now,
-		HTTPClient:                  o.httpClient(),
+		HTTPClient:                  httpfetch.NoRedirect(o.HTTPClient),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
@@ -529,11 +520,43 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 	}
 
 	var metadata types.AuthorizationServerMetadata
-	if err := o.doRequest(observe.WithEndpoint(context.Background(), observe.EndpointAuthorizationServerMetadata), "GET", endpoint, wellKnownAuthorizationServer, nil, &metadata); err != nil {
+	if err := o.fetchMetadataDocument(observe.WithEndpoint(context.Background(), observe.EndpointAuthorizationServerMetadata), authorizationServerMetadataURL(url.URL(endpoint)), &metadata); err != nil {
 		return nil, stageError(StageAuthorizationServerMetadata, fmt.Errorf("failed to fetch authorization server metadata: %w", err))
 	}
 
 	return &metadata, nil
+}
+
+// authorizationServerMetadataURL inserts the RFC 8414 Section 3.1 well-known
+// path between the host and the path of an authorization server identifier,
+// after removing a terminating "/" from the path. An endpoint that already
+// names the well-known document is returned unchanged.
+func authorizationServerMetadataURL(endpointURL url.URL) url.URL {
+	path := strings.TrimSuffix(endpointURL.Path, "/")
+	if !strings.HasPrefix(path, wellKnownAuthorizationServer) {
+		endpointURL.Path = wellKnownAuthorizationServer + path
+		endpointURL.RawPath = ""
+	}
+	return endpointURL
+}
+
+// fetchMetadataDocument GETs a JSON metadata document, which RFC 8414 Section
+// 3.2 serves with 200 OK.
+func (o *Oid4vciReceiver) fetchMetadataDocument(ctx context.Context, requestURL url.URL, target any) error {
+	response, err := o.do(ctx, exchange{method: http.MethodGet, url: requestURL})
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if response.statusCode != http.StatusOK {
+		return response.statusError()
+	}
+	if len(response.body) == 0 {
+		return fmt.Errorf("empty response body")
+	}
+	if err := json.Unmarshal(response.body, target); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return nil
 }
 
 // ValidateCredentialConfigurationForProfile applies the HAIP 1.0 constraints on

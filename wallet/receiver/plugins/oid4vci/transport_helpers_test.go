@@ -3,8 +3,10 @@ package oid4vci
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -44,4 +46,17 @@ func requestCredentialJSON(ctx context.Context, receiver *Oid4vciReceiver, endpo
 		return nil, err
 	}
 	return receiver.DecodeCredentialResponse(response.Body, response.ContentType, nil)
+}
+
+// useDPoPNonceTokenChallenge answers as an RFC 9449 Section 8 authorization
+// server that requires a nonce. The caller sets the DPoP-Nonce header first.
+func useDPoPNonceTokenChallenge(w http.ResponseWriter) {
+	_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_dpop_nonce"})
+}
+
+// useDPoPNonceResourceChallenge answers as an RFC 9449 Section 9 resource
+// server that requires a nonce. The caller sets the DPoP-Nonce header first.
+func useDPoPNonceResourceChallenge(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof"`)
+	w.WriteHeader(http.StatusUnauthorized)
 }

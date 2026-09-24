@@ -1,11 +1,9 @@
 package oid4vci
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -100,16 +99,6 @@ func (o *Oid4vciReceiver) requireHAIPTransport(normalized profile.Profile) error
 	return nil
 }
 
-// httpClient returns the client every OpenID4VCI request is sent through. The
-// caller's client is wrapped rather than mutated, and the wrapper is rebuilt per
-// call because a caller may replace HTTPClient between requests; the wrapper
-// shares the caller's Transport, so connection pooling is unaffected.
-func (o *Oid4vciReceiver) httpClient() *http.Client {
-	return NoRedirectClient(o.HTTPClient)
-}
-
-var oid4vciHTTPClient = &http.Client{Timeout: 15 * time.Second, CheckRedirect: rejectOID4VCIRedirect}
-
 // ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered with a
 // redirect. No OpenID4VCI endpoint is defined to redirect, and following one is
 // never safe: a 307 or 308 replays the request body together with the
@@ -119,22 +108,16 @@ var oid4vciHTTPClient = &http.Client{Timeout: 15 * time.Second, CheckRedirect: r
 // a plugin, so it declares its own alias of this sentinel.
 var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
 
-// rejectOID4VCIRedirect refuses to follow a redirect on any OpenID4VCI request,
-// metadata retrieval included. Credential Issuer Metadata is fetched from the
-// path Section 12.2.2 fixes inside the Credential Issuer Identifier, so a
-// redirect can only move the document to an origin the identifier does not name.
 func rejectOID4VCIRedirect(req *http.Request, _ []*http.Request) error {
 	return fmt.Errorf("OID4VCI endpoint redirected to %s: %w", req.URL.Redacted(), ErrHTTPRedirectNotAllowed)
 }
 
 // NoRedirectClient returns a shallow copy of client whose CheckRedirect refuses
-// every 3xx with ErrHTTPRedirectNotAllowed. The caller's *http.Client is never
-// mutated: its Transport, Timeout, Jar and every other field are carried over to
-// the copy, which shares the same Transport. A nil client yields this package's
-// default client, which already refuses redirects.
+// every 3xx with ErrHTTPRedirectNotAllowed. The caller's *http.Client is not
+// mutated. A nil client yields a client with a 15 second timeout.
 func NoRedirectClient(client *http.Client) *http.Client {
 	if client == nil {
-		return oid4vciHTTPClient
+		return &http.Client{Timeout: 15 * time.Second, CheckRedirect: rejectOID4VCIRedirect}
 	}
 	noRedirect := *client
 	noRedirect.CheckRedirect = rejectOID4VCIRedirect
@@ -152,129 +135,6 @@ func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.Sup
 	default:
 		return "", fmt.Errorf("unsupported credential format: %q", format)
 	}
-}
-
-// doRequest performs an HTTP request and unmarshals the JSON response into target.
-// It handles common patterns: URL construction, status checking, body reading, and JSON parsing.
-// ctx bounds the request.
-func (o *Oid4vciReceiver) doRequest(ctx context.Context, method string, endpoint common.URIField, path string, body io.Reader, target interface{}) error {
-	endpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
-	}
-
-	if path == "/.well-known/oauth-authorization-server" {
-		// Special handling for metadata discovery as per RFC 8414 §3
-		// The well-known string MUST be inserted between the host component and the path component.
-		// RFC 8414 §3.1 excludes the trailing slash from the AS path component.
-		originalPath := strings.TrimSuffix(endpointURL.Path, "/")
-		if !strings.HasPrefix(originalPath, path) {
-			endpointURL.Path = path + originalPath
-		}
-	} else {
-		// OID4VCI Draft 13 (ID1) §11.2.2, etc...
-		if !strings.HasSuffix(endpointURL.Path, path) {
-			endpointURL = *endpointURL.JoinPath(path)
-		}
-	}
-
-	return o.doRequestURL(ctx, method, endpointURL, body, target)
-}
-
-func (o *Oid4vciReceiver) doRequestURL(ctx context.Context, method string, endpointURL url.URL, body io.Reader, target interface{}) error {
-	if method != http.MethodGet && method != http.MethodPost {
-		return fmt.Errorf("unsupported HTTP method: %s", method)
-	}
-	if method == "POST" && body == nil {
-		return fmt.Errorf("POST request requires a body")
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpointURL.String(), body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	if method == "POST" {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-	resp, err := o.httpClient().Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
-	}
-
-	if len(bodyBytes) == 0 {
-		return fmt.Errorf("empty response body")
-	}
-	if err := json.Unmarshal(bodyBytes, target); err != nil {
-		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return nil
-}
-
-// doFinalRequest performs one OpenID4VCI 1.0 Final request and decodes a JSON
-// body into target, discarding the response headers. ctx bounds the request.
-func (o *Oid4vciReceiver) doFinalRequest(ctx context.Context, method string, endpoint common.URIField, body io.Reader, contentType string, headers map[string]string, target any) error {
-	_, err := o.doFinalRequestWithResponseHeader(ctx, method, endpoint, body, contentType, headers, target)
-	return err
-}
-
-// doFinalRequestWithResponseHeader is doFinalRequest, returning the response
-// header as well. Some OpenID4VCI responses carry protocol state outside the
-// body: the Section 7.2 Nonce Response may carry an RFC 9449 Section 8.2
-// DPoP-Nonce the wallet has to use on the next request. The header is returned
-// non-nil whenever a response was received, so a caller may read it without a
-// nil check; on a transport error it is nil and the error is returned.
-func (o *Oid4vciReceiver) doFinalRequestWithResponseHeader(ctx context.Context, method string, endpoint common.URIField, body io.Reader, contentType string, headers map[string]string, target any) (http.Header, error) {
-	endpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, endpointURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	for key, value := range headers {
-		if value != "" {
-			req.Header.Set(key, value)
-		}
-	}
-
-	resp, err := o.httpClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	o.rememberDPoPNonce(endpointURL, resp.Header.Get("DPoP-Nonce"))
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.Header, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.Header, &httpStatusError{statusCode: resp.StatusCode, body: string(bodyBytes)}
-	}
-	if target == nil || len(bodyBytes) == 0 {
-		return resp.Header, nil
-	}
-	if err := json.Unmarshal(bodyBytes, target); err != nil {
-		return resp.Header, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-	return resp.Header, nil
 }
 
 // ReceiveCredential performs a Draft 13 credential request. It is a legacy
@@ -295,9 +155,6 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	}
 
 	endpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
-	}
 
 	// Prepare credential request body
 	reqBody := map[string]interface{}{}
@@ -318,51 +175,43 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 		return nil, err
 	}
 
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointCredential), "POST", endpointURL.String(), bytes.NewReader(reqBodyBytes))
-	if err != nil {
-		return nil, err
-	}
-
 	requestOptions := firstCredentialRequestOptions(options)
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	tokenType := authorizationScheme(accessToken.TokenType)
-	req.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenType, accessToken.Token))
-	if strings.EqualFold(accessToken.TokenType, "DPoP") {
+	var dpopProof string
+	if strings.EqualFold(accessToken.TokenType, dpopAuthorizationScheme) {
 		if requestOptions == nil || requestOptions.DPoPProofJWT == nil || *requestOptions.DPoPProofJWT == "" {
 			return nil, fmt.Errorf("DPoP proof JWT is required for DPoP access token")
 		}
-		req.Header.Set("DPoP", *requestOptions.DPoPProofJWT)
+		dpopProof = *requestOptions.DPoPProofJWT
 	}
-	req.Header.Set("Accept", "application/json")
-	req.ContentLength = int64(len(reqBodyBytes))
-
-	// Execute request
-	resp, err := o.httpClient().Do(req)
+	response, err := o.do(observe.WithEndpoint(context.Background(), observe.EndpointCredential), exchange{
+		method:      http.MethodPost,
+		url:         endpointURL,
+		contentType: "application/json; charset=utf-8",
+		body:        func() ([]byte, error) { return reqBodyBytes, nil },
+		header: func(header http.Header) error {
+			if dpopProof != "" {
+				header.Set("DPoP", dpopProof)
+			}
+			return nil
+		},
+		accessToken: &accessToken,
+		limit:       httpfetch.CredentialBodyLimit,
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	o.rememberDPoPNonce(endpointURL, resp.Header.Get("DPoP-Nonce"))
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		if isUseDPoPNonceResponse(resp, bodyBytes) {
+	bodyBytes := response.body
+	if response.statusCode != http.StatusOK {
+		if isUseDPoPNonce(response) {
 			return nil, fmt.Errorf(
 				"%w; status: %d; endpoint: %s; response: %s",
-				types.NewDPoPNonceError(resp.Header.Get("DPoP-Nonce"), types.ErrUseDPoPNonce),
-				resp.StatusCode,
+				types.NewDPoPNonceError(response.header.Get("DPoP-Nonce"), types.ErrUseDPoPNonce),
+				response.statusCode,
 				endpointURL.String(),
 				string(bodyBytes),
 			)
 		}
-		return nil, fmt.Errorf("failed to receive credential; status: %d; endpoint: %s; response: %s", resp.StatusCode, endpointURL.String(), string(bodyBytes))
+		return nil, fmt.Errorf("failed to receive credential; status: %d; endpoint: %s; response: %s", response.statusCode, endpointURL.String(), string(bodyBytes))
 	}
 
 	if len(bodyBytes) == 0 {

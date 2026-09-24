@@ -5,13 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -240,11 +238,10 @@ func (o *Oid4vciReceiver) postDraft13CredentialEndpoint(
 	return decodeDraft13CredentialResponse(responseBody)
 }
 
-// doDraft13ProtectedPost posts body to a token-protected Draft 13 endpoint and
-// owns the RFC 9449 Section 8 DPoP nonce retry, exactly as the Final path does.
-// It is written here rather than shared with the Final helper because the two
-// versions disagree about the error body, and the retry and the error parsing
-// are the same piece of code.
+// doDraft13ProtectedPost posts body to a token-protected Draft 13 endpoint
+// through the shared request primitive and reports a refusal in the Draft 13
+// error shape. An invalid_proof refusal is returned to the caller, which owns
+// the Section 7.3.2 retry with the fresh c_nonce.
 func (o *Oid4vciReceiver) doDraft13ProtectedPost(
 	ctx context.Context,
 	endpoint common.URIField,
@@ -252,75 +249,17 @@ func (o *Oid4vciReceiver) doDraft13ProtectedPost(
 	body []byte,
 	proofFactory types.DPoPProofFactory,
 ) ([]byte, string, error) {
-	endpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return nil, "", fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
+	response, err := o.postWithAccessToken(ctx, endpoint, accessToken, body, "application/json", proofFactory, httpfetch.CredentialBodyLimit)
+	if err != nil {
+		return nil, "", err
 	}
-	scheme := authorizationScheme(accessToken.TokenType)
-	if scheme == dpopAuthorizationScheme && proofFactory == nil {
-		return nil, "", fmt.Errorf("%w: a DPoP-bound access token needs a DPoP proof factory", ErrDPoPRequired)
+	if response.ok() {
+		return response.body, response.header.Get("Content-Type"), nil
 	}
-
-	dpopNonce := o.dpopNonceFor(endpointURL)
-	var last *Draft13CredentialEndpointError
-	for attempt := 0; attempt < 2; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL.String(), bytes.NewReader(body))
-		if err != nil {
-			return nil, "", err
-		}
-		request.Header.Set("Accept", "application/json")
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Authorization", scheme+" "+accessToken.Token)
-		if scheme == dpopAuthorizationScheme {
-			proof, err := proofFactory(dpopNonce)
-			if err != nil {
-				return nil, "", err
-			}
-			request.Header.Set("DPoP", proof)
-		}
-
-		response, err := o.httpClient().Do(request)
-		if err != nil {
-			return nil, "", err
-		}
-		responseBody, readErr := io.ReadAll(response.Body)
-		closeErr := response.Body.Close()
-		if readErr != nil {
-			return nil, "", readErr
-		}
-		if closeErr != nil {
-			return nil, "", closeErr
-		}
-		nonce := response.Header.Get("DPoP-Nonce")
-		o.rememberDPoPNonce(endpointURL, nonce)
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			return responseBody, response.Header.Get("Content-Type"), nil
-		}
-		// An endpoint may demand a DPoP proof the wallet cannot build when the
-		// access token is not DPoP-bound. Reporting that is more useful than
-		// repeating a request that carried no proof.
-		if scheme != dpopAuthorizationScheme && dpopChallengeRequested(nonce, response.Header.Get("WWW-Authenticate")) {
-			return nil, "", ErrDPoPRequired
-		}
-		endpointError := newDraft13CredentialEndpointError(response.StatusCode, response.Header.Get("Content-Type"), responseBody, nonce)
-		// RFC 9449 Section 8: a 400/401 carrying a DPoP-Nonce is the server's
-		// challenge, and the request is retried once with that nonce. An
-		// invalid_proof is not a DPoP condition and is handed to the caller,
-		// which owns the Section 7.3.2 retry with the fresh c_nonce.
-		if scheme == dpopAuthorizationScheme &&
-			endpointError.Code != "invalid_proof" &&
-			(response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized) &&
-			nonce != "" {
-			dpopNonce = nonce
-			last = endpointError
-			continue
-		}
-		return nil, "", endpointError
+	if bearerTokenChallenged(&accessToken, response) {
+		return nil, "", ErrDPoPRequired
 	}
-	if last != nil {
-		return nil, "", last
-	}
-	return nil, "", fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+	return nil, "", newDraft13CredentialEndpointError(response.statusCode, response.header.Get("Content-Type"), response.body, response.header.Get("DPoP-Nonce"))
 }
 
 // newDraft13CredentialEndpointError reads a non-2xx Draft 13 endpoint response.

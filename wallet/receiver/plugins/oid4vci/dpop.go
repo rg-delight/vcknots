@@ -2,7 +2,6 @@ package oid4vci
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -152,28 +151,4 @@ func authorizationScheme(tokenType string) string {
 		return dpopAuthorizationScheme
 	}
 	return "Bearer"
-}
-
-// dpopChallengeRequested reports whether a response asks the client for a DPoP
-// proof: RFC 9449 §8 provides a DPoP-Nonce response header, and §7.1 names the
-// DPoP scheme in a WWW-Authenticate challenge. Either signal means the request
-// has to carry a proof bound to a key the client holds.
-func dpopChallengeRequested(dpopNonce, wwwAuthenticate string) bool {
-	if strings.TrimSpace(dpopNonce) != "" {
-		return true
-	}
-	scheme, _, _ := strings.Cut(strings.TrimSpace(wwwAuthenticate), " ")
-	scheme, _, _ = strings.Cut(scheme, ",")
-	return strings.EqualFold(scheme, dpopAuthorizationScheme)
-}
-
-func isUseDPoPNonceError(bodyBytes []byte) bool {
-	return tokenErrorCode(bodyBytes) == "use_dpop_nonce"
-}
-
-func isUseDPoPNonceResponse(resp *http.Response, bodyBytes []byte) bool {
-	if isUseDPoPNonceError(bodyBytes) {
-		return true
-	}
-	return strings.Contains(strings.ToLower(resp.Header.Get("WWW-Authenticate")), "use_dpop_nonce")
 }

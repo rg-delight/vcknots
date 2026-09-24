@@ -791,7 +791,7 @@ func TestOid4vciReceiver_RequestCredentialDPoPRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -862,7 +862,7 @@ func TestOid4vciReceiver_PostCredentialEndpointDPoPRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -927,7 +927,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeDPoPRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusBadRequest)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -1012,7 +1012,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -1079,7 +1079,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialDPoPRetry(t *testing.T) {
 		if attempts == 1 {
 			assertBearerJSONRequest(t, r, "access-1", "proof:")
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
@@ -1133,7 +1133,7 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 		if attempts == 1 {
 			assertBearerJSONRequest(t, r, "access-1", "proof:")
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
@@ -2319,7 +2319,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(
 		captured = append(captured, r.Form)
 		if attempts == 1 {
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusBadRequest)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
