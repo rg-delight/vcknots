@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -167,10 +168,10 @@ func TestNormalizeOAuthErrorCode(t *testing.T) {
 	require.Len(t, normalizeOAuthErrorCode(strings.Repeat("a", 200)), 64)
 }
 
-// TestSubmitAuthorizationErrorResponse covers the standalone error response
-// transport: it posts error, error_description and state, and returns the
-// redirect_uri the verifier answered with.
-func TestSubmitAuthorizationErrorResponse(t *testing.T) {
+// TestSubmitErrorResponse covers the error response to an admitted request:
+// it posts error, error_description and the request's state to the request's
+// response_uri, and returns the redirect_uri the verifier answered with.
+func TestSubmitErrorResponse(t *testing.T) {
 	captured := &url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -187,76 +188,68 @@ func TestSubmitAuthorizationErrorResponse(t *testing.T) {
 		_, _ = w.Write([]byte(`{"redirect_uri":"https://verifier.example/complete"}`))
 	}))
 	defer server.Close()
-	endpoint, err := url.Parse(server.URL)
-	require.NoError(t, err)
 
 	p := &Oid4vpPresenter{AllowHTTP: true}
-	redirect, err := p.SubmitAuthorizationErrorResponse(*endpoint, "access_denied", "user declined", "state-1")
+	request := admitDirectPost(t, p, server.URL+"/response", "state-1")
+	result, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "user declined")
 	require.NoError(t, err)
-	require.Equal(t, "https://verifier.example/complete", redirect)
+	require.Equal(t, "https://verifier.example/complete", result.RedirectURI)
+	require.False(t, result.Encrypted)
 	require.Equal(t, "access_denied", captured.Get("error"))
 	require.Equal(t, "user declined", captured.Get("error_description"))
 	require.Equal(t, "state-1", captured.Get("state"))
 	require.Empty(t, captured.Get("vp_token"))
 }
 
-// TestSubmitAuthorizationErrorResponseRejectsPlaintextHTTP covers the endpoint
-// scheme guard: without AllowHTTP the error response must not be sent over
-// plain HTTP.
-func TestSubmitAuthorizationErrorResponseRejectsPlaintextHTTP(t *testing.T) {
-	endpoint, err := url.Parse("http://verifier.example/response")
-	require.NoError(t, err)
-	p := &Oid4vpPresenter{}
-	_, err = p.SubmitAuthorizationErrorResponse(*endpoint, "access_denied", "", "")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "https")
-}
-
-// TestSubmitAuthorizationErrorResponseRefusalsAreTyped covers the two
-// caller-supplied values SubmitAuthorizationErrorResponse checks before it
-// sends anything. An integrator has to tell these apart from a Verifier or
-// network failure to answer its own caller, so the refusals carry sentinels
-// rather than only message text, and nothing reaches the endpoint.
-func TestSubmitAuthorizationErrorResponseRefusalsAreTyped(t *testing.T) {
+// TestSubmitErrorResponseRefusesAnUnadmittedRequest: a handle admitted by
+// another presenter instance is refused before anything is sent.
+func TestSubmitErrorResponseRefusesAnUnadmittedRequest(t *testing.T) {
 	reached := false
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		reached = true
 	}))
 	defer server.Close()
-	reachable, err := url.Parse(server.URL)
+	request := admitDirectPost(t, &Oid4vpPresenter{AllowHTTP: true}, server.URL+"/response", "")
+
+	_, err := (&Oid4vpPresenter{AllowHTTP: true}).SubmitErrorResponse(context.Background(), request, "access_denied", "")
+	require.ErrorIs(t, err, ErrRequestNotAdmittedHere)
+	require.False(t, reached)
+}
+
+// TestSubmitErrorResponseRefusesAnInvalidDescription: error_description must
+// fit the RFC 6749 §4.1.2.1 character set, and a refusal carries a sentinel
+// and reaches nothing.
+func TestSubmitErrorResponseRefusesAnInvalidDescription(t *testing.T) {
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+	defer server.Close()
+	p := &Oid4vpPresenter{AllowHTTP: true}
+	request := admitDirectPost(t, p, server.URL+"/response", "")
+
+	for name, description := range map[string]string{
+		"double quote":  `he said "no"`,
+		"backslash":     `path\to\thing`,
+		"newline":       "line1\nline2",
+		"control byte":  "bell\x07",
+		"outside ASCII": "利用者が拒否しました",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", description)
+			require.ErrorIs(t, err, ErrErrorDescriptionInvalid)
+			require.False(t, reached, "a refused error response must not reach the verifier")
+		})
+	}
+}
+
+// TestSubmitErrorResponseOverDCAPI: a DC API request's error response is the
+// data object with the single member error (OID4VP 1.0 Appendix A.4).
+func TestSubmitErrorResponseOverDCAPI(t *testing.T) {
+	p := &Oid4vpPresenter{}
+	request, err := p.ParseDCAPIRequest(context.Background(), dcapiUnsignedInvocation(t, "dc_api"))
 	require.NoError(t, err)
-
-	t.Run("endpoint", func(t *testing.T) {
-		for name, endpoint := range map[string]string{
-			"plaintext http":   "http://verifier.example/response",
-			"no authority":     "https:///response",
-			"relative":         "/response",
-			"not a URL at all": "not a url",
-		} {
-			t.Run(name, func(t *testing.T) {
-				parsed, parseErr := url.Parse(endpoint)
-				require.NoError(t, parseErr)
-				p := &Oid4vpPresenter{AllowHTTP: name != "plaintext http"}
-				_, err := p.SubmitAuthorizationErrorResponse(*parsed, "access_denied", "", "")
-				require.ErrorIs(t, err, ErrResponseURIInvalid)
-			})
-		}
-	})
-
-	t.Run("error_description", func(t *testing.T) {
-		for name, description := range map[string]string{
-			"double quote":  `he said "no"`,
-			"backslash":     `path\to\thing`,
-			"newline":       "line1\nline2",
-			"control byte":  "bell\x07",
-			"outside ASCII": "利用者が拒否しました",
-		} {
-			t.Run(name, func(t *testing.T) {
-				p := &Oid4vpPresenter{AllowHTTP: true}
-				_, err := p.SubmitAuthorizationErrorResponse(*reachable, "access_denied", description, "")
-				require.ErrorIs(t, err, ErrErrorDescriptionInvalid)
-				require.False(t, reached, "a refused error response must not reach the verifier")
-			})
-		}
-	})
+	result, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "user declined")
+	require.NoError(t, err)
+	require.Equal(t, &DCAPIResponse{Protocol: DCAPIProtocolUnsigned, Data: map[string]any{"error": "access_denied"}}, result.DCAPIResponse)
 }

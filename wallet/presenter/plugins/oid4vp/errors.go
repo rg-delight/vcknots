@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 // Sentinel errors the OID4VP Final Request Object authentication path returns.
@@ -240,55 +241,47 @@ func normalizeOAuthErrorCode(code string) string {
 	return normalized.String()
 }
 
-// SubmitAuthorizationErrorResponse posts an OAuth 2.0 error authorization
-// response (error, error_description and state) to the Verifier's Response
-// Endpoint as application/x-www-form-urlencoded, and returns the redirect_uri
-// the Verifier answered with, if any.
-//
-// It is the single transport for a Wallet that decides on the rejection before
-// it holds a CredentialPresentationRequest. OID4VP 1.0 §8.3.1 permits the error
-// response to be sent unencrypted, so this form is always plaintext. The
-// endpoint must use https unless the presenter enables AllowHTTP for a local
-// test. A non-2xx answer is reported as a *VerifierResponseError that does not
-// carry the response body.
-//
-// The two caller-supplied values that reach the wire are checked before
-// anything is sent: the endpoint through parseResponseURI (ErrResponseURIInvalid)
-// and description against the RFC 6749 §4.1.2.1 character set
-// (ErrErrorDescriptionInvalid), so an integrator branches on the refusal with
-// errors.Is instead of reproducing either rule ahead of the call.
-func (p *Oid4vpPresenter) SubmitAuthorizationErrorResponse(endpoint url.URL, code, description, state string) (string, error) {
-	if _, err := parseResponseURI(endpoint.String(), p.AllowHTTP); err != nil {
-		return "", err
+// SubmitErrorResponse answers an admitted request with an OAuth 2.0 error
+// response (OID4VP 1.0 §8.5, RFC 6749 §4.1.2.1): error, error_description and
+// state, form-posted in plaintext to the request's response_uri (§8.3.1
+// permits an unencrypted error response). A DC API request gets
+// SubmitResult.DCAPIResponse whose data holds only error (Appendix A.4).
+// description is checked against the RFC 6749 character set first
+// (ErrErrorDescriptionInvalid). A request that failed admission is answered
+// only through AuthorizationRequestError.SendErrorResponse.
+func (p *Oid4vpPresenter) SubmitErrorResponse(ctx context.Context, req types.AdmittedRequest, code, description string) (*types.SubmitResult, error) {
+	handle, err := p.admittedHere(req)
+	if err != nil {
+		return nil, err
+	}
+	if code == "" {
+		return nil, errors.New("error code is required")
 	}
 	if err := validateOAuthErrorDescription(description); err != nil {
-		return "", err
+		return nil, err
 	}
-
+	if handle.isDCAPI() {
+		return &types.SubmitResult{DCAPIResponse: &DCAPIResponse{
+			Protocol: handle.req.DCAPIProtocol,
+			Data:     map[string]any{"error": code},
+		}}, nil
+	}
+	if !isDirectPostMode(handle.req.ResponseMode) {
+		return nil, fmt.Errorf("response_mode %q is not supported for an error response", handle.req.ResponseMode)
+	}
 	formData := url.Values{}
 	formData.Set("error", code)
 	if description != "" {
 		formData.Set("error_description", description)
 	}
-	if state != "" {
-		formData.Set("state", state)
+	if handle.req.State != "" {
+		formData.Set("state", handle.req.State)
 	}
-
-	body, err := p.postAuthorizationResponse(endpoint.String(), formData)
+	body, err := postAuthorizationResponse(ctx, p.httpClient(), handle.endpoint.String(), formData)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(body) == 0 {
-		return "", nil
-	}
-
-	var verifierResponse struct {
-		RedirectURI string `json:"redirect_uri"`
-	}
-	if err := json.Unmarshal(body, &verifierResponse); err != nil {
-		return "", nil
-	}
-	return verifierResponse.RedirectURI, nil
+	return &types.SubmitResult{RedirectURI: redirectURIFromVerifierResponse(body)}, nil
 }
 
 // validateOAuthErrorDescription checks error_description against the production

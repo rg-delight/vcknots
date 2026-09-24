@@ -56,7 +56,7 @@ func (w *Wallet) PresentCredentialWithOptions(uriString string, key IKeyEntry, o
 		ResponseMode:   string(req.ResponseMode),
 		ClientMetadata: req.ClientMetadata,
 	}
-	redirectURI, err := w.presenter.PresentDCQL(presenterTypes.Oid4vp, *endpoint, vpToken, presentationRequest)
+	redirectURI, err := w.presentDCQLAt(*endpoint, vpToken, presentationRequest)
 	if err != nil {
 		return "", err
 	}
@@ -104,7 +104,7 @@ func (w *Wallet) PresentDCQLSelection(req *oid4vp.CredentialPresentationRequest,
 // so the response mode and the verifier metadata are read the same way whichever
 // vocabulary named the credentials.
 func (w *Wallet) presentDCQLVPToken(req *oid4vp.CredentialPresentationRequest, endpoint url.URL, vpToken map[string][]string) (string, error) {
-	return w.presenter.PresentDCQL(presenterTypes.Oid4vp, endpoint, vpToken, &presenterTypes.PresentationRequest{
+	return w.presentDCQLAt(endpoint, vpToken, &presenterTypes.PresentationRequest{
 		State:          req.State,
 		ResponseMode:   string(req.ResponseMode),
 		ClientMetadata: req.ClientMetadata,
@@ -113,8 +113,9 @@ func (w *Wallet) presentDCQLVPToken(req *oid4vp.CredentialPresentationRequest, e
 
 // BuildOID4VPFinalAuthorizationResponse builds an OID4VP Final DCQL
 // authorization response from credentials already stored in the wallet. The
-// returned value is ready to encrypt with Oid4vpPresenter.CreateEncryptedAuthorizationResponse
-// and submit as the direct_post.jwt "response" form field.
+// returned value is ready to submit with
+// Oid4vpPresenter.SubmitEncryptedAuthorizationResponse as the direct_post.jwt
+// "response" form field.
 func (w *Wallet) BuildOID4VPFinalAuthorizationResponse(uriString string, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
 	req, _, err := w.parseAuthorizationRequest(uriString)
 	if err != nil {
@@ -150,8 +151,31 @@ func (w *Wallet) SubmitOID4VPFinalAuthorizationRequest(req *oid4vp.CredentialPre
 	if err != nil {
 		return "", err
 	}
-	return w.presenter.SubmitOID4VPFinalEncryptedAuthorizationResponse(endpoint, map[string]any(response), req.ClientMetadata)
+	presenter, err := w.oid4vpPresenter()
+	if err != nil {
+		return "", err
+	}
+	body, err := presenter.SubmitEncryptedAuthorizationResponse(endpoint, map[string]any(response), req.ClientMetadata)
+	if err != nil {
+		return "", presenterTypes.NewPresenterError(presenterTypes.Oid4vp, endpoint.String(), "submit_final", err)
+	}
+	return body, nil
 }
+
+// presentDCQLAt posts vpToken for a request the caller holds to endpoint,
+// through the registered OID4VP plugin.
+func (w *Wallet) presentDCQLAt(endpoint url.URL, vpToken map[string][]string, request *presenterTypes.PresentationRequest) (string, error) {
+	presenter, err := w.oid4vpPresenter()
+	if err != nil {
+		return "", err
+	}
+	redirectURI, err := presenter.PresentDCQL(presenterTypes.Oid4vp, endpoint, vpToken, request)
+	if err != nil {
+		return "", presenterTypes.NewPresenterError(presenterTypes.Oid4vp, endpoint.String(), "present_dcql", err)
+	}
+	return redirectURI, nil
+}
+
 func (w *Wallet) buildOID4VPFinalAuthorizationResponse(req *oid4vp.CredentialPresentationRequest, key IKeyEntry) (OID4VPFinalAuthorizationResponse, error) {
 	if req.DcqlQuery == nil {
 		return nil, fmt.Errorf("dcql_query is required for OID4VP Final authorization response")

@@ -211,14 +211,14 @@ func TestOid4vpPresenter_Present(t *testing.T) {
 	})
 }
 
-func TestOid4vpPresenter_CreateEncryptedAuthorizationResponse(t *testing.T) {
+func TestOid4vpPresenter_EncryptAuthorizationResponse(t *testing.T) {
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate recipient key: %v", err)
 	}
 
 	p := &Oid4vpPresenter{}
-	token, err := p.CreateEncryptedAuthorizationResponse(
+	token, err := encryptResponseForTest(p,
 		map[string]any{
 			"vp_token": map[string]any{
 				"pid": []string{"presented-sd-jwt"},
@@ -238,7 +238,7 @@ func TestOid4vpPresenter_CreateEncryptedAuthorizationResponse(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("CreateEncryptedAuthorizationResponse() error = %v", err)
+		t.Fatalf("encryptAuthorizationResponseJWE() error = %v", err)
 	}
 
 	jwe, err := jose.ParseEncrypted(token, []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A256GCM})
@@ -457,7 +457,7 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 			}
 
 			p := &Oid4vpPresenter{AllowHTTP: true}
-			req, err := p.ParseDraft24PresentationRequest(uri)
+			req, err := parseDraft24ForTest(p, uri)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParsePresentationRequest() error = %v, wantErr %v", err, tt.wantErr)
@@ -473,7 +473,7 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 	// Test invalid URI
 	t.Run("Invalid URI", func(t *testing.T) {
 		p := &Oid4vpPresenter{AllowHTTP: true}
-		_, err := p.ParseDraft24PresentationRequest("://invalid-uri")
+		_, err := parseDraft24ForTest(p, "://invalid-uri")
 		if err == nil {
 			t.Error("Expected error for invalid URI, got nil")
 		}
@@ -1283,7 +1283,7 @@ func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 	uri := "openid4vp://present?request=" + url.QueryEscape(jwtStr)
 
 	p := &Oid4vpPresenter{}
-	req, err := p.ParseDraft24PresentationRequest(uri)
+	req, err := parseDraft24ForTest(p, uri)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

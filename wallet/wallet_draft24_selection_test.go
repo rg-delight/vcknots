@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
@@ -59,7 +61,7 @@ func TestWallet_PresentDraft24SelectionUsesCallerChoice(t *testing.T) {
 	fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St", "postal_code": "100-0000"})
 	ids := draft24SelectionCredentialIDs(t, fixture)
 
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
@@ -106,7 +108,7 @@ func TestWallet_PresentDraft24SelectionSingleCredentialKeepsRootPath(t *testing.
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	ids := draft24SelectionCredentialIDs(t, fixture)
 
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
@@ -141,7 +143,7 @@ func TestWallet_PresentDraft24SelectionEncryptsDirectPostJWT(t *testing.T) {
 	require.NoError(t, err)
 	clientMetadata := `{"jwks":` + string(jwks) + `,"encrypted_response_enc_values_supported":["A256GCM"],"authorization_encrypted_response_alg":"ECDH-ES","authorization_encrypted_response_enc":"A256GCM"}`
 
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post.jwt", clientMetadata))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post.jwt", clientMetadata))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
@@ -174,7 +176,7 @@ func TestWallet_PresentDraft24SelectionRejectsUnknownCredential(t *testing.T) {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
@@ -275,4 +277,15 @@ func TestBuildDraft24DescriptorMapInventsIDWhenCallerNamesNone(t *testing.T) {
 	require.Len(t, descriptorMap, 1)
 	require.NotEmpty(t, descriptorMap[0].ID)
 	require.Equal(t, "$", descriptorMap[0].Path)
+}
+
+// parseDraft24RequestForTest parses a Draft 24 request and returns a copy of
+// the admitted request.
+func parseDraft24RequestForTest(dispatcher *presenter.PresentationDispatcher, uri string) (*oid4vp.CredentialPresentationRequest, error) {
+	admitted, err := dispatcher.ParseDraft24Request(context.Background(), presenterTypes.Oid4vp, uri)
+	if err != nil {
+		return nil, err
+	}
+	request := admitted.(*oid4vp.AdmittedRequest).Request()
+	return &request, nil
 }

@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -84,38 +86,49 @@ func (p *Oid4vpPresenter) ProtocolProfile() profile.Profile {
 	return normalized
 }
 
-// SetProtocolProfile is used by the wallet root to propagate its profile to the
-// default presenter plugin it constructs itself.
-func (p *Oid4vpPresenter) SetProtocolProfile(value profile.Profile) {
-	p.Profile = value
-}
-
 // SetSupportedTransactionDataTypes is used by the wallet root to propagate its
 // supported transaction_data types to the default presenter plugin.
-func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(types []string) {
-	p.SupportedTransactionDataTypes = types
+func (p *Oid4vpPresenter) SetSupportedTransactionDataTypes(values []string) {
+	p.SupportedTransactionDataTypes = values
 }
+
+var (
+	_ types.RequestParser      = (*Oid4vpPresenter)(nil)
+	_ types.DCAPIRequestParser = (*Oid4vpPresenter)(nil)
+	_ types.Responder          = (*Oid4vpPresenter)(nil)
+)
 
 // ParsePresentationRequest parses and authenticates an OpenID4VP 1.0
 // Authorization Request URI. The request arrives as a Request Object by
 // reference (request_uri), by value (request), or as plain query parameters
-// (OID4VP 1.0 §5, RFC 9101).
+// (OID4VP 1.0 §5, RFC 9101). ParseRequest returns the same request as a
+// handle that can be answered.
 func (p *Oid4vpPresenter) ParsePresentationRequest(uriString string) (*CredentialPresentationRequest, error) {
-	return p.parseRequestURI(uriString)
+	handle, err := p.parseRequestURI(context.Background(), uriString)
+	if err != nil {
+		return nil, err
+	}
+	return handle.req, nil
+}
+
+// ParseRequest parses and admits an OpenID4VP 1.0 Authorization Request URI,
+// dereferencing its request_uri when present. The result is an
+// *AdmittedRequest.
+func (p *Oid4vpPresenter) ParseRequest(ctx context.Context, uri string) (types.AdmittedRequest, error) {
+	return asAdmitted(p.parseRequestURI(ctx, uri))
 }
 
 // ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
-// already holds, with the same checks and typed errors as a Request Object
-// ParsePresentationRequest fetched. expectedClientID is the Authorization
-// Request client_id the Request Object's claim must equal (OID4VP 1.0
-// §5.10.1, ErrRequestObjectClientIDMismatch); pass "" only when there is no
-// outer client_id.
-func (p *Oid4vpPresenter) ParseRequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
-	return p.parseRequestObject(requestObject, expectedClientID)
+// already holds, with the same checks as one ParseRequest fetched. src.ClientID
+// is the Authorization Request client_id the Request Object's claim must equal
+// (OID4VP 1.0 §5.10.1, ErrRequestObjectClientIDMismatch); it is empty only when
+// there is no outer client_id. The result is an *AdmittedRequest.
+func (p *Oid4vpPresenter) ParseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
+	return asAdmitted(p.parseRequestObject(ctx, requestObject, src))
 }
 
-func (p *Oid4vpPresenter) parseRequestURI(uriString string) (*CredentialPresentationRequest, error) {
-	builder, err := p.newRequestBuilder()
+func (p *Oid4vpPresenter) parseRequestURI(ctx context.Context, uriString string) (*AdmittedRequest, error) {
+	builder, err := p.newRequestBuilder(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -160,25 +173,24 @@ func (p *Oid4vpPresenter) parseRequestURI(uriString string) (*CredentialPresenta
 	default:
 		builder.WithQueryParams(queryParams)
 	}
-	return p.finishParse(&builder.requestCore, builder.Build)
+	return p.finishParse(&builder.requestCore, builder.Build, wireOpenID4VP1)
 }
 
 // parseRequestObject is the by-value counterpart of parseRequestURI.
-func (p *Oid4vpPresenter) parseRequestObject(requestObject string, expectedClientID string) (*CredentialPresentationRequest, error) {
-	builder, err := p.newRequestBuilder()
+func (p *Oid4vpPresenter) parseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (*AdmittedRequest, error) {
+	builder, err := p.newRequestBuilder(ctx)
 	if err != nil {
 		return nil, err
 	}
-	clientID := strings.TrimSpace(expectedClientID)
+	clientID := strings.TrimSpace(src.ClientID)
 	if clientID != "" {
 		if _, err := parseOID4VPClientID(clientID); err != nil {
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
-	builder.expectedClientID = clientID
-	builder.expectedClientIDAbsent = clientID == ""
+	builder.applySource(clientID, src)
 	builder.WithRequestObject(requestObject)
-	return p.finishParse(&builder.requestCore, builder.Build)
+	return p.finishParse(&builder.requestCore, builder.Build, wireOpenID4VP1)
 }
 
 // authorizationRequestQuery returns the query parameters of an Authorization
@@ -203,7 +215,8 @@ func (p *Oid4vpPresenter) normalizedProfile() (profile.Profile, error) {
 
 // configureCore copies the presenter's transport and trust policy into the
 // state of one parse.
-func (p *Oid4vpPresenter) configureCore(core *requestCore) {
+func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) {
+	core.ctx = ctx
 	core.httpClient = p.httpClient()
 	core.allowHTTP = p.AllowHTTP
 	core.x509TrustChainRoots = p.X509TrustChainRoots
@@ -216,7 +229,7 @@ func (p *Oid4vpPresenter) configureCore(core *requestCore) {
 
 // newRequestBuilder creates the builder of one OpenID4VP 1.0 parse with the
 // presenter's transport, trust and protocol policy.
-func (p *Oid4vpPresenter) newRequestBuilder() (*requestBuilder, error) {
+func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilder, error) {
 	normalizedProfile, err := p.normalizedProfile()
 	if err != nil {
 		return nil, err
@@ -228,7 +241,7 @@ func (p *Oid4vpPresenter) newRequestBuilder() (*requestBuilder, error) {
 	}
 	builder := NewRequestBuilder()
 	builder.profile = normalizedProfile
-	p.configureCore(&builder.requestCore)
+	p.configureCore(ctx, &builder.requestCore)
 	builder.walletMetadata = p.WalletMetadata
 	builder.requestURINonce = p.RequestURINonce
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
@@ -237,10 +250,10 @@ func (p *Oid4vpPresenter) newRequestBuilder() (*requestBuilder, error) {
 	return builder, nil
 }
 
-// finishParse runs build and, on a refusal, records where an error
-// authorization response may go; it is posted there only when the presenter
-// opted in with SendParseErrorResponses.
-func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*CredentialPresentationRequest, error)) (*CredentialPresentationRequest, error) {
+// finishParse runs build and admits the result. On a refusal it records where
+// an error authorization response may go; it is posted there only when the
+// presenter opted in with SendParseErrorResponses.
+func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*CredentialPresentationRequest, error), wire wireContract) (*AdmittedRequest, error) {
 	req, err := build()
 	if err != nil {
 		core.attachErrorResponseTarget(err)
@@ -252,5 +265,5 @@ func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*Credenti
 		}
 		return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w", err)
 	}
-	return req, nil
+	return p.admit(req, wire, core.requestObject)
 }

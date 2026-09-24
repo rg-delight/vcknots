@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -103,7 +104,8 @@ func TestObserveAnnotatesAuthorizationResponseEncryption(t *testing.T) {
 		p, endpoint, _, _ := dcqlTransportEndpoint(t)
 		observePresenterClient(p, recorder)
 
-		_, err := p.SubmitAuthorizationErrorResponse(endpoint, "access_denied", "", "state-1")
+		request := admitDirectPost(t, p, endpoint.String(), "state-1")
+		_, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "")
 		require.NoError(t, err)
 
 		exchange := requireSingleExchange(t, recorder)

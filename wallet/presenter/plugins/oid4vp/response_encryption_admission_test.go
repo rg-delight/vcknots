@@ -100,12 +100,12 @@ func TestDraft24DirectPostJWTRefusedAtParseWithoutEncryptionKey(t *testing.T) {
 	values := draft24RedirectURIValues(responseURI, responseURI)
 	values.Set("response_mode", "direct_post.jwt")
 	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
-	_, err := p.ParseDraft24PresentationRequest(finalQueryURI(values))
+	_, err := parseDraft24ForTest(p, finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseEncryptionKeyMissing), "want ErrResponseEncryptionKeyMissing, got %v", err)
 	require.Equal(t, int32(0), verifier.calls.Load(), "a response encryption refusal must not be POSTed")
 
 	values.Set("client_metadata", responseEncryptionClientMetadataParam())
-	_, err = p.ParseDraft24PresentationRequest(finalQueryURI(values))
+	_, err = parseDraft24ForTest(p, finalQueryURI(values))
 	require.NoError(t, err)
 }
 
@@ -151,7 +151,7 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 		uri := "openid4vp://authorize?" + url.Values{"client_id": {f.clientID()}, "request": {f.sign(t, claims, nil)}}.Encode()
 		p := f.presenter()
 		p.Profile = profile.HAIP
-		_, err := p.ParseDraft24PresentationRequest(uri)
+		_, err := parseDraft24ForTest(p, uri)
 		require.NoError(t, err)
 	})
 }

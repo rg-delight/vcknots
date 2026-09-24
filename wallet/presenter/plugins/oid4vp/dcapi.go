@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -26,30 +28,33 @@ type dcapiSignatureVerifier func(publicKey any) (map[string]any, error)
 
 // newDCAPIRequestBuilder wires the presenter's trust and profile policy into a
 // requestBuilder used by the DC API paths.
-func (p *Oid4vpPresenter) newDCAPIRequestBuilder(normalizedProfile profile.Profile) *requestBuilder {
+func (p *Oid4vpPresenter) newDCAPIRequestBuilder(ctx context.Context, normalizedProfile profile.Profile) *requestBuilder {
 	b := NewRequestBuilder()
 	b.profile = normalizedProfile
-	b.httpClient = p.httpClient()
-	b.allowHTTP = p.AllowHTTP
-	b.x509TrustChainRoots = p.X509TrustChainRoots
-	b.insecureSkipX509Verify = p.InsecureSkipX509Verify
+	p.configureCore(ctx, &b.requestCore)
 	b.errorResponseAllowed = false
-	b.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
-	if p.RequestObjectValidation != nil {
-		b.WithRequestObjectValidation(*p.RequestObjectValidation)
-	}
 	return b
 }
 
-// ParseDCAPIRequest authenticates and parses one platform DC API invocation
+// ParseDCAPIRequest authenticates and admits one platform DC API invocation
 // (OID4VP 1.0 Appendix A.3). The Origin is supplied by the platform and is
 // never read from the request. Unsigned requests are accepted without a
 // signature using web-origin:<origin> as the effective identifier; signed and
-// multi-signed requests are authenticated exactly like a signed Request Object.
-func (p *Oid4vpPresenter) ParseDCAPIRequest(invocation DCAPIInvocation) (*CredentialPresentationRequest, error) {
-	normalizedProfile, err := p.Profile.Normalize()
+// multi-signed requests are authenticated exactly like a signed Request
+// Object. The result is an *AdmittedRequest whose response SubmitDCQLResponse
+// returns as SubmitResult.DCAPIResponse.
+func (p *Oid4vpPresenter) ParseDCAPIRequest(ctx context.Context, invocation DCAPIInvocation) (types.AdmittedRequest, error) {
+	request, err := p.parseDCAPIRequest(ctx, invocation)
 	if err != nil {
-		return nil, fmt.Errorf("invalid OID4VP profile: %w", err)
+		return nil, err
+	}
+	return asAdmitted(p.admit(request, wireOpenID4VP1, dcapiRequestObject(invocation.Request)))
+}
+
+func (p *Oid4vpPresenter) parseDCAPIRequest(ctx context.Context, invocation DCAPIInvocation) (*CredentialPresentationRequest, error) {
+	normalizedProfile, err := p.normalizedProfile()
+	if err != nil {
+		return nil, err
 	}
 	origin := strings.TrimSpace(invocation.Origin)
 	if origin == "" {
@@ -59,11 +64,11 @@ func (p *Oid4vpPresenter) ParseDCAPIRequest(invocation DCAPIInvocation) (*Creden
 	var request *CredentialPresentationRequest
 	switch invocation.Request.Protocol {
 	case DCAPIProtocolUnsigned:
-		request, err = p.parseDCAPIUnsigned(invocation, origin, normalizedProfile)
+		request, err = p.parseDCAPIUnsigned(ctx, invocation, origin, normalizedProfile)
 	case DCAPIProtocolSigned:
-		request, err = p.parseDCAPISigned(invocation, origin, normalizedProfile)
+		request, err = p.parseDCAPISigned(ctx, invocation, origin, normalizedProfile)
 	case DCAPIProtocolMultiSigned:
-		request, err = p.parseDCAPIMultiSigned(invocation, origin, normalizedProfile)
+		request, err = p.parseDCAPIMultiSigned(ctx, invocation, origin, normalizedProfile)
 	default:
 		return nil, newAuthorizationRequestError(InvalidRequestError, "unsupported DC API protocol %q", invocation.Request.Protocol)
 	}
@@ -78,9 +83,26 @@ func (p *Oid4vpPresenter) ParseDCAPIRequest(invocation DCAPIInvocation) (*Creden
 	return request, nil
 }
 
+// dcapiRequestObject returns the signed request member of a DC API request
+// (a compact JWS or a JWS JSON Serialization), or "" for an unsigned one.
+func dcapiRequestObject(request DCAPIRequest) string {
+	if request.Protocol == DCAPIProtocolUnsigned {
+		return ""
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(request.Data, &data); err != nil {
+		return ""
+	}
+	var compact string
+	if err := json.Unmarshal(data["request"], &compact); err == nil {
+		return compact
+	}
+	return string(data["request"])
+}
+
 // parseDCAPIUnsigned handles Appendix A.3.1. The Wallet MUST ignore any
 // client_id and expected_origins delivered in an unsigned request (A.2).
-func (p *Oid4vpPresenter) parseDCAPIUnsigned(invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
+func (p *Oid4vpPresenter) parseDCAPIUnsigned(ctx context.Context, invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
 	if len(invocation.Request.Data) == 0 || string(invocation.Request.Data) == "null" {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API unsigned request data is required")
 	}
@@ -98,7 +120,7 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(invocation DCAPIInvocation, origin 
 	delete(params, "expected_origins")
 	params["client_id"] = dcapiWebOriginClientID(origin)
 
-	b := p.newDCAPIRequestBuilder(normalizedProfile)
+	b := p.newDCAPIRequestBuilder(ctx, normalizedProfile)
 	b.requestSource = sourceDCAPIUnsigned
 	b.setParamsWithAnyMap(params)
 	if b.errValidation == nil {
@@ -109,7 +131,7 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(invocation DCAPIInvocation, origin 
 
 // parseDCAPISigned handles Appendix A.3.2.1: data.request is a compact JWS
 // whose protected header or payload carries client_id.
-func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
+func (p *Oid4vpPresenter) parseDCAPISigned(ctx context.Context, invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(invocation.Request.Data, &data); err != nil {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API signed request data must be a JSON object: %v", err)
@@ -126,7 +148,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API signed request must be a bounded compact signed JWT")
 	}
 
-	b := p.newDCAPIRequestBuilder(normalizedProfile)
+	b := p.newDCAPIRequestBuilder(ctx, normalizedProfile)
 	options, err := b.requestObjectValidationOptions()
 	if err != nil {
 		return nil, err
@@ -178,7 +200,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 // Serialization signatures array carries its own client_id in the protected
 // header; the Wallet authenticates the first signature whose x509_hash client
 // identifier it can verify and MUST verify at least one.
-func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
+func (p *Oid4vpPresenter) parseDCAPIMultiSigned(ctx context.Context, invocation DCAPIInvocation, origin string, normalizedProfile profile.Profile) (*CredentialPresentationRequest, error) {
 	var data map[string]json.RawMessage
 	if err := json.Unmarshal(invocation.Request.Data, &data); err != nil {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API multi-signed request data must be a JSON object: %v", err)
@@ -200,7 +222,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 	if multi.Payload == "" || len(multi.Signatures) == 0 {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API multi-signed request requires payload and signatures")
 	}
-	initialBuilder := p.newDCAPIRequestBuilder(normalizedProfile)
+	initialBuilder := p.newDCAPIRequestBuilder(ctx, normalizedProfile)
 	options, err := initialBuilder.requestObjectValidationOptions()
 	if err != nil {
 		return nil, err
@@ -239,7 +261,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(invocation DCAPIInvocation, orig
 			lastErr = certErr
 			continue
 		}
-		b := p.newDCAPIRequestBuilder(normalizedProfile)
+		b := p.newDCAPIRequestBuilder(ctx, normalizedProfile)
 		now := requestObjectNow(options)
 		chainResult, chainErr := b.verifyRequestObjectCertificateChain(certificates, options, now)
 		if chainErr != nil {
@@ -328,36 +350,29 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 	return b.Build()
 }
 
-// BuildDCAPIResponse builds the object returned to the platform for an already
-// parsed DC API request (OID4VP 1.0 Appendix A.4). dc_api returns the plaintext
-// vp_token object; dc_api.jwt encrypts the Authorization Response exactly like
-// direct_post.jwt (§8.3) and returns it as the response member.
-func (p *Oid4vpPresenter) BuildDCAPIResponse(request *CredentialPresentationRequest, vpToken map[string][]string) (*DCAPIResponse, error) {
-	if request == nil {
-		return nil, errors.New("DC API response requires a parsed request")
-	}
+// dcapiResponse builds the object returned to the platform for an admitted DC
+// API request (OID4VP 1.0 Appendix A.4). dc_api returns the plaintext vp_token
+// object; dc_api.jwt encrypts the Authorization Response as direct_post.jwt
+// does (§8.3) and returns it as the response member.
+func (p *Oid4vpPresenter) dcapiResponse(request *CredentialPresentationRequest, vpToken map[string][]string) (*DCAPIResponse, bool, error) {
 	if len(vpToken) == 0 {
-		return nil, errors.New("DC API response requires a non-empty vp_token")
-	}
-	protocol := request.DCAPIProtocol
-	if protocol == "" {
-		return nil, errors.New("DC API response requires the request protocol")
+		return nil, false, errors.New("DC API response requires a non-empty vp_token")
 	}
 	switch request.ResponseMode {
 	case OAuthAuthzReqResponseModeDCAPI:
-		return &DCAPIResponse{Protocol: protocol, Data: map[string]any{"vp_token": vpToken}}, nil
+		return &DCAPIResponse{Protocol: request.DCAPIProtocol, Data: map[string]any{"vp_token": vpToken}}, false, nil
 	case OAuthAuthzReqResponseModeDCAPIJWT:
-		if request.ClientMetadata == nil {
-			return nil, errors.New("dc_api.jwt response requires verifier client_metadata with an encryption key")
-		}
-		payload := map[string]any{"vp_token": vpToken}
-		encrypted, err := p.CreateEncryptedAuthorizationResponse(payload, request.ClientMetadata)
+		payload, err := json.Marshal(map[string]any{"vp_token": vpToken})
 		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt DC API response: %w", err)
+			return nil, false, fmt.Errorf("failed to marshal authorization response: %w", err)
 		}
-		return &DCAPIResponse{Protocol: protocol, Data: map[string]any{"response": encrypted}}, nil
+		encrypted, err := p.encryptAuthorizationResponseJWE(payload, request.ClientMetadata)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to encrypt DC API response: %w", err)
+		}
+		return &DCAPIResponse{Protocol: request.DCAPIProtocol, Data: map[string]any{"response": encrypted}}, true, nil
 	default:
-		return nil, fmt.Errorf("response_mode %q is not a DC API mode", request.ResponseMode)
+		return nil, false, fmt.Errorf("response_mode %q is not a DC API mode", request.ResponseMode)
 	}
 }
 

@@ -175,7 +175,7 @@ func (f *federationRequestFixture) options() RequestObjectValidationOptions {
 func (f *federationRequestFixture) parse(t *testing.T, requestObject string, options RequestObjectValidationOptions, client *http.Client) (*CredentialPresentationRequest, error) {
 	t.Helper()
 	presenter := &Oid4vpPresenter{HTTPClient: client, RequestObjectValidation: &options}
-	return presenter.ParseRequestObject(requestObject, f.clientID())
+	return parseRequestObjectForTest(presenter, requestObject, f.clientID())
 }
 
 func TestFederationRequestObjectWithDiscoveredTrustChain(t *testing.T) {

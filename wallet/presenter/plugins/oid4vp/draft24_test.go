@@ -23,7 +23,7 @@ func TestPresentationRequest_ExplicitDraft24Boundary(t *testing.T) {
 		"presentation_definition": {`{"id":"definition","input_descriptors":[{"id":"identity"}]}`},
 	}
 	draftURI := "openid4vp://present?" + params.Encode()
-	draft, err := p.ParseDraft24PresentationRequest(draftURI)
+	draft, err := parseDraft24ForTest(p, draftURI)
 	require.NoError(t, err)
 	require.Equal(t, "definition", draft.PresentationDefinition.ID)
 	require.Nil(t, draft.DcqlQuery)
@@ -37,7 +37,7 @@ func TestPresentationRequest_ExplicitDraft24Boundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, final.PresentationDefinition)
 	require.Equal(t, "given_name", final.DcqlQuery.Credentials[0].Claims[0].Path[0])
-	draftDCQL, err := p.ParseDraft24PresentationRequest(finalURI)
+	draftDCQL, err := parseDraft24ForTest(p, finalURI)
 	require.NoError(t, err)
 	require.Equal(t, final.DcqlQuery, draftDCQL.DcqlQuery)
 }
@@ -147,7 +147,7 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 func TestDraft24ScopeCompatibility(t *testing.T) {
 	params := url.Values{"client_id": {"redirect_uri:https://verifier.example/response"}, "response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"n"}, "scope": {"openid"}, "presentation_definition": {`{"id":"definition"}`}}
 	p := &Oid4vpPresenter{}
-	_, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+	_, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
 	require.NoError(t, err)
 	params.Del("presentation_definition")
 	params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"dc+sd-jwt","meta":{}}]}`)
@@ -175,7 +175,7 @@ func TestParseRequestRejectsInvalidOuterClientIDBeforeFetch(t *testing.T) {
 func TestDraft24RetainsSyntacticDCQLParsing(t *testing.T) {
 	params := url.Values{"client_id": {"redirect_uri:https://verifier.example/response"}, "response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"n"}, "dcql_query": {`{"credentials":[{"id":"identity","format":"mso_mdoc"}]}`}}
 	p := &Oid4vpPresenter{}
-	request, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+	request, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
 	require.NoError(t, err)
 	require.Equal(t, "mso_mdoc", request.DcqlQuery.Credentials[0].Format)
 	// Syntactic parsing is not evidence that mdoc presentation is implemented.
@@ -196,7 +196,7 @@ func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
 		"response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"nonce"},
 		"presentation_definition": {definition},
 	}
-	request, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+	request, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
 	require.NoError(t, err)
 	require.Equal(t, "definition", request.PresentationDefinition.ID)
 	require.JSONEq(t, definition, string(request.RawPresentationDefinition))
@@ -207,7 +207,7 @@ func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
 	// A signed Request Object carries the definition as a JSON object rather
 	// than as a query parameter string, and must round-trip the same way.
 	f := newRequestObjectFixture(t, "verifier.example")
-	signed, err := f.presenter().ParseDraft24PresentationRequest(draft24RequestURI(t, f, draft24X509Claims(f)))
+	signed, err := parseDraft24ForTest(f.presenter(), draft24RequestURI(t, f, draft24X509Claims(f)))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"id":"pd-1","input_descriptors":[{"id":"pid"}]}`, string(signed.RawPresentationDefinition))
 
@@ -236,7 +236,7 @@ func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 	t.Run("presentation_definition_uri", func(t *testing.T) {
 		params := base()
 		params.Set("presentation_definition_uri", "https://verifier.example/pd/1")
-		req, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+		req, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
 		require.NoError(t, err)
 		require.Equal(t, "https://verifier.example/pd/1", req.PresentationDefinitionURI)
 		require.Nil(t, req.PresentationDefinition)
@@ -246,7 +246,7 @@ func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 	t.Run("scope", func(t *testing.T) {
 		params := base()
 		params.Set("scope", "com.example.pid")
-		req, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + params.Encode())
+		req, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
 		require.NoError(t, err)
 		require.Equal(t, "com.example.pid", req.Scope)
 		require.Nil(t, req.PresentationDefinition)
@@ -254,7 +254,7 @@ func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 	})
 
 	t.Run("none of them", func(t *testing.T) {
-		_, err := p.ParseDraft24PresentationRequest("openid4vp://present?" + base().Encode())
+		_, err := parseDraft24ForTest(p, "openid4vp://present?"+base().Encode())
 		assertAuthzErrorCode(t, err, InvalidRequestError)
 		require.ErrorContains(t, err, "presentation_definition, presentation_definition_uri, scope or dcql_query is required")
 	})

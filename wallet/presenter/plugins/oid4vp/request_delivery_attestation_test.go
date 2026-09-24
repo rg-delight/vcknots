@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-func presenterWithDeliveryAttestation(f *requestObjectFixture, p profile.Profile, attested bool) *Oid4vpPresenter {
+func presenterForDelivery(f *requestObjectFixture, p profile.Profile) *Oid4vpPresenter {
 	options := f.options()
-	options.DeliveredByReference = attested
 	return &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &options,
@@ -21,14 +21,13 @@ func presenterWithDeliveryAttestation(f *requestObjectFixture, p profile.Profile
 
 func parseRequestByValue(t *testing.T, f *requestObjectFixture, p profile.Profile, attested bool) (*CredentialPresentationRequest, error) {
 	t.Helper()
-	uri := "openid4vp://authorize?" + url.Values{
-		"client_id": {f.clientID()},
-		"request":   {f.signWithRoot(t, f.claims(), false)},
-	}.Encode()
-	return presenterWithDeliveryAttestation(f, p, attested).ParsePresentationRequest(uri)
+	return parseRequestObjectWithSourceForTest(presenterForDelivery(f, p), f.signWithRoot(t, f.claims(), false), types.RequestObjectSource{
+		ClientID:             f.clientID(),
+		DeliveredByReference: attested,
+	})
 }
 
-func parseRequestByReference(t *testing.T, f *requestObjectFixture, p profile.Profile, attested bool) (*CredentialPresentationRequest, error) {
+func parseRequestByReference(t *testing.T, f *requestObjectFixture, p profile.Profile) (*CredentialPresentationRequest, error) {
 	t.Helper()
 	f.mu.Lock()
 	f.requestObject = []byte(f.signWithRoot(t, f.claims(), false))
@@ -37,18 +36,18 @@ func parseRequestByReference(t *testing.T, f *requestObjectFixture, p profile.Pr
 		"client_id":   {f.clientID()},
 		"request_uri": {f.server.URL + "/request-object"},
 	}.Encode()
-	return presenterWithDeliveryAttestation(f, p, attested).ParsePresentationRequest(uri)
+	return presenterForDelivery(f, p).ParsePresentationRequest(uri)
 }
 
 // TestHAIPRequestDeliveryAttestation covers the caller attestation that lets an
-// application re-submit a stored request_uri Request Object with request= while
-// satisfying the HAIP §5.1 delivery-by-reference requirement.
+// application pass a Request Object it fetched through request_uri by value
+// while satisfying the HAIP §5.1 delivery-by-reference requirement.
 func TestHAIPRequestDeliveryAttestation(t *testing.T) {
-	t.Run("request= with attestation is accepted and recorded", func(t *testing.T) {
+	t.Run("by value with attestation is accepted and recorded", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		req, err := parseRequestByValue(t, f, profile.HAIP, true)
 		if err != nil {
-			t.Fatalf("HAIP with DeliveredByReference must accept request=: %v", err)
+			t.Fatalf("HAIP with DeliveredByReference must accept the Request Object: %v", err)
 		}
 		proof := req.RequestObjectVerification
 		if proof == nil {
@@ -62,17 +61,17 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 		}
 	})
 
-	t.Run("request= without attestation is rejected", func(t *testing.T) {
+	t.Run("by value without attestation is rejected", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		_, err := parseRequestByValue(t, f, profile.HAIP, false)
 		if err == nil || !strings.Contains(err.Error(), "request_uri") {
-			t.Fatalf("HAIP must reject request= without attestation: %v", err)
+			t.Fatalf("HAIP must reject a by-value Request Object without attestation: %v", err)
 		}
 	})
 
-	t.Run("real request_uri never marks the attestation used", func(t *testing.T) {
+	t.Run("request_uri is recorded as delivered by reference", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		req, err := parseRequestByReference(t, f, profile.HAIP, true)
+		req, err := parseRequestByReference(t, f, profile.HAIP)
 		if err != nil {
 			t.Fatalf("HAIP request_uri must be accepted: %v", err)
 		}
@@ -91,11 +90,11 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 	t.Run("Final ignores the attestation", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		if _, err := parseRequestByValue(t, f, profile.Final, false); err != nil {
-			t.Fatalf("Final must accept request= without attestation: %v", err)
+			t.Fatalf("Final must accept a by-value Request Object without attestation: %v", err)
 		}
 		req, err := parseRequestByValue(t, f, profile.Final, true)
 		if err != nil {
-			t.Fatalf("Final must accept request= with attestation: %v", err)
+			t.Fatalf("Final must accept a by-value Request Object with attestation: %v", err)
 		}
 		proof := req.RequestObjectVerification
 		if proof == nil {
@@ -112,22 +111,16 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 
 // TestDeliveryAttestationDoesNotSuppressWalletNonceMismatch proves the
 // attestation is scoped to the HAIP delivery check: it never stands in for the
-// wallet_nonce echo bound to an actual request_uri POST in this process.
+// wallet_nonce echo the caller states it sent.
 func TestDeliveryAttestationDoesNotSuppressWalletNonceMismatch(t *testing.T) {
 	f := newRequestObjectFixture(t)
-	captured := &capturedRequestURIForm{}
-	f.echoNonceHandler(t, captured, func(string) string { return "wrong-nonce" })
-
-	options := f.options()
-	options.DeliveredByReference = true
-	p := &Oid4vpPresenter{
-		HTTPClient:              f.server.Client(),
-		RequestObjectValidation: &options,
-		Profile:                 profile.HAIP,
-		RequestURINonce:         func() (string, error) { return "expected-nonce", nil },
-	}
-
-	_, err := f.parseRequestURIPost(t, p)
+	claims := f.claims()
+	claims["wallet_nonce"] = "wrong-nonce"
+	_, err := parseRequestObjectWithSourceForTest(presenterForDelivery(f, profile.HAIP), f.signWithRoot(t, claims, false), types.RequestObjectSource{
+		ClientID:             f.clientID(),
+		DeliveredByReference: true,
+		WalletNonce:          "expected-nonce",
+	})
 	if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
 		t.Fatalf("attestation must not suppress wallet_nonce mismatch: %v", err)
 	}

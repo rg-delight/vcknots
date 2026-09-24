@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -165,23 +166,19 @@ func TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	options := RequestObjectValidationOptions{
 		RootCAs: pool,
 		Now:     func() time.Time { return f.now },
-		// The Request Object is delivered by value here; the attestation is
-		// what lets it satisfy the HAIP Section 5.1 delivery requirement.
-		DeliveredByReference: true,
 	}
-	uri := "openid4vp://authorize?" + url.Values{
-		"client_id": {f.clientID()},
-		"request":   {f.signWithRoot(t, f.claims(), true)},
-	}.Encode()
+	requestObject := f.signWithRoot(t, f.claims(), true)
 
+	// The Request Object is passed by value; the attestation is what lets it
+	// satisfy the HAIP Section 5.1 delivery requirement.
 	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
-	_, err := haip.ParsePresentationRequest(uri)
+	_, err := parseRequestObjectWithSourceForTest(haip, requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
 	if err == nil || !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
 		t.Fatalf("HAIP must reject the anchor in x5c with a root pool: %v", err)
 	}
 
 	final := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
-	if _, err := final.ParsePresentationRequest(uri); err != nil {
+	if _, err := parseRequestObjectForTest(final, requestObject, f.clientID()); err != nil {
 		t.Fatalf("Final must still accept a chain that includes the anchor: %v", err)
 	}
 }

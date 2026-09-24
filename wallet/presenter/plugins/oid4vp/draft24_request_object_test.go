@@ -50,7 +50,7 @@ func draft24RequestURI(t *testing.T, f *requestObjectFixture, claims map[string]
 // than the legacy root pool alone.
 func TestDraft24X509SanDNSRequestObjectWithPresentationDefinition(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
-	request, err := f.presenter().ParseDraft24PresentationRequest(draft24RequestURI(t, f, draft24X509Claims(f)))
+	request, err := parseDraft24ForTest(f.presenter(), draft24RequestURI(t, f, draft24X509Claims(f)))
 	if err != nil {
 		t.Fatalf("Draft24 x509_san_dns request with a presentation_definition was rejected: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestDraft24X509SanDNSRequestObjectRejectsForeignTrustAnchor(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
 	foreign := newRequestObjectFixture(t, "verifier.example").options()
 	presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &foreign}
-	_, err := presenter.ParseDraft24PresentationRequest(draft24RequestURI(t, f, draft24X509Claims(f)))
+	_, err := parseDraft24ForTest(presenter, draft24RequestURI(t, f, draft24X509Claims(f)))
 	if err == nil || !strings.Contains(err.Error(), "request object certificate chain is not trusted") {
 		t.Fatalf("Draft24 must reject a Request Object signed below a foreign anchor: %v", err)
 	}
@@ -92,14 +92,14 @@ func TestDraft24RequestObjectHonoursWalletAudience(t *testing.T) {
 	options.WalletAudience = []string{"https://wallet.example"}
 	presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
 
-	_, err := presenter.ParseDraft24PresentationRequest(draft24RequestURI(t, f, draft24X509Claims(f)))
+	_, err := parseDraft24ForTest(presenter, draft24RequestURI(t, f, draft24X509Claims(f)))
 	if err == nil || !strings.Contains(err.Error(), "request object audience does not identify this Wallet") {
 		t.Fatalf("Draft24 must apply the configured wallet audience: %v", err)
 	}
 
 	claims := draft24X509Claims(f)
 	claims["aud"] = "https://wallet.example"
-	if _, err := presenter.ParseDraft24PresentationRequest(draft24RequestURI(t, f, claims)); err != nil {
+	if _, err := parseDraft24ForTest(presenter, draft24RequestURI(t, f, claims)); err != nil {
 		t.Fatalf("Draft24 must accept the configured wallet audience: %v", err)
 	}
 }
@@ -111,7 +111,7 @@ func TestDraft24RequestObjectRejectsExpiredRequestObject(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
 	claims := draft24X509Claims(f)
 	claims["exp"] = f.now.Add(-time.Second).Unix()
-	_, err := f.presenter().ParseDraft24PresentationRequest(draft24RequestURI(t, f, claims))
+	_, err := parseDraft24ForTest(f.presenter(), draft24RequestURI(t, f, claims))
 	if err == nil || !strings.Contains(err.Error(), "request object is outside its exp validity") {
 		t.Fatalf("Draft24 must reject an expired Request Object: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestDraft24ClientMetadataRequestObjectUsesTheCallerClock(t *testing.T) {
 	parse := func(now time.Time, skew time.Duration) error {
 		options := RequestObjectValidationOptions{Now: func() time.Time { return now }, ClockSkew: skew}
 		presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
-		_, err := presenter.ParseDraft24PresentationRequest(uri)
+		_, err := parseDraft24ForTest(presenter, uri)
 		return err
 	}
 
@@ -201,7 +201,7 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 	trusted := x509.NewCertPool()
 	trusted.AddCert(f.root)
 	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: trusted}
-	request, err := p.ParseDraft24RequestObject(token, f.clientID())
+	request, err := parseDraft24RequestObjectForTest(p, token, f.clientID())
 	if err != nil {
 		t.Fatalf("a chain to the configured root must be accepted: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 	untrusted := x509.NewCertPool()
 	untrusted.AddCert(other.root)
 	p = &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: untrusted}
-	if _, err := p.ParseDraft24RequestObject(token, f.clientID()); err == nil {
+	if _, err := parseDraft24RequestObjectForTest(p, token, f.clientID()); err == nil {
 		t.Fatal("an x509_hash certificate outside the configured roots must be refused")
 	}
 }
@@ -231,7 +231,7 @@ func TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint(t *testing.T) {
 			claims["client_id"] = "x509_san_dns:verifier.example"
 			claims["response_mode"] = mode
 			parse := func() (*CredentialPresentationRequest, error) {
-				return p.ParseDraft24RequestObject(f.sign(t, claims, nil), "x509_san_dns:verifier.example")
+				return parseDraft24RequestObjectForTest(p, f.sign(t, claims, nil), "x509_san_dns:verifier.example")
 			}
 			request, err := parse()
 			if err != nil {

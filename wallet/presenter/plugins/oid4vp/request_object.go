@@ -1,7 +1,6 @@
 package oid4vp
 
 import (
-	"context"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -39,10 +38,6 @@ type RequestObjectValidationOptions struct {
 	// SigningAlgorithms defaults to ES256 and RS256. This is independent of
 	// encryption keys and algorithms carried in client_metadata.
 	SigningAlgorithms []jose.SignatureAlgorithm
-	// DeliveredByReference states that the application fetched this Request
-	// Object through request_uri and now passes it by value, which satisfies
-	// the HAIP §5.1 delivery rule. It affects that check only.
-	DeliveredByReference bool
 	// RequireExpiry rejects a Request Object without exp. Neither OpenID4VP
 	// 1.0 nor HAIP requires exp, so it is off by default in every profile.
 	RequireExpiry bool
@@ -51,9 +46,6 @@ type RequestObjectValidationOptions struct {
 	// profile substitutes haipRequestObjectMaxAge when the caller left it
 	// zero, and honours a caller-supplied value as given.
 	MaxAge time.Duration
-	// Context scopes the outbound requests of one parse (request_uri,
-	// revocation, federation). Nil means context.Background().
-	Context context.Context
 	// VerifierAttestationIssuers are the parties this Wallet trusts for issuing
 	// Verifier Attestation JWTs (OID4VP 1.0 §5.9.3). An empty list refuses
 	// every verifier_attestation Client Identifier, because the profile makes
@@ -63,11 +55,6 @@ type RequestObjectValidationOptions struct {
 	// openid_federation Client Identifier. A nil value refuses every such
 	// Client Identifier.
 	Federation *FederationTrustOptions
-	// WalletNonce is the wallet_nonce the application sent with its own
-	// request_uri POST before passing the Request Object by value. The
-	// Request Object must echo it (OID4VP 1.0 §5.10.1). It is ignored when
-	// this library fetched the Request Object itself.
-	WalletNonce string
 }
 
 // haipRequestObjectMaxAge is the Request Object lifetime the HAIP profile
@@ -90,9 +77,10 @@ type RequestObjectVerification struct {
 	// parameters). It is empty when the library did not observe one of those
 	// paths.
 	Delivery string
-	// DeliveryAttested is true when a caller DeliveredByReference attestation
-	// was accepted for the HAIP delivery check, letting a request= Request
-	// Object satisfy the request_uri requirement.
+	// DeliveryAttested is true when the caller's
+	// RequestObjectSource.DeliveredByReference was accepted for the HAIP
+	// delivery check, letting a Request Object passed by value satisfy the
+	// request_uri requirement.
 	DeliveryAttested bool
 	// ExpiresAt is the exp claim of the authenticated Request Object, in UTC.
 	// It is the zero value when the Request Object carried no exp, which the
@@ -158,9 +146,6 @@ func (c *requestCore) setRequestObjectValidation(options RequestObjectValidation
 	options.WalletAudience = append([]string(nil), options.WalletAudience...)
 	options.SigningAlgorithms = append([]jose.SignatureAlgorithm(nil), options.SigningAlgorithms...)
 	c.requestObjectValidation = &options
-	c.ctx = options.Context
-	c.deliveredByReference = options.DeliveredByReference
-	c.callerWalletNonce = options.WalletNonce
 }
 
 // WithExpectedClientID supplies the outer Authorization Request client_id that

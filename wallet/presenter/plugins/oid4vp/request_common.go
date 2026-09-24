@@ -17,6 +17,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -109,6 +110,15 @@ func newRequestCore() requestCore {
 		},
 		profile: profile.Final,
 	}
+}
+
+// applySource records the caller's facts about a Request Object passed by
+// value (types.RequestObjectSource).
+func (c *requestCore) applySource(clientID string, src types.RequestObjectSource) {
+	c.expectedClientID = clientID
+	c.expectedClientIDAbsent = clientID == ""
+	c.deliveredByReference = src.DeliveredByReference
+	c.callerWalletNonce = src.WalletNonce
 }
 
 // context returns the context this parse's outbound requests run under.

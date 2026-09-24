@@ -312,7 +312,7 @@ func TestWallet_PresentDraft24SelectionFromAStorelessWallet(t *testing.T) {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 	credential := heldCredential(t, fixture, "urn:test:identity")
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	endpoint, err := url.Parse(fixture.baseURL + "/response")
 	require.NoError(t, err)
