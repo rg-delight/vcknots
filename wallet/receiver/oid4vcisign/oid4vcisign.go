@@ -52,7 +52,8 @@ var _ types.OID4VCIFinalSigner = Default{}
 // CreateDpopProof builds the RFC 9449 Section 4.2 DPoP proof for a single HTTP
 // request, with the public JWK in the protected header, the htm/htu/iat/jti
 // claims, the server-supplied nonce when one is known and the ath hash of the
-// access token when the request carries one.
+// access token when the request carries one. htm is upper-cased and htu loses
+// its query and fragment. key.Key is a private key or a jose.OpaqueSigner.
 func (Default) CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error) {
 	htu, err := dpopHTU(rawURL)
 	if err != nil {
@@ -244,6 +245,9 @@ func defaultSignatureAlgorithm(key jose.JSONWebKey) jose.SignatureAlgorithm {
 	if key.Algorithm != "" {
 		return jose.SignatureAlgorithm(key.Algorithm)
 	}
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok && len(signer.Algs()) > 0 {
+		return signer.Algs()[0]
+	}
 	if algorithms := signatureAlgorithmsForKey(key); len(algorithms) > 0 {
 		return algorithms[0]
 	}
@@ -252,11 +256,13 @@ func defaultSignatureAlgorithm(key jose.JSONWebKey) jose.SignatureAlgorithm {
 
 // signatureAlgorithmsForKey lists the JWS algorithms a key can actually produce,
 // in the order this wallet prefers them. An EC key is bound to the single
-// algorithm of its curve (RFC 7518 Section 3.4), so listing anything else would
-// only produce a signature the issuer cannot verify. A key type this package does
-// not recognise, including an opaque crypto.Signer backed by hardware, yields no
-// algorithms; such a key states its algorithm in the JWK alg member instead.
+// algorithm of its curve (RFC 7518 Section 3.4). A jose.OpaqueSigner lists its
+// own. Any other key type this package does not recognise yields none; such a
+// key states its algorithm in the JWK alg member instead.
 func signatureAlgorithmsForKey(key jose.JSONWebKey) []jose.SignatureAlgorithm {
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok {
+		return signer.Algs()
+	}
 	public := key.Key
 	if signer, ok := key.Key.(crypto.Signer); ok {
 		public = signer.Public()
@@ -312,7 +318,10 @@ func signJWTWithPublicJWKHeaderAndExtras(key jose.JSONWebKey, alg jose.Signature
 	if alg == "" {
 		alg = defaultSignatureAlgorithm(key)
 	}
-	publicJWK := key.Public()
+	publicJWK, err := publicKeyOf(key)
+	if err != nil {
+		return "", err
+	}
 	publicJWK.Algorithm = string(alg)
 	if publicJWK.Use == "" {
 		publicJWK.Use = "sig"
@@ -331,6 +340,23 @@ func signJWTWithPublicJWKHeaderAndExtras(key jose.JSONWebKey, alg jose.Signature
 		return "", err
 	}
 	return jwt.Signed(signer).Claims(payload).Serialize()
+}
+
+// publicKeyOf returns the public JWK of a private key, or of the key a
+// jose.OpaqueSigner holds.
+func publicKeyOf(key jose.JSONWebKey) (jose.JSONWebKey, error) {
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok {
+		public := signer.Public()
+		if public == nil || !public.Valid() || !public.IsPublic() {
+			return jose.JSONWebKey{}, fmt.Errorf("opaque signer returned no valid public key")
+		}
+		return *public, nil
+	}
+	public := key.Public()
+	if !public.Valid() {
+		return jose.JSONWebKey{}, fmt.Errorf("unsupported signing key type %T", key.Key)
+	}
+	return public, nil
 }
 
 func signJWT(key jose.JSONWebKey, typ string, payload map[string]any, extraHeaders map[string]any) (string, error) {
