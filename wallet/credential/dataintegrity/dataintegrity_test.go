@@ -320,3 +320,104 @@ func TestCanonicalizeRefusesTooManyBlankNodes(t *testing.T) {
 		t.Fatalf("got %v, want ErrCanonicalizationTooComplex", err)
 	}
 }
+
+func TestVerifyWithOptionsChecksTheVerifierExpectations(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	created, err := time.Parse(time.RFC3339Nano, proof["created"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := vectors.Holder.publicKey(t)
+	matching := VerifyOptions{
+		ProofPurpose:       ProofPurposeAuthentication,
+		VerificationMethod: vectors.Holder.VerificationMethod,
+		Challenge:          proof["challenge"].(string),
+		Domain:             proof["domain"].(string),
+		Now:                created.Add(time.Minute),
+	}
+	if err := VerifyEddsaRdfc2022WithOptions(presentation, vectors.Contexts, publicKey, matching); err != nil {
+		t.Fatalf("matching options: %v", err)
+	}
+	cases := map[string]func(o *VerifyOptions){
+		"another purpose":             func(o *VerifyOptions) { o.ProofPurpose = ProofPurposeAssertionMethod },
+		"another verification method": func(o *VerifyOptions) { o.VerificationMethod = vectors.Issuer.VerificationMethod },
+		"another challenge":           func(o *VerifyOptions) { o.Challenge = "another-nonce" },
+		"another domain":              func(o *VerifyOptions) { o.Domain = "another-verifier" },
+		"created in the future":       func(o *VerifyOptions) { o.Now = created.Add(-time.Hour) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			options := matching
+			mutate(&options)
+			if err := VerifyEddsaRdfc2022WithOptions(presentation, vectors.Contexts, publicKey, options); !errors.Is(err, ErrProofInvalid) {
+				t.Fatalf("got %v, want ErrProofInvalid", err)
+			}
+		})
+	}
+}
+
+func withProof(document map[string]any, proof any) map[string]any {
+	secured := withoutProof(document)
+	secured["proof"] = proof
+	return secured
+}
+
+func TestVerifyRefusesMalformedProofMembers(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	with := func(name string, value any) map[string]any {
+		changed := map[string]any{}
+		for key, member := range proof {
+			changed[key] = member
+		}
+		changed[name] = value
+		return withProof(presentation, changed)
+	}
+	cases := map[string]map[string]any{
+		"created is not a dateTimeStamp": with("created", "2026-09-23"),
+		"expires is not a string":        with("expires", 1),
+		"expired":                        with("expires", "2000-01-01T00:00:00Z"),
+		"chained proof":                  with("previousProof", "urn:uuid:1"),
+		"no proofPurpose":                with("proofPurpose", ""),
+		"empty proof set":                withProof(presentation, []any{}),
+		"proof set entry not an object":  withProof(presentation, []any{"proof"}),
+	}
+	options := VerifyOptions{Now: time.Now()}
+	for name, document := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := VerifyEddsaRdfc2022WithOptions(document, vectors.Contexts, vectors.Holder.publicKey(t), options); !errors.Is(err, ErrProofInvalid) {
+				t.Fatalf("got %v, want ErrProofInvalid", err)
+			}
+		})
+	}
+}
+
+func TestVerifySelectsTheProofOfAProofSet(t *testing.T) {
+	vectors := loadVectors(t)
+	presentation := vectors.Cases[0].Presentation
+	proof := presentation["proof"].(map[string]any)
+	other := map[string]any{"type": ProofType, "cryptosuite": "ecdsa-rdfc-2019", "proofPurpose": ProofPurposeAuthentication, "verificationMethod": "did:example:other#key", "proofValue": "zabc"}
+	publicKey := vectors.Holder.publicKey(t)
+
+	set := withProof(presentation, []any{other, proof})
+	if err := VerifyEddsaRdfc2022(set, vectors.Contexts, publicKey); err != nil {
+		t.Fatalf("proof set: %v", err)
+	}
+
+	second := map[string]any{}
+	for key, value := range proof {
+		second[key] = value
+	}
+	second["verificationMethod"] = vectors.Issuer.VerificationMethod
+	ambiguous := withProof(presentation, []any{second, proof})
+	if err := VerifyEddsaRdfc2022(ambiguous, vectors.Contexts, publicKey); !errors.Is(err, ErrProofInvalid) {
+		t.Fatalf("ambiguous proof set: got %v, want ErrProofInvalid", err)
+	}
+	selected := VerifyOptions{VerificationMethod: vectors.Holder.VerificationMethod}
+	if err := VerifyEddsaRdfc2022WithOptions(ambiguous, vectors.Contexts, publicKey, selected); err != nil {
+		t.Fatalf("selected proof: %v", err)
+	}
+}

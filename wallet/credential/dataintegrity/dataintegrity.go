@@ -174,17 +174,53 @@ func SignEddsaRdfc2022(document map[string]any, options ProofOptions, contexts P
 	return secured, nil
 }
 
-// VerifyEddsaRdfc2022 verifies the single eddsa-rdfc-2022 proof a secured
-// document carries under publicKey (Section 3.2.2). Resolving which key the
-// proof's verificationMethod names, and whether it may be used for the proof
-// purpose, is the caller's decision.
+// VerifyOptions are a verifier's expectations of a proof (VC Data Integrity
+// 1.0 Section 4.4, Verify Proof). Empty fields impose nothing.
+type VerifyOptions struct {
+	// ProofPurpose, when non-empty, must equal the proof's proofPurpose.
+	ProofPurpose string
+	// VerificationMethod, when non-empty, must equal the proof's
+	// verificationMethod. It also selects the proof to verify from a proof
+	// set (Section 2.1.1).
+	VerificationMethod string
+	// Challenge, when non-empty, must equal the proof's challenge.
+	Challenge string
+	// Domain, when non-empty, must equal the proof's domain or one of its
+	// values.
+	Domain string
+	// Now, when non-zero, is the verification time: a proof created after Now
+	// plus ClockSkew, or whose expires is not after Now minus ClockSkew, is
+	// refused.
+	Now time.Time
+	// ClockSkew is the tolerance applied with Now.
+	ClockSkew time.Duration
+}
+
+// VerifyEddsaRdfc2022 is VerifyEddsaRdfc2022WithOptions with no expectations
+// beyond a well-formed proof that verifies under publicKey.
 func VerifyEddsaRdfc2022(document map[string]any, contexts PinnedContexts, publicKey ed25519.PublicKey) error {
-	proof, ok := document["proof"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("%w: the document must carry exactly one proof object", ErrProofInvalid)
+	return VerifyEddsaRdfc2022WithOptions(document, contexts, publicKey, VerifyOptions{})
+}
+
+// VerifyEddsaRdfc2022WithOptions verifies an eddsa-rdfc-2022 proof of a
+// secured document under publicKey (VC Data Integrity EdDSA Cryptosuites v1.0
+// Section 3.2.2) and checks it against options.
+//
+// The document's `proof` is one proof object or a proof set (an array, VC
+// Data Integrity 1.0 Section 2.1.1). The proof verified is the
+// eddsa-rdfc-2022 DataIntegrityProof of the set, selected by
+// options.VerificationMethod when the set holds several. Proof chains
+// (previousProof) are not supported and are refused. `created` and `expires`,
+// when present, must be dateTimeStamp values. Resolving which key the proof's
+// verificationMethod names, and whether it may be used for the proof purpose,
+// is the caller's decision.
+func VerifyEddsaRdfc2022WithOptions(document map[string]any, contexts PinnedContexts, publicKey ed25519.PublicKey, options VerifyOptions) error {
+	proof, err := selectProof(document["proof"], options.VerificationMethod)
+	if err != nil {
+		return err
 	}
-	if proof["type"] != ProofType || proof["cryptosuite"] != CryptosuiteEddsaRdfc2022 {
-		return fmt.Errorf("%w: the proof is not an %s DataIntegrityProof", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	if err := checkProof(proof, options); err != nil {
+		return err
 	}
 	proofValue, ok := proof["proofValue"].(string)
 	if !ok || !strings.HasPrefix(proofValue, "z") {
@@ -218,6 +254,116 @@ func VerifyEddsaRdfc2022(document map[string]any, contexts PinnedContexts, publi
 		return fmt.Errorf("%w: signature verification failed", ErrProofInvalid)
 	}
 	return nil
+}
+
+// selectProof returns the eddsa-rdfc-2022 proof of a `proof` member that is a
+// proof object or a proof set, narrowed to verificationMethod when non-empty.
+func selectProof(member any, verificationMethod string) (map[string]any, error) {
+	var proofs []any
+	switch typed := member.(type) {
+	case map[string]any:
+		proofs = []any{typed}
+	case []any:
+		proofs = typed
+	}
+	if len(proofs) == 0 {
+		return nil, fmt.Errorf("%w: the document must carry a proof object or a non-empty proof set", ErrProofInvalid)
+	}
+	var selected []map[string]any
+	for _, entry := range proofs {
+		proof, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%w: every proof must be an object", ErrProofInvalid)
+		}
+		if proof["type"] != ProofType || proof["cryptosuite"] != CryptosuiteEddsaRdfc2022 {
+			continue
+		}
+		if verificationMethod != "" && proof["verificationMethod"] != verificationMethod {
+			continue
+		}
+		selected = append(selected, proof)
+	}
+	switch len(selected) {
+	case 0:
+		return nil, fmt.Errorf("%w: no %s DataIntegrityProof matches", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	case 1:
+		return selected[0], nil
+	default:
+		return nil, fmt.Errorf("%w: several %s proofs match; name the verificationMethod", ErrProofInvalid, CryptosuiteEddsaRdfc2022)
+	}
+}
+
+// checkProof applies the proof member rules of VC Data Integrity 1.0 Section
+// 2.1 and the verifier's options to proof.
+func checkProof(proof map[string]any, options VerifyOptions) error {
+	if _, chained := proof["previousProof"]; chained {
+		return fmt.Errorf("%w: proof chains are not supported", ErrProofInvalid)
+	}
+	purpose, _ := proof["proofPurpose"].(string)
+	if purpose == "" {
+		return fmt.Errorf("%w: proofPurpose is required", ErrProofInvalid)
+	}
+	if options.ProofPurpose != "" && purpose != options.ProofPurpose {
+		return fmt.Errorf("%w: proofPurpose %q is not %q", ErrProofInvalid, purpose, options.ProofPurpose)
+	}
+	if method, _ := proof["verificationMethod"].(string); method == "" {
+		return fmt.Errorf("%w: verificationMethod is required", ErrProofInvalid)
+	}
+	if options.Challenge != "" && proof["challenge"] != options.Challenge {
+		return fmt.Errorf("%w: challenge does not match", ErrProofInvalid)
+	}
+	if options.Domain != "" && !proofDomainIncludes(proof["domain"], options.Domain) {
+		return fmt.Errorf("%w: domain does not match", ErrProofInvalid)
+	}
+	created, err := proofTime(proof, "created")
+	if err != nil {
+		return err
+	}
+	expires, err := proofTime(proof, "expires")
+	if err != nil {
+		return err
+	}
+	if options.Now.IsZero() {
+		return nil
+	}
+	if !created.IsZero() && created.After(options.Now.Add(options.ClockSkew)) {
+		return fmt.Errorf("%w: proof was created in the future", ErrProofInvalid)
+	}
+	if !expires.IsZero() && !expires.After(options.Now.Add(-options.ClockSkew)) {
+		return fmt.Errorf("%w: proof has expired", ErrProofInvalid)
+	}
+	return nil
+}
+
+// proofDomainIncludes reports whether a proof's domain, a string or an array
+// of strings, includes want.
+func proofDomainIncludes(domain any, want string) bool {
+	switch typed := domain.(type) {
+	case string:
+		return typed == want
+	case []any:
+		return slices.Contains(typed, any(want))
+	default:
+		return false
+	}
+}
+
+// proofTime reads an optional dateTimeStamp member of a proof (XML Schema
+// dateTimeStamp, which requires a time zone), or the zero time when absent.
+func proofTime(proof map[string]any, name string) (time.Time, error) {
+	raw, present := proof[name]
+	if !present {
+		return time.Time{}, nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return time.Time{}, fmt.Errorf("%w: %s must be a dateTimeStamp", ErrProofInvalid, name)
+	}
+	instant, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: %s must be a dateTimeStamp", ErrProofInvalid, name)
+	}
+	return instant, nil
 }
 
 // HashData is the eddsa-rdfc-2022 hash data of Section 3.2.4: the SHA-256 of
