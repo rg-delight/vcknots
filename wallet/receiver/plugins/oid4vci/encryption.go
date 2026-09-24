@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/go-jose/go-jose/v4"
@@ -15,12 +16,13 @@ import (
 
 // CredentialResponseEncryptionParameters builds the OpenID4VCI 1.0 §8.2
 // "credential_response_encryption" request parameter from the §12.2.4 issuer
-// metadata and the wallet's public encryption key. Final §8.2 defines exactly
-// jwk, enc and zip (there is no top-level alg, unlike earlier drafts). enc is
-// the first advertised value this library can decrypt; zip is included only when
-// zip_values_supported lists DEF, matching the §10 encrypted-messages rules. A
-// missing key is an error when the issuer marks
-// credential_response_encryption.encryption_required true.
+// metadata and the wallet's public encryption key. §8.2 defines jwk, enc and
+// zip. §10 requires the jwk to carry the alg the issuer encrypts with: the
+// key's own alg, which must be listed in alg_values_supported, or else the
+// first listed algorithm the key type can use. enc is the first advertised
+// value this library can decrypt; zip is included only when
+// zip_values_supported lists DEF. A missing key is an error when the issuer
+// marks encryption_required true.
 func CredentialResponseEncryptionParameters(metadata *types.CredentialIssuerMetadata, key *jose.JSONWebKey) (map[string]any, error) {
 	if metadata == nil || metadata.CredentialResponseEncryption == nil {
 		return nil, nil
@@ -34,13 +36,19 @@ func CredentialResponseEncryptionParameters(metadata *types.CredentialIssuerMeta
 		return nil, nil
 	}
 
-	enc, err := selectSupportedResponseEncryption(encryption.EncValuesSupported)
+	alg, err := selectResponseEncryptionAlgorithm(key, encryption.AlgValuesSupported)
 	if err != nil {
 		return nil, err
 	}
+	enc, err := selectSupportedEnc(encryption.EncValuesSupported)
+	if err != nil {
+		return nil, fmt.Errorf("credential response encryption: %w", err)
+	}
 
+	publicKey := key.Public()
+	publicKey.Algorithm = alg
 	parameters := map[string]any{
-		"jwk": key.Public(),
+		"jwk": publicKey,
 		"enc": enc,
 	}
 	if containsZipDeflate(encryption.ZipValuesSupported) {
@@ -70,7 +78,36 @@ func requestCarriesResponseEncryption(payload []byte) bool {
 	}
 }
 
-func selectSupportedResponseEncryption(encValues []string) (string, error) {
+// selectResponseEncryptionAlgorithm resolves the JWE alg of the wallet's
+// response encryption key: its own alg, or the first entry of algValues its
+// key type can use. A non-empty algValues must list the result.
+func selectResponseEncryptionAlgorithm(key *jose.JSONWebKey, algValues []string) (string, error) {
+	if alg := strings.TrimSpace(key.Algorithm); alg != "" {
+		if err := requireKeyEncryptionAlgorithm(key, alg); err != nil {
+			return "", fmt.Errorf("credential response encryption: %w", err)
+		}
+		if len(algValues) > 0 && !slices.Contains(algValues, alg) {
+			return "", fmt.Errorf("credential response encryption: key alg %q is not in the issuer's alg_values_supported %v", alg, algValues)
+		}
+		return alg, nil
+	}
+	if len(algValues) == 0 {
+		alg, err := credentialRequestEncryptionAlgorithm(key)
+		if err != nil {
+			return "", fmt.Errorf("credential response encryption: %w", err)
+		}
+		return alg, nil
+	}
+	for _, alg := range algValues {
+		if requireKeyEncryptionAlgorithm(key, alg) == nil {
+			return alg, nil
+		}
+	}
+	return "", fmt.Errorf("credential response encryption: the key cannot be used with any of the issuer's alg_values_supported %v", algValues)
+}
+
+// selectSupportedEnc returns the first enc value this library can use.
+func selectSupportedEnc(encValues []string) (string, error) {
 	for _, enc := range encValues {
 		if enc == "" {
 			continue
@@ -79,7 +116,7 @@ func selectSupportedResponseEncryption(encValues []string) (string, error) {
 			return enc, nil
 		}
 	}
-	return "", fmt.Errorf("credential response encryption: issuer advertises no supported enc value in %v", encValues)
+	return "", fmt.Errorf("issuer advertises no supported enc value in %v", encValues)
 }
 
 func containsZipDeflate(zipValues []string) bool {
@@ -147,28 +184,48 @@ func credentialRequestEncryptionAlgorithm(key *jose.JSONWebKey) (string, error) 
 	if key == nil {
 		return "", fmt.Errorf("credential request encryption key is missing")
 	}
-	if alg := strings.TrimSpace(key.Algorithm); alg != "" {
-		return alg, nil
+	alg := strings.TrimSpace(key.Algorithm)
+	if alg == "" {
+		switch key.Key.(type) {
+		case *ecdsa.PublicKey, *ecdsa.PrivateKey:
+			alg = "ECDH-ES"
+		case *rsa.PublicKey, *rsa.PrivateKey:
+			alg = "RSA-OAEP-256"
+		case ed25519.PublicKey, ed25519.PrivateKey:
+			return "", fmt.Errorf("encryption key %q is an Ed25519 signature key; ECDH-ES needs an EC key", key.KeyID)
+		default:
+			return "", fmt.Errorf(
+				"encryption key %q omits the required alg parameter and its key type %T admits no default",
+				key.KeyID, key.Key)
+		}
+	}
+	if err := requireKeyEncryptionAlgorithm(key, alg); err != nil {
+		return "", err
+	}
+	return alg, nil
+}
+
+// requireKeyEncryptionAlgorithm checks that alg is a key management algorithm
+// this library performs and that the key's type can perform it: ECDH-ES needs
+// an EC key (RFC 7518 Section 4.6), RSA-OAEP-256 an RSA key (Section 4.3).
+// Ed25519 is a signature curve and is refused by name.
+func requireKeyEncryptionAlgorithm(key *jose.JSONWebKey, alg string) error {
+	if _, err := parseJWEKeyAlgorithm(alg); err != nil {
+		return err
 	}
 	switch key.Key.(type) {
 	case *ecdsa.PublicKey, *ecdsa.PrivateKey:
-		return "ECDH-ES", nil
-	case ed25519.PublicKey, ed25519.PrivateKey:
-		return "ECDH-ES", nil
+		if strings.HasPrefix(alg, "ECDH-ES") {
+			return nil
+		}
 	case *rsa.PublicKey, *rsa.PrivateKey:
-		return "RSA-OAEP-256", nil
-	default:
-		return "", fmt.Errorf(
-			"credential request encryption key %q omits the required alg parameter and its key type %T admits no default",
-			key.KeyID, key.Key)
+		if alg == "RSA-OAEP-256" {
+			return nil
+		}
+	case ed25519.PublicKey, ed25519.PrivateKey:
+		return fmt.Errorf("encryption key %q is an Ed25519 signature key; %s needs an EC key", key.KeyID, alg)
 	}
-}
-
-func firstOrDefault(values []string, fallback string) string {
-	if len(values) > 0 && values[0] != "" {
-		return values[0]
-	}
-	return fallback
+	return fmt.Errorf("encryption key %q of type %T cannot be used with %s", key.KeyID, key.Key, alg)
 }
 
 // parseJWEKeyAlgorithm maps a JWE "alg" identifier to the go-jose key algorithm

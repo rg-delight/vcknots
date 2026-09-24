@@ -227,7 +227,10 @@ func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *t
 	if err != nil {
 		return nil, "", err
 	}
-	enc := firstOrDefault(issuerMetadata.CredentialRequestEncryption.EncValuesSupported, "A128GCM")
+	enc, err := selectSupportedEnc(issuerMetadata.CredentialRequestEncryption.EncValuesSupported)
+	if err != nil {
+		return nil, "", fmt.Errorf("credential request encryption: %w", err)
+	}
 
 	keyAlg, err := parseJWEKeyAlgorithm(alg)
 	if err != nil {
