@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
@@ -90,6 +91,7 @@ type finalIssuanceFixture struct {
 	// proofTypesSupported, when set, is published as the configuration's
 	// proof_types_supported verbatim.
 	proofTypesSupported      map[string]any
+	bindingMethods           []string
 	batchSize                int
 	parExpiresIn             int
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
@@ -296,6 +298,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		credentialConfiguration := map[string]any{"format": "dc+sd-jwt"}
 		if !f.omitScope {
 			credentialConfiguration["scope"] = "pid-scope"
+		}
+		if f.bindingMethods != nil {
+			credentialConfiguration["cryptographic_binding_methods_supported"] = f.bindingMethods
 		}
 		if f.proofTypesSupported != nil {
 			credentialConfiguration["proof_types_supported"] = f.proofTypesSupported
@@ -2132,6 +2137,59 @@ func (s *fakeFinalSigner) CreateDpopProof(jose.JSONWebKey, string, string, strin
 func (s *fakeFinalSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
 	s.proofCalls++
 	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// unboundTestSDJWTVC is an SD-JWT VC signed by issuerKey that carries no cnf.
+func unboundTestSDJWTVC(t *testing.T, issuerKey *ecdsa.PrivateKey) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
+	require.NoError(t, err)
+	signed, err := jwt.Signed(signer).Claims(map[string]any{
+		"iss": "https://issuer.example.test", "vct": "urn:eudi:pid:1",
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	}).Serialize()
+	require.NoError(t, err)
+	return signed + "~"
+}
+
+// §12.2.4: cryptographic_binding_methods_supported is present exactly when the
+// credential is bound to a key, so a credential without cnf is not what was
+// requested and is not stored as unbound.
+func TestReceiveOID4VCIFinalCredential_RefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNotification = true
+		f.bindingMethods = []string{"jwk"}
+		f.proofTypesSupported = map[string]any{
+			"jwt": map[string]any{"proof_signing_alg_values_supported": []string{"ES256"}},
+		}
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials":     []any{map[string]any{"credential": unboundTestSDJWTVC(f.t, f.issuerKey)}},
+				"notification_id": "notification-1",
+			})
+		}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrHolderBindingMissing)
+	require.Equal(t, []string{"credential_failure"}, fixture.notificationEvents)
+	entries, _, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+// Without cryptographic_binding_methods_supported the credential is not bound
+// to a key, and one without cnf is accepted.
+func TestReceiveOID4VCIFinalCredential_AcceptsUnboundCredentialWhenBindingIsNotRequired(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials": []any{map[string]any{"credential": unboundTestSDJWTVC(f.t, f.issuerKey)}},
+			})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
 }
 
 // fixedAlgorithmSigner signs every key proof with one algorithm, ignoring the

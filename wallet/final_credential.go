@@ -404,6 +404,7 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 		return nil, fmt.Errorf("credential response returned %d credentials but only %d holder keys were supplied", len(values), len(holderKeys))
 	}
 
+	bindingRequired := credentialBindingRequired(issuerMetadata, credentialConfigurationID)
 	saved := make([]*SavedCredential, 0, len(values))
 	usedKeys := make([]bool, len(holderKeys))
 	for _, value := range values {
@@ -414,7 +415,7 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 		// OpenID4VCI 1.0 §8.3 does not promise that the credentials array
 		// follows the order of the proofs, so each credential is matched to the
 		// holder key its cnf names; every supplied key may be used at most once.
-		holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, usedKeys)
+		holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, usedKeys, bindingRequired)
 		if err != nil {
 			return nil, err
 		}
@@ -451,17 +452,34 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 	return saved, nil
 }
 
+// credentialBindingRequired reports whether the Credential Configuration
+// advertises cryptographic_binding_methods_supported, which §12.2.4 makes
+// present exactly when the credential is bound to a key.
+func credentialBindingRequired(issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) bool {
+	if issuerMetadata == nil {
+		return false
+	}
+	config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]
+	return ok && config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0
+}
+
 // matchBatchHolderKey selects the holder key whose RFC 7638 thumbprint equals
-// the credential's cnf.jwk. A credential without cnf takes the first unused key
-// (the acceptance rules then decide whether that is allowed); a cnf that names
-// none of the supplied keys, or a key that was already consumed, is an error.
-func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFlavor, holderKeys []jose.JSONWebKey, usedKeys []bool) (*jose.JSONWebKey, error) {
-	if len(holderKeys) == 0 {
+// the credential's cnf.jwk; every supplied key is used at most once. A
+// credential without cnf is refused when binding is required, and otherwise
+// takes the first unused key for the acceptance rules to judge.
+func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFlavor, holderKeys []jose.JSONWebKey, usedKeys []bool, bindingRequired bool) (*jose.JSONWebKey, error) {
+	if len(holderKeys) == 0 && !bindingRequired {
 		return nil, nil
 	}
 	claimed, err := credentialConfirmationKey(raw, flavor)
 	if err != nil {
 		return nil, err
+	}
+	if claimed == nil && bindingRequired {
+		return nil, fmt.Errorf("the credential configuration requires cryptographic binding: %w", ErrHolderBindingMissing)
+	}
+	if len(holderKeys) == 0 {
+		return nil, nil
 	}
 	if claimed == nil {
 		for index := range holderKeys {
