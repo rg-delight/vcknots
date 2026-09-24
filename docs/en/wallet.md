@@ -33,14 +33,14 @@ The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. **HAIP 1.0** is 
 | OpenID4VP 1.0 over `direct_post` / `direct_post.jwt` | `ParsePresentationRequest`, `ParsePresentationRequestObject`, `SelectCredentials`, `SubmitPresentation`, `DeclinePresentation`; `PresentCredential` | Requests are answered through an `*oid4vp.AdmittedRequest` handle. |
 | Verifier authentication | `oid4vp.Oid4vpPresenter` (`RequestObjectValidation`, `PreRegisteredClients`) | `x509_san_dns`, `x509_hash`, `redirect_uri`, pre-registered clients, `verifier_attestation`, `openid_federation`. See [Verifier authentication](#verifier-authentication). |
 | `request_uri` GET / POST with `wallet_nonce` | `ParsePresentationRequest` | A POST always sends a fresh `wallet_nonce` and, when configured, `wallet_metadata`. |
-| DCQL | `SelectCredentials`, `oid4vp.ResolveSatisfiableDCQLCredentials`, `oid4vp.ValidateDCQLMatches` | `credential_sets`, `claims`, `claim_sets`, `values`, nested and array claim paths, `multiple`, `trusted_authorities` of type `aki`. |
+| DCQL | `SelectCredentials`, `oid4vp.ResolveSatisfiableDCQLCredentials`, `oid4vp.ValidateDCQLMatches` | `credential_sets`, `claims`, `claim_sets`, `values`, nested and array claim paths, `multiple`, `trusted_authorities` of type `aki` and `openid_federation`. |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | `dc+sd-jwt` presentations with key binding only. |
 | W3C Digital Credentials API (`dc_api`, `dc_api.jwt`; unsigned, signed, multi-signed) | `ParseDCAPIRequest` + `SubmitPresentation` | Protocol handling only; the caller supplies the platform-authenticated origin. |
 | OpenID4VCI Draft 13 | `Draft13()`, `ReceiveCredential` | Refused under HAIP. |
 | OpenID4VP Draft 24 (Presentation Exchange) | `Draft24()` + `SubmitPresentation` | Refused under HAIP. |
 | Formats | `credential.SDJwtVC`, `credential.JwtVc`, `credential.LdpVc` | SD-JWT VC issuer `typ` may be `dc+sd-jwt` or `vc+sd-jwt`. `ldp_vc` uses Data Integrity `eddsa-rdfc-2022` proofs. |
 
-**Not implemented.** ISO mdoc (`mso_mdoc`): there is no mdoc / COSE / CBOR serializer, so no mdoc presentation can be built. The `decentralized_identifier` Client Identifier Prefix is parsed and refused. Of the DCQL `trusted_authorities` types only `aki` is evaluated; an entry of another type matches no credential.
+**Not implemented.** ISO mdoc (`mso_mdoc`): there is no mdoc / COSE / CBOR serializer, so no mdoc presentation can be built. The `decentralized_identifier` Client Identifier Prefix is parsed and refused. Of the DCQL `trusted_authorities` types `aki` and `openid_federation` are evaluated; an entry of another type (`etsi_tl`) matches no credential.
 
 ### Profiles (Final and HAIP)
 
@@ -974,7 +974,7 @@ A prefix that requires a signature is refused in plain parameters with `ErrReque
 
 ### DCQL
 
-`SelectCredentials` evaluates `credential_sets` (`options`, `required`), `claims`, `claim_sets`, `values`, nested and array claim paths (OpenID4VP 1.0 §7), `multiple`, `meta` (`vct_values`, `type_values`) and `trusted_authorities` of type `aki`. It picks, for every required credential query, the credentials that satisfy it with the first claim set they satisfy; a request the store cannot answer is an `*oid4vp.AuthorizationRequestError` with code `access_denied`. Credentials without holder binding are excluded from a query that requires it. A `jwt_vc_json` or `ldp_vc` claim path starts at the credential (`["credentialSubject","given_name"]`).
+`SelectCredentials` evaluates `credential_sets` (`options`, `required`), `claims`, `claim_sets`, `values`, nested and array claim paths (OpenID4VP 1.0 §7), `multiple`, `meta` (`vct_values`, `type_values`) and `trusted_authorities` of type `aki` and `openid_federation`. An `openid_federation` value matches a credential when a Trust Chain from its issuer to a Trust Anchor of `RequestObjectValidation.Federation`, resolved under that configuration, includes the value (OpenID4VP 1.0 §6.1.1.3); without configured Trust Anchors it matches nothing. A caller that builds `oid4vp.DCQLCredentialCandidate` values itself sets `Issuer` and calls `AdmittedRequest.ResolveFederationTrustedAuthorities` before matching. It picks, for every required credential query, the credentials that satisfy it with the first claim set they satisfy; a request the store cannot answer is an `*oid4vp.AuthorizationRequestError` with code `access_denied`. Credentials without holder binding are excluded from a query that requires it. A `jwt_vc_json` or `ldp_vc` claim path starts at the credential (`["credentialSubject","given_name"]`).
 
 A wallet whose holder chooses among candidates uses `oid4vp.ResolveDCQLClaimSets` and `oid4vp.ValidateDCQLMatches`; `SubmitPresentation` applies the same validation to the selection it is given (`oid4vp.ErrDCQLSelectionUnsatisfied`).
 

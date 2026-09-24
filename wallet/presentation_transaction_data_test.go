@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -314,7 +315,7 @@ func TestWallet_TransactionDataOwnedByANonSDJWTCredentialFails(t *testing.T) {
 	entries, _, err := controller.GetCredentialEntries(GetCredentialEntriesRequest{})
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
-	_, err = controller.buildDCQLVPToken(req, Presentation{Key: key, Credentials: []CredentialSelection{
+	_, err = controller.buildDCQLVPToken(context.Background(), nil, req, Presentation{Key: key, Credentials: []CredentialSelection{
 		{CredentialID: entries[0].Entry.Id, QueryIDs: []string{"vc"}},
 	}})
 	require.ErrorContains(t, err, "invalid_transaction_data")

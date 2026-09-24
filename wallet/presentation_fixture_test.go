@@ -43,10 +43,12 @@ func sameKeyThumbprint(t *testing.T, a, b jose.JSONWebKey) bool {
 }
 
 type sdjwtPresentationFixture struct {
-	wallet        *Wallet
-	key           IKeyEntry
-	baseURL       string
-	posted        <-chan url.Values
+	wallet  *Wallet
+	key     IKeyEntry
+	baseURL string
+	posted  <-chan url.Values
+	// mux serves baseURL; a test adds its own handlers to it.
+	mux           *http.ServeMux
 	receive       func(vct string, holder *jose.JSONWebKey, mandatory map[string]any, selective map[string]string)
 	receiveValues func(vct string, holder *jose.JSONWebKey, mandatory, selective map[string]any)
 }
@@ -161,7 +163,7 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 		require.NoError(t, err)
 		require.Equal(t, wire, string(saved.Entry.Raw))
 	}
-	return sdjwtPresentationFixture{wallet: controller, key: holder, baseURL: server.URL, posted: posted, receiveValues: issue,
+	return sdjwtPresentationFixture{wallet: controller, key: holder, baseURL: server.URL, posted: posted, mux: mux, receiveValues: issue,
 		receive: func(vct string, boundKey *jose.JSONWebKey, mandatory map[string]any, selective map[string]string) {
 			values := map[string]any{}
 			for name, value := range selective {

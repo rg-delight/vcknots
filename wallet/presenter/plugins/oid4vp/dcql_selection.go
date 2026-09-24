@@ -34,6 +34,15 @@ type DCQLCredentialCandidate struct {
 	// the X.509 certificates in the credential's issuer chain. It is matched
 	// against aki trusted_authorities queries (OID4VP 1.0 Section 6.1.1.1).
 	AuthorityKeyIDs []string
+	// Issuer is the credential's issuer identifier (iss, or the W3C VC
+	// issuer).
+	Issuer string
+	// FederationEntityIDs lists the Entity Identifiers of the validated Trust
+	// Chains from Issuer to a configured Trust Anchor, which
+	// AdmittedRequest.ResolveFederationTrustedAuthorities sets. It is matched
+	// against openid_federation trusted_authorities queries (OID4VP 1.0
+	// Section 6.1.1.3).
+	FederationEntityIDs []string
 	// Types lists the W3C VC type values of the credential. It is matched
 	// against meta.type_values (OID4VP 1.0 Appendix B.1.1).
 	Types []string
@@ -559,7 +568,9 @@ func dcqlPathIndex(value any) (int64, bool) {
 
 // candidateMatchesTrustedAuthorities applies OID4VP 1.0 Section 6.1.1: a
 // credential matches when it matches one of the values of one of the entries.
-// Only the "aki" type (HAIP 1.0 Section 5) is evaluated; an entry of any other
+// An "aki" value is an Authority Key Identifier of the issuer chain (Section
+// 6.1.1.1); an "openid_federation" value is an Entity Identifier on a
+// validated Trust Chain of the issuer (Section 6.1.1.3). An entry of any other
 // type matches no credential, so a query naming only such types is
 // unsatisfiable rather than unconstrained.
 func candidateMatchesTrustedAuthorities(authorities []TrustedAuthority, candidate DCQLCredentialCandidate) bool {
@@ -567,11 +578,17 @@ func candidateMatchesTrustedAuthorities(authorities []TrustedAuthority, candidat
 		return true
 	}
 	for _, authority := range authorities {
-		if authority.Type != "aki" {
+		var evidence []string
+		switch authority.Type {
+		case "aki":
+			evidence = candidate.AuthorityKeyIDs
+		case trustedAuthorityOpenIDFederation:
+			evidence = candidate.FederationEntityIDs
+		default:
 			continue
 		}
 		for _, value := range authority.Values {
-			if containsString(candidate.AuthorityKeyIDs, value) {
+			if containsString(evidence, value) {
 				return true
 			}
 		}

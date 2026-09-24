@@ -192,9 +192,15 @@ func newFederationEvidence(trust *federation.VerifierTrust) *FederationEvidence 
 // uses, so the transport, the anchors and the time policy of a federation
 // resolution are the ones the caller configured for this parse.
 func (b *requestCore) federationResolver(options RequestObjectValidationOptions) *federation.Resolver {
+	return newFederationResolver(options, b.httpClient)
+}
+
+// newFederationResolver builds a resolver from options.Federation, which must
+// be set. Its HTTPClient wins over fallback.
+func newFederationResolver(options RequestObjectValidationOptions, fallback *http.Client) *federation.Resolver {
 	client := options.Federation.HTTPClient
 	if client == nil {
-		client = b.httpClient
+		client = fallback
 		if client == nil {
 			client = (&Oid4vpPresenter{}).httpClient()
 		}

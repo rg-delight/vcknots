@@ -88,7 +88,7 @@ func (w *Wallet) SelectCredentials(ctx context.Context, h *oid4vp.AdmittedReques
 	if h.Draft24() {
 		selections, err = w.selectDraft24Credentials(&req)
 	} else {
-		selections, err = w.selectDCQLCredentials(&req)
+		selections, err = w.selectDCQLCredentials(ctx, h, &req)
 	}
 	return selections, classify(err)
 }

@@ -18,7 +18,7 @@ import (
 // selectDCQLCredentials is the library's choice among the stored credentials,
 // one selection per credential. DisclosedClaims names the claim sets the
 // choice resolved to, so SubmitPresentation resolves the same sets again.
-func (w *Wallet) selectDCQLCredentials(req *oid4vp.CredentialPresentationRequest) ([]CredentialSelection, error) {
+func (w *Wallet) selectDCQLCredentials(ctx context.Context, h *oid4vp.AdmittedRequest, req *oid4vp.CredentialPresentationRequest) ([]CredentialSelection, error) {
 	if req.DcqlQuery == nil {
 		return nil, fmt.Errorf("%w: dcql_query is not specified", ErrInvalidArgument)
 	}
@@ -36,6 +36,9 @@ func (w *Wallet) selectDCQLCredentials(req *oid4vp.CredentialPresentationRequest
 	}
 	if len(candidates) == 0 {
 		return nil, newAccessDeniedError("no credentials available for presentation")
+	}
+	if err := h.ResolveFederationTrustedAuthorities(ctx, candidates); err != nil {
+		return nil, err
 	}
 	matches, err := oid4vp.ResolveSatisfiableDCQLCredentials(req.DcqlQuery, candidates)
 	if err != nil {
@@ -76,7 +79,7 @@ func (w *Wallet) submitDCQLPresentation(ctx context.Context, h *oid4vp.AdmittedR
 	if err := validateTransactionDataHolderBinding(&req); err != nil {
 		return nil, err
 	}
-	vpToken, err := w.buildDCQLVPToken(&req, p)
+	vpToken, err := w.buildDCQLVPToken(ctx, h, &req, p)
 	if err != nil {
 		return nil, err
 	}
@@ -91,24 +94,29 @@ type dcqlAnswer struct {
 
 // buildDCQLVPToken checks p against the query and serializes every answer
 // before anything is sent.
-func (w *Wallet) buildDCQLVPToken(req *oid4vp.CredentialPresentationRequest, p Presentation) (map[string][]string, error) {
+func (w *Wallet) buildDCQLVPToken(ctx context.Context, h *oid4vp.AdmittedRequest, req *oid4vp.CredentialPresentationRequest, p Presentation) (map[string][]string, error) {
 	credentials, err := w.resolveSelections(p.Credentials, p.Key)
 	if err != nil {
 		return nil, err
 	}
 	candidates := make([]oid4vp.DCQLCredentialCandidate, 0, len(credentials))
-	answers := []dcqlAnswer{}
 	for index, selection := range p.Credentials {
-		presented := credentials[index]
 		if len(selection.QueryIDs) == 0 {
 			// The vp_token is keyed by credential query id (Section 8.1).
-			return nil, fmt.Errorf("%w: the selection for credential %q names no credential query", ErrInvalidArgument, presented.id)
+			return nil, fmt.Errorf("%w: the selection for credential %q names no credential query", ErrInvalidArgument, credentials[index].id)
 		}
-		candidate, err := dcqlCandidateFromSavedCredential(presented.saved)
+		candidate, err := dcqlCandidateFromSavedCredential(credentials[index].saved)
 		if err != nil {
 			return nil, err
 		}
 		candidates = append(candidates, candidate)
+	}
+	if err := h.ResolveFederationTrustedAuthorities(ctx, candidates); err != nil {
+		return nil, err
+	}
+	answers := []dcqlAnswer{}
+	for index, selection := range p.Credentials {
+		presented, candidate := credentials[index], candidates[index]
 		for _, queryID := range selection.QueryIDs {
 			claimSets, err := oid4vp.ResolveDCQLClaimSets(req.DcqlQuery, queryID, candidate)
 			if err != nil {
@@ -273,11 +281,14 @@ func dcqlCandidateFromSavedCredential(saved *SavedCredential) (oid4vp.DCQLCreden
 			claimObject = root
 		}
 	}
-	vct := ""
+	vct, issuer := "", ""
 	var types []string
-	if saved.Credential != nil && len(saved.Credential.Types) > 0 {
-		vct = saved.Credential.Types[0]
-		types = saved.Credential.Types
+	if saved.Credential != nil {
+		issuer = saved.Credential.Issuer
+		if len(saved.Credential.Types) > 0 {
+			vct = saved.Credential.Types[0]
+			types = saved.Credential.Types
+		}
 	}
 	holderBound := credentialHasHolderBinding(flavor, saved)
 	return oid4vp.DCQLCredentialCandidate{
@@ -290,6 +301,7 @@ func dcqlCandidateFromSavedCredential(saved *SavedCredential) (oid4vp.DCQLCreden
 		ClaimObject:     claimObject,
 		HolderBound:     &holderBound,
 		AuthorityKeyIDs: oid4vp.AuthorityKeyIdentifiersFromCredential(string(saved.Entry.Raw)),
+		Issuer:          issuer,
 	}, nil
 }
 

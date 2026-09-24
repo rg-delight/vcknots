@@ -36,7 +36,7 @@ OpenID4VCI Draft 13 と OpenID4VP Draft 24 は `Draft13()` と `Draft24()` の�
 | `direct_post` / `direct_post.jwt` 上の OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation`、`PresentCredential` | 要求には `*oid4vp.AdmittedRequest` ハンドルを通じて応答します。 |
 | Verifier の認証 | `oid4vp.Oid4vpPresenter`（`RequestObjectValidation`、`PreRegisteredClients`） | `x509_san_dns`、`x509_hash`、`redirect_uri`、pre-registered client、`verifier_attestation`、`openid_federation` に対応します。[Verifier の認証](#verifier-authentication)を参照してください。 |
 | `request_uri` の GET / POST と `wallet_nonce` | `ParsePresentationRequest` | POST では毎回新しい `wallet_nonce` と、設定があれば `wallet_metadata` を送ります。 |
-| DCQL | `SelectCredentials`、`oid4vp.ResolveSatisfiableDCQLCredentials`、`oid4vp.ValidateDCQLMatches` | `credential_sets`、`claims`、`claim_sets`、`values`、nested / array の claim path、`multiple`、`aki` 種別の `trusted_authorities` に対応します。 |
+| DCQL | `SelectCredentials`、`oid4vp.ResolveSatisfiableDCQLCredentials`、`oid4vp.ValidateDCQLMatches` | `credential_sets`、`claims`、`claim_sets`、`values`、nested / array の claim path、`multiple`、`aki` と `openid_federation` 種別の `trusted_authorities` に対応します。 |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | key binding つきの `dc+sd-jwt` 提示に限ります。 |
 | W3C Digital Credentials API（`dc_api`、`dc_api.jwt`、unsigned / signed / multi-signed） | `ParseDCAPIRequest` + `SubmitPresentation` | プロトコル処理のみです。platform が認証した origin は呼出し側が渡します。 |
 | OpenID4VCI Draft 13 | `Draft13()`、`ReceiveCredential` | HAIP では拒否します。 |
@@ -46,7 +46,7 @@ OpenID4VCI Draft 13 と OpenID4VP Draft 24 は `Draft13()` と `Draft24()` の�
 **未実装。**
 ISO mdoc（`mso_mdoc`）は mdoc / COSE / CBOR の serializer がないため、mdoc の提示を構築できません。
 `decentralized_identifier` の Client Identifier Prefix は解析したうえで拒否します。
-DCQL の `trusted_authorities` で評価するのは `aki` 種別だけで、他の種別の entry はどの Credential にも一致しません。
+DCQL の `trusted_authorities` で評価するのは `aki` と `openid_federation` 種別で、他の種別（`etsi_tl`）の entry はどの Credential にも一致しません。
 
 ### プロファイル（Final と HAIP）
 
@@ -1079,7 +1079,7 @@ wallet 自身の以前の解析がその取得を記録したときだけ設定�
 
 ### DCQL
 
-`SelectCredentials` は、`credential_sets`（`options`、`required`）、`claims`、`claim_sets`、`values`、nested と array の claim path（OpenID4VP 1.0 §7）、`multiple`、`meta`（`vct_values`、`type_values`）、`aki` 種別の `trusted_authorities` を評価します。
+`SelectCredentials` は、`credential_sets`（`options`、`required`）、`claims`、`claim_sets`、`values`、nested と array の claim path（OpenID4VP 1.0 §7）、`multiple`、`meta`（`vct_values`、`type_values`）、`aki` と `openid_federation` 種別の `trusted_authorities` を評価します。`openid_federation` の値は、Credential の issuer から `RequestObjectValidation.Federation` の Trust Anchor への Trust Chain（その設定の下で解決）がその値を含むときに一致します（OpenID4VP 1.0 §6.1.1.3）。Trust Anchor が設定されていなければ何にも一致しません。`oid4vp.DCQLCredentialCandidate` を自分で組み立てる呼び出し側は、`Issuer` を設定し、照合の前に `AdmittedRequest.ResolveFederationTrustedAuthorities` を呼びます。
 必須の各 credential query について、それを満たす Credential を、満たせる最初の claim set とともに選びます。
 ストアが答えられない要求は、コード `access_denied` の `*oid4vp.AuthorizationRequestError` になります。
 holder binding を要求する query からは、holder binding のない Credential を除外します。
