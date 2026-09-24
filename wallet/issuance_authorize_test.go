@@ -145,7 +145,6 @@ func TestResolveCredentialOffer_RefusesRedirectAndWrongMediaType(t *testing.T) {
 // A credential_offer_uri served with another media type is refused with a
 // coded error, like every other refusal of ResolveCredentialOffer.
 func TestResolveCredentialOffer_WrongMediaTypeErrorIsCoded(t *testing.T) {
-	t.Skip("LANE3A-BUG: the media type refusal of FetchCredentialOffer reaches the caller as an unclassified error")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(`{"credential_issuer":"https://issuer.example"}`))
