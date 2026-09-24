@@ -9,7 +9,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
-	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -36,7 +35,6 @@ var (
 	// ErrIssuerMetadataSignatureRequired reports that signed metadata was
 	// required and none was obtained.
 	ErrIssuerMetadataSignatureRequired = receiverOid4vci.ErrIssuerMetadataSignatureRequired
-	ErrPreRegisteredClientUnknown      = oid4vp.ErrPreRegisteredClientUnknown
 	ErrCredentialResponsePlaintext     = receiverTypes.ErrCredentialResponsePlaintext
 	ErrCredentialResponseDecrypt       = receiverTypes.ErrCredentialResponseDecrypt
 	ErrCredentialResponseShape         = receiverTypes.ErrCredentialResponseShape

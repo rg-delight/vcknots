@@ -86,12 +86,12 @@ func DecodeX5CFromJWTHeader(obj string) ([]*x509.Certificate, error) {
 	return DecodeX5CChain(value)
 }
 
-// IsSelfSigned reports whether cert is self-issued and carries its own
+// isSelfSigned reports whether cert is self-issued and carries its own
 // signature. Subject and issuer are compared as raw DER rather than as their
 // string rendering, and the signature is verified with the certificate's own
 // public key: a certificate that merely repeats a subject DN in its issuer
 // field, as a re-keyed CA of the same name does, is not self-signed.
-func IsSelfSigned(cert *x509.Certificate) bool {
+func isSelfSigned(cert *x509.Certificate) bool {
 	if cert == nil || len(cert.Raw) == 0 || !bytes.Equal(cert.RawIssuer, cert.RawSubject) {
 		return false
 	}
@@ -109,7 +109,7 @@ func RequireNonSelfSignedLeaf(chain []*x509.Certificate, label string) error {
 	if chain[0] == nil || len(chain[0].Raw) == 0 {
 		return fmt.Errorf("%s x5c leaf certificate is empty", label)
 	}
-	if IsSelfSigned(chain[0]) {
+	if isSelfSigned(chain[0]) {
 		return fmt.Errorf("%s x5c leaf certificate must not be self-signed", label)
 	}
 	return nil

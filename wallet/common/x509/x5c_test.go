@@ -173,13 +173,13 @@ func TestDecodeX5CFromJWTHeaderRejectsMissingHeader(t *testing.T) {
 
 func TestIsSelfSignedDetectsSelfIssuedRoot(t *testing.T) {
 	leaf, _, anchor := x5cTestChain(t)
-	if !IsSelfSigned(anchor.certificate) {
+	if !isSelfSigned(anchor.certificate) {
 		t.Fatal("a self-issued anchor must be reported as self-signed")
 	}
-	if IsSelfSigned(leaf.certificate) {
+	if isSelfSigned(leaf.certificate) {
 		t.Fatal("an issued leaf must not be reported as self-signed")
 	}
-	if IsSelfSigned(nil) {
+	if isSelfSigned(nil) {
 		t.Fatal("a missing certificate must not be reported as self-signed")
 	}
 
@@ -190,7 +190,7 @@ func TestIsSelfSignedDetectsSelfIssuedRoot(t *testing.T) {
 	if !bytes.Equal(impostor.certificate.RawIssuer, impostor.certificate.RawSubject) {
 		t.Fatal("fixture must share the subject and issuer DN")
 	}
-	if IsSelfSigned(impostor.certificate) {
+	if isSelfSigned(impostor.certificate) {
 		t.Fatal("a certificate signed by another key with the same DN is not self-signed")
 	}
 }

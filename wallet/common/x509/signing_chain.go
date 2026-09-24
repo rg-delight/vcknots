@@ -93,7 +93,7 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 		}
 	}
 	leaf := certificates[0]
-	if leaf.IsCA || IsSelfSigned(leaf) {
+	if leaf.IsCA || isSelfSigned(leaf) {
 		return invalid("certificate", errors.New("signer must be a non-self-signed end-entity certificate"))
 	}
 	if hasKeyUsage(leaf) && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
