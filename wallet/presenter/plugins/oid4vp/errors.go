@@ -172,7 +172,7 @@ func sanitizeOAuthErrorDescription(description string) string {
 // decision the request cannot accept from a transport or serialization failure.
 var ErrDCQLSelectionUnsatisfied = common.NewCodedError("dcql_selection_unsatisfied", "DCQL credential selection does not satisfy the query")
 
-// VerifierResponseError reports a non-200 response from the Verifier's
+// VerifierResponseError reports a non-2xx response from the Verifier's
 // Response Endpoint. It deliberately retains only the HTTP status and the
 // OAuth 2.0 error code normalized from the response body: the body is under
 // the Verifier's control and may echo protocol state or secrets, so it never
@@ -249,7 +249,7 @@ func normalizeOAuthErrorCode(code string) string {
 // it holds a CredentialPresentationRequest. OID4VP 1.0 §8.3.1 permits the error
 // response to be sent unencrypted, so this form is always plaintext. The
 // endpoint must use https unless the presenter enables AllowHTTP for a local
-// test. A non-200 answer is reported as a *VerifierResponseError that does not
+// test. A non-2xx answer is reported as a *VerifierResponseError that does not
 // carry the response body.
 //
 // The two caller-supplied values that reach the wire are checked before

@@ -49,7 +49,7 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 // postAuthorizationResponse form-POSTs to the Verifier's Response Endpoint
 // without following redirects: a redirect could move the response to another
 // host or to plain http. The response body is read up to
-// httpfetch.DefaultBodyLimit; a non-200 status keeps only the OAuth error code,
+// httpfetch.DefaultBodyLimit; a non-2xx status keeps only the OAuth error code,
 // because the body is under the Verifier's control.
 func postAuthorizationResponse(ctx context.Context, client *http.Client, endpoint string, formData url.Values) ([]byte, error) {
 	// A JWE travels in the "response" member (OID4VP 1.0 §8.3).
