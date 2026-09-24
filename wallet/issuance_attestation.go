@@ -16,7 +16,7 @@ import (
 // (HAIP Sections 4.4.1 and 4.5.1), and, when no resolver is configured, the
 // bundled static attester's own public key for an attestation without x5c.
 func (w *Wallet) attestationPolicyFor(provider any) attestation.TrustPolicy {
-	policy := w.attestation.Trust
+	policy := w.attestationSettings().Trust
 	if w.profile.IsHAIP() {
 		policy.RequireX5C = true
 	}
@@ -44,8 +44,8 @@ func (w *Wallet) attestationPolicyFor(provider any) attestation.TrustPolicy {
 // clientAttestationKey is the wallet instance key a Client Attestation binds:
 // Config.Attestation.ClientKey, else Config.DPoP.Key.
 func (w *Wallet) clientAttestationKey() IKeyEntry {
-	if w.attestation.ClientKey != nil {
-		return w.attestation.ClientKey
+	if w.attestationSettings().ClientKey != nil {
+		return w.attestationSettings().ClientKey
 	}
 	return w.dpop.Key
 }
@@ -60,7 +60,7 @@ func (w *Wallet) clientAttestationFactory(
 	asMetadata *receiverTypes.AuthorizationServerMetadata,
 	asIssuer string,
 ) (receiverTypes.OAuthClientAttestationHeadersFactory, error) {
-	provider := w.attestation.Client
+	provider := w.attestationSettings().Client
 	if provider == nil {
 		return nil, nil
 	}
@@ -120,16 +120,16 @@ func (w *Wallet) keyAttestationFor(
 ) (string, error) {
 	keyAttestation := supplied
 	if keyAttestation == nil {
-		if w.attestation.Key == nil {
+		if w.attestationSettings().Key == nil {
 			return "", ErrKeyAttestationRequired
 		}
-		provided, err := w.attestation.Key.KeyAttestation(ctx, request)
+		provided, err := w.attestationSettings().Key.KeyAttestation(ctx, request)
 		if err != nil {
 			return "", fmt.Errorf("failed to obtain key attestation: %w", withCode(attestation.ErrKeyAttestationInvalid, err))
 		}
 		keyAttestation = provided
 	}
-	if err := attestation.ValidateKeyAttestation(ctx, keyAttestation, request, w.attestationPolicyFor(w.attestation.Key)); err != nil {
+	if err := attestation.ValidateKeyAttestation(ctx, keyAttestation, request, w.attestationPolicyFor(w.attestationSettings().Key)); err != nil {
 		return "", err
 	}
 	if len(signingAlgValues) > 0 {

@@ -73,9 +73,10 @@ type Wallet struct {
 	// wallet uses reports the same profile (see Config.Profile).
 	profile profile.Profile
 
-	issuance    IssuanceConfig
-	attestation AttestationConfig
-	testHooks   *TestHooks
+	issuance IssuanceConfig
+	// attestationConfig is a pointer so that Wallet stays comparable.
+	attestationConfig *AttestationConfig
+	testHooks         *TestHooks
 
 	credentialAcceptance *acceptance.Policy
 }
@@ -209,6 +210,15 @@ type TestHooks struct {
 	// PresentationExchangeResponse rewrites Draft 24 Presentation Exchange
 	// responses.
 	PresentationExchangeResponse Draft24ResponseTransform
+}
+
+// attestationSettings returns Config.Attestation, or its zero value for a
+// Wallet built without NewWalletWithConfig.
+func (w *Wallet) attestationSettings() AttestationConfig {
+	if w.attestationConfig == nil {
+		return AttestationConfig{}
+	}
+	return *w.attestationConfig
 }
 
 // signatureAlgorithm returns the configured client_assertion signing
@@ -362,6 +372,7 @@ func newWallet(config Config) (*Wallet, error) {
 		}
 		config.DPoP.Key = key
 	}
+	attestationConfig := config.Attestation
 	return &Wallet{
 		credStore:  config.CredStore,
 		idProf:     config.IDProfiler,
@@ -374,9 +385,9 @@ func newWallet(config Config) (*Wallet, error) {
 
 		profile: walletProfile,
 
-		issuance:    config.Issuance,
-		attestation: config.Attestation,
-		testHooks:   config.TestHooks,
+		issuance:          config.Issuance,
+		attestationConfig: &attestationConfig,
+		testHooks:         config.TestHooks,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil

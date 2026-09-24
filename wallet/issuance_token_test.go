@@ -498,7 +498,7 @@ func TestAuthorizePreAuthorizedIssuanceRejectsAnonymousUnderHAIP(t *testing.T) {
 	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
 	require.Equal(t, 0, fixture.tokenCalls)
 
-	fixture.wallet.attestation.Client = &attestation.StaticClientAttester{Key: testKeyEntry(t, fixture.attesterKey)}
+	fixture.wallet.attestationConfig.Client = &attestation.StaticClientAttester{Key: testKeyEntry(t, fixture.attesterKey)}
 	fixture.wallet.clientAuth = ClientAuthConfig{}
 	_, err = fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
 	require.ErrorIs(t, err, ErrInvalidArgument)

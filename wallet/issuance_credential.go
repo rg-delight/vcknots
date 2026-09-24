@@ -102,7 +102,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		if md.NonceEndpoint == nil && w.profile.IsHAIP() {
 			return nil, fmt.Errorf("the credential configuration %q is requested with a key attestation: %w", grant.CredentialConfigurationID, ErrNonceEndpointRequired)
 		}
-		if req.KeyAttestation == nil && w.attestation.Key == nil {
+		if req.KeyAttestation == nil && w.attestationSettings().Key == nil {
 			return nil, required(grant, false)
 		}
 		// An attestation minted outside the wallet is bound to one c_nonce

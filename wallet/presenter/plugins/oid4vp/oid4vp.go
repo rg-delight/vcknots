@@ -236,11 +236,13 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 	builder := NewRequestBuilder()
 	builder.profile = normalizedProfile
 	p.configureCore(ctx, &builder.requestCore)
-	builder.walletMetadata = p.WalletMetadata
-	builder.requestURINonce = p.RequestURINonce
-	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
-	builder.preRegisteredClients = p.PreRegisteredClients
-	builder.resolvePreRegisteredClient = p.ResolvePreRegisteredClient
+	builder.policy = &builderPolicy{
+		walletMetadata:                p.WalletMetadata,
+		requestURINonce:               p.RequestURINonce,
+		supportedTransactionDataTypes: p.SupportedTransactionDataTypes,
+		preRegisteredClients:          p.PreRegisteredClients,
+		resolvePreRegisteredClient:    p.ResolvePreRegisteredClient,
+	}
 	return builder, nil
 }
 

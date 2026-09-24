@@ -44,13 +44,11 @@ type Oid4vciReceiver struct {
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
 
-	// dpopNonceMu guards dpopNonces and dpopNonceClock.
+	// dpopNonceMu guards dpopNonces.
 	dpopNonceMu sync.Mutex
-	// dpopNonces holds the latest RFC 9449 Section 8.2 DPoP nonce of each
-	// server, keyed by scheme and authority, bounded to maxDPoPNonceServers
-	// entries (least recently used evicted).
-	dpopNonces     map[string]dpopNonceEntry
-	dpopNonceClock uint64
+	// dpopNonces is created on first use and kept behind a pointer so that
+	// Oid4vciReceiver stays comparable.
+	dpopNonces *dpopNonceCache
 }
 
 var (

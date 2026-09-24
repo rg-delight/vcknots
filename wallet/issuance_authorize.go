@@ -257,7 +257,7 @@ func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 		return fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 	if w.profile.IsHAIP() {
-		if w.attestation.Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
+		if w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
 			return invalidArgument("HAIP requires an OAuth2 client authentication mechanism")
 		}
 		if w.dpop.Key == nil {
@@ -319,7 +319,7 @@ func (w *Wallet) finalCredentialConfiguration(transport receiverTypes.OID4VCITra
 // server does not accept, unless a client attestation authenticates the
 // client instead.
 func (w *Wallet) checkPrivateKeyJWT(as *receiverTypes.AuthorizationServerMetadata) error {
-	if w.attestation.Client != nil || w.clientAuth.Method != receiverTypes.PrivateKeyJwt {
+	if w.attestationSettings().Client != nil || w.clientAuth.Method != receiverTypes.PrivateKeyJwt {
 		return nil
 	}
 	if !asMetadataSupportsAuthMethod(as, receiverTypes.PrivateKeyJwt) {

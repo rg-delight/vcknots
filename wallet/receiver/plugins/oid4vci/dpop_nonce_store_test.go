@@ -240,7 +240,7 @@ func TestDPoPNonceStoreIsBounded(t *testing.T) {
 		// Server 0 stays in use, so it is never the least recently used.
 		receiver.dpopNonceFor(serverURL(0))
 	}
-	if got := len(receiver.dpopNonces); got != maxDPoPNonceServers {
+	if got := len(receiver.dpopNonces.entries); got != maxDPoPNonceServers {
 		t.Fatalf("stored servers = %d, want %d", got, maxDPoPNonceServers)
 	}
 	if got := receiver.dpopNonceFor(serverURL(0)); got != "nonce-0" {

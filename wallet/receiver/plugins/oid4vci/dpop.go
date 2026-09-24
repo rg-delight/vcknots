@@ -27,6 +27,14 @@ type dpopNonceEntry struct {
 	lastUsed uint64
 }
 
+// dpopNonceCache holds the latest RFC 9449 Section 8.2 DPoP nonce of each
+// server, keyed by scheme and authority, bounded to maxDPoPNonceServers
+// entries (least recently used evicted).
+type dpopNonceCache struct {
+	entries map[string]dpopNonceEntry
+	clock   uint64
+}
+
 // rememberDPoPNonce records the DPoP-Nonce a server sent (RFC 9449 Section
 // 8.2) so the next proof for that server carries it. An empty value is
 // ignored: a response without the header does not revoke a known nonce.
@@ -45,14 +53,18 @@ func (o *Oid4vciReceiver) rememberDPoPNonce(endpointURL url.URL, nonce string) {
 func (o *Oid4vciReceiver) dpopNonceFor(endpointURL url.URL) string {
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
+	if o.dpopNonces == nil {
+		return ""
+	}
+	cache := o.dpopNonces
 	server := dpopNonceServerKey(endpointURL)
-	entry, found := o.dpopNonces[server]
+	entry, found := cache.entries[server]
 	if !found {
 		return ""
 	}
-	o.dpopNonceClock++
-	entry.lastUsed = o.dpopNonceClock
-	o.dpopNonces[server] = entry
+	cache.clock++
+	entry.lastUsed = cache.clock
+	cache.entries[server] = entry
 	return entry.nonce
 }
 
@@ -60,20 +72,21 @@ func (o *Oid4vciReceiver) dpopNonceFor(endpointURL url.URL) string {
 // evicts the least recently used one beyond maxDPoPNonceServers.
 func (o *Oid4vciReceiver) storeDPoPNonceLocked(server, nonce string) {
 	if o.dpopNonces == nil {
-		o.dpopNonces = make(map[string]dpopNonceEntry)
+		o.dpopNonces = &dpopNonceCache{entries: make(map[string]dpopNonceEntry)}
 	}
-	o.dpopNonceClock++
-	o.dpopNonces[server] = dpopNonceEntry{nonce: nonce, lastUsed: o.dpopNonceClock}
-	if len(o.dpopNonces) <= maxDPoPNonceServers {
+	cache := o.dpopNonces
+	cache.clock++
+	cache.entries[server] = dpopNonceEntry{nonce: nonce, lastUsed: cache.clock}
+	if len(cache.entries) <= maxDPoPNonceServers {
 		return
 	}
 	oldest := ""
-	for candidate, entry := range o.dpopNonces {
-		if oldest == "" || entry.lastUsed < o.dpopNonces[oldest].lastUsed {
+	for candidate, entry := range cache.entries {
+		if oldest == "" || entry.lastUsed < cache.entries[oldest].lastUsed {
 			oldest = candidate
 		}
 	}
-	delete(o.dpopNonces, oldest)
+	delete(cache.entries, oldest)
 }
 
 // requireDPoPTokenType applies HAIP Section 4 (sender-constrained access

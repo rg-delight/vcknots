@@ -129,13 +129,13 @@ func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 			token := signAttestationJWT(t, attesterKey, tc.typ, tc.claims)
 			w := &Wallet{
 				clientAuth: ClientAuthConfig{ClientID: "client-1"},
-				attestation: AttestationConfig{
+				attestationConfig: &AttestationConfig{
 					Client:    fixedClientAttestationProvider{attestation: &attestation.ClientAttestation{JWT: token}},
 					ClientKey: testKeyEntry(t, clientKey),
 				},
 			}
 			if !tc.unsigned {
-				w.attestation.Trust = attestation.TrustPolicy{ResolveKey: func(attestation.JOSEHeader) (any, error) {
+				w.attestationConfig.Trust = attestation.TrustPolicy{ResolveKey: func(attestation.JOSEHeader) (any, error) {
 					return attesterKey.Public().Key, nil
 				}}
 			}

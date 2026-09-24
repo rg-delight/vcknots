@@ -16,6 +16,17 @@ import (
 // Request.
 type requestBuilder struct {
 	requestCore
+	// policy is the presenter configuration of this parse. It is a pointer
+	// so that requestBuilder stays comparable; nil is the zero policy.
+	policy *builderPolicy
+	// preRegisteredClient is the registry entry of this request's
+	// pre-registered Client Identifier, nil for every other prefix.
+	preRegisteredClient *PreRegisteredClient
+}
+
+// builderPolicy is the part of the presenter configuration a requestBuilder
+// reads.
+type builderPolicy struct {
 	walletMetadata  map[string]any
 	requestURINonce func() (string, error)
 	// supportedTransactionDataTypes lists the transaction_data types the
@@ -25,9 +36,14 @@ type requestBuilder struct {
 	// pre-registered Client Identifier is resolved against (OID4VP 1.0 §5.9.2).
 	preRegisteredClients       map[string]PreRegisteredClient
 	resolvePreRegisteredClient PreRegisteredClientResolver
-	// preRegisteredClient is the registry entry of this request's
-	// pre-registered Client Identifier, nil for every other prefix.
-	preRegisteredClient *PreRegisteredClient
+}
+
+// settings returns the builder's policy, or the zero policy.
+func (b *requestBuilder) settings() builderPolicy {
+	if b.policy == nil {
+		return builderPolicy{}
+	}
+	return *b.policy
 }
 
 // NewRequestBuilder creates a builder for OpenID4VP 1.0 Authorization
@@ -161,8 +177,8 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		}
 		b.sentWalletNonce = nonce
 		form.Set("wallet_nonce", nonce)
-		if b.walletMetadata != nil {
-			metadataJSON, err := json.Marshal(b.walletMetadata)
+		if b.settings().walletMetadata != nil {
+			metadataJSON, err := json.Marshal(b.settings().walletMetadata)
 			if err != nil {
 				b.errValidation = fmt.Errorf("failed to marshal wallet_metadata: %w", err)
 				return b
@@ -183,8 +199,8 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 // presenter's generator when set, otherwise 32 random bytes, base64url-encoded
 // without padding (OID4VP 1.0 §5.10).
 func (b *requestBuilder) newRequestURINonce() (string, error) {
-	if b.requestURINonce != nil {
-		return b.requestURINonce()
+	if b.settings().requestURINonce != nil {
+		return b.settings().requestURINonce()
 	}
 	return defaultRequestURINonce()
 }

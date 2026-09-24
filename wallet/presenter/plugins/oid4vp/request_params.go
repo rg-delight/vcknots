@@ -244,8 +244,8 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 // a supported type and a non-empty credential_ids array naming dc+sd-jwt
 // queries that require holder binding. Any failure is invalid_transaction_data.
 func (b *requestBuilder) validateFinalTransactionData() error {
-	supported := make(map[string]bool, len(b.supportedTransactionDataTypes))
-	for _, dataType := range b.supportedTransactionDataTypes {
+	supported := make(map[string]bool, len(b.settings().supportedTransactionDataTypes))
+	for _, dataType := range b.settings().supportedTransactionDataTypes {
 		supported[dataType] = true
 	}
 	queries := make(map[string]CredentialQuery)

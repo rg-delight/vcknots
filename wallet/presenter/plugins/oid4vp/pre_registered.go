@@ -13,11 +13,11 @@ import (
 // advance of the Authorization Request", so an unresolved identifier is an
 // error rather than an unauthenticated Verifier.
 func (b *requestBuilder) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
-	if registered, exists := b.preRegisteredClients[clientID]; exists {
+	if registered, exists := b.settings().preRegisteredClients[clientID]; exists {
 		return preRegisteredClientWithID(&registered, clientID), nil
 	}
-	if b.resolvePreRegisteredClient != nil {
-		resolved, err := b.resolvePreRegisteredClient(clientID)
+	if b.settings().resolvePreRegisteredClient != nil {
+		resolved, err := b.settings().resolvePreRegisteredClient(clientID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve pre-registered client_id %q: %w", clientID, err)
 		}
