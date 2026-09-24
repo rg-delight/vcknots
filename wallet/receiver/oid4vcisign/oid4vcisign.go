@@ -80,29 +80,6 @@ func (Default) CreateDpopProof(key jose.JSONWebKey, method string, rawURL string
 	return token, nil
 }
 
-// CreateCredentialRequestJWTProof builds the Section 8.2.1.1 "jwt" key proof
-// with no issuer algorithm constraint and no key attestation.
-//
-// Deprecated: use CreateCredentialRequestJWTProofWithOptions, which honours the
-// Credential Configuration's proof_signing_alg_values_supported.
-func (d Default) CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error) {
-	return d.CreateCredentialRequestJWTProofWithKeyAttestation(key, audience, nonce, "")
-}
-
-// CreateCredentialRequestJWTProofWithKeyAttestation builds the same proof as
-// CreateCredentialRequestJWTProof and, when keyAttestation is non-empty, adds
-// the OpenID4VCI 1.0 Appendix D key_attestation header parameter.
-//
-// Deprecated: use CreateCredentialRequestJWTProofWithOptions, which takes the
-// key attestation in ProofOptions alongside the issuer algorithm constraint.
-func (d Default) CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error) {
-	return d.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
-		Audience:       audience,
-		Nonce:          nonce,
-		KeyAttestation: keyAttestation,
-	})
-}
-
 // CreateCredentialRequestJWTProofWithOptions builds the Section 8.2.1.1 "jwt"
 // key proof for a Credential Request, signing it with an algorithm the
 // Credential Issuer accepts.

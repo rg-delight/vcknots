@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
+	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -45,7 +46,7 @@ func TestCredentialEndpointError_InvalidProof(t *testing.T) {
 	defer server.Close()
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-	_, err := receiver.PostCredentialEndpointWithDpopRetry(mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
+	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -77,7 +78,7 @@ func TestCredentialEndpointError_NonJSONKeepsStatus(t *testing.T) {
 	defer server.Close()
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-	_, err := receiver.PostCredentialEndpointWithDpopRetry(mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
+	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
 	var endpointErr *types.CredentialEndpointError
 	if !errors.As(err, &endpointErr) {
 		t.Fatalf("errors.As(*CredentialEndpointError) = false, err = %v", err)
@@ -114,9 +115,9 @@ func TestPostCredentialEndpointWithNonceRetry_Success(t *testing.T) {
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	response, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetry(
+	response, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
-		"access-1",
+		dpopAccessToken("access-1"),
 		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
@@ -126,7 +127,7 @@ func TestPostCredentialEndpointWithNonceRetry_Success(t *testing.T) {
 		noopProofFactory,
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetry() error = %v", err)
+		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
 	}
 	if string(response.Body) != `{"credential":"credential-jwt"}`+"\n" {
 		t.Fatalf("response body = %q", string(response.Body))
@@ -166,9 +167,9 @@ func TestPostCredentialEndpointWithNonceRetry_SecondInvalidNonceStops(t *testing
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, _, err := receiver.PostCredentialEndpointWithNonceRetry(
+	_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
-		"access-1",
+		dpopAccessToken("access-1"),
 		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
@@ -201,9 +202,9 @@ func TestPostCredentialEndpointWithNonceRetry_NoNonceEndpoint(t *testing.T) {
 	defer server.Close()
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetry(
+	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
-		"access-1",
+		dpopAccessToken("access-1"),
 		nil,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
@@ -234,14 +235,14 @@ func TestDecodeDeferredCredentialResponse_Interval(t *testing.T) {
 	defer server.Close()
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-	response, err := receiver.RequestDeferredCredentialWithDpopRetry(
+	response, err := requestCredentialJSON(t.Context(), receiver,
 		mustURIField(t, server.URL+"/deferred"),
 		"access-1",
 		types.DeferredCredentialRequest{TransactionID: "t"},
 		noopProofFactory,
 	)
 	if err != nil {
-		t.Fatalf("RequestDeferredCredentialWithDpopRetry() error = %v", err)
+		t.Fatalf("deferred credential request error = %v", err)
 	}
 	if response.TransactionID != "t" || response.Interval != 5 {
 		t.Fatalf("response = %#v, want interval 5", response)
@@ -586,7 +587,7 @@ func TestCredentialProofFailsWhenNoSharedAlgorithm(t *testing.T) {
 		t.Fatalf("errors.Is(ErrProofAlgorithmNotSupported) = false, err = %v", err)
 	}
 
-	if _, err := SelectProofSigningAlgorithm(key, []jose.SignatureAlgorithm{jose.ES256, jose.ES384}); err != nil {
+	if _, err := oid4vcisign.SelectProofSigningAlgorithm(key, []jose.SignatureAlgorithm{jose.ES256, jose.ES384}); err != nil {
 		t.Fatalf("a listed key algorithm must be kept: %v", err)
 	}
 }
@@ -611,17 +612,6 @@ func TestCredentialProofUnconstrainedWhenIssuerListsNone(t *testing.T) {
 	}
 	if parsed.Headers[0].Algorithm != string(jose.ES256) {
 		t.Fatalf("proof alg = %q, want ES256", parsed.Headers[0].Algorithm)
-	}
-
-	// The established entry points delegate here with no constraint, so they
-	// keep producing the same proof.
-	//lint:ignore SA1019 the legacy entry point is exactly what this case pins
-	legacy, err := receiver.CreateCredentialRequestJWTProof(key, "https://issuer.example", "")
-	if err != nil {
-		t.Fatalf("CreateCredentialRequestJWTProof() error = %v", err)
-	}
-	if _, err := jwt.ParseSigned(legacy, []jose.SignatureAlgorithm{jose.ES256}); err != nil {
-		t.Fatalf("failed to parse proof from the legacy entry point: %v", err)
 	}
 }
 
@@ -950,9 +940,9 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetry(
+	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
-		"access-1",
+		dpopAccessToken("access-1"),
 		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
@@ -962,7 +952,7 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 		noopProofFactory,
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetry() error = %v", err)
+		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
 	}
 	if usedNonce != "fresh-nonce" {
 		t.Fatalf("usedNonce = %q, want fresh-nonce", usedNonce)
@@ -1000,9 +990,9 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, _, err := receiver.PostCredentialEndpointWithNonceRetry(
+	_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
-		"access-1",
+		dpopAccessToken("access-1"),
 		&nonceEndpoint,
 		"initial-nonce",
 		func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },

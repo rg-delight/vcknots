@@ -213,12 +213,12 @@ func TestReceivingDispatcher_FinalCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalReceiver, err := dispatcher.OID4VCIFinalReceiver(types.Oid4vci)
+	finalReceiver, err := dispatcher.OID4VCIFinalTransport(types.Oid4vci)
 	if err != nil || finalReceiver == nil {
 		t.Fatalf("built-in OID4VCI Final capability: %v, %v", finalReceiver, err)
 	}
 	for _, protocol := range []types.SupportedReceivingTypes{types.Mock, types.SupportedReceivingTypes(999)} {
-		capability, err := dispatcher.OID4VCIFinalReceiver(protocol)
+		capability, err := dispatcher.OID4VCIFinalTransport(protocol)
 		if capability != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
 			t.Errorf("protocol %v: expected unsupported capability, got %v, %v", protocol, capability, err)
 		}

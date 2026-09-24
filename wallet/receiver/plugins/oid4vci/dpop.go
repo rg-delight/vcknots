@@ -137,14 +137,6 @@ type DPoPProofFactory = types.DPoPProofFactory
 // invent one the wallet cannot sign.
 var ErrDPoPRequired = common.NewCodedError("dpop_required", "credential endpoint requires DPoP")
 
-// dpopBoundToken adapts the access token string the established signatures take.
-// Those entry points predate the token_type being plumbed through, and every one
-// of them was sending the DPoP scheme unconditionally, so that is the scheme
-// they keep.
-func dpopBoundToken(accessToken string) types.CredentialIssuanceAccessToken {
-	return types.CredentialIssuanceAccessToken{Token: accessToken, TokenType: "DPoP"}
-}
-
 // dpopAuthorizationScheme is the RFC 9449 Section 7.1 authentication scheme for
 // a DPoP-bound access token.
 const dpopAuthorizationScheme = "DPoP"

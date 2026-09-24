@@ -183,49 +183,6 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	return &response, nil
 }
 
-// ExchangeAuthorizationCode performs a single Section 6.1 token request with a
-// pre-built DPoP proof. It is not part of types.OID4VCIFinalTransport and
-// carries no context; it binds its request to context.Background(). Use
-// ExchangeAuthorizationCodeWithDpopAndAttestationRetry, which owns the RFC 9449
-// Section 8 nonce retry and takes a context.
-func (o *Oid4vciReceiver) ExchangeAuthorizationCode(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, dpopProof string) (*types.CredentialIssuanceAccessToken, error) {
-	normalized, err := o.normalizedProfile()
-	if err != nil {
-		return nil, err
-	}
-	formData := url.Values{}
-	formData.Set("grant_type", "authorization_code")
-	formData.Set("code", request.Code)
-	formData.Set("redirect_uri", request.RedirectURI)
-	formData.Set("code_verifier", request.CodeVerifier)
-	formData.Set("client_id", request.ClientID)
-	setClientAssertionForm(formData, request.ClientAssertion, request.ClientAssertionType)
-
-	requestHeaders := headersToMap(headers)
-	if dpopProof != "" {
-		requestHeaders["DPoP"] = dpopProof
-	}
-
-	var response types.CredentialIssuanceAccessToken
-	if err := o.doFinalRequest(observe.WithEndpoint(context.Background(), observe.EndpointToken), http.MethodPost, endpoint, strings.NewReader(formData.Encode()), "application/x-www-form-urlencoded", requestHeaders, &response); err != nil {
-		return nil, stageError(StageToken, fmt.Errorf("failed to exchange authorization code: %w", err))
-	}
-	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
-		return nil, err
-	}
-	return &response, nil
-}
-
-// ExchangeAuthorizationCodeWithDpopRetry exchanges the authorization code with
-// fixed Client Attestation headers. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its requests to
-// context.Background().
-func (o *Oid4vciReceiver) ExchangeAuthorizationCodeWithDpopRetry(endpoint common.URIField, request types.AuthorizationCodeTokenRequest, headers types.OAuthClientAttestationHeaders, proofFactory DPoPProofFactory) (*types.CredentialIssuanceAccessToken, error) {
-	return o.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(context.Background(), endpoint, request, func() (types.OAuthClientAttestationHeaders, error) {
-		return headers, nil
-	}, proofFactory)
-}
-
 // ExchangeAuthorizationCodeWithDpopAndAttestationRetry exchanges the
 // authorization code at the Section 6.1 Token Endpoint and owns the RFC 9449
 // Section 8 DPoP nonce retry: both factories are called once per attempt, so a

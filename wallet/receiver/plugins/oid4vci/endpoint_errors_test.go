@@ -59,7 +59,7 @@ func TestEndpointErrorNamesTheFailedStage(t *testing.T) {
 	_, err = receiver.FetchNonceResponse(context.Background(), endpoint)
 	requireEndpointError(t, err, StageNonce, status, "temporarily_unavailable")
 
-	_, err = receiver.ExchangeAuthorizationCodeWithDpopRetry(endpoint, types.AuthorizationCodeTokenRequest{Code: "code-1"}, types.OAuthClientAttestationHeaders{}, noopProofFactory)
+	_, err = receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), endpoint, types.AuthorizationCodeTokenRequest{Code: "code-1"}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), noopProofFactory)
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 
 	_, err = receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(context.Background(), endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, func() (types.OAuthClientAttestationHeaders, error) {
@@ -81,7 +81,7 @@ func TestEndpointErrorReportsTheOAuthErrorWithoutTheBody(t *testing.T) {
 	defer server.Close()
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 
-	_, err := receiver.ExchangeAuthorizationCodeWithDpopRetry(mustURIField(t, server.URL), types.AuthorizationCodeTokenRequest{Code: "code-1"}, types.OAuthClientAttestationHeaders{}, noopProofFactory)
+	_, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL), types.AuthorizationCodeTokenRequest{Code: "code-1"}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), noopProofFactory)
 	requireEndpointError(t, err, StageToken, http.StatusBadRequest, "invalid_grant")
 	var endpointError *EndpointError
 	_ = errors.As(err, &endpointError)

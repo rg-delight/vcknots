@@ -954,14 +954,3 @@ type OID4VCIFinalSigner interface {
 	// authorization server and, when the server issued one, to its challenge.
 	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
 }
-
-// OID4VCIFinalReceiver is a plugin that is both an OID4VCIFinalTransport and an
-// OID4VCIFinalSigner.
-//
-// Deprecated: implement OID4VCIFinalTransport instead and supply the signing
-// primitives through Wallet Config.OID4VCISigner. This compound interface is
-// kept so existing plugins and callers keep compiling.
-type OID4VCIFinalReceiver interface {
-	OID4VCIFinalTransport
-	OID4VCIFinalSigner
-}
