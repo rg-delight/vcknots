@@ -81,7 +81,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		bearer := newTokenServer(t, "DPoP")
 		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Profile("bogus")}
 		_, err := receiver.FetchAccessToken(types.Oid4vci, bearer, "code", "")
-		require.ErrorContains(t, err, "unknown OID4VP profile")
+		require.ErrorContains(t, err, "unknown protocol profile")
 	})
 }
 

@@ -1,6 +1,11 @@
 package profile
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/trustknots/vcknots/wallet/common"
+)
 
 func TestNormalize(t *testing.T) {
 	tests := []struct {
@@ -37,5 +42,15 @@ func TestIsHAIP(t *testing.T) {
 	}
 	if !HAIP.IsHAIP() {
 		t.Fatal("HAIP must report IsHAIP")
+	}
+}
+
+func TestNormalizeUnknownIsCoded(t *testing.T) {
+	_, err := Profile("draft13").Normalize()
+	if !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("Normalize error = %v, want ErrUnknownProfile", err)
+	}
+	if code, ok := common.CodeOf(err); !ok || code != "unknown_profile" {
+		t.Fatalf("CodeOf = %q, %v", code, ok)
 	}
 }

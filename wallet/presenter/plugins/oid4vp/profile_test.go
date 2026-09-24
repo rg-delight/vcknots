@@ -27,7 +27,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		claims := f.claims()
 		for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
 			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: unknown, Delivery: deliverByValue})
-			if err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
+			if err == nil || !strings.Contains(err.Error(), "unknown protocol profile") {
 				t.Fatalf("profile %q: want unknown profile error, got %v", unknown, err)
 			}
 		}
@@ -541,7 +541,7 @@ func TestRequestBuilderWithProfileEnforcesHAIP(t *testing.T) {
 func TestRequestBuilderWithProfileRejectsUnknownProfile(t *testing.T) {
 	for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
 		_, err := NewRequestBuilder().WithProfile(unknown).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
-		if err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
+		if err == nil || !strings.Contains(err.Error(), "unknown protocol profile") {
 			t.Fatalf("WithProfile(%q): want unknown profile error, got %v", unknown, err)
 		}
 	}

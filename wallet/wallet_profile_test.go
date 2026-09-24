@@ -102,7 +102,7 @@ func TestNewWalletWithConfig_ProfilePropagation(t *testing.T) {
 
 	t.Run("unknown profile is rejected", func(t *testing.T) {
 		_, err := NewWalletWithConfig(Config{Profile: profile.Profile("bogus"), CredStore: newProfileCredStore(t)})
-		require.ErrorContains(t, err, "unknown OID4VP profile")
+		require.ErrorContains(t, err, "unknown protocol profile")
 	})
 }
 
