@@ -18,6 +18,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/keystore"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -320,7 +321,11 @@ func (w *Wallet) clientAttestationProvider(req OID4VCIFinalReceiveRequest) (Clie
 	if strings.TrimSpace(req.AttesterIssuer) == "" {
 		return nil, fmt.Errorf("attester issuer is required when attester key is provided")
 	}
-	return &StaticClientAttester{Key: req.AttesterKey, Issuer: req.AttesterIssuer}, nil
+	key, err := keystore.NewKeyEntryFromJWK(req.AttesterKey)
+	if err != nil {
+		return nil, fmt.Errorf("attester key: %w", err)
+	}
+	return &StaticClientAttester{Key: key, Chain: req.AttesterKey.Certificates, Issuer: req.AttesterIssuer}, nil
 }
 
 func (w *Wallet) createOID4VCIAttestationHeaders(ctx context.Context, receiver receiverTypes.OID4VCIFinalTransport, req OID4VCIFinalReceiveRequest, authMetadata *receiverTypes.AuthorizationServerMetadata, authorizationServerIssuer string) (receiverTypes.OAuthClientAttestationHeaders, string, error) {

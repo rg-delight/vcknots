@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
@@ -14,7 +15,7 @@ var (
 	// ErrCredentialAcceptancePolicyRequired reports that a flow which must
 	// authenticate the issuer before storing a credential ran without a
 	// configured Config.CredentialAcceptance.
-	ErrCredentialAcceptancePolicyRequired = common.NewCodedError("credential_acceptance_policy_required", "credential acceptance policy is required")
+	ErrCredentialAcceptancePolicyRequired = acceptance.ErrPolicyRequired
 	// ErrUnknownCredentialConfiguration reports that the requested
 	// credential_configuration_id is absent from the Credential Issuer's
 	// credential_configurations_supported metadata.
@@ -67,81 +68,6 @@ var (
 	// was presented which the wallet's client registry does not hold. It
 	// aliases the oid4vp presenter plugin's sentinel, which raises it.
 	ErrPreRegisteredClientUnknown = oid4vp.ErrPreRegisteredClientUnknown
-)
-
-// ErrHolderBindingConfirmationUnsupported reports that a credential's cnf
-// claim names a confirmation method other than cnf.jwk, such as cnf.kid or
-// cnf."x5t#S256". Only a confirmation carrying the key itself lets the wallet
-// prove possession of it in a Key Binding JWT, so such a credential is
-// rejected instead of stored with a binding the wallet cannot exercise.
-var ErrHolderBindingConfirmationUnsupported = common.NewCodedError("credential_holder_binding_unsupported", "credential cnf confirmation method is not supported; only cnf.jwk is accepted")
-
-// Sentinel errors the credential acceptance path wraps at each failure site.
-// They exist so an integrator can branch on the condition that stopped a
-// credential from being stored — with errors.Is, which holds through every
-// wrapping this package performs — instead of matching message text. Every one
-// of them is reachable through VerifyCredentialForAcceptance and
-// VerifyCredentialWithPolicy.
-//
-// Two acceptance failures keep the typed errors they already had rather than
-// gaining a sentinel here: an untrusted, revoked or unknown-revocation issuer
-// certificate chain arrives as a *x509.SigningChainError or *x509.CRLCheckError
-// from wallet/common/x509, which carry the certificate and the reason.
-var (
-	// ErrCredentialParse reports that the credential is not a credential of
-	// the requested serialization: it does not deserialize, its issuer JWT is
-	// not three base64url parts, or one of its parts is not the JSON it must
-	// be. Nothing about the issuer has been checked when it is returned.
-	ErrCredentialParse = common.NewCodedError("credential_parse_failed", "credential could not be parsed")
-	// ErrCredentialTypInvalid reports that the issuer JWT's typ header does
-	// not name a media type the requested serialization allows. SD-JWT VC
-	// (draft-ietf-oauth-sd-jwt-vc Section 3.1) allows dc+sd-jwt and the
-	// earlier vc+sd-jwt.
-	ErrCredentialTypInvalid = common.NewCodedError("credential_typ_invalid", "credential typ header is not supported")
-	// ErrCredentialAlgUnsupported reports that the issuer JWT's alg header is
-	// missing, is the unsigned "none" of RFC 7515 Section 3.6, is absent from
-	// the acceptance policy's SigningAlgorithms, or names an algorithm no
-	// registered verifier plugin implements.
-	ErrCredentialAlgUnsupported = common.NewCodedError("credential_alg_unsupported", "credential signing algorithm is not accepted")
-	// ErrHolderBindingMissing reports that the policy requires holder binding
-	// and the wallet cannot establish one: the credential carries no cnf claim,
-	// or it carries a cnf confirmation key while the acceptance call supplied
-	// no holder key to compare it against.
-	ErrHolderBindingMissing = common.NewCodedError("credential_holder_binding_missing", "credential does not contain a cnf holder binding")
-	// ErrHolderBindingMismatch reports that the credential's cnf.jwk is not
-	// the holder key the flow used, compared by RFC 7638 thumbprint.
-	ErrHolderBindingMismatch = common.NewCodedError("credential_holder_binding_mismatch", "credential is bound to a different holder key")
-	// ErrIssuerKeyUnresolved reports that no issuer public key could be
-	// obtained to verify the signature with: the policy configures neither
-	// x5c trust nor a resolution hook, the hook failed, or it returned no key.
-	// The credential's signature has not been checked when it is returned.
-	ErrIssuerKeyUnresolved = common.NewCodedError("issuer_key_unresolved", "issuer key could not be resolved")
-	// ErrIssuerSignatureInvalid reports that every candidate issuer key failed
-	// to verify the credential's signature.
-	ErrIssuerSignatureInvalid = common.NewCodedError("issuer_signature_invalid", "issuer signature could not be verified")
-	// ErrIssuerDNSBindingFailed reports that RequireIssuerDNSBinding is set and
-	// the leaf certificate carries no dNSName SAN equal to the host of an https
-	// iss. This is ecosystem policy rather than an SD-JWT VC requirement.
-	ErrIssuerDNSBindingFailed = common.NewCodedError("issuer_dns_binding_failed", "issuer certificate is not bound to the issuer host")
-	// ErrCredentialExpired reports that the credential's exp claim is in the
-	// past, measured against the policy clock and ClockSkew.
-	ErrCredentialExpired = common.NewCodedError("credential_expired", "credential has expired")
-	// ErrCredentialNotYetValid reports that the credential's nbf claim is in
-	// the future, measured the same way.
-	ErrCredentialNotYetValid = common.NewCodedError("credential_not_yet_valid", "credential is not yet valid")
-	// ErrDisclosureIntegrity reports that an SD-JWT disclosure is not covered
-	// by exactly one digest of the issuer-signed payload, which would let a
-	// disclosure be added or replayed without invalidating the signature.
-	ErrDisclosureIntegrity = common.NewCodedError("disclosure_integrity_failed", "SD-JWT disclosure integrity check failed")
-	// ErrSDAlgUnsupported reports that the credential's _sd_alg is not a
-	// string or names a hash outside AcceptedSDAlgorithms.
-	ErrSDAlgUnsupported = common.NewCodedError("sd_alg_unsupported", "credential _sd_alg is not supported")
-	// ErrHAIPX5CRequired reports that the wallet runs the HAIP profile and an
-	// SD-JWT VC arrived without the x5c header HAIP Section 6.1.1 requires.
-	ErrHAIPX5CRequired = common.NewCodedError("haip_x5c_required", "HAIP requires the issuer signing certificate in the x5c header")
-	// ErrHAIPTrustAnchorInX5C reports that the credential's x5c chain contains
-	// a configured trust anchor, which HAIP Section 6.1.1 forbids.
-	ErrHAIPTrustAnchorInX5C = common.NewCodedError("haip_trust_anchor_in_x5c", "HAIP forbids including the trust anchor certificate in the x5c header")
 )
 
 // Sentinel errors of the two-stage OpenID4VCI 1.0 Final issuance API, where
@@ -289,27 +215,6 @@ var (
 	// request_uri of a Pushed Authorization Request is no longer usable at the
 	// authorization endpoint, measured against OID4VCIFinalAuthorization.ExpiresAt.
 	ErrAuthorizationRequestURIExpired = common.NewCodedError("authorization_request_uri_expired", "pushed authorization request_uri has expired")
-)
-
-// Sentinel errors the attestation validation of HAIP §4.4 wraps. The wallet
-// authenticates every attestation an attester hands it before a request
-// carrying it leaves the process, and there is no opt-out, so these are the two
-// conditions that stop an otherwise well-formed issuance for a reason the
-// issuer never sees. The reason stays in the chain: the error they wrap names
-// the claim, signature or chain check that failed.
-var (
-	// ErrClientAttestationInvalid reports that the Appendix E Client
-	// Attestation the provider returned is not usable as this wallet's client
-	// credential: it is empty or malformed, its signature could not be
-	// authenticated against the configured trust material, or its typ, sub,
-	// cnf.jwk, aud or exp does not match the wallet instance and the
-	// authorization server the request is for.
-	ErrClientAttestationInvalid = common.NewCodedError("client_attestation_invalid", "client attestation is not valid for this wallet instance")
-	// ErrKeyAttestationInvalid reports the same for an Appendix D key
-	// attestation: empty, malformed, unauthenticated, or not attesting the
-	// holder keys, the c_nonce, the audience or a future exp the Credential
-	// Request needs.
-	ErrKeyAttestationInvalid = common.NewCodedError("key_attestation_invalid", "key attestation is not valid for this credential request")
 )
 
 // Sentinel errors NotifyOID4VCIFinalCredential and NotifyOID4VCIDraft13Credential
