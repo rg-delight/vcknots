@@ -874,7 +874,7 @@ func TestVerifyCredentialForAcceptance_SigningAlgorithms(t *testing.T) {
 			require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 
 			// The same credential under a policy that lists no algorithm falls
-			// back to DefaultCredentialSigningAlgorithms, which is ES256 alone.
+			// back to DefaultCredentialSigningAlgorithms(), which is ES256 alone.
 			unlisted, _ := newAcceptanceWallet(t, profile.Final, &CredentialAcceptancePolicy{ResolveIssuerKeys: resolve})
 			_, _, err = unlisted.VerifyCredentialForAcceptance(t.Context(), []byte(wire), credential.SDJwtVC, &holder)
 			if issuer.algorithm == jose.ES256 {
@@ -885,6 +885,18 @@ func TestVerifyCredentialForAcceptance_SigningAlgorithms(t *testing.T) {
 			require.ErrorContains(t, err, "is not listed by the credential acceptance policy")
 		})
 	}
+}
+
+// TestAcceptancePolicyDefaultsAreCopies pins that the default algorithm lists
+// cannot be widened process-wide by a caller that modifies what it was given.
+func TestAcceptancePolicyDefaultsAreCopies(t *testing.T) {
+	algorithms := DefaultCredentialSigningAlgorithms()
+	algorithms[0] = jose.RS256
+	require.Equal(t, []jose.SignatureAlgorithm{jose.ES256}, DefaultCredentialSigningAlgorithms())
+
+	sdAlgorithms := AcceptedSDAlgorithms()
+	sdAlgorithms[0] = "md5"
+	require.Equal(t, []string{"sha-256", "sha-384", "sha-512"}, AcceptedSDAlgorithms())
 }
 
 // TestVerifyCredentialForAcceptance_AlgorithmWithoutPlugin covers the second

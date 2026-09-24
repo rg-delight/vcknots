@@ -67,15 +67,9 @@ type CredentialAcceptancePolicy struct {
 	// SD-JWT disclosure integrity) keeps applying.
 	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS "alg" values an issuer may sign a
-	// credential with. An empty list means DefaultCredentialSigningAlgorithms.
-	//
-	// It is a separate decision from which algorithms the verification
-	// dispatcher can compute: a registered plugin makes an algorithm
-	// verifiable, this list makes it acceptable. Keeping them apart means that
-	// adding a plugin — including the ones NewVerificationDispatcher registers
-	// by default — never widens what a deployment accepts on its own, and that
-	// a caller can narrow acceptance without rebuilding the dispatcher. An
-	// algorithm listed here that no plugin implements is still rejected.
+	// credential with. Empty means DefaultCredentialSigningAlgorithms(). The
+	// verification dispatcher must also implement the algorithm: a registered
+	// plugin makes an algorithm verifiable, this list makes it acceptable.
 	SigningAlgorithms []jose.SignatureAlgorithm
 	// ExpectedSDJWTVCType is the SD-JWT VC `vct` claim the credential must
 	// carry. An empty value checks nothing, which is the behaviour before this
@@ -87,25 +81,20 @@ type CredentialAcceptancePolicy struct {
 	ClockSkew           time.Duration
 }
 
-// DefaultCredentialSigningAlgorithms is the issuer signature algorithm policy
-// applied when a CredentialAcceptancePolicy leaves SigningAlgorithms empty, and
-// when no policy is configured at all.
-//
-// It holds ES256 alone. HAIP Section "Requirements for Digital Signatures"
-// states that "Issuers, Verifiers, and Wallets MUST, at a minimum, support
-// ECDSA with P-256 and SHA-256 (JOSE algorithm identifier ES256 ...)" and that
-// "ecosystem-specific profiles of this specification MAY mandate additional
-// cryptographic suites": the floor is interoperable everywhere, anything above
-// it is an ecosystem decision, so a deployment that accepts more says so in its
-// policy. The wallet never modifies the slice; callers may read it and must not
-// modify it either.
-var DefaultCredentialSigningAlgorithms = []jose.SignatureAlgorithm{jose.ES256}
+// DefaultCredentialSigningAlgorithms returns the issuer signature algorithms
+// accepted when CredentialAcceptancePolicy.SigningAlgorithms is empty: ES256,
+// the algorithm HAIP Section "Requirements for Digital Signatures" requires
+// every wallet to support. Anything beyond it is an ecosystem decision stated
+// in the policy. The result is a fresh copy.
+func DefaultCredentialSigningAlgorithms() []jose.SignatureAlgorithm {
+	return []jose.SignatureAlgorithm{jose.ES256}
+}
 
 // acceptedSigningAlgorithms resolves the issuer signature algorithms one
 // acceptance run allows.
 func acceptedSigningAlgorithms(policy *CredentialAcceptancePolicy) []jose.SignatureAlgorithm {
 	if policy == nil || len(policy.SigningAlgorithms) == 0 {
-		return DefaultCredentialSigningAlgorithms
+		return DefaultCredentialSigningAlgorithms()
 	}
 	return policy.SigningAlgorithms
 }
@@ -710,14 +699,13 @@ func IssuerSignedJOSEHeader(flavor credential.SupportedSerializationFlavor, raw 
 	return header, nil
 }
 
-// AcceptedSDAlgorithms lists the _sd_alg values this wallet accepts on an
-// SD-JWT VC, written as the lowercase IANA "Named Information Hash Algorithm"
-// names that SD-JWT (draft-ietf-oauth-selective-disclosure-jwt) Section 4.1.1
-// requires. A credential naming anything else is rejected rather than verified
-// under a substituted hash, and "sha-256" is the default when _sd_alg is
-// absent. The wallet never modifies the slice; callers may read it to report
-// what they support and must not modify it either.
-var AcceptedSDAlgorithms = []string{"sha-256", "sha-384", "sha-512"}
+// AcceptedSDAlgorithms returns the SD-JWT _sd_alg values the wallet accepts,
+// as the lowercase IANA "Named Information Hash Algorithm" names SD-JWT
+// Section 4.1.1 uses. "sha-256" is the default when _sd_alg is absent. The
+// result is a fresh copy.
+func AcceptedSDAlgorithms() []string {
+	return []string{"sha-256", "sha-384", "sha-512"}
+}
 
 func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *credential.Credential) error {
 	sdAlg := "sha-256"
@@ -727,7 +715,7 @@ func verifySDJWTDisclosureIntegrity(payload map[string]any, parsedCredential *cr
 			return fmt.Errorf("%w: _sd_alg must be a string", ErrSDAlgUnsupported)
 		}
 		sdAlg = strings.ToLower(text)
-		if !slices.Contains(AcceptedSDAlgorithms, sdAlg) {
+		if !slices.Contains(AcceptedSDAlgorithms(), sdAlg) {
 			return fmt.Errorf("%w: unsupported _sd_alg %q", ErrSDAlgUnsupported, text)
 		}
 	}
