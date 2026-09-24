@@ -1184,3 +1184,15 @@ func TestObserveLabelsEveryDraft13IssuanceRequest(t *testing.T) {
 		observe.EndpointNotification,
 	}, recorder.Endpoints())
 }
+
+// Under HAIP the Draft 13 view refuses before it reads the state it is given.
+func TestDraft13RefusesUnderHAIPBeforeReadingTheState(t *testing.T) {
+	w := newHAIPIssuanceFixture(t).wallet.Draft13()
+	_, err := w.RequestCredential(context.Background(), nil, CredentialRequest{})
+	require.ErrorIs(t, err, ErrProfileForbidsDraft)
+	_, err = w.RequestDeferredCredential(context.Background(), nil)
+	require.ErrorIs(t, err, ErrProfileForbidsDraft)
+	_, err = w.AuthorizeIssuance(context.Background(), nil, "")
+	require.ErrorIs(t, err, ErrProfileForbidsDraft)
+	require.ErrorIs(t, w.NotifyIssuer(context.Background(), nil, NotificationCredentialAccepted, ""), ErrProfileForbidsDraft)
+}

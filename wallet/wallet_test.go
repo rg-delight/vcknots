@@ -188,20 +188,6 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 	return controller
 }
 
-// createTestControllerWithAcceptance builds a wallet with an explicit
-// Config.CredentialAcceptance, which the OpenID4VCI Final and HAIP issuance
-// paths require before a credential may be stored.
-func createTestControllerWithAcceptance(t *testing.T, policy *CredentialAcceptancePolicy) *Wallet {
-	t.Helper()
-	tempConfigDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
-	t.Setenv("HOME", tempConfigDir)
-
-	controller, err := NewWalletWithConfig(Config{CredentialAcceptance: policy})
-	require.NoError(t, err)
-	return controller
-}
-
 // acceptIssuerKeyPolicy authenticates credentials signed by issuerKey. SD-JWT
 // VC §3.5 leaves issuer key resolution to ecosystem policy, so the tests model
 // a wallet that holds the issuer key out of band.

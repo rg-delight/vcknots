@@ -423,6 +423,9 @@ func (d *Draft13Issuance) credentialStage(ctx context.Context, cache *issuanceMe
 }
 
 func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
+	if d.w.profile.IsHAIP() {
+		return nil, ErrProfileForbidsDraft
+	}
 	if err := checkGrant(grant, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
@@ -616,6 +619,9 @@ func draft13CredentialResponse(response *receiverTypes.Draft13CredentialResponse
 }
 
 func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferred *DeferredIssuance) (*IssuanceResult, error) {
+	if d.w.profile.IsHAIP() {
+		return nil, ErrProfileForbidsDraft
+	}
 	if err := checkDeferred(deferred, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
