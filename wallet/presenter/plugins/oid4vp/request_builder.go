@@ -21,9 +21,8 @@ import (
 type requestSource int
 
 const (
-	sourceUnknown requestSource = iota
 	// sourceQuery is plain query parameters.
-	sourceQuery
+	sourceQuery requestSource = iota + 1
 	// sourceValue is a Request Object passed by value (request=, or
 	// ParseRequestObject).
 	sourceValue
