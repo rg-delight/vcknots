@@ -68,7 +68,25 @@ var (
 	// unless FederationTrustOptions.AllowUnsignedRequests is set, and a
 	// pre-registered client with RequireSignedRequestObject.
 	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "this client identifier requires a signed Request Object")
+	// ErrAuthorizationRequestInvalid reports an Authorization Request the
+	// Wallet refused for a reason no more specific error names. The parse
+	// methods that return a request handle add it to an uncoded refusal.
+	ErrAuthorizationRequestInvalid = common.NewCodedError("oid4vp_request_invalid", "authorization request is invalid")
 )
+
+// codeParseError gives a refusal without a code ErrAuthorizationRequestInvalid.
+// Cancellation and transport failures are left as they are, so the caller
+// still tells them from a refused request.
+func codeParseError(err error) error {
+	if _, coded := common.CodeOf(err); coded || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Op != "parse" {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrAuthorizationRequestInvalid, err)
+}
 
 // ErrErrorResponseEndpointUnbound reports that a refused Authorization Request
 // names no Response URI the Wallet may send an error authorization response

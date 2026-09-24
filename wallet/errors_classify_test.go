@@ -25,6 +25,7 @@ func TestClassifyGivesEveryErrorACode(t *testing.T) {
 		{"canceled", fmt.Errorf("send: %w", context.Canceled), "canceled", []error{ErrCanceled, context.Canceled}, false},
 		{"deadline", &url.Error{Op: "Post", URL: "https://x", Err: context.DeadlineExceeded}, "deadline_exceeded", []error{ErrDeadlineExceeded, context.DeadlineExceeded}, false},
 		{"network", &url.Error{Op: "Get", URL: "https://x", Err: &net.OpError{Op: "dial", Err: uncoded}}, "network_error", []error{ErrNetwork, uncoded}, false},
+		{"malformed URL", &url.Error{Op: "parse", URL: "::", Err: uncoded}, "unclassified", []error{ErrUnclassified}, false},
 		{"anything else", uncoded, "unclassified", []error{ErrUnclassified, uncoded}, false},
 	}
 	for _, test := range tests {

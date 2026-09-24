@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 
 	"github.com/trustknots/vcknots/wallet/common"
 )
@@ -19,7 +20,9 @@ import (
 //  2. Every non-nil error returned by an exported function or method of this
 //     package has at least one code in its chain. Failures with no more
 //     specific code are reported as ErrInvalidArgument, ErrCanceled,
-//     ErrDeadlineExceeded, ErrNetwork or ErrUnclassified.
+//     ErrDeadlineExceeded, ErrNetwork or ErrUnclassified. The one exception is
+//     an error returned by PresentCredentialOptions.OnRedirect, which is
+//     passed back unchanged.
 //  3. Exported sentinels and error types of the sub-packages are coded, but a
 //     plugin method called directly may return an uncoded error from a
 //     dependency; promise 2 applies once it crosses a method of this package.
@@ -84,15 +87,25 @@ func classify(err error) error {
 	if _, coded := common.CodeOf(err); coded {
 		return err
 	}
-	var netErr net.Error
 	switch {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("%w: %w", ErrCanceled, err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("%w: %w", ErrDeadlineExceeded, err)
-	case errors.As(err, &netErr):
+	case isNetworkError(err):
 		return fmt.Errorf("%w: %w", ErrNetwork, err)
 	default:
 		return fmt.Errorf("%w: %w", ErrUnclassified, err)
 	}
+}
+
+// isNetworkError reports a transport failure. A *url.Error from url.Parse is
+// a malformed URL, not one.
+func isNetworkError(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Op != "parse"
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

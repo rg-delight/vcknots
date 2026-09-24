@@ -21,6 +21,9 @@ import (
 
 // FetchCredentialIssuerMetadata fetches credential issuer metadata from the given endpoint.
 func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+	if endpoint == nil {
+		return nil, invalidArgument("issuer metadata endpoint is required")
+	}
 	uriField, err := common.ParseURIField(endpoint.String())
 	if err != nil {
 		return nil, keepMessage(ErrInvalidArgument, fmt.Errorf("failed to parse URI field: %w", err))

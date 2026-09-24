@@ -547,7 +547,15 @@ func (w *Wallet) GenerateDID(options DIDCreateOptions) (*idprofTypes.IdentityPro
 	}
 
 	identity, err := w.idProf.Create("did", createOption)
-	return identity, classify(err)
+	if err != nil {
+		// Creating a did:key or did:jwk is local, so a failure is a
+		// method or key the caller chose that the plugins refuse.
+		if _, coded := common.CodeOf(err); !coded {
+			err = keepMessage(ErrInvalidArgument, err)
+		}
+		return nil, classify(err)
+	}
+	return identity, nil
 }
 
 // DIDCreateOptions holds options for DID creation.

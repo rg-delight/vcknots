@@ -119,10 +119,10 @@ func (p *Oid4vpPresenter) admittedHere(req types.AdmittedRequest) (*AdmittedRequ
 }
 
 // asAdmitted converts a parse result to the interface without producing a
-// typed nil.
+// typed nil, and codes an uncoded refusal (codeParseError).
 func asAdmitted(handle *AdmittedRequest, err error) (types.AdmittedRequest, error) {
 	if err != nil {
-		return nil, err
+		return nil, codeParseError(err)
 	}
 	return handle, nil
 }

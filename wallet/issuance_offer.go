@@ -17,13 +17,17 @@ import (
 func ParseCredentialOfferURL(rawURL string) (*CredentialOffer, error) {
 	offerURL, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse credential offer URL: %w", err)
+		return nil, invalidArgument("failed to parse credential offer URL: %w", err)
 	}
 	rawOffer := offerURL.Query().Get("credential_offer")
 	if rawOffer == "" {
-		return nil, fmt.Errorf("credential_offer query parameter is required")
+		return nil, invalidArgument("credential_offer query parameter is required")
 	}
-	return parseCredentialOfferJSON(rawOffer)
+	offer, err := parseCredentialOfferJSON(rawOffer)
+	if err != nil {
+		return nil, invalidArgument("%w", err)
+	}
+	return offer, nil
 }
 
 // ResolveCredentialOffer resolves a Credential Offer URI in the by-value
