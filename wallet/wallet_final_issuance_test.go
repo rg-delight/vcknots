@@ -1823,11 +1823,61 @@ func TestResumeOID4VCIFinalAuthorizationReturnsAuthorizationError(t *testing.T) 
 	require.NoError(t, err)
 
 	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
-		"openid-credential-offer://callback?error=access_denied&error_description=user%20said%20no")
+		"openid-credential-offer://callback?error=access_denied&error_description=user%20said%20no&state="+url.QueryEscape(authorization.State))
 	var authorizationError *AuthorizationResponseError
 	require.ErrorAs(t, err, &authorizationError)
 	require.Equal(t, "access_denied", authorizationError.Code)
 	require.Equal(t, "user said no", authorizationError.Description)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 6749 §4.1.2.1 makes state REQUIRED on an error redirect when the request
+// carried one, and §10.12 requires CSRF protection of the redirect URI: an
+// error redirect any page can forge must not abort the issuance.
+func TestResumeOID4VCIFinalAuthorizationIgnoresErrorRedirectWithoutState(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	for name, redirect := range map[string]string{
+		"missing state": "openid-credential-offer://callback?error=access_denied&error_description=attacker%20text",
+		"foreign state": "openid-credential-offer://callback?error=access_denied&state=someone-elses-state",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization, redirect)
+			require.ErrorIs(t, err, ErrAuthorizationStateMismatch)
+			var authorizationError *AuthorizationResponseError
+			require.False(t, errors.As(err, &authorizationError))
+		})
+	}
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 9207 §2.4 applies iss to error responses as well, so a server that
+// advertises the parameter cannot be impersonated by an error redirect that
+// omits or forges it.
+func TestResumeOID4VCIFinalAuthorizationChecksIssuerOnErrorRedirect(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.issParameterSupported = true
+	})
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+	state := url.QueryEscape(authorization.State)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state)
+	require.ErrorIs(t, err, ErrAuthorizationIssMissing)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state+"&iss="+url.QueryEscape("https://attacker.example"))
+	require.ErrorIs(t, err, ErrAuthorizationIssMismatch)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state+"&iss="+url.QueryEscape(fixture.server.URL))
+	var authorizationError *AuthorizationResponseError
+	require.ErrorAs(t, err, &authorizationError)
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 

@@ -36,11 +36,9 @@ type AuthorizationResponseError struct {
 	Code string
 	// Description is the optional error_description that accompanied it.
 	Description string
-	// State is the state the authorization server echoed on the error
-	// redirect, when it carried one. RFC 6749 §4.1.2.1 makes the parameter
-	// REQUIRED "if a state parameter was present in the client authorization
-	// request", so it is reported here for a caller that dispatched several
-	// requests and attributes the failure to one of them.
+	// State is the state the error redirect echoed. It always equals the
+	// authorization request's state: a redirect without it is refused with
+	// ErrAuthorizationStateMismatch before it is read as an error.
 	State string
 }
 
@@ -526,8 +524,10 @@ func followOID4VCIAuthorizationEndpoint(client *http.Client, auth *OID4VCIFinalA
 
 // validateOID4VCIAuthorizationRedirect applies the RFC 6749 §4.1.2 / RFC 9207
 // §2.4 checks to the redirect the user agent delivered and returns the
-// authorization code. authorizationURL is the request the redirect answers, used
-// only to resolve a relative Location.
+// authorization code. The redirect URI, state and iss are checked before the
+// response is read as an error, so a forged error redirect cannot abort the
+// issuance (RFC 6749 §4.1.2.1 and §10.12). authorizationURL is the request the
+// redirect answers, used only to resolve a relative Location.
 func validateOID4VCIAuthorizationRedirect(location string, authorizationURL string, expectedState string, registeredRedirectURI string, issuer authorizationResponseIssuerPolicy) (string, error) {
 	redirectURL, err := url.Parse(location)
 	if err != nil {
@@ -542,36 +542,33 @@ func validateOID4VCIAuthorizationRedirect(location string, authorizationURL stri
 	}
 	registeredRedirect, err := url.Parse(registeredRedirectURI)
 	if err != nil {
-		// An unparseable registered redirect_uri cannot be compared with, so
-		// the callback cannot be shown to belong to this request: the same
-		// condition the comparison below reports.
 		return "", fmt.Errorf("failed to parse registered redirect URI: %w: %w", ErrAuthorizationRedirectURIMismatch, err)
 	}
 	if !sameOriginAndPath(registeredRedirect, redirectURL) {
 		return "", ErrAuthorizationRedirectURIMismatch
 	}
-	if errorCode := redirectURL.Query().Get("error"); errorCode != "" {
-		return "", &AuthorizationResponseError{
-			Code:        errorCode,
-			Description: redirectURL.Query().Get("error_description"),
-			State:       redirectURL.Query().Get("state"),
-		}
-	}
-	if state := redirectURL.Query().Get("state"); state != expectedState {
+	query := redirectURL.Query()
+	if query.Get("state") != expectedState {
 		return "", ErrAuthorizationStateMismatch
 	}
-	// RFC 9207 §2.4: an iss parameter that is present MUST equal the issuer
-	// identifier of the authorization server that was used; when the server
-	// advertises support (or the profile requires it) the parameter MUST be
-	// present so a mix-up attack cannot omit it.
-	if iss, present := redirectURL.Query()["iss"]; present {
+	// RFC 9207 §2.4: a present iss MUST equal the authorization server's issuer
+	// identifier, and MUST be present when the server advertises support or
+	// the profile requires it.
+	if iss, present := query["iss"]; present {
 		if len(iss) != 1 || iss[0] != issuer.expected {
 			return "", ErrAuthorizationIssMismatch
 		}
 	} else if issuer.required {
 		return "", ErrAuthorizationIssMissing
 	}
-	code := redirectURL.Query().Get("code")
+	if errorCode := query.Get("error"); errorCode != "" {
+		return "", &AuthorizationResponseError{
+			Code:        errorCode,
+			Description: query.Get("error_description"),
+			State:       query.Get("state"),
+		}
+	}
+	code := query.Get("code")
 	if code == "" {
 		return "", ErrAuthorizationCodeMissing
 	}
