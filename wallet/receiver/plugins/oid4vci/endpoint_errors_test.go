@@ -170,8 +170,8 @@ func TestCredentialErrorDescriptionIsBoundedAndSanitized(t *testing.T) {
 		t.Errorf("description = %q", endpointError.Description)
 	}
 
-	_, err = receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
-	var draft13Error *Draft13CredentialEndpointError
+	_, err = receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
+	var draft13Error *types.Draft13CredentialEndpointError
 	if !errors.As(err, &draft13Error) || len(draft13Error.Description) > maxErrorDescriptionLength || strings.Contains(draft13Error.Description, "\x1b") {
 		t.Errorf("draft13 error = %#v", draft13Error)
 	}

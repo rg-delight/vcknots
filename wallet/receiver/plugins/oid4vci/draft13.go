@@ -29,23 +29,6 @@ import (
 // notification of Section 10 — has the same body in both versions, so the
 // difference is only which error shape comes back.
 
-// The Draft 13 wire types live in the receiver types package so a plugin
-// outside this module can implement types.Draft13CredentialTransport.
-type (
-	Draft13Proof                   = types.Draft13Proof
-	Draft13CredentialRequest       = types.Draft13CredentialRequest
-	Draft13CredentialResponse      = types.Draft13CredentialResponse
-	Draft13NotificationRequest     = types.NotificationRequest
-	Draft13CredentialEndpointError = types.Draft13CredentialEndpointError
-)
-
-// Draft 13 error conditions; see types.ErrDraft13InvalidProof and
-// types.ErrDraft13IssuancePending.
-var (
-	ErrDraft13InvalidProof    = types.ErrDraft13InvalidProof
-	ErrDraft13IssuancePending = types.ErrDraft13IssuancePending
-)
-
 // RequestDraft13Credential posts a Draft 13 Section 7.2 Credential Request. A
 // refusal is a *Draft13CredentialEndpointError, which carries the fresh
 // c_nonce of a Section 7.3.2 invalid_proof response.
@@ -53,9 +36,9 @@ func (o *Oid4vciReceiver) RequestDraft13Credential(
 	ctx context.Context,
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
-	request Draft13CredentialRequest,
+	request types.Draft13CredentialRequest,
 	proofFactory types.DPoPProofFactory,
-) (*Draft13CredentialResponse, error) {
+) (*types.Draft13CredentialResponse, error) {
 	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode draft13 credential request: %w", err)
@@ -71,7 +54,7 @@ func (o *Oid4vciReceiver) RequestDraft13DeferredCredential(
 	accessToken types.CredentialIssuanceAccessToken,
 	transactionID string,
 	proofFactory types.DPoPProofFactory,
-) (*Draft13CredentialResponse, error) {
+) (*types.Draft13CredentialResponse, error) {
 	if strings.TrimSpace(transactionID) == "" {
 		return nil, fmt.Errorf("transaction_id is required for a deferred credential request")
 	}
@@ -107,7 +90,7 @@ func (o *Oid4vciReceiver) postDraft13CredentialEndpoint(
 	accessToken types.CredentialIssuanceAccessToken,
 	body []byte,
 	proofFactory types.DPoPProofFactory,
-) (*Draft13CredentialResponse, error) {
+) (*types.Draft13CredentialResponse, error) {
 	responseBody, _, err := o.doDraft13ProtectedPost(ctx, endpoint, accessToken, body, proofFactory)
 	if err != nil {
 		return nil, err
@@ -143,8 +126,8 @@ func (o *Oid4vciReceiver) doDraft13ProtectedPost(
 // A JSON body is parsed for the Section 7.3.1 members; any other content type
 // leaves Code empty and only the status is reported, because an unparsed body
 // is attacker-influenced text this library does not carry further.
-func newDraft13CredentialEndpointError(statusCode int, contentType string, body []byte, dpopNonce string) *Draft13CredentialEndpointError {
-	endpointError := &Draft13CredentialEndpointError{
+func newDraft13CredentialEndpointError(statusCode int, contentType string, body []byte, dpopNonce string) *types.Draft13CredentialEndpointError {
+	endpointError := &types.Draft13CredentialEndpointError{
 		StatusCode: statusCode,
 		DPoPNonce:  strings.TrimSpace(dpopNonce),
 	}
@@ -174,7 +157,7 @@ func newDraft13CredentialEndpointError(statusCode int, contentType string, body 
 // `credentials` array a Final-shaped issuer may answer with is accepted when it
 // holds exactly one entry, because refusing it would only turn a credential the
 // wallet can read into a failure.
-func decodeDraft13CredentialResponse(body []byte) (*Draft13CredentialResponse, error) {
+func decodeDraft13CredentialResponse(body []byte) (*types.Draft13CredentialResponse, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return nil, fmt.Errorf("credential response is empty")
 	}
@@ -190,7 +173,7 @@ func decodeDraft13CredentialResponse(body []byte) (*Draft13CredentialResponse, e
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("failed to parse credential response: %w", err)
 	}
-	response := &Draft13CredentialResponse{
+	response := &types.Draft13CredentialResponse{
 		TransactionID:   payload.TransactionID,
 		NotificationID:  payload.NotificationID,
 		CNonce:          payload.CNonce,

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/profile"
-	"github.com/trustknots/vcknots/wallet/receiver/types"
 
 	"github.com/trustknots/vcknots/wallet/common"
 )
@@ -86,23 +85,6 @@ func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
 			ErrDPoPRequired, tokenType)
 	}
 	return nil
-}
-
-// RequireBearerTokenType accepts only a Bearer token_type (compared case
-// insensitively, RFC 6749 Section 7.1). A DPoP token is ErrDPoPRequired: a
-// client without a DPoP key cannot present it.
-func RequireBearerTokenType(t *types.CredentialIssuanceAccessToken) error {
-	if t == nil {
-		return fmt.Errorf("token response is required")
-	}
-	switch {
-	case strings.EqualFold(strings.TrimSpace(t.TokenType), "Bearer"):
-		return nil
-	case strings.EqualFold(strings.TrimSpace(t.TokenType), dpopAuthorizationScheme):
-		return fmt.Errorf("%w: token endpoint issued a DPoP-bound access token, which the anonymous Pre-Authorized Code path cannot present", ErrDPoPRequired)
-	default:
-		return fmt.Errorf("token response returned unsupported token_type %q (Bearer required)", t.TokenType)
-	}
 }
 
 // ErrDPoPRequired reports that a DPoP proof is required (RFC 9449) and the

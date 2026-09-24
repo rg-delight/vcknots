@@ -520,7 +520,7 @@ func TestDraft13ReportsASecondInvalidProof(t *testing.T) {
 	})
 
 	_, err := fixture.receivePreAuthorized(t)
-	draft13RequireCoded(t, err, receiverOid4vci.ErrDraft13InvalidProof)
+	draft13RequireCoded(t, err, receiverTypes.ErrDraft13InvalidProof)
 	require.Len(t, fixture.credentials(), 2, "invalid_proof is retried exactly once")
 	require.Zero(t, draft13StoredCount(t, fixture.wallet))
 }
@@ -778,7 +778,7 @@ func TestDraft13DeferredReportsATerminalRefusal(t *testing.T) {
 
 	_, err = fixture.wallet.Draft13().RequestDeferredCredential(context.Background(), result.Deferred)
 	require.Error(t, err)
-	require.NotErrorIs(t, err, receiverOid4vci.ErrDraft13IssuancePending)
+	require.NotErrorIs(t, err, receiverTypes.ErrDraft13IssuancePending)
 	var endpointError *receiverTypes.Draft13CredentialEndpointError
 	require.ErrorAs(t, err, &endpointError)
 	require.Equal(t, "invalid_transaction_id", endpointError.Code)

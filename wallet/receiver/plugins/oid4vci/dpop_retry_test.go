@@ -113,9 +113,9 @@ func TestDraft13CredentialErrorWithDPoPNonceIsNotResent(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	proof := &countingProof{}
 
-	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
+	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
 
-	var endpointError *Draft13CredentialEndpointError
+	var endpointError *types.Draft13CredentialEndpointError
 	if !errors.As(err, &endpointError) || endpointError.Code != "invalid_request" {
 		t.Fatalf("error = %v, want invalid_request", err)
 	}

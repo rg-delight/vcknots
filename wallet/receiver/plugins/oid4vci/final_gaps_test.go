@@ -727,45 +727,6 @@ func parseCompactJWEHeader(t *testing.T, compact string) jose.Header {
 // P2-C: token_type / DPoP rules.
 // ---------------------------------------------------------------------------
 
-// RequireBearerTokenType validates the Final 1.0 anonymous Pre-Authorized Code
-// token response. token_type is REQUIRED (OpenID4VCI 1.0 §6.1) and case
-// insensitive (RFC 6749 §7.1), so a Bearer spelling is accepted whatever its
-// case and an unknown value is refused.
-func TestRequireBearerTokenType(t *testing.T) {
-	t.Run("bearer is case insensitive", func(t *testing.T) {
-		for _, tokenType := range []string{"Bearer", "bearer", "BEARER", " Bearer "} {
-			if err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: tokenType}); err != nil {
-				t.Fatalf("RequireBearerTokenType(%q) error = %v", tokenType, err)
-			}
-		}
-	})
-
-	t.Run("dpop is refused with ErrDPoPRequired", func(t *testing.T) {
-		for _, tokenType := range []string{"DPoP", "dpop"} {
-			err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: tokenType})
-			if !errors.Is(err, ErrDPoPRequired) {
-				t.Fatalf("RequireBearerTokenType(%q) error = %v, want ErrDPoPRequired", tokenType, err)
-			}
-		}
-	})
-
-	t.Run("unknown token_type is refused", func(t *testing.T) {
-		err := RequireBearerTokenType(&types.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "MAC"})
-		if err == nil {
-			t.Fatal("RequireBearerTokenType(MAC) = nil, want an error")
-		}
-		if errors.Is(err, ErrDPoPRequired) {
-			t.Fatalf("RequireBearerTokenType(MAC) = ErrDPoPRequired, want an unsupported token_type error")
-		}
-	})
-
-	t.Run("nil token response is refused", func(t *testing.T) {
-		if err := RequireBearerTokenType(nil); err == nil {
-			t.Fatal("RequireBearerTokenType(nil) = nil, want an error")
-		}
-	})
-}
-
 // A bearer token cannot answer an RFC 9449 §8 DPoP challenge: it has no key to
 // sign the proof the challenge asks for. The transport fails closed with
 // ErrDPoPRequired after exactly one request, whether the challenge arrives as a

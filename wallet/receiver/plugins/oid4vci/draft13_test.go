@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 func TestDecodeDraft13CredentialResponse(t *testing.T) {
@@ -51,8 +52,8 @@ func TestNewDraft13CredentialEndpointError(t *testing.T) {
 	require.Equal(t, "fresh", endpointError.CNonce)
 	require.Equal(t, 3, endpointError.Interval)
 	require.Equal(t, "dpop-nonce", endpointError.DPoPNonce)
-	require.True(t, errors.Is(endpointError, ErrDraft13InvalidProof))
-	require.False(t, errors.Is(endpointError, ErrDraft13IssuancePending))
+	require.True(t, errors.Is(endpointError, types.ErrDraft13InvalidProof))
+	require.False(t, errors.Is(endpointError, types.ErrDraft13IssuancePending))
 	require.Equal(t, "draft13_credential_invalid_proof", endpointError.ErrorCode())
 
 	// A body that is not JSON is never read: only the status is reported.
