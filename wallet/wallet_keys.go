@@ -38,15 +38,7 @@ type inMemoryECKeyEntry struct {
 	privKey *ecdsa.PrivateKey
 	pubJWK  jose.JSONWebKey
 }
-type keyEntryWithoutPublicKeyID struct {
-	IKeyEntry
-}
 
-func (k keyEntryWithoutPublicKeyID) PublicKey() jose.JSONWebKey {
-	jwk := k.IKeyEntry.PublicKey()
-	jwk.KeyID = ""
-	return jwk
-}
 func newInMemoryECKeyEntry() (*inMemoryECKeyEntry, error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

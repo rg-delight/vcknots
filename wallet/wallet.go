@@ -34,7 +34,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
-	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -68,22 +67,9 @@ type Wallet struct {
 	// bypass the root policy.
 	profile profile.Profile
 
-	// clientAttestation and keyAttestation are the caller-selected attestation
-	// providers. A nil clientAttestation falls back to a StaticClientAttester
-	// built from a per-request AttesterKey for compatibility.
-	clientAttestation ClientAttestationProvider
-	keyAttestation    KeyAttestationProvider
-
-	// attestationTrust authenticates what those providers return. The zero
-	// value carries no trust material, which is enough for the bundled static
-	// attesters (the wallet holds their key) and for an attester that ships its
-	// certificate chain in x5c.
-	attestationTrust AttestationTrustPolicy
-
-	// oid4vciSigner is the caller-selected OpenID4VCI Final signer. A nil value
-	// means "ask the receiver plugin, then fall back to oid4vcisign.Default",
-	// which is resolved per issuance by oid4vciFinalSigner.
-	oid4vciSigner receiverTypes.OID4VCIFinalSigner
+	issuance    IssuanceConfig
+	attestation AttestationConfig
+	testHooks   *TestHooks
 
 	credentialAcceptance *CredentialAcceptancePolicy
 }
@@ -136,51 +122,21 @@ type Config struct {
 	// ErrNoCredentialStore.
 	Storeless bool
 
-	// ClientAttestation supplies the OAuth 2.0 Client Attestation JWT for this
-	// wallet instance. When nil, a per-request AttesterKey is wrapped into a
-	// StaticClientAttester for compatibility.
-	ClientAttestation ClientAttestationProvider
-
-	// KeyAttestation supplies OpenID4VCI 1.0 Appendix D key attestations when
-	// the issuer requires them or the caller opts in.
-	KeyAttestation KeyAttestationProvider
-
-	// AttestationTrust authenticates the attestation JWTs those providers
-	// return, before any request carrying one leaves the wallet: which key
-	// signed it and, when trust anchors are configured, whether its x5c chain
-	// is trusted. Its RequireX5C is raised by the HAIP profile on its own, so a
-	// deployment only sets this to configure trust anchors, a key resolver for
-	// a provider that does not use x5c, or a revocation policy.
-	//
-	// A remote provider that returns an attestation without an x5c chain needs
-	// a ResolveKey here: an attestation this wallet cannot authenticate is
-	// refused rather than forwarded.
-	AttestationTrust AttestationTrustPolicy
-
-	// OID4VCISigner builds the private-key operations of an OpenID4VCI 1.0
-	// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt"
-	// key proof and the Client Attestation PoP. Configure it to keep the
-	// wallet's keys in a hardware module or a remote signing service.
-	//
-	// When nil the receiver plugin is used if it implements
-	// receiver/types.OID4VCIFinalSigner, as the bundled OpenID4VCI plugin does,
-	// and oid4vcisign.Default otherwise.
-	OID4VCISigner receiverTypes.OID4VCIFinalSigner
-
-	// Issuance holds the wallet-level OpenID4VCI settings. Not read yet.
+	// Issuance holds the wallet-level OpenID4VCI settings.
 	Issuance IssuanceConfig
 
-	// Attestation supplies and authenticates client and key attestations. Not
-	// read yet; it takes over ClientAttestation, KeyAttestation and
-	// AttestationTrust.
+	// Attestation supplies and authenticates client and key attestations.
 	Attestation AttestationConfig
 
 	// TestHooks rewrites protocol messages the library built, for testing how
-	// a peer handles them. Nil leaves every message as built. Not read yet.
+	// a peer handles them. Nil leaves every message as built.
 	TestHooks *TestHooks
 }
 
-// DPoPConfig holds configuration for DPoP proof generation.
+// DPoPConfig holds configuration for DPoP proof generation. Key is the
+// wallet's DPoP key; OpenID4VCI 1.0 issuances send a DPoP proof whenever it is
+// set, and HAIP requires it. Enabled generates a key when Key is nil and
+// forces DPoP on the Draft 13 and ReceiveCredential paths.
 type DPoPConfig struct {
 	Enabled bool
 	Key     IKeyEntry
@@ -224,7 +180,9 @@ type IssuanceConfig struct {
 }
 
 // AttestationConfig supplies the attestations an issuance presents and the
-// policy that authenticates them before they are sent.
+// policy that authenticates them before they are sent. An attestation the
+// wallet cannot authenticate is refused, not forwarded; a remote provider
+// without x5c needs Trust.ResolveKey.
 type AttestationConfig struct {
 	// Client supplies the OAuth 2.0 Client Attestation of this wallet
 	// instance (OpenID4VCI 1.0 Appendix E).
@@ -460,35 +418,12 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 
 		profile: normalizedProfile,
 
-		clientAttestation: config.ClientAttestation,
-		keyAttestation:    config.KeyAttestation,
-		attestationTrust:  config.AttestationTrust,
-		oid4vciSigner:     config.OID4VCISigner,
+		issuance:    config.Issuance,
+		attestation: config.Attestation,
+		testHooks:   config.TestHooks,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
-}
-
-// oid4vciFinalSigner resolves the OpenID4VCI Final signing primitives for one
-// issuance. Config.OID4VCISigner wins; otherwise the transport plugin itself is
-// used when it also implements the signer, which keeps the bundled plugin's
-// behaviour; otherwise the software default signs.
-func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCITransport) receiverTypes.OID4VCIFinalSigner {
-	if w.oid4vciSigner != nil {
-		return w.oid4vciSigner
-	}
-	if signer, ok := transport.(receiverTypes.OID4VCIFinalSigner); ok {
-		return signer
-	}
-	return oid4vcisign.Default{}
-}
-
-// oid4vciProfileValidator is the optional receiver capability the root uses to
-// apply HAIP constraints to the selected Credential Configuration before PAR.
-// The transport's DiscoverCredentialIssuer already applies them to the issuer
-// metadata.
-type oid4vciProfileValidator interface {
-	ValidateCredentialConfigurationForProfile(receiverTypes.CredentialConfiguration) error
 }
 
 // setProtocolProfile is implemented by the built-in protocol plugins so the root
