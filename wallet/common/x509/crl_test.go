@@ -211,7 +211,7 @@ func TestCRLRejectsInvalidTimeIssuerSignatureAndMalformedInput(t *testing.T) {
 			list.ThisUpdate = ca.now.Add(-2 * time.Hour)
 			list.NextUpdate = ca.now.Add(-time.Hour)
 		}), CRLErrorStale},
-		{"future", issueCRLTestDER(t, ca, func(list *x509.RevocationList) { list.ThisUpdate = ca.now.Add(time.Minute) }), CRLErrorStale},
+		{"future", issueCRLTestDER(t, ca, func(list *x509.RevocationList) { list.ThisUpdate = ca.now.Add(10 * time.Minute) }), CRLErrorStale},
 		{"no nextUpdate", rewriteCRLTestDER(t, ca, valid, func(tbs []asn1.RawValue) []asn1.RawValue { return append(tbs[:4], tbs[5:]...) }), CRLErrorStale},
 		{"wrong issuer", issueCRLTestDER(t, other, nil), CRLErrorIssuer},
 		{"bad signature", append(append([]byte(nil), valid[:len(valid)-1]...), valid[len(valid)-1]^1), CRLErrorSignature},
@@ -229,6 +229,52 @@ func TestCRLRejectsInvalidTimeIssuerSignatureAndMalformedInput(t *testing.T) {
 			_, err := checker.Check(context.Background(), []*x509.Certificate{leaf, ca.cert}, ca.now)
 			assertCRLTestKind(t, err, tt.kind)
 		})
+	}
+}
+
+// TestCRLThisUpdateToleratesClockSkew pins that a CRL issued moments ahead of
+// the wallet clock is current: the default skew is five minutes, and
+// ClockSkew replaces it.
+func TestCRLThisUpdateToleratesClockSkew(t *testing.T) {
+	ca := newCRLTestAuthority(t, nil)
+	der := issueCRLTestDER(t, ca, func(list *x509.RevocationList) { list.ThisUpdate = ca.now.Add(2 * time.Minute) })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(der) }))
+	defer server.Close()
+	leaf := issueCRLTestCertificate(t, ca, func(cert *x509.Certificate) { cert.CRLDistributionPoints = []string{server.URL} })
+
+	checker := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: server.Client()})
+	if _, err := checker.Check(context.Background(), []*x509.Certificate{leaf, ca.cert}, ca.now); err != nil {
+		t.Fatalf("CRL within the default skew rejected: %v", err)
+	}
+	strict := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: server.Client(), ClockSkew: time.Minute})
+	_, err := strict.Check(context.Background(), []*x509.Certificate{leaf, ca.cert}, ca.now)
+	assertCRLTestKind(t, err, CRLErrorStale)
+	if _, err := NewCRLChecker(CRLCheckerOptions{HTTPClient: server.Client(), ClockSkew: -time.Second}); err == nil {
+		t.Fatal("negative clock skew accepted")
+	}
+}
+
+// TestCRLIssuerWithoutKeyUsageMaySignCRLs pins RFC 5280 Section 6.3.3(f):
+// cRLSign is checked only when the issuer carries a key usage extension, as
+// keyCertSign is on the certification path.
+func TestCRLIssuerWithoutKeyUsageMaySignCRLs(t *testing.T) {
+	ca := newCRLTestAuthority(t, func(cert *x509.Certificate) { cert.KeyUsage = 0 })
+	if hasKeyUsage(ca.cert) {
+		t.Fatal("fixture issuer must carry no key usage extension")
+	}
+	// crypto/x509 refuses to sign a CRL for an issuer without cRLSign, so the
+	// CRL is produced from an in-memory copy that claims it; the DER issuer
+	// name and key are the same.
+	signer := *ca.cert
+	signer.KeyUsage = x509.KeyUsageCRLSign
+	der := issueCRLTestDER(t, crlTestAuthority{cert: &signer, key: ca.key, now: ca.now}, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(der) }))
+	defer server.Close()
+	leaf := issueCRLTestCertificate(t, ca, func(cert *x509.Certificate) { cert.CRLDistributionPoints = []string{server.URL} })
+	checker := newCRLTestChecker(t, CRLCheckerOptions{HTTPClient: server.Client()})
+	result, err := checker.Check(context.Background(), []*x509.Certificate{leaf, ca.cert}, ca.now)
+	if err != nil || result.CheckedCertificates != 1 {
+		t.Fatalf("CRL from an issuer without key usage rejected: %+v, %v", result, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -272,9 +273,14 @@ func validateSigningPath(path []*x509.Certificate, now time.Time) error {
 	return nil
 }
 
+// keyUsageOID is the key usage extension of RFC 5280 Section 4.2.1.3.
+var keyUsageOID = asn1.ObjectIdentifier{2, 5, 29, 15}
+
+// hasKeyUsage reports whether cert carries a key usage extension; RFC 5280
+// Section 6.1.4(n) and 6.3.3(f) check the bits only when it does.
 func hasKeyUsage(cert *x509.Certificate) bool {
 	for _, extension := range cert.Extensions {
-		if extension.Id.Equal([]int{2, 5, 29, 15}) {
+		if extension.Id.Equal(keyUsageOID) {
 			return true
 		}
 	}
