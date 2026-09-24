@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,6 +63,7 @@ func oid4vciFinalCredentialRequestBodyFactory(
 	encryptionParams map[string]any,
 ) receiverTypes.CredentialRequestBodyFactory {
 	issuerMetadata := flow.issuerMetadata
+	signingAlgValues := proofSigningAlgValues(flow.credentialConfiguration)
 	return func(cNonce string) ([]byte, string, error) {
 		keyAttestationJWT := ""
 		if flow.keyAttestation != nil {
@@ -97,23 +99,25 @@ func oid4vciFinalCredentialRequestBodyFactory(
 			if err := ValidateKeyAttestation(ctx, attestation, request, flow.keyAttestation.policy); err != nil {
 				return nil, "", err
 			}
+			if err := requireListedProofAlgorithm("key attestation", attestation.JWT, signingAlgValues); err != nil {
+				return nil, "", err
+			}
 			keyAttestationJWT = attestation.JWT
 		}
-		// §8.2.1.1: "the `alg` JWT header of the key proof ... MUST match one
-		// of the values listed in the `proof_signing_alg_values_supported`
-		// metadata parameter", which §12.2.4.1 publishes per Credential
-		// Configuration.
 		proofOptions := receiverTypes.ProofOptions{
 			Audience:         issuerMetadata.CredentialIssuer,
 			Nonce:            cNonce,
 			KeyAttestation:   keyAttestationJWT,
-			SigningAlgValues: proofSigningAlgValues(flow.credentialConfiguration),
+			SigningAlgValues: signingAlgValues,
 		}
 		proofs := make([]string, 0, len(flow.holderKeys))
 		for _, key := range flow.holderKeys {
 			proof, err := flow.signer.CreateCredentialRequestJWTProofWithOptions(key, proofOptions)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to create credential request proof: %w", err)
+			}
+			if err := requireListedProofAlgorithm("key proof", proof, signingAlgValues); err != nil {
+				return nil, "", err
 			}
 			proofs = append(proofs, proof)
 		}
@@ -137,11 +141,8 @@ func oid4vciFinalCredentialRequestBodyFactory(
 	}
 }
 
-// proofSigningAlgValues reads the "jwt" proof type's
-// proof_signing_alg_values_supported from a Credential Configuration.
-// OpenID4VCI 1.0 §12.2.4.1 makes it "REQUIRED. A non-empty array of algorithm
-// identifiers that the Issuer supports for this proof type. The Wallet uses one
-// of them to sign the proof"; a configuration that publishes none imposes no
+// proofSigningAlgValues reads the jwt proof type's
+// proof_signing_alg_values_supported (§12.2.4). An empty result imposes no
 // constraint.
 func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.SignatureAlgorithm {
 	if config.ProofTypesSupported == nil {
@@ -152,6 +153,42 @@ func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.
 		return nil
 	}
 	return jwtProof.ProofSigningAlgValuesSupported
+}
+
+// requireJWTProofType refuses a Credential Configuration whose
+// proof_types_supported omits jwt, the only key proof this wallet produces.
+// A configuration without proof_types_supported requires no proof (§12.2.4).
+func requireJWTProofType(configurationID string, config receiverTypes.CredentialConfiguration) error {
+	if config.ProofTypesSupported == nil {
+		return nil
+	}
+	if _, ok := (*config.ProofTypesSupported)["jwt"]; ok {
+		return nil
+	}
+	types := make([]string, 0, len(*config.ProofTypesSupported))
+	for name := range *config.ProofTypesSupported {
+		types = append(types, name)
+	}
+	slices.Sort(types)
+	return fmt.Errorf("credential configuration %q lists proof types %v: %w", configurationID, types, ErrProofTypeUnsupported)
+}
+
+// requireListedProofAlgorithm applies Appendix F.1: the alg header of the key
+// proof and of its key_attestation MUST be one of
+// proof_signing_alg_values_supported. It holds a signer that ignored the list
+// to the issuer's metadata before the request is sent.
+func requireListedProofAlgorithm(what string, token string, supported []jose.SignatureAlgorithm) error {
+	if len(supported) == 0 {
+		return nil
+	}
+	header, err := AttestationJOSEHeaderFromJWT(token)
+	if err != nil {
+		return fmt.Errorf("%s is malformed: %w", what, err)
+	}
+	if !slices.Contains(supported, jose.SignatureAlgorithm(header.Algorithm)) {
+		return fmt.Errorf("%s is signed with %q, not one of proof_signing_alg_values_supported %v: %w", what, header.Algorithm, supported, ErrProofAlgorithmNotSupported)
+	}
+	return nil
 }
 
 func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clientKey jose.JSONWebKey, endpoint common.URIField, accessToken string) receiverTypes.DPoPProofFactory {

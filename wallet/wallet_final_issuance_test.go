@@ -83,10 +83,13 @@ type finalIssuanceFixture struct {
 	// walletProfile selects the wallet and receiver plugin profile. HAIP also
 	// forces a TLS server, because HAIP §4 requires TLS for the issuer and
 	// authorization server endpoints.
-	walletProfile            profile.Profile
-	clientAuthKey            IKeyEntry
-	omitScope                bool
-	keyAttestationsRequired  bool
+	walletProfile           profile.Profile
+	clientAuthKey           IKeyEntry
+	omitScope               bool
+	keyAttestationsRequired bool
+	// proofTypesSupported, when set, is published as the configuration's
+	// proof_types_supported verbatim.
+	proofTypesSupported      map[string]any
 	batchSize                int
 	parExpiresIn             int
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
@@ -293,6 +296,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		credentialConfiguration := map[string]any{"format": "dc+sd-jwt"}
 		if !f.omitScope {
 			credentialConfiguration["scope"] = "pid-scope"
+		}
+		if f.proofTypesSupported != nil {
+			credentialConfiguration["proof_types_supported"] = f.proofTypesSupported
 		}
 		if f.keyAttestationsRequired {
 			credentialConfiguration["proof_types_supported"] = map[string]any{
@@ -2126,6 +2132,61 @@ func (s *fakeFinalSigner) CreateDpopProof(jose.JSONWebKey, string, string, strin
 func (s *fakeFinalSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
 	s.proofCalls++
 	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// fixedAlgorithmSigner signs every key proof with one algorithm, ignoring the
+// issuer's proof_signing_alg_values_supported.
+type fixedAlgorithmSigner struct {
+	oid4vcisign.Default
+	algorithm jose.SignatureAlgorithm
+}
+
+func (s fixedAlgorithmSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
+	opts.SigningAlgValues = []jose.SignatureAlgorithm{s.algorithm}
+	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// §12.2.4.1: a configuration that lists proof types but not jwt cannot be
+// served by this wallet, which says so before any request leaves it.
+func TestReceiveOID4VCIFinalCredential_RefusesConfigurationWithoutJWTProofType(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.proofTypesSupported = map[string]any{
+			"attestation": map[string]any{"proof_signing_alg_values_supported": []string{"ES256"}},
+		}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofTypeUnsupported)
+	require.Equal(t, 0, fixture.parCalls)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// Appendix F.1: the key proof's alg MUST be one of the configuration's
+// proof_signing_alg_values_supported, whichever signer produced it.
+func TestReceiveOID4VCIFinalCredential_RefusesProofWithUnlistedAlgorithm(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.proofTypesSupported = map[string]any{
+			"jwt": map[string]any{"proof_signing_alg_values_supported": []string{"ES384"}},
+		}
+		f.oid4vciSigner = fixedAlgorithmSigner{algorithm: jose.ES256}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofAlgorithmNotSupported)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// Appendix F.1: the key_attestation's alg is held to the same list.
+func TestReceiveOID4VCIFinalCredential_RefusesKeyAttestationWithUnlistedAlgorithm(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	attesterKey := jose.JSONWebKey{Key: privateKey, KeyID: "key-attester-p384", Algorithm: string(jose.ES384), Use: "sig"}
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}
+
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofAlgorithmNotSupported)
+	require.Equal(t, 0, fixture.credentialCalls)
 }
 
 // transportOnlyOID4VCIPlugin is a receiver plugin that implements the Final

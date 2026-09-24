@@ -441,6 +441,9 @@ func (w *Wallet) newOID4VCIFinalCredentialFlow(
 	if err != nil {
 		return nil, err
 	}
+	if err := requireJWTProofType(credentialConfigurationID, config); err != nil {
+		return nil, err
+	}
 
 	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
 	if w.profile.IsHAIP() && profileValidator == nil {

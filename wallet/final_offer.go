@@ -171,6 +171,9 @@ func (w *Wallet) newOID4VCIFinalFlow(
 	if err != nil {
 		return nil, err
 	}
+	if err := requireJWTProofType(credentialConfigurationID, config); err != nil {
+		return nil, err
+	}
 
 	// HAIP §4.1 constraints on the issuer metadata and the selected credential
 	// configuration are enforced before PAR so an unsupported issuer never sees

@@ -4,6 +4,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // Sentinel errors the OpenID4VCI Final and HAIP paths wrap with context. They
@@ -29,6 +30,11 @@ var (
 	// share no proof signing algorithm. It aliases the oid4vci plugin's
 	// sentinel for the same reason as ErrHTTPRedirectNotAllowed.
 	ErrProofAlgorithmNotSupported = receiverOid4vci.ErrProofAlgorithmNotSupported
+	// ErrProofTypeUnsupported reports that the Credential Configuration lists
+	// proof_types_supported without the jwt proof type, the only key proof
+	// this wallet produces (OpenID4VCI 1.0 §12.2.4, Appendix F). It aliases the
+	// receiver types sentinel of the same code.
+	ErrProofTypeUnsupported = receiverTypes.ErrInvalidProofType
 	// ErrIssuerIdentifierMismatch reports that issuer metadata named a
 	// credential_issuer other than the requested Credential Issuer Identifier
 	// (VCI 1.0 §12.2.4). It aliases the oid4vci plugin's sentinel of that name.
