@@ -2,8 +2,6 @@ package wallet
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,16 +9,10 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 )
-
-func newDCAPIVerifierKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	return recipient
-}
 
 func dcapiWalletRequestData(t *testing.T, responseMode string, recipient *ecdsa.PrivateKey, encValues []string) json.RawMessage {
 	t.Helper()
@@ -99,7 +91,7 @@ func TestWalletSubmitPresentationToDCAPIEncrypted(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, map[string]any{"nationality": "JP"}, map[string]string{"given_name": "Taro"})
-	recipient := newDCAPIVerifierKey(t)
+	recipient := testutil.NewP256Key(t)
 
 	response := invokeDCAPI(t, fixture, "dc_api.jwt", recipient, []string{"A128GCM"})
 	require.Equal(t, oid4vp.DCAPIProtocolUnsigned, response.Protocol)

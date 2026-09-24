@@ -2,7 +2,6 @@ package acceptance
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -19,6 +18,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -42,17 +42,10 @@ func sdJWT(holder *jose.JSONWebKey) Options {
 	return Options{Flavor: credential.SDJwtVC, HolderKey: holder}
 }
 
-func newTestECKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	return key
-}
-
 // newHolderKey returns a fresh public holder JWK.
 func newHolderKey(t *testing.T) jose.JSONWebKey {
 	t.Helper()
-	return jose.JSONWebKey{Key: &newTestECKey(t).PublicKey, KeyID: "holder", Algorithm: "ES256", Use: "sig"}
+	return jose.JSONWebKey{Key: &testutil.NewP256Key(t).PublicKey, KeyID: "holder", Algorithm: "ES256", Use: "sig"}
 }
 
 type testWire struct {
@@ -217,7 +210,7 @@ func (c testIssuerChain) anchors() []*x509.Certificate {
 
 func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	t.Helper()
-	caKey := newTestECKey(t)
+	caKey := testutil.NewP256Key(t)
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Acceptance Test CA"},
@@ -232,7 +225,7 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	caCert, err := x509.ParseCertificate(caDER)
 	require.NoError(t, err)
 
-	leafKey := newTestECKey(t)
+	leafKey := testutil.NewP256Key(t)
 	leafTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(2),
 		Subject:               pkix.Name{CommonName: "Acceptance Test Issuer"},

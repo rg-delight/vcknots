@@ -2,8 +2,6 @@ package oid4vp
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 )
 
@@ -44,8 +43,8 @@ func newFederationRequestFixture(t *testing.T) *federationRequestFixture {
 	f := &federationRequestFixture{
 		statements:  map[string]string{},
 		now:         time.Now().UTC().Truncate(time.Second),
-		verifierKey: newECKey(t),
-		anchorKey:   newECKey(t),
+		verifierKey: testutil.NewP256Key(t),
+		anchorKey:   testutil.NewP256Key(t),
 	}
 	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -97,15 +96,6 @@ func newFederationRequestFixture(t *testing.T) *federationRequestFixture {
 	f.statements[subordinateURL] = subordinate
 	f.chain = []string{configuration, subordinate, anchor}
 	return f
-}
-
-func newECKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
 }
 
 func publicJWKS(key *ecdsa.PrivateKey, kid string) jose.JSONWebKeySet {
@@ -246,7 +236,7 @@ func TestFederationRequestObjectWithCarriedTrustChain(t *testing.T) {
 	})
 	t.Run("anchor configured with other keys", func(t *testing.T) {
 		options := f.options()
-		options.Federation.TrustAnchors[0].JWKS = publicJWKS(newECKey(t), federationAnchorKid)
+		options.Federation.TrustAnchors[0].JWKS = publicJWKS(testutil.NewP256Key(t), federationAnchorKid)
 		requestObject := f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, map[jose.HeaderKey]any{"trust_chain": f.chain})
 		_, err := f.parse(t, requestObject, options, offlineClient(t))
 		requireErrorIs(t, err, federation.ErrTrustChainInvalid)
@@ -260,7 +250,7 @@ func TestFederationRequestObjectWithCarriedTrustChain(t *testing.T) {
 
 func TestFederationRequestObjectRefusals(t *testing.T) {
 	f := newFederationRequestFixture(t)
-	stranger := newECKey(t)
+	stranger := testutil.NewP256Key(t)
 	cases := []struct {
 		name    string
 		request func() string

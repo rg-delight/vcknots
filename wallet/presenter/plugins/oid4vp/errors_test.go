@@ -15,6 +15,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -248,7 +249,7 @@ func TestSubmitErrorResponseRefusesAnInvalidDescription(t *testing.T) {
 // direct_post.jwt request uses that Response Mode (OID4VP 1.0 §5.6), so it is
 // encrypted to the Verifier's key.
 func TestSubmitErrorResponseEncryptsUnderDirectPostJWT(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	captured := &url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

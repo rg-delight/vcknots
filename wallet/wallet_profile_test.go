@@ -17,6 +17,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
@@ -159,7 +160,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
 
 	resolvePolicy := func() *acceptance.Policy {
@@ -355,7 +356,7 @@ func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry
 func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()
-	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holderKey})
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: testutil.NewP256Key(t), cnf: &holderKey})
 	server := newDraftIssuanceServer(t, wire, "Bearer")
 
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client()}))
@@ -375,7 +376,7 @@ func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 func TestReceiveCredentialIsRefusedUnderHAIP(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()
-	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holderKey})
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: testutil.NewP256Key(t), cnf: &holderKey})
 	// HAIP §4.3 requires a DPoP-bound access token, which the receiver
 	// plugin checks before the credential request.
 	server := newDraftIssuanceServer(t, wire, "DPoP")

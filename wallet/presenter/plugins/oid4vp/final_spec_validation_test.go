@@ -14,6 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -289,7 +290,7 @@ func TestFinalDcqlMetaValidation(t *testing.T) {
 
 // Fix 7: OID4VP 1.0 §8.3.1 encrypted error response for direct_post.jwt.
 func TestFinalEncryptedErrorResponse(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	newServer := func(t *testing.T) (*httptest.Server, *url.Values) {
 		t.Helper()
 		captured := &url.Values{}
@@ -365,7 +366,7 @@ func TestFinalErrorCodesRegistered(t *testing.T) {
 
 // A direct_post.jwt response bounds the Verifier's response body.
 func TestDirectPostJWTResponseBoundedBody(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(bytes.Repeat([]byte("a"), int(httpfetch.DefaultBodyLimit)+512))
@@ -387,7 +388,7 @@ func TestDirectPostJWTResponseBoundedBody(t *testing.T) {
 
 // Fix 10: OID4VP 1.0 §8.3 requires alg on JWKs used for encryption.
 func TestPresentDCQLRejectsEncryptionKeyWithoutAlg(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	s := newEncryptionServer(t)
 	p := &Oid4vpPresenter{HTTPClient: s.server.Client()}
 	request := &types.PresentationRequest{ClientMetadata: &VerifierMetadata{

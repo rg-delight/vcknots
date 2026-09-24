@@ -3,8 +3,6 @@ package oid4vp
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -17,6 +15,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -180,13 +179,6 @@ func TestParseDCAPIRequestMultiSigned(t *testing.T) {
 	require.Equal(t, trusted.clientID(), request.RequestObjectVerification.ClientID)
 }
 
-func newDCAPIRecipient(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	return recipient
-}
-
 func dcapiUnsignedDataWithMetadata(t *testing.T, recipient *ecdsa.PrivateKey, encValues []string) []byte {
 	t.Helper()
 	metadata := map[string]any{
@@ -224,7 +216,7 @@ func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 		{name: "haip prefers A256GCM", profile: profile.HAIP, encValues: []string{"A128GCM", "A256GCM"}, enc: jose.A256GCM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			recipient := newDCAPIRecipient(t)
+			recipient := testutil.NewP256Key(t)
 			p := &Oid4vpPresenter{Profile: tc.profile}
 			invocation := types.DCAPIInvocation{
 				Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, tc.encValues)},
@@ -256,7 +248,7 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 	t.Run("unsigned", func(t *testing.T) {
 		p := &Oid4vpPresenter{Profile: profile.HAIP}
 		invocation := types.DCAPIInvocation{
-			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, newDCAPIRecipient(t), []string{"A128GCM", "A256GCM"})},
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, testutil.NewP256Key(t), []string{"A128GCM", "A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
 		_, err := parseDCAPIForTest(p, invocation)
@@ -544,7 +536,7 @@ func TestParseDCAPIRequestAdmission(t *testing.T) {
 	})
 
 	t.Run("HAIP requires both content encryptions on dc_api.jwt too", func(t *testing.T) {
-		recipient := newDCAPIRecipient(t)
+		recipient := testutil.NewP256Key(t)
 		invocation := types.DCAPIInvocation{
 			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
 			Origin:  "https://verifier.example",

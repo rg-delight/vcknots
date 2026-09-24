@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -30,6 +29,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
@@ -280,13 +280,6 @@ func tamperIssuerSignature(t *testing.T, wire string) string {
 	return strings.Join(jwtParts, ".") + "~" + parts[1]
 }
 
-func newTestECKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	return key
-}
-
 type testIssuerChain struct {
 	caCert   *x509.Certificate
 	caKey    *ecdsa.PrivateKey
@@ -307,7 +300,7 @@ func (c testIssuerChain) anchors() []*x509.Certificate {
 
 func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	t.Helper()
-	caKey := newTestECKey(t)
+	caKey := testutil.NewP256Key(t)
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Acceptance Test CA"},
@@ -322,7 +315,7 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	caCert, err := x509.ParseCertificate(caDER)
 	require.NoError(t, err)
 
-	leafKey := newTestECKey(t)
+	leafKey := testutil.NewP256Key(t)
 	leafTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(2),
 		Subject:               pkix.Name{CommonName: "Acceptance Test Issuer"},
@@ -353,7 +346,7 @@ func TestCredentialAcceptance_NilPolicy(t *testing.T) {
 		fixture := newAcceptanceFixture(t, nil)
 		holder := fixture.holder.PublicKey()
 		otherHolder := newMockKeyEntry().PublicKey()
-		wire := buildAcceptanceWire(t, acceptanceWire{cnf: &otherHolder, signingKey: newTestECKey(t)})
+		wire := buildAcceptanceWire(t, acceptanceWire{cnf: &otherHolder, signingKey: testutil.NewP256Key(t)})
 		_, err := fixture.storeCredential(t, wire, &holder)
 		require.ErrorContains(t, err, "credential is bound to a different holder key")
 		require.Equal(t, 0, fixture.entryCount(t))
@@ -362,7 +355,7 @@ func TestCredentialAcceptance_NilPolicy(t *testing.T) {
 	t.Run("matching cnf is stored with HolderBound", func(t *testing.T) {
 		fixture := newAcceptanceFixture(t, nil)
 		holder := fixture.holder.PublicKey()
-		wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
+		wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: testutil.NewP256Key(t)})
 		saved, err := fixture.storeCredential(t, wire, &holder)
 		require.NoError(t, err)
 		require.NotNil(t, saved.Verification)
@@ -378,7 +371,7 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 	// with the policy missing.
 	fixture := newAcceptanceFixture(t, &acceptance.Policy{UnverifiedIssuer: true})
 	holder := fixture.holder.PublicKey()
-	valid := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
+	valid := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: testutil.NewP256Key(t)})
 	response := &receiverTypes.CredentialResponse{Credentials: []any{valid, "this-is-not-a-credential"}}
 	metadata := &receiverTypes.CredentialIssuerMetadata{
 		CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
@@ -392,14 +385,14 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 
 func TestVerifyCredential_ValidAndWrongKey(t *testing.T) {
 	fixture := newAcceptanceFixture(t, nil)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	holder := jose.JSONWebKey{Key: &issuerKey.PublicKey, Algorithm: "ES256"}
 	wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey})
 	saved, err := fixture.storeCredential(t, wire, &holder)
 	require.NoError(t, err)
 	require.True(t, fixture.wallet.VerifyCredential(saved.Credential, holder))
 
-	wrongKey := newTestECKey(t)
+	wrongKey := testutil.NewP256Key(t)
 	require.False(t, fixture.wallet.VerifyCredential(saved.Credential, jose.JSONWebKey{Key: &wrongKey.PublicKey, Algorithm: "ES256"}))
 }
 
@@ -422,7 +415,7 @@ func TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy(t *testing.T) {
 
 func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
-	wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: newTestECKey(t)})
+	wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: testutil.NewP256Key(t)})
 
 	t.Run("a nil policy fails closed when the caller requires one", func(t *testing.T) {
 		fixture := newAcceptanceFixture(t, nil)
@@ -440,7 +433,7 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	})
 
 	t.Run("a configured policy satisfies the requirement", func(t *testing.T) {
-		issuerKey := newTestECKey(t)
+		issuerKey := testutil.NewP256Key(t)
 		signed := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey, kid: "issuer-key-1"})
 		fixture := newAcceptanceFixture(t, &acceptance.Policy{
 			ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
@@ -513,7 +506,7 @@ func TestCredentialAcceptanceStoresNothingOnFailure(t *testing.T) {
 // match both the wallet and the acceptance package sentinels.
 func TestVerifyCredentialForAcceptanceUsesTheWalletPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
 	w, store := newAcceptanceWallet(t, profile.Final, &acceptance.Policy{
 		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
@@ -528,7 +521,7 @@ func TestVerifyCredentialForAcceptanceUsesTheWalletPolicy(t *testing.T) {
 	require.True(t, verification.HolderBound)
 
 	other := newMockKeyEntry().PublicKey()
-	other.Key = &newTestECKey(t).PublicKey
+	other.Key = &testutil.NewP256Key(t).PublicKey
 	_, _, err = w.VerifyCredentialForAcceptance(t.Context(), wire, credential.SDJwtVC, &other)
 	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)
 	require.ErrorIs(t, err, acceptance.ErrHolderBindingMismatch)

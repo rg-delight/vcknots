@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 )
 
 func observePresenterClient(p *Oid4vpPresenter, recorder *observetest.Recorder) {
@@ -63,7 +64,7 @@ func TestObserveLabelsRequestObjectFetch(t *testing.T) {
 // labelled, and whether it carried a JWE, which its wire shape cannot show, is
 // reported on the SubmitResult.
 func TestObserveLabelsAuthorizationResponse(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
 	metadata, err := json.Marshal(map[string]any{

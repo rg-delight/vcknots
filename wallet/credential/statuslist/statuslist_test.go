@@ -3,7 +3,6 @@ package statuslist
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -23,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 )
 
 const (
@@ -35,15 +35,6 @@ const (
 var testNow = time.Unix(1_779_000_000, 0).UTC()
 
 // --- token construction ----------------------------------------------------
-
-func newKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return key
-}
 
 func publicJWK(key *ecdsa.PrivateKey, kid string) jose.JSONWebKey {
 	return jose.JSONWebKey{Key: &key.PublicKey, KeyID: kid, Algorithm: string(jose.ES256), Use: "sig"}
@@ -125,7 +116,7 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{key: newKey(t)}
+	h := &harness{key: testutil.NewP256Key(t)}
 	h.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.requests.Add(1)
 		h.lastReq.Store(r.Clone(context.Background()))
@@ -363,8 +354,8 @@ func TestCheckReferenceAcceptsMediaTypeParameters(t *testing.T) {
 }
 
 func TestCheckReferenceUsesTheKidOnlyAsAHint(t *testing.T) {
-	signer := newKey(t)
-	other := newKey(t)
+	signer := testutil.NewP256Key(t)
+	other := testutil.NewP256Key(t)
 	tests := []struct {
 		name      string
 		headerKid any // nil means no kid header
@@ -745,7 +736,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 		{
 			name: "signed by another key",
 			token: func(t *testing.T, h *harness) string {
-				return signES256(t, newKey(t), defaultHeader(), defaultClaims(h.uri))
+				return signES256(t, testutil.NewP256Key(t), defaultHeader(), defaultClaims(h.uri))
 			},
 			want: ErrStatusListSignatureInvalid,
 		},
@@ -938,7 +929,7 @@ func TestCheckRefusesAnUnparsableStatusClaimWithoutFetching(t *testing.T) {
 }
 
 func TestCheckReferenceAllowsCleartextOnlyWhenEnabled(t *testing.T) {
-	key := newKey(t)
+	key := testutil.NewP256Key(t)
 	server := httptest.NewServer(nil)
 	t.Cleanup(server.Close)
 	uri := server.URL + statusPath

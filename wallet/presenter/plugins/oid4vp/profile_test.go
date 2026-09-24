@@ -2,7 +2,6 @@ package oid4vp
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -208,15 +208,6 @@ func (s *encryptionServer) endpoint(t *testing.T) url.URL {
 	return *endpoint
 }
 
-func newP256Recipient(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return recipient
-}
-
 func decryptAuthorizationResponse(t *testing.T, token string, recipient *ecdsa.PrivateKey, alg jose.KeyAlgorithm, enc jose.ContentEncryption) map[string]any {
 	t.Helper()
 	jwe, err := jose.ParseEncrypted(token, []jose.KeyAlgorithm{alg}, []jose.ContentEncryption{enc})
@@ -235,7 +226,7 @@ func decryptAuthorizationResponse(t *testing.T, token string, recipient *ecdsa.P
 }
 
 func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	vpToken := map[string][]string{"pid": {"credential"}}
 
 	t.Run("direct_post.jwt encrypts with the advertised enc and kid", func(t *testing.T) {
@@ -351,7 +342,7 @@ func TestPresentDCQLFinalResponseEncryption(t *testing.T) {
 }
 
 func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	vpToken := map[string][]string{"pid": {"credential"}}
 
 	newHAIPPresenter := func(s *encryptionServer) *Oid4vpPresenter {
@@ -414,7 +405,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 // TestEncryptedAuthorizationResponseMatchesPresentDCQL proves both
 // encryption paths select the same key/alg/enc.
 func TestEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	metadata := &VerifierMetadata{
 		Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "shared", Use: "enc", Algorithm: "ECDH-ES"}}},
 		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
@@ -551,7 +542,7 @@ func TestRequestBuilderWithProfileRejectsUnknownProfile(t *testing.T) {
 // an authorization response, as observed on the wire.
 func responseEncryptionFor(t *testing.T, encValues []string, enc jose.ContentEncryption) {
 	t.Helper()
-	recipient := newP256Recipient(t)
+	recipient := testutil.NewP256Key(t)
 	s := newEncryptionServer(t)
 	p := &Oid4vpPresenter{HTTPClient: s.server.Client()}
 	request := &types.PresentationRequest{

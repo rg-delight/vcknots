@@ -14,6 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -33,13 +34,13 @@ func TestParseChecksOnlyWhatNeedsNoPolicy(t *testing.T) {
 
 	t.Run("a cnf bound to another holder key is refused", func(t *testing.T) {
 		other := newHolderKey(t)
-		wire := buildWire(t, testWire{cnf: &other, signingKey: newTestECKey(t)})
+		wire := buildWire(t, testWire{cnf: &other, signingKey: testutil.NewP256Key(t)})
 		_, _, err := acceptor.Parse([]byte(wire), sdJWT(&holder))
 		require.ErrorIs(t, err, ErrHolderBindingMismatch)
 	})
 
 	t.Run("a matching cnf is reported bound without an issuer", func(t *testing.T) {
-		wire := buildWire(t, testWire{cnf: &holder, signingKey: newTestECKey(t), tamperSignature: true})
+		wire := buildWire(t, testWire{cnf: &holder, signingKey: testutil.NewP256Key(t), tamperSignature: true})
 		parsed, verification, err := acceptor.Parse([]byte(wire), sdJWT(&holder))
 		require.NoError(t, err)
 		require.NotNil(t, parsed)
@@ -103,7 +104,7 @@ func TestVerifyX509Policy(t *testing.T) {
 
 func TestVerifyResolvedIssuerKeys(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	holder := newHolderKey(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
 
@@ -114,7 +115,7 @@ func TestVerifyResolvedIssuerKeys(t *testing.T) {
 	})
 
 	t.Run("only wrong keys are a signature failure", func(t *testing.T) {
-		wrong := newTestECKey(t)
+		wrong := testutil.NewP256Key(t)
 		_, _, err := acceptor.Verify(t.Context(), wire, resolving(jose.JSONWebKey{Key: &wrong.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}), sdJWT(&holder))
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 	})
@@ -162,7 +163,7 @@ func TestVerifyUnverifiedIssuer(t *testing.T) {
 	})
 
 	t.Run("an exp beyond any date is malformed", func(t *testing.T) {
-		far := buildWire(t, testWire{signingKey: newTestECKey(t), cnf: &holder, exp: time.Unix(9e15, 0)})
+		far := buildWire(t, testWire{signingKey: testutil.NewP256Key(t), cnf: &holder, exp: time.Unix(9e15, 0)})
 		_, _, err := acceptor.Verify(t.Context(), []byte(far), permissive, sdJWT(&holder))
 		require.ErrorIs(t, err, ErrCredentialParse)
 	})
@@ -186,7 +187,7 @@ func TestVerifyHAIPRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 
 func TestVerifyRejectsUnsupportedConfirmationMethod(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	holder := newHolderKey(t)
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
 
@@ -301,7 +302,7 @@ func TestAlgorithmListsAreCopies(t *testing.T) {
 func TestVerifyAlgorithmWithoutPlugin(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
 	holder := newHolderKey(t)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
 	policy.SigningAlgorithms = []jose.SignatureAlgorithm{jose.ES256, jose.HS256, "none"}
 
@@ -322,7 +323,7 @@ func TestVerifyAlgorithmWithoutPlugin(t *testing.T) {
 func TestVerifyTypedFailures(t *testing.T) {
 	holder := newHolderKey(t)
 	otherHolder := newHolderKey(t)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 
@@ -396,7 +397,7 @@ func TestVerifyTypedFailures(t *testing.T) {
 func TestVerifyPolicyIsPerCall(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
 	holder := newHolderKey(t)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
 	trusting := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
 
@@ -423,7 +424,7 @@ func TestVerifyPolicyIsPerCall(t *testing.T) {
 func TestVerifyRequireHolderBinding(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
 	holder := newHolderKey(t)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	bound := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
 	unbound := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1"}))
 	optional := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
@@ -447,7 +448,7 @@ func TestVerifyRequireHolderBinding(t *testing.T) {
 
 func TestVerifyExpectedSDJWTVCType(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", vct: "urn:test:acceptance"}))
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
 
@@ -464,7 +465,7 @@ func TestVerifyExpectedSDJWTVCType(t *testing.T) {
 
 func TestVerifyInfersTheFlavor(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	issuerKey := newTestECKey(t)
+	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, typ: "JWT"}))
 	// With the flavor inferred, the SD-JWT VC typ rule applies to a "~" wire.
 	_, _, err := acceptor.Verify(t.Context(), wire, Policy{UnverifiedIssuer: true}, Options{})

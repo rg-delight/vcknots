@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 )
 
 const (
@@ -28,8 +29,8 @@ func newAttestationFixture(t *testing.T) *attestationFixture {
 	t.Helper()
 	return &attestationFixture{
 		now:         time.Now().UTC().Truncate(time.Second),
-		attesterKey: newECKey(t),
-		verifierKey: newECKey(t),
+		attesterKey: testutil.NewP256Key(t),
+		verifierKey: testutil.NewP256Key(t),
 	}
 }
 
@@ -127,7 +128,7 @@ func TestVerifierAttestationRequestObjectIsAuthenticated(t *testing.T) {
 
 func TestVerifierAttestationRequestObjectRefusals(t *testing.T) {
 	f := newAttestationFixture(t)
-	stranger := newECKey(t)
+	stranger := testutil.NewP256Key(t)
 	withClaims := func(edit func(map[string]any)) string {
 		claims := f.attestationClaims(t)
 		edit(claims)

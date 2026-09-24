@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -49,8 +50,8 @@ func requireChainErrorCode(t *testing.T, err error, code string) {
 // unauthenticated until a key verifies it.
 func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	signer := newTestECKey(t)
-	stale := newTestECKey(t)
+	signer := testutil.NewP256Key(t)
+	stale := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: signer, kid: "issuer-key-1"}))
 
 	t.Run("a kid-matching key that does not verify does not refuse the credential", func(t *testing.T) {
@@ -109,7 +110,7 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 // a signature candidate even when it holds the signing key.
 func TestCredentialAcceptorIgnoresKeysNotForThisSignature(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final)
-	signer := newTestECKey(t)
+	signer := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: signer}))
 	resolving := func(keys ...jose.JSONWebKey) Policy {
 		return Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
@@ -170,7 +171,7 @@ func TestResolveIssuerKeyCandidatesOrdersByKid(t *testing.T) {
 func revokedIssuerChain(t *testing.T) (testIssuerChain, *http.Client) {
 	t.Helper()
 	now := time.Now()
-	caKey := newTestECKey(t)
+	caKey := testutil.NewP256Key(t)
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Revoking Test CA"},
@@ -198,7 +199,7 @@ func revokedIssuerChain(t *testing.T) (testIssuerChain, *http.Client) {
 	}))
 	t.Cleanup(server.Close)
 
-	leafKey := newTestECKey(t)
+	leafKey := testutil.NewP256Key(t)
 	leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
 		SerialNumber:          leafSerial,
 		Subject:               pkix.Name{CommonName: "Revoked Test Issuer"},
@@ -288,7 +289,7 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 	})
 
 	t.Run("a self-signed leaf is refused and never falls back to key resolution", func(t *testing.T) {
-		signerKey := newTestECKey(t)
+		signerKey := testutil.NewP256Key(t)
 		template := &x509.Certificate{
 			SerialNumber: big.NewInt(9), Subject: pkix.Name{CommonName: "Self-signed Issuer"},
 			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
@@ -333,7 +334,7 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 	})
 
 	t.Run("an unanchored chain whose resolved key does not verify is a signature failure", func(t *testing.T) {
-		stranger := newTestECKey(t)
+		stranger := testutil.NewP256Key(t)
 		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &stranger.PublicKey, KeyID: "issuer-key-1"}}}
 		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved), Options{})
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
