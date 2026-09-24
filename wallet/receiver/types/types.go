@@ -921,6 +921,20 @@ type OID4VCIFinalTransport interface {
 	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
 }
 
+// CredentialOfferFetcher is an optional receiver capability: it dereferences
+// an OpenID4VCI 1.0 Section 4.1.3 credential_offer_uri with the plugin's own
+// HTTP client and transport policy and returns the Credential Offer Object.
+type CredentialOfferFetcher interface {
+	FetchCredentialOffer(ctx context.Context, uri common.URIField) ([]byte, error)
+}
+
+// HTTPSchemePolicy is an optional receiver capability reporting whether the
+// plugin accepts plain http endpoints, so a caller validating an identifier
+// itself applies the same policy.
+type HTTPSchemePolicy interface {
+	HTTPAllowed() bool
+}
+
 // OID4VCIFinalSigner builds the private-key operations of an OpenID4VCI 1.0
 // Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt" key
 // proof and the attestation-based client authentication PoP of
