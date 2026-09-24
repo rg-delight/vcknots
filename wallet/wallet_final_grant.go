@@ -342,9 +342,10 @@ func (w *Wallet) RequestOID4VCIFinalCredential(ctx context.Context, req OID4VCIF
 		externalKeyAttestation: req.ExternalKeyAttestation,
 		keyAttestation:         req.KeyAttestation,
 		policy: oid4vciFinalCredentialPolicy{
-			encryption:              req.CredentialEncryption,
-			skipNotification:        req.SkipNotification,
-			requireSingleCredential: req.RequireSingleCredential,
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
 		},
 	})
 	if err != nil {
@@ -528,11 +529,13 @@ type OID4VCIFinalPreAuthorizedReceiveRequest struct {
 	// library's 60 second cap.
 	MaxDeferredInterval             time.Duration
 	CredentialResponseEncryptionKey *jose.JSONWebKey
-	// CredentialEncryption, SkipNotification and RequireSingleCredential
-	// behave as the identically named members of OID4VCIFinalReceiveRequest.
-	CredentialEncryption    CredentialEncryptionPolicy
-	SkipNotification        bool
-	RequireSingleCredential bool
+	// CredentialEncryption, SkipNotification, RequireSingleCredential and
+	// AllowDraftCredentialResponse behave as the identically named members of
+	// OID4VCIFinalReceiveRequest.
+	CredentialEncryption         CredentialEncryptionPolicy
+	SkipNotification             bool
+	RequireSingleCredential      bool
+	AllowDraftCredentialResponse bool
 }
 
 // ReceiveOID4VCIFinalPreAuthorizedCredential runs the whole OpenID4VCI 1.0
@@ -645,9 +648,10 @@ func (w *Wallet) authorizeOID4VCIFinalPreAuthorizedToken(ctx context.Context, re
 		externalKeyAttestation: req.ExternalKeyAttestation,
 		keyAttestation:         req.KeyAttestation,
 		policy: oid4vciFinalCredentialPolicy{
-			encryption:              req.CredentialEncryption,
-			skipNotification:        req.SkipNotification,
-			requireSingleCredential: req.RequireSingleCredential,
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
 		},
 	})
 	if err != nil {

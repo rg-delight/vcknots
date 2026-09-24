@@ -156,15 +156,20 @@ func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clien
 	}
 }
 
-func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey, strictShape bool) (*receiverTypes.CredentialResponse, error) {
+// decodeOID4VCIFinalCredentialResponse decodes a Credential or Deferred
+// Credential Response for flow: one credential per key proof, the pre-Final
+// shape only when the caller opted in.
+func decodeOID4VCIFinalCredentialResponse(flow *oid4vciFinalFlow, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
+	maxCredentials := len(flow.holderKeys)
+	if flow.policy.requireSingleCredential {
+		maxCredentials = 1
+	}
 	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
 		DecryptionKey: key,
-		// The high-level wallet path accepts the pre-Final shape and §14.6
-		// batch issuance; RequireSingleCredential narrows that to the one
-		// credential this issuance asked for, without refusing the §9 "still
-		// pending" body the deferred poll has to keep reading.
-		allowLegacyCredentialShape: true,
-		requireSingleCredential:    strictShape,
+		shape: credentialResponseShape{
+			maxCredentials: maxCredentials,
+			allowDraft:     flow.policy.allowDraftCredentialResponse,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential response: %w", err)
@@ -352,7 +357,7 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 	}
 	values = append(values, response.Credentials...)
 	if len(values) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: credential response carries no credentials", ErrCredentialResponseShape)
 	}
 	if len(holderKeys) > 0 && len(values) > len(holderKeys) {
 		return nil, fmt.Errorf("credential response returned %d credentials but only %d holder keys were supplied", len(values), len(holderKeys))

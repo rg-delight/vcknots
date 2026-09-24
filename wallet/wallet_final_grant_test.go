@@ -252,7 +252,7 @@ func TestRequestOID4VCIFinalCredentialReSignsAfterInvalidNonce(t *testing.T) {
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")

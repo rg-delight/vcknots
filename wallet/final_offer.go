@@ -259,9 +259,10 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		keyAttestation:              keyAttestation,
 		suppliedKeyAttestation:      req.KeyAttestation,
 		policy: oid4vciFinalCredentialPolicy{
-			encryption:              req.CredentialEncryption,
-			skipNotification:        req.SkipNotification,
-			requireSingleCredential: req.RequireSingleCredential,
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
 		},
 		usePrivateKeyJwt: usePrivateKeyJwt,
 		generateClientAssertion: func() (string, error) {

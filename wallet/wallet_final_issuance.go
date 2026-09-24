@@ -52,9 +52,10 @@ type oid4vciFinalFlow struct {
 // oid4vciFinalCredentialPolicy collects the Holder-owned switches of the §8
 // Credential Request that the OpenID4VCI 1.0 metadata cannot express.
 type oid4vciFinalCredentialPolicy struct {
-	encryption              CredentialEncryptionPolicy
-	skipNotification        bool
-	requireSingleCredential bool
+	encryption                   CredentialEncryptionPolicy
+	skipNotification             bool
+	requireSingleCredential      bool
+	allowDraftCredentialResponse bool
 }
 
 // ReceiveOID4VCIFinalCredential implements the OpenID4VCI 1.0 Final/HAIP
@@ -327,10 +328,7 @@ func (w *Wallet) requestOID4VCIFinalCredentials(
 		// errors.Is (invalid_proof, credential_request_denied, ...).
 		return nil, fmt.Errorf("failed to receive credential: %w", err)
 	}
-	if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
-		return nil, fmt.Errorf("credential response encryption was requested but the credential endpoint returned %q", rawResponse.ContentType)
-	}
-	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey, flow.policy.requireSingleCredential)
+	credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow, rawResponse, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -427,9 +425,10 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 		credentialConfiguration:   issuerMetadata.CredentialConfigurationSupported[req.CredentialConfigurationID],
 		holderKeys:                holderKeys,
 		policy: oid4vciFinalCredentialPolicy{
-			encryption:              req.CredentialEncryption,
-			skipNotification:        req.SkipNotification,
-			requireSingleCredential: req.RequireSingleCredential,
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
 		},
 	}
 	return w.pollOID4VCIFinalDeferredCredential(ctx, flow, req.AccessToken, req.ClientKey, encryptionKey, encryptionParams, req.TransactionID, "", attempts, interval, req.MaxInterval)

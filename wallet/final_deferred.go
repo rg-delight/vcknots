@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -47,11 +46,13 @@ type OID4VCIFinalDeferredRequest struct {
 	// MaxInterval caps the polling interval, including one the issuer names in
 	// its §9.2 issuance_pending response. Zero uses MaxDeferredInterval.
 	MaxInterval time.Duration
-	// CredentialEncryption, SkipNotification and RequireSingleCredential
-	// behave as the identically named members of OID4VCIFinalReceiveRequest.
-	CredentialEncryption    CredentialEncryptionPolicy
-	SkipNotification        bool
-	RequireSingleCredential bool
+	// CredentialEncryption, SkipNotification, RequireSingleCredential and
+	// AllowDraftCredentialResponse behave as the identically named members of
+	// OID4VCIFinalReceiveRequest.
+	CredentialEncryption         CredentialEncryptionPolicy
+	SkipNotification             bool
+	RequireSingleCredential      bool
+	AllowDraftCredentialResponse bool
 }
 
 func (w *Wallet) handleOID4VCIFinalDeferredResponse(
@@ -169,14 +170,15 @@ func (w *Wallet) pollOID4VCIFinalDeferredCredential(
 			}
 			return nil, fmt.Errorf("failed to receive deferred credential: %w", err)
 		}
-		if encryptionParams != nil && !strings.Contains(strings.ToLower(rawResponse.ContentType), "application/jwt") {
-			return nil, fmt.Errorf("credential response encryption was requested but the deferred credential endpoint returned %q", rawResponse.ContentType)
-		}
-		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow.receiver, rawResponse, encryptionKey, flow.policy.requireSingleCredential)
+		credentialResponse, err := decodeOID4VCIFinalCredentialResponse(flow, rawResponse, encryptionKey)
 		if err != nil {
 			return nil, err
 		}
 		if credentialHasNoCredentials(credentialResponse) {
+			// §9.2: a response that defers again repeats the transaction_id.
+			if credentialResponse.TransactionID != transactionID {
+				return nil, fmt.Errorf("%w: deferred credential response named transaction_id %q, not %q", ErrCredentialResponseShape, credentialResponse.TransactionID, transactionID)
+			}
 			if credentialResponse.Interval > 0 {
 				interval = clampDeferredInterval(time.Duration(credentialResponse.Interval)*time.Second, maxInterval)
 			}

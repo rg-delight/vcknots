@@ -402,7 +402,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			f.credentialHandler(w, r)
 			return
 		}
-		payload := map[string]any{"credential": f.issuedCredential}
+		payload := map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}}
 		if f.includeNotification {
 			payload["notification_id"] = "notification-1"
 		}
@@ -414,7 +414,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			f.deferredHandler(w, r)
 			return
 		}
-		payload := map[string]any{"credential": f.issuedCredential}
+		payload := map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}}
 		if f.includeNotification {
 			payload["notification_id"] = "notification-1"
 		}
@@ -919,7 +919,7 @@ func TestReceiveOID4VCIFinalCredential_InvalidNonceRetriedOnce(t *testing.T) {
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
@@ -959,7 +959,7 @@ func TestReceiveOID4VCIFinalCredential_BatchWithTwoKeys(t *testing.T) {
 		secondCredential = f.issueCredential(f.additionalKey, map[string]string{"given_name": "Hanako"})
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
-				"credentials": []string{f.issuedCredential, secondCredential},
+				"credentials": []any{map[string]any{"credential": f.issuedCredential}, map[string]any{"credential": secondCredential}},
 			})
 		}
 	})
@@ -1088,7 +1088,7 @@ func TestReceiveOID4VCIFinalCredential_DeferredPollIntervalThenSuccess(t *testin
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]any{"error": "issuance_pending", "interval": 1})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	req := fixture.request()
@@ -1144,7 +1144,7 @@ func TestReceiveOID4VCIFinalCredential_NotificationFailureOnInvalidCredential(t 
 		f.includeNotification = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
-				"credential":      badCredential,
+				"credentials":     []any{map[string]any{"credential": badCredential}},
 				"notification_id": "notification-1",
 			})
 		}

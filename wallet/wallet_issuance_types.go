@@ -147,7 +147,11 @@ type OID4VCIFinalReceiveRequest struct {
 	// second one is never silently stored. It is incompatible with §14.6 batch
 	// issuance through AdditionalHolderKeys.
 	RequireSingleCredential bool
-	HTTPClient              *http.Client
+	// AllowDraftCredentialResponse accepts the pre-Final Credential Response
+	// shape: the singular credential member and credentials elements that are
+	// bare strings. By default only the OpenID4VCI 1.0 §8.2 shape is accepted.
+	AllowDraftCredentialResponse bool
+	HTTPClient                   *http.Client
 	// AllowSelfDrivenAuthorization lets ReceiveOID4VCIFinalCredential drive the
 	// §5.2 authorization endpoint itself, by issuing a bare GET and reading the
 	// Location header. Only an issuer that needs no user interaction answers

@@ -118,7 +118,7 @@ func TestObserveLabelsDeferredCredentialPoll(t *testing.T) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"transaction_id": "tx-1"})
 		}
 		f.deferredHandler = func(w http.ResponseWriter, r *http.Request) {
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	req := fixture.request()
