@@ -517,10 +517,13 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 	} else {
 		request.Format = config.Format
 		request.VCT = config.VCT
-		// Appendix A.1.1.5, A.1.2.5: the request names the credential type
-		// only.
-		if config.CredentialDefinition != nil && len(config.CredentialDefinition.Type) > 0 {
-			request.CredentialDefinition = &receiverTypes.CredentialDefinition{Type: append([]string(nil), config.CredentialDefinition.Type...)}
+		// Appendix A.1.1.5: a jwt_vc_json request names the credential type;
+		// A.1.2.5: an ldp_vc request also names its @context.
+		if definition := config.CredentialDefinition; definition != nil && len(definition.Type) > 0 {
+			request.CredentialDefinition = &receiverTypes.CredentialDefinition{Type: append([]string(nil), definition.Type...)}
+			if config.Format == "ldp_vc" {
+				request.CredentialDefinition.Context = append([]any(nil), definition.Context...)
+			}
 		}
 	}
 	if !shouldAttachCredentialRequestProof(ReceiveCredentialRequest{}, &config) {

@@ -91,7 +91,9 @@ type finalIssuanceFixture struct {
 	omitScope               bool
 	keyAttestationsRequired bool
 	// proofTypesSupported, when set, is published verbatim.
-	proofTypesSupported      map[string]any
+	proofTypesSupported map[string]any
+	// credentialFormat, when set, replaces the configuration's dc+sd-jwt.
+	credentialFormat         string
 	bindingMethods           []string
 	batchSize                int
 	parExpiresIn             int
@@ -337,6 +339,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 	case "/.well-known/openid-credential-issuer":
 		f.issuerMetadataCalls++
 		credentialConfiguration := map[string]any{"format": "dc+sd-jwt"}
+		if f.credentialFormat != "" {
+			credentialConfiguration["format"] = f.credentialFormat
+		}
 		if !f.omitScope {
 			credentialConfiguration["scope"] = "pid-scope"
 		}

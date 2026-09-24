@@ -474,9 +474,16 @@ func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFla
 	return nil, fmt.Errorf("credential is bound to a holder key that was not part of the request: %w", acceptance.ErrHolderBindingMismatch)
 }
 
-// credentialConfirmationKey reads cnf.jwk from the issuer-signed JWT without
-// verifying it; nil when there is none.
+// credentialConfirmationKey reads cnf.jwk from the issuer-signed JWT, or the
+// subject DID key of a W3C VC, without verifying it; nil when there is none.
 func credentialConfirmationKey(raw []byte, flavor credential.SupportedSerializationFlavor) (*jose.JSONWebKey, error) {
+	if flavor == credential.LdpVc {
+		var document map[string]any
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return nil, fmt.Errorf("data integrity credential: %w: %w", acceptance.ErrCredentialParse, err)
+		}
+		return subjectDIDKey(map[string]any{"vc": document})
+	}
 	token := string(raw)
 	if flavor == credential.SDJwtVC {
 		token, _, _ = strings.Cut(token, "~")
@@ -560,6 +567,8 @@ func mimeTypeForCredentialConfiguration(md *receiverTypes.CredentialIssuerMetada
 				return string(credential.SDJwtVC)
 			case "jwt_vc_json", "jwt_vc", "vc+jwt":
 				return string(credential.JwtVc)
+			case "ldp_vc":
+				return string(credential.LdpVc)
 			}
 		}
 	}

@@ -944,6 +944,7 @@ wallet は Credential を返す、または保存する前に、`Config.Credenti
 * **Issuer の鍵:** `IssuerX509` は `x5c` チェーンを検証します（アンカー、CRL による失効確認、任意の EKU と `RequireIssuerDNSBinding`）。`ResolveIssuerKeys` と `ResolveIssuerKeysFromClaims` は、使える `x5c` がない Credential の候補鍵を提供します。`IssuerX509` が設定されていれば `x5c` を持つ Credential には使いませんが、どのアンカーにも届かないチェーンに `ResolveIssuerKeysWhenX5CUntrusted` が適用される場合は例外です。
 * **holder binding:** `cnf.jwk` は Credential を要求した holder 鍵と一致しなければなりません。`RequireHolderBinding` は `cnf` のない Credential も拒否します。
 * **有効性:** 署名、`exp` / `nbf`（`ClockSkew` を考慮）、SD-JWT の disclosure の整合性と `_sd_alg`、設定されていれば `ExpectedSDJWTVCType`。
+* **`ldp_vc`:** `eddsa-rdfc-2022` の Data Integrity proof を、`ResolveIssuerKeys`（proof の `verificationMethod` を `kid`、`EdDSA` を `alg` として呼ばれます）が返す鍵と、`Policy.DataIntegrityContexts` に固定した JSON-LD context で検証します。`verificationMethod` は credential の `issuer` に属する必要があり、有効期間は `validFrom` / `validUntil` です。発行では holder との束縛を `did:key` または `did:jwk` の `credentialSubject.id` で判定します。`IssuerX509` は適用されず、`UnverifiedIssuer` は適用されます。
 
 `acceptance.Verification`（`SavedCredential.Verification` も同じ）は、Issuer の鍵、証明書のフィンガープリント、失効確認の件数、holder binding の結果を記録します。
 失敗はパッケージ `acceptance` のセンチネル（`ErrIssuerKeyUnresolved`、`ErrIssuerSignatureInvalid`、`ErrHolderBindingMismatch` など）をラップします。

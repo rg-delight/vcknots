@@ -1,6 +1,7 @@
 // Package acceptance decides whether a received credential may be stored: it
 // authenticates the issuer key (X.509 x5c chain or a caller-supplied resolver),
-// verifies the issuer signature, checks the cnf holder binding, exp/nbf and
+// verifies the issuer signature (for an ldp_vc, its eddsa-rdfc-2022 Data
+// Integrity proof), checks the cnf holder binding, the validity period and
 // SD-JWT disclosure integrity. It needs no wallet or credential store.
 package acceptance
 
@@ -21,6 +22,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -41,7 +43,9 @@ type Policy struct {
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysFromClaims replaces ResolveIssuerKeys when set, for a
 	// resolver that also reads the (unauthenticated) payload, such as the JWT
-	// VC vc.issuer member.
+	// VC vc.issuer member. For an ldp_vc, header holds the proof's
+	// verificationMethod as kid and "EdDSA" as alg, and claims is the
+	// credential document.
 	ResolveIssuerKeysFromClaims func(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysWhenX5CUntrusted lets the resolver establish the key
 	// when the x5c chain reaches none of IssuerX509's anchors
@@ -57,8 +61,12 @@ type Policy struct {
 	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS algs an issuer may use. Empty means
 	// DefaultSigningAlgorithms(). A verifier plugin must also implement the
-	// algorithm.
+	// algorithm. An ldp_vc is verified with eddsa-rdfc-2022 only.
 	SigningAlgorithms []jose.SignatureAlgorithm
+	// DataIntegrityContexts pins the JSON-LD contexts an ldp_vc may name;
+	// verifying its Data Integrity proof needs them, and none is fetched (see
+	// package credential/dataintegrity).
+	DataIntegrityContexts dataintegrity.PinnedContexts
 	// ExpectedSDJWTVCType, when set, is the vct the credential must carry.
 	ExpectedSDJWTVCType string
 	// Now is the verification clock; nil means time.Now.
@@ -159,6 +167,9 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 	flavor := opts.Flavor
 	if flavor == "" {
 		flavor = inferredFlavor(raw)
+	}
+	if flavor == credential.LdpVc {
+		return a.runDataIntegrity(raw, opts, policy)
 	}
 	header, err := IssuerSignedJOSEHeader(flavor, raw)
 	if err != nil {

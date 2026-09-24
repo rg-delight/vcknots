@@ -432,8 +432,10 @@ type KeyAttestationsRequired struct {
 }
 
 // CredentialDefinition is the credential_definition member that describes a
-// W3C Verifiable Credential by its type and credentialSubject.
+// W3C Verifiable Credential by its type and credentialSubject. Context is the
+// @context of an ldp_vc (OpenID4VCI Appendix A.1.2).
 type CredentialDefinition struct {
+	Context           []any                                  `json:"@context,omitempty"`
 	Type              []string                               `json:"type"`
 	CredentialSubject *CredentialDefinitionCredentialSubject `json:"credentialSubject,omitempty"`
 }

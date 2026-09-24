@@ -105,6 +105,8 @@ func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.Sup
 		return credential.JwtVc, nil
 	case "dc+sd-jwt", "vc+sd-jwt", string(credential.SDJwtVC):
 		return credential.SDJwtVC, nil
+	case "ldp_vc", string(credential.LdpVc):
+		return credential.LdpVc, nil
 	default:
 		return "", fmt.Errorf("unsupported credential format: %q", format)
 	}

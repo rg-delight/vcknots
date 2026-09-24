@@ -12,6 +12,7 @@ func TestOID4VCICredentialFormatToSerializationFlavor(t *testing.T) {
 		"dc+sd-jwt":   credential.SDJwtVC,
 		// Draft 13 Appendix A.3 names SD-JWT VC "vc+sd-jwt".
 		"vc+sd-jwt": credential.SDJwtVC,
+		"ldp_vc":    credential.LdpVc,
 	} {
 		got, err := OID4VCICredentialFormatToSerializationFlavor(format)
 		if err != nil || got != want {
