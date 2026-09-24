@@ -631,7 +631,7 @@ func TestReceiveOID4VCIFinalCredential_AuthorizationServerMetadataIssuerMismatch
 		f.asIssuerOverride = "https://other.example"
 	})
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
-	require.ErrorContains(t, err, "does not match the selected authorization server")
+	require.ErrorIs(t, err, oid4vci.ErrAuthorizationServerIssuerMismatch)
 	require.Equal(t, 0, fixture.parCalls)
 }
 

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -584,13 +583,11 @@ func WithClientID(clientID string) TokenRequestOption {
 	}
 }
 
-// ResolveTokenEndpointURL returns the canonical token endpoint URL string.
-// Metadata token_endpoint values are complete endpoint URLs, so this only
-// normalizes trailing slashes and does not append "/token".
+// ResolveTokenEndpointURL returns the token endpoint exactly as the
+// authorization server metadata published it (RFC 8414 Section 2), so the
+// request and the DPoP htu claim name the same URL.
 func ResolveTokenEndpointURL(endpoint common.URIField) string {
-	endpointURL := url.URL(endpoint)
-	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/")
-	return endpointURL.String()
+	return endpoint.String()
 }
 
 // PreAuthorizedCodeTokenRequest is the OpenID4VCI 1.0 §6.1 Token Request of the
@@ -818,9 +815,8 @@ type ProofOptions struct {
 // Request and the Token Endpoint), Section 6.3 (the Client Attestation
 // challenge), Section 7 (the Nonce Endpoint), Section 8 (the Credential
 // Endpoint), Section 11 (the Notification Endpoint) and the Credential Request
-// and Credential Response codec of Section 8.1 and Section 8.2. It
-// intentionally extends, rather than replaces, the legacy Receiver interface
-// used by the existing Draft 13 flow.
+// and Credential Response codec of Section 8.1 and Section 8.2. It extends
+// Receiver.
 //
 // It carries no signing primitive. Key proofs, DPoP proofs and Client
 // Attestation PoPs are built by an OID4VCIFinalSigner, so a transport plugin
@@ -924,6 +920,20 @@ type OID4VCIFinalTransport interface {
 	DecodeCredentialResponse(body []byte, contentType string, decryptionKey any) (*CredentialResponse, error)
 }
 
+// CredentialOfferFetcher is an optional receiver capability: it dereferences
+// an OpenID4VCI 1.0 Section 4.1.3 credential_offer_uri with the plugin's own
+// HTTP client and transport policy and returns the Credential Offer Object.
+type CredentialOfferFetcher interface {
+	FetchCredentialOffer(ctx context.Context, uri common.URIField) ([]byte, error)
+}
+
+// HTTPSchemePolicy is an optional receiver capability reporting whether the
+// plugin accepts plain http endpoints, so a caller validating an identifier
+// itself applies the same policy.
+type HTTPSchemePolicy interface {
+	HTTPAllowed() bool
+}
+
 // OID4VCIFinalSigner builds the private-key operations of an OpenID4VCI 1.0
 // Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt" key
 // proof and the attestation-based client authentication PoP of
@@ -953,15 +963,4 @@ type OID4VCIFinalSigner interface {
 	// draft-ietf-oauth-attestation-based-client-auth Section 4, bound to the
 	// authorization server and, when the server issued one, to its challenge.
 	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
-}
-
-// OID4VCIFinalReceiver is a plugin that is both an OID4VCIFinalTransport and an
-// OID4VCIFinalSigner.
-//
-// Deprecated: implement OID4VCIFinalTransport instead and supply the signing
-// primitives through Wallet Config.OID4VCISigner. This compound interface is
-// kept so existing plugins and callers keep compiling.
-type OID4VCIFinalReceiver interface {
-	OID4VCIFinalTransport
-	OID4VCIFinalSigner
 }

@@ -61,9 +61,17 @@ func TestIssuerMetadataDoesNotRetryInvalidOrForbiddenResponses(t *testing.T) {
 }
 
 func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("https_%t", secure), func(t *testing.T) {
+			testAppendedMetadataPathFallback(t, secure)
+		})
+	}
+}
+
+func testAppendedMetadataPathFallback(t *testing.T, secure bool) {
 	var paths []string
 	var acceptedIdentifier string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		if r.URL.Path == "/.well-known/openid-credential-issuer/tenant" {
 			w.WriteHeader(http.StatusNotFound)
@@ -72,15 +80,21 @@ func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T
 		}
 		// §12.2.4 binds credential_issuer to the requested identifier, which
 		// for this tenant is the base URL plus the /tenant path.
-		acceptedIdentifier = "http://" + r.Host + "/tenant"
+		acceptedIdentifier = serverURLFor(r) + "/tenant"
 		fmt.Fprint(w, `{"credential_issuer":"`+acceptedIdentifier+`"}`)
-	}))
+	})
+	server := httptest.NewUnstartedServer(handler)
+	if secure {
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
 	defer server.Close()
 	endpoint, err := common.ParseURIField(server.URL + "/tenant")
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: !secure, AppendedMetadataPathFallback: true}
 	metadata, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci)
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +104,51 @@ func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T
 	}
 	if metadata.CredentialIssuer != acceptedIdentifier || metadata.CredentialRequestEncryption != nil {
 		t.Fatalf("metadata from discarded response leaked: %+v", metadata)
+	}
+}
+
+func serverURLFor(r *http.Request) string {
+	if r.TLS != nil {
+		return "https://" + r.Host
+	}
+	return "http://" + r.Host
+}
+
+// The Draft 13 location is tried only on request: AllowHTTP alone does not
+// enable it, and HAIP, which is Final-only, never uses it.
+func TestIssuerMetadataAppendedPathFallbackIsOptIn(t *testing.T) {
+	cases := map[string]struct {
+		secure, allowHTTP, fallback bool
+		profile                     profile.Profile
+	}{
+		"AllowHTTP only": {allowHTTP: true},
+		"HAIP":           {secure: true, fallback: true, profile: profile.HAIP},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			if tc.secure {
+				server.StartTLS()
+			} else {
+				server.Start()
+			}
+			defer server.Close()
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: tc.allowHTTP, Profile: tc.profile, AppendedMetadataPathFallback: tc.fallback}
+			endpoint, err := common.ParseURIField(server.URL + "/tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci); err == nil {
+				t.Fatal("expected the 404 to be reported")
+			}
+			if len(paths) != 1 {
+				t.Fatalf("paths = %v, want only the Section 12.2.2 location", paths)
+			}
+		})
 	}
 }
 
@@ -753,6 +812,49 @@ func TestFetchIssuerMetadataKeepsTheAcceptedDocument(t *testing.T) {
 			}
 			if document["credential_issuer"] != serverURL {
 				t.Fatalf("RawDocument = %v, want the accepted document", document)
+			}
+		})
+	}
+}
+
+// RFC 8414 Section 3.3: "The "issuer" value returned MUST be identical to the
+// authorization server's issuer identifier value into which the well-known URI
+// string was inserted to create the URL used to retrieve the metadata. If
+// these values are not identical, the data contained in the response MUST NOT
+// be used." Every caller, Draft 13 included, gets the check from the plugin.
+func TestAuthorizationServerMetadataIssuerMustMatch(t *testing.T) {
+	var published string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":"https://as.example/token"}`, published)
+	}))
+	defer server.Close()
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+
+	for name, tc := range map[string]struct {
+		endpoint, issuer string
+		ok               bool
+	}{
+		"identical":                       {endpoint: server.URL + "/as", issuer: server.URL + "/as", ok: true},
+		"another issuer":                  {endpoint: server.URL + "/as", issuer: "https://attacker.example/as"},
+		"trailing slash differs":          {endpoint: server.URL + "/as", issuer: server.URL + "/as/"},
+		"well-known endpoint, identical":  {endpoint: server.URL + "/.well-known/oauth-authorization-server/as", issuer: server.URL + "/as", ok: true},
+		"well-known endpoint, other path": {endpoint: server.URL + "/.well-known/oauth-authorization-server/as", issuer: server.URL + "/other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			published = tc.issuer
+			endpoint, err := common.ParseURIField(tc.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := receiver.FetchAuthorizationServerMetadata(*endpoint, types.Oid4vci)
+			if tc.ok {
+				if err != nil || metadata.Issuer.String() != tc.issuer {
+					t.Fatalf("metadata = %+v, err = %v", metadata, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrAuthorizationServerIssuerMismatch) || metadata != nil {
+				t.Fatalf("metadata = %+v, err = %v; want ErrAuthorizationServerIssuerMismatch", metadata, err)
 			}
 		})
 	}

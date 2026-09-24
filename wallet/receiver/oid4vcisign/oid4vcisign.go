@@ -3,11 +3,8 @@
 // proof, the Section 8.2.1.1 "jwt" key proof and the client attestation JWTs of
 // draft-ietf-oauth-attestation-based-client-auth.
 //
-// It exists so those primitives are no longer welded to the bundled transport
-// plugin. A wallet keeps the default by doing nothing, replaces it with a
-// hardware or remote signer through the Wallet configuration, and a transport
-// plugin written outside this repository embeds Default to inherit the
-// software behaviour.
+// A wallet uses Default unless its configuration supplies another
+// types.OID4VCIFinalSigner, for example a hardware or remote signer.
 package oid4vcisign
 
 import (
@@ -52,7 +49,8 @@ var _ types.OID4VCIFinalSigner = Default{}
 // CreateDpopProof builds the RFC 9449 Section 4.2 DPoP proof for a single HTTP
 // request, with the public JWK in the protected header, the htm/htu/iat/jti
 // claims, the server-supplied nonce when one is known and the ath hash of the
-// access token when the request carries one.
+// access token when the request carries one. htm is upper-cased and htu loses
+// its query and fragment. key.Key is a private key or a jose.OpaqueSigner.
 func (Default) CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error) {
 	htu, err := dpopHTU(rawURL)
 	if err != nil {
@@ -78,29 +76,6 @@ func (Default) CreateDpopProof(key jose.JSONWebKey, method string, rawURL string
 		return "", fmt.Errorf("failed to create DPoP proof: %w", err)
 	}
 	return token, nil
-}
-
-// CreateCredentialRequestJWTProof builds the Section 8.2.1.1 "jwt" key proof
-// with no issuer algorithm constraint and no key attestation.
-//
-// Deprecated: use CreateCredentialRequestJWTProofWithOptions, which honours the
-// Credential Configuration's proof_signing_alg_values_supported.
-func (d Default) CreateCredentialRequestJWTProof(key jose.JSONWebKey, audience string, nonce string) (string, error) {
-	return d.CreateCredentialRequestJWTProofWithKeyAttestation(key, audience, nonce, "")
-}
-
-// CreateCredentialRequestJWTProofWithKeyAttestation builds the same proof as
-// CreateCredentialRequestJWTProof and, when keyAttestation is non-empty, adds
-// the OpenID4VCI 1.0 Appendix D key_attestation header parameter.
-//
-// Deprecated: use CreateCredentialRequestJWTProofWithOptions, which takes the
-// key attestation in ProofOptions alongside the issuer algorithm constraint.
-func (d Default) CreateCredentialRequestJWTProofWithKeyAttestation(key jose.JSONWebKey, audience string, nonce string, keyAttestation string) (string, error) {
-	return d.CreateCredentialRequestJWTProofWithOptions(key, types.ProofOptions{
-		Audience:       audience,
-		Nonce:          nonce,
-		KeyAttestation: keyAttestation,
-	})
 }
 
 // CreateCredentialRequestJWTProofWithOptions builds the Section 8.2.1.1 "jwt"
@@ -133,7 +108,7 @@ func (Default) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, o
 // CreateClientAttestation self-issues the Client Attestation JWT of
 // draft-ietf-oauth-attestation-based-client-auth Section 3, signing it with a
 // locally held attester key. It is CreateClientAttestationWithOptions with no
-// options, which produces the same JWT this method always has.
+// options.
 //
 // A wallet does not hold the attester's private key: the attestation is issued
 // by the attester and reaches the wallet through a ClientAttestationProvider,
@@ -145,9 +120,8 @@ func (d Default) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey 
 }
 
 // ClientAttestationOptions carries the optional inputs of
-// Default.CreateClientAttestationWithOptions that the fixed
-// CreateClientAttestation argument list cannot express. The zero value
-// reproduces the established CreateClientAttestation behaviour.
+// Default.CreateClientAttestationWithOptions. The zero value produces the
+// attestation CreateClientAttestation does.
 type ClientAttestationOptions struct {
 	// Audience, when non-empty, is written as the aud claim and binds the
 	// attestation to a single authorization server. HAIP Section 4.4.1:
@@ -158,8 +132,7 @@ type ClientAttestationOptions struct {
 	Audience string
 }
 
-// CreateClientAttestationWithOptions is CreateClientAttestation taking the
-// optional inputs that the legacy argument list could not carry. It emits the
+// CreateClientAttestationWithOptions emits the
 // draft-ietf-oauth-attestation-based-client-auth Section 3 attester-issued
 // attestation, adding the aud claim when opts.Audience is set. HAIP Section
 // 4.4.1 requires that "Wallet Attestations MUST NOT be reused across different
@@ -267,6 +240,9 @@ func defaultSignatureAlgorithm(key jose.JSONWebKey) jose.SignatureAlgorithm {
 	if key.Algorithm != "" {
 		return jose.SignatureAlgorithm(key.Algorithm)
 	}
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok && len(signer.Algs()) > 0 {
+		return signer.Algs()[0]
+	}
 	if algorithms := signatureAlgorithmsForKey(key); len(algorithms) > 0 {
 		return algorithms[0]
 	}
@@ -275,11 +251,13 @@ func defaultSignatureAlgorithm(key jose.JSONWebKey) jose.SignatureAlgorithm {
 
 // signatureAlgorithmsForKey lists the JWS algorithms a key can actually produce,
 // in the order this wallet prefers them. An EC key is bound to the single
-// algorithm of its curve (RFC 7518 Section 3.4), so listing anything else would
-// only produce a signature the issuer cannot verify. A key type this package does
-// not recognise, including an opaque crypto.Signer backed by hardware, yields no
-// algorithms; such a key states its algorithm in the JWK alg member instead.
+// algorithm of its curve (RFC 7518 Section 3.4). A jose.OpaqueSigner lists its
+// own. Any other key type this package does not recognise yields none; such a
+// key states its algorithm in the JWK alg member instead.
 func signatureAlgorithmsForKey(key jose.JSONWebKey) []jose.SignatureAlgorithm {
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok {
+		return signer.Algs()
+	}
 	public := key.Key
 	if signer, ok := key.Key.(crypto.Signer); ok {
 		public = signer.Public()
@@ -335,7 +313,10 @@ func signJWTWithPublicJWKHeaderAndExtras(key jose.JSONWebKey, alg jose.Signature
 	if alg == "" {
 		alg = defaultSignatureAlgorithm(key)
 	}
-	publicJWK := key.Public()
+	publicJWK, err := publicKeyOf(key)
+	if err != nil {
+		return "", err
+	}
 	publicJWK.Algorithm = string(alg)
 	if publicJWK.Use == "" {
 		publicJWK.Use = "sig"
@@ -354,6 +335,23 @@ func signJWTWithPublicJWKHeaderAndExtras(key jose.JSONWebKey, alg jose.Signature
 		return "", err
 	}
 	return jwt.Signed(signer).Claims(payload).Serialize()
+}
+
+// publicKeyOf returns the public JWK of a private key, or of the key a
+// jose.OpaqueSigner holds.
+func publicKeyOf(key jose.JSONWebKey) (jose.JSONWebKey, error) {
+	if signer, ok := key.Key.(jose.OpaqueSigner); ok {
+		public := signer.Public()
+		if public == nil || !public.Valid() || !public.IsPublic() {
+			return jose.JSONWebKey{}, fmt.Errorf("opaque signer returned no valid public key")
+		}
+		return *public, nil
+	}
+	public := key.Public()
+	if !public.Valid() {
+		return jose.JSONWebKey{}, fmt.Errorf("unsupported signing key type %T", key.Key)
+	}
+	return public, nil
 }
 
 func signJWT(key jose.JSONWebKey, typ string, payload map[string]any, extraHeaders map[string]any) (string, error) {

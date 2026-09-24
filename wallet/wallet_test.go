@@ -1323,7 +1323,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			}
 			if tokenAttempts == 1 {
 				w.Header().Set("DPoP-Nonce", "token-nonce-1")
-				http.Error(w, "use nonce", http.StatusUnauthorized)
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_dpop_nonce"})
 				return
 			}
 			mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
@@ -1342,7 +1342,8 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 			}
 			if credentialAttempts == 1 {
 				w.Header().Set("DPoP-Nonce", "credential-nonce-1")
-				http.Error(w, "use nonce", http.StatusUnauthorized)
+				w.Header().Set("WWW-Authenticate", `DPoP error="use_dpop_nonce"`)
+				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 			body, decoded := decodeObservedCredentialRequest(obs, r, requestEncryptionKey)

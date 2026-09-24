@@ -57,11 +57,11 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 			Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
 		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
-		_, err := final.ExchangeAuthorizationCode(bearer, request, types.OAuthClientAttestationHeaders{}, "proof")
+		_, err := final.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), bearer, request, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("proof"))
 		require.NoError(t, err)
 
 		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
-		_, err = haip.ExchangeAuthorizationCode(bearer, request, types.OAuthClientAttestationHeaders{}, "proof")
+		_, err = haip.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), bearer, request, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("proof"))
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 

@@ -727,14 +727,14 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("PAR response = %#v", par)
 	}
 
-	token, err := receiver.ExchangeAuthorizationCode(endpoint("/token"), types.AuthorizationCodeTokenRequest{
+	token, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), endpoint("/token"), types.AuthorizationCodeTokenRequest{
 		Code:         "code-1",
 		RedirectURI:  "https://wallet.example/callback",
 		CodeVerifier: "verifier-1",
 		ClientID:     "client-1",
-	}, types.OAuthClientAttestationHeaders{}, "dpop-token")
+	}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("dpop-token"))
 	if err != nil {
-		t.Fatalf("ExchangeAuthorizationCode() error = %v", err)
+		t.Fatalf("token request error = %v", err)
 	}
 	if token.Token != "access-1" || token.TokenType != "DPoP" {
 		t.Fatalf("token response = %#v", token)
@@ -748,34 +748,34 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		t.Fatalf("nonce response = %#v", nonce)
 	}
 
-	credential, err := receiver.RequestCredential(endpoint("/credential"), "access-1", types.CredentialRequest{
+	credential, err := requestCredentialJSON(t.Context(), receiver, endpoint("/credential"), "access-1", types.CredentialRequest{
 		CredentialConfigurationID: "pid",
 		Proofs:                    &types.CredentialProofs{JWT: []string{"proof-jwt"}},
-	}, "dpop-credential")
+	}, fixedProof("dpop-credential"))
 	if err != nil {
-		t.Fatalf("RequestCredential() error = %v", err)
+		t.Fatalf("credential request error = %v", err)
 	}
 	if credential.TransactionID != "tx-1" {
 		t.Fatalf("credential response = %#v", credential)
 	}
 
-	deferred, err := receiver.RequestDeferredCredential(endpoint("/deferred"), "access-1", types.DeferredCredentialRequest{TransactionID: credential.TransactionID}, "dpop-deferred")
+	deferred, err := requestCredentialJSON(t.Context(), receiver, endpoint("/deferred"), "access-1", types.DeferredCredentialRequest{TransactionID: credential.TransactionID}, fixedProof("dpop-deferred"))
 	if err != nil {
-		t.Fatalf("RequestDeferredCredential() error = %v", err)
+		t.Fatalf("deferred credential request error = %v", err)
 	}
 	if deferred.Credential != "credential-jwt" || deferred.NotificationID != "notification-1" {
 		t.Fatalf("deferred response = %#v", deferred)
 	}
 
-	if err := receiver.SendCredentialNotification(endpoint("/notification"), "access-1", types.NotificationRequest{
+	if err := receiver.SendCredentialNotificationWithDpopRetryForToken(t.Context(), endpoint("/notification"), dpopAccessToken("access-1"), types.NotificationRequest{
 		NotificationID: deferred.NotificationID,
 		Event:          "credential_accepted",
-	}, "dpop-notification"); err != nil {
-		t.Fatalf("SendCredentialNotification() error = %v", err)
+	}, fixedProof("dpop-notification")); err != nil {
+		t.Fatalf("notification error = %v", err)
 	}
 }
 
-func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
+func TestOid4vciReceiver_RequestCredentialDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -791,7 +791,7 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -813,7 +813,7 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	response, err := receiver.RequestCredentialWithDpopRetry(
+	response, err := requestCredentialJSON(t.Context(), receiver,
 		common.URIField(*parsed),
 		"access-1",
 		types.CredentialRequest{CredentialConfigurationID: "pid"},
@@ -823,7 +823,7 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("RequestCredentialWithDpopRetry() error = %v", err)
+		t.Fatalf("credential request error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -836,7 +836,7 @@ func TestOid4vciReceiver_RequestCredentialWithDpopRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
+func TestOid4vciReceiver_PostCredentialEndpointDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -862,7 +862,7 @@ func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -878,7 +878,7 @@ func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	response, err := receiver.PostCredentialEndpointWithDpopRetry(
+	response, err := postCredentialBody(t.Context(), receiver,
 		common.URIField(*parsed),
 		"access-1",
 		[]byte("encrypted-request"),
@@ -889,7 +889,7 @@ func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithDpopRetry() error = %v", err)
+		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -902,7 +902,7 @@ func TestOid4vciReceiver_PostCredentialEndpointWithDpopRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
+func TestOid4vciReceiver_ExchangeAuthorizationCodeDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -927,7 +927,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusBadRequest)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -963,7 +963,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	response, err := receiver.ExchangeAuthorizationCodeWithDpopRetry(
+	response, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
 		common.URIField(*parsed),
 		types.AuthorizationCodeTokenRequest{
 			Code:         "code-1",
@@ -971,17 +971,17 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopRetry(t *testing.T) {
 			CodeVerifier: "verifier-1",
 			ClientID:     "client-1",
 		},
-		types.OAuthClientAttestationHeaders{
+		fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
 			ClientAttestation:    "attestation-jwt",
 			ClientAttestationPop: "attestation-pop-jwt",
-		},
+		}),
 		func(nonce string) (string, error) {
 			proofNonces = append(proofNonces, nonce)
 			return "proof:" + nonce, nil
 		},
 	)
 	if err != nil {
-		t.Fatalf("ExchangeAuthorizationCodeWithDpopRetry() error = %v", err)
+		t.Fatalf("token request error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -1012,7 +1012,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 				t.Errorf("first DPoP proof = %q", r.Header.Get("DPoP"))
 			}
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		if r.Header.Get("DPoP") != "proof:nonce-1" {
@@ -1068,7 +1068,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t 
 	}
 }
 
-func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
+func TestOid4vciReceiver_RequestDeferredCredentialDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -1079,7 +1079,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 		if attempts == 1 {
 			assertBearerJSONRequest(t, r, "access-1", "proof:")
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
@@ -1099,7 +1099,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	response, err := receiver.RequestDeferredCredentialWithDpopRetry(
+	response, err := requestCredentialJSON(t.Context(), receiver,
 		common.URIField(*parsed),
 		"access-1",
 		types.DeferredCredentialRequest{TransactionID: "tx-1"},
@@ -1109,7 +1109,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("RequestDeferredCredentialWithDpopRetry() error = %v", err)
+		t.Fatalf("deferred credential request error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -1122,7 +1122,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialWithDpopRetry(t *testing.T) {
 	}
 }
 
-func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
+func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
 	receiver.AllowHTTP = true
@@ -1133,7 +1133,7 @@ func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
 		if attempts == 1 {
 			assertBearerJSONRequest(t, r, "access-1", "proof:")
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusUnauthorized)
+			useDPoPNonceResourceChallenge(w)
 			return
 		}
 		assertBearerJSONRequest(t, r, "access-1", "proof:nonce-1")
@@ -1153,9 +1153,9 @@ func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
 	}
 
 	var proofNonces []string
-	err = receiver.SendCredentialNotificationWithDpopRetry(
+	err = receiver.SendCredentialNotificationWithDpopRetryForToken(t.Context(),
 		common.URIField(*parsed),
-		"access-1",
+		dpopAccessToken("access-1"),
 		types.NotificationRequest{NotificationID: "notification-1", Event: "credential_accepted"},
 		func(nonce string) (string, error) {
 			proofNonces = append(proofNonces, nonce)
@@ -1163,7 +1163,7 @@ func TestOid4vciReceiver_SendCredentialNotificationWithDpopRetry(t *testing.T) {
 		},
 	)
 	if err != nil {
-		t.Fatalf("SendCredentialNotificationWithDpopRetry() error = %v", err)
+		t.Fatalf("SendCredentialNotificationWithDpopRetryForToken() error = %v", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d", attempts)
@@ -2178,9 +2178,11 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 					// identifier the wallet requested (VCI 1.0 §12.2.4): the
 					// request origin with the well-known prefix removed and any
 					// trailing slash kept.
+					// RFC 8414 §3.3 holds the authorization server issuer
+					// to the same rule.
 					credentialIssuer := "http://" + r.Host + tt.identifier
 					mockserver.JSONResponse(w, http.StatusOK, map[string]string{
-						"issuer":            "https://example.com",
+						"issuer":            credentialIssuer,
 						"credential_issuer": credentialIssuer,
 					})
 					return
@@ -2296,14 +2298,14 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeClientAssertion(t *testing.T) 
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
-	token, err := receiver.ExchangeAuthorizationCode(common.URIField(*parsed), types.AuthorizationCodeTokenRequest{
+	token, err := receiver.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), common.URIField(*parsed), types.AuthorizationCodeTokenRequest{
 		Code:                "code-1",
 		RedirectURI:         "https://wallet.example/callback",
 		CodeVerifier:        "verifier-1",
 		ClientID:            "client-1",
 		ClientAssertion:     "assertion-jwt",
 		ClientAssertionType: types.ClientAssertionTypeJWTBearer,
-	}, types.OAuthClientAttestationHeaders{}, "dpop-proof")
+	}, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("dpop-proof"))
 	require.NoError(t, err)
 	assert.Equal(t, "access-1", token.Token)
 	assert.Equal(t, "assertion-jwt", captured.Get("client_assertion"))
@@ -2319,7 +2321,7 @@ func TestOid4vciReceiver_ExchangeAuthorizationCodeRetryRefreshesClientAssertion(
 		captured = append(captured, r.Form)
 		if attempts == 1 {
 			w.Header().Set("DPoP-Nonce", "nonce-1")
-			http.Error(w, "use nonce", http.StatusBadRequest)
+			useDPoPNonceTokenChallenge(w)
 			return
 		}
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "DPoP"})
@@ -2399,7 +2401,7 @@ func TestPostCredentialEndpointRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
 	receiver := &Oid4vciReceiver{AllowHTTP: true}
 
-	response, err := receiver.PostCredentialEndpointWithDpopRetry(
+	response, err := postCredentialBody(t.Context(), receiver,
 		mustURIField(t, redirectingURL+"/credential"),
 		"access-1",
 		[]byte(`{"credential_configuration_id":"cfg"}`),
@@ -2542,10 +2544,6 @@ func TestOid4vciReceiverSatisfiesTransportAndSigner(t *testing.T) {
 
 	var transport types.OID4VCIFinalTransport = receiver
 	var signer types.OID4VCIFinalSigner = receiver
-	// The bundled plugin also satisfies the deprecated compound interface; the
-	// assignment pins that backward compatibility at compile time.
-	//lint:ignore SA1019 compatibility assertion
-	var _ types.OID4VCIFinalReceiver = receiver
 
 	if _, ok := any(&transportOnlyReceiver{OID4VCIFinalTransport: receiver}).(types.OID4VCIFinalSigner); ok {
 		t.Fatal("a transport-only plugin must not satisfy OID4VCIFinalSigner")

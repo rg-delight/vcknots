@@ -1,12 +1,10 @@
 package oid4vci
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -32,14 +31,13 @@ const maxNonceResponseBodyBytes int64 = 4 << 10
 
 // ErrProofAlgorithmNotSupported reports that the holder key cannot produce any
 // of the algorithms the Credential Issuer lists in
-// proof_signing_alg_values_supported. It is the oid4vcisign sentinel of the same
-// name, re-exported here because the key proof used to be built by this package;
-// errors.Is matches either spelling.
+// proof_signing_alg_values_supported. It is the oid4vcisign sentinel of the
+// same name, so errors.Is matches either.
 var ErrProofAlgorithmNotSupported = oid4vcisign.ErrProofAlgorithmNotSupported
 
 // FetchNonce fetches a c_nonce from the Section 7 Nonce Endpoint. It is a
-// legacy Draft 13 types.Receiver method and therefore carries no context; it
-// binds its request to context.Background().
+// types.Receiver method and carries no context; it binds its request to
+// context.Background().
 func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
@@ -48,47 +46,29 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 		return nil, err
 	}
 
-	nonceEndpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(nonceEndpointURL.Scheme, "https") {
-		return nil, fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", nonceEndpointURL.Scheme)
+	response, err := o.do(observe.WithEndpoint(context.Background(), observe.EndpointNonce), exchange{
+		method: http.MethodPost,
+		url:    url.URL(endpoint),
+		limit:  maxNonceResponseBodyBytes,
+	})
+	if errors.Is(err, httpfetch.ErrBodyTooLarge) {
+		return nil, fmt.Errorf("nonce endpoint response exceeds %d bytes: %w", maxNonceResponseBodyBytes, err)
 	}
-
-	req, err := http.NewRequestWithContext(observe.WithEndpoint(context.Background(), observe.EndpointNonce), http.MethodPost, nonceEndpointURL.String(), http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create nonce request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := o.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
 	}
-	defer resp.Body.Close()
-	// Section 7.2 Nonce Response: "The Credential Issuer MAY provide a DPoP
-	// nonce in an HTTP header as defined in Section 8.2 of [@!RFC9449]. In this
-	// case, the Wallet uses the new nonce value in the DPoP proof when
-	// presenting an access token at the Credential Endpoint."
-	o.rememberDPoPNonce(nonceEndpointURL, resp.Header.Get("DPoP-Nonce"))
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxNonceResponseBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read nonce response: %w", err)
+	if !response.ok() {
+		if code := response.statusError().oauthError; code != "" {
+			return nil, fmt.Errorf("nonce endpoint returned status %d, error: %s", response.statusCode, code)
+		}
+		return nil, fmt.Errorf("nonce endpoint returned status %d", response.statusCode)
 	}
-
-	if int64(len(bodyBytes)) > maxNonceResponseBodyBytes {
-		return nil, fmt.Errorf("nonce endpoint response exceeds %d bytes", maxNonceResponseBodyBytes)
-	}
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("nonce endpoint returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	if len(bodyBytes) == 0 {
+	if len(response.body) == 0 {
 		return nil, fmt.Errorf("nonce endpoint returned empty response")
 	}
 
 	var nonceResponse credentialNonceResponse
-	if err := json.Unmarshal(bodyBytes, &nonceResponse); err != nil {
+	if err := json.Unmarshal(response.body, &nonceResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse nonce response: %w", err)
 	}
 
@@ -112,8 +92,16 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 // receiver's per-server nonce store, so the next DPoP proof this plugin builds
 // for that server already carries it. ctx bounds the request.
 func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint common.URIField) (*types.NonceResponse, error) {
+	exchanged, err := o.do(observe.WithEndpoint(ctx, observe.EndpointNonce), exchange{method: http.MethodPost, url: url.URL(endpoint)})
+	if err == nil && !exchanged.ok() {
+		err = exchanged.statusError()
+	}
 	var response types.NonceResponse
-	responseHeader, err := o.doFinalRequestWithResponseHeader(observe.WithEndpoint(ctx, observe.EndpointNonce), http.MethodPost, endpoint, nil, "", nil, &response)
+	if err == nil && len(exchanged.body) > 0 {
+		if decodeErr := json.Unmarshal(exchanged.body, &response); decodeErr != nil {
+			err = fmt.Errorf("failed to parse JSON: %w", decodeErr)
+		}
+	}
 	if err != nil {
 		return nil, stageError(StageNonce, fmt.Errorf("failed to fetch nonce: %w", err))
 	}
@@ -124,86 +112,44 @@ func (o *Oid4vciReceiver) FetchNonceResponse(ctx context.Context, endpoint commo
 	if strings.TrimSpace(response.CNonce) == "" {
 		return nil, fmt.Errorf("nonce response does not contain a c_nonce: %w", types.ErrNonceResponseInvalid)
 	}
-	response.DPoPNonce = strings.TrimSpace(responseHeader.Get("DPoP-Nonce"))
+	response.DPoPNonce = strings.TrimSpace(exchanged.header.Get("DPoP-Nonce"))
 	return &response, nil
-}
-
-// RequestCredential posts a single Section 8 Credential Request with a
-// pre-built DPoP proof. It is not part of types.OID4VCIFinalTransport and
-// carries no context; it binds its request to context.Background().
-func (o *Oid4vciReceiver) RequestCredential(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
-	var response types.CredentialResponse
-	if err := o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), credentialRequest, dpopProof, &response); err != nil {
-		return nil, fmt.Errorf("failed to request credential: %w", err)
-	}
-	return &response, nil
-}
-
-// RequestCredentialWithDpopRetry posts a Section 8 Credential Request with the
-// RFC 9449 Section 8 nonce retry. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its requests to
-// context.Background().
-func (o *Oid4vciReceiver) RequestCredentialWithDpopRetry(endpoint common.URIField, accessToken string, credentialRequest types.CredentialRequest, proofFactory DPoPProofFactory) (*types.CredentialResponse, error) {
-	var response types.CredentialResponse
-	if err := o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), credentialRequest, proofFactory, &response); err != nil {
-		return nil, fmt.Errorf("failed to request credential with DPoP retry: %w", err)
-	}
-	return &response, nil
-}
-
-// PostCredentialEndpointWithDpopRetry posts a pre-encoded Credential Request
-// body with the RFC 9449 Section 8 nonce retry. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its requests to
-// context.Background().
-func (o *Oid4vciReceiver) PostCredentialEndpointWithDpopRetry(endpoint common.URIField, accessToken string, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
-	return o.postCredentialEndpointForToken(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), body, contentType, proofFactory)
 }
 
 func (o *Oid4vciReceiver) postCredentialEndpointForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, error) {
-	responseBody, responseContentType, err := o.doBearerRequestWithDpopRetry(ctx, endpoint, accessToken, body, contentType, proofFactory)
+	response, err := o.postProtected(ctx, endpoint, accessToken, body, contentType, proofFactory, httpfetch.CredentialBodyLimit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to post credential endpoint request with DPoP retry: %w", err)
+		return nil, fmt.Errorf("failed to post credential endpoint request: %w", err)
 	}
 	return &CredentialEndpointHTTPResponse{
-		Body:        responseBody,
-		ContentType: responseContentType,
+		Body:        response.body,
+		ContentType: response.header.Get("Content-Type"),
 	}, nil
 }
 
-// PostCredentialEndpointWithNonceRetryForToken is
-// PostCredentialEndpointWithNonceRetry taking the parsed token response instead
-// of the bare access token string, so that the Authorization header carries the
-// scheme the authorization server issued. A Credential Issuer that returns
-// token_type "Bearer" (RFC 6750 Section 2.1) must be addressed with the Bearer
-// scheme; only a DPoP-bound token (RFC 9449 Section 7.1) takes the DPoP scheme
-// and an accompanying DPoP proof header. Callers that still pass a bare string
-// keep the DPoP scheme this plugin has always sent. ctx bounds every attempt,
-// the Nonce Endpoint refresh included.
+// PostCredentialEndpointWithNonceRetryForToken posts the Credential Request (or
+// Deferred Credential Request) body build returns for the current c_nonce. The
+// access token is sent with the scheme its token_type names: Bearer (RFC 6750
+// Section 2.1) or DPoP with a proof (RFC 9449 Section 7.1).
+//
+// On the Section 8.3.1.2 "invalid_nonce" error it fetches a fresh c_nonce from
+// nonceEndpoint, rebuilds the body and posts once more; with a nil
+// nonceEndpoint the error is returned as is. It returns the response and the
+// c_nonce the accepted request was built with. ctx bounds every request.
 func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetryForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
 	return o.postCredentialEndpointWithNonceRetry(ctx, endpoint, accessToken, nonceEndpoint, initialCNonce, build, proofFactory)
 }
 
-// SendCredentialNotificationWithDpopRetryForToken is
-// SendCredentialNotificationWithDpopRetry taking the parsed token response, for
-// the same reason as PostCredentialEndpointWithNonceRetryForToken.
-// ctx bounds every attempt.
+// SendCredentialNotificationWithDpopRetryForToken sends the Section 11
+// Notification Request with the access token's scheme, as
+// PostCredentialEndpointWithNonceRetryForToken does. ctx bounds every request.
 func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetryForToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
-	return o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, accessToken, notification, proofFactory, nil)
-}
-
-// PostCredentialEndpointWithNonceRetry posts the credential request body built
-// for the current c_nonce. OpenID4VCI 1.0 §8.3.1 requires the wallet to include
-// the latest c_nonce in the proof, and §8.3.1.2 defines the "invalid_nonce"
-// error an issuer returns when the proof carries a stale one; the wallet SHOULD
-// obtain a fresh c_nonce from the nonce endpoint and retry. Exactly one such
-// retry is performed so a misbehaving issuer cannot keep the wallet in a loop.
-// DPoP challenges are still handled by PostCredentialEndpointWithDpopRetry
-// underneath. It returns the response and the c_nonce actually used; when
-// nonceEndpoint is nil the invalid_nonce error is returned without a retry.
-// It is not part of types.OID4VCIFinalTransport and carries no context; it
-// binds its requests to context.Background().
-func (o *Oid4vciReceiver) PostCredentialEndpointWithNonceRetry(endpoint common.URIField, accessToken string, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
-	return o.postCredentialEndpointWithNonceRetry(observe.WithEndpoint(context.Background(), observe.EndpointCredential), endpoint, dpopBoundToken(accessToken), nonceEndpoint, initialCNonce, build, proofFactory)
+	body, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+	_, err = o.postProtected(observe.WithEndpoint(ctx, observe.EndpointNotification), endpoint, accessToken, body, "application/json", proofFactory, httpfetch.DefaultBodyLimit)
+	return err
 }
 
 func (o *Oid4vciReceiver) postCredentialEndpointWithNonceRetry(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, nonceEndpoint *common.URIField, initialCNonce string, build CredentialRequestBodyFactory, proofFactory DPoPProofFactory) (*CredentialEndpointHTTPResponse, string, error) {
@@ -240,45 +186,6 @@ func (o *Oid4vciReceiver) postCredentialEndpointWithNonceRetry(ctx context.Conte
 		return nil, freshCNonce, err
 	}
 	return response, freshCNonce, nil
-}
-
-// RequestDeferredCredential posts a single Section 9 Deferred Credential
-// Request with a pre-built DPoP proof. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its request to
-// context.Background().
-func (o *Oid4vciReceiver) RequestDeferredCredential(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, dpopProof string) (*types.CredentialResponse, error) {
-	var response types.CredentialResponse
-	if err := o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointDeferredCredential), endpoint, dpopBoundToken(accessToken), deferredRequest, dpopProof, &response); err != nil {
-		return nil, fmt.Errorf("failed to request deferred credential: %w", err)
-	}
-	return &response, nil
-}
-
-// RequestDeferredCredentialWithDpopRetry posts a Section 9 Deferred Credential
-// Request with the RFC 9449 Section 8 nonce retry. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its requests to
-// context.Background().
-func (o *Oid4vciReceiver) RequestDeferredCredentialWithDpopRetry(endpoint common.URIField, accessToken string, deferredRequest types.DeferredCredentialRequest, proofFactory DPoPProofFactory) (*types.CredentialResponse, error) {
-	var response types.CredentialResponse
-	if err := o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointDeferredCredential), endpoint, dpopBoundToken(accessToken), deferredRequest, proofFactory, &response); err != nil {
-		return nil, fmt.Errorf("failed to request deferred credential with DPoP retry: %w", err)
-	}
-	return &response, nil
-}
-
-// SendCredentialNotification sends a single Section 11 notification with a
-// pre-built DPoP proof. It is not part of types.OID4VCIFinalTransport and
-// carries no context; it binds its request to context.Background().
-func (o *Oid4vciReceiver) SendCredentialNotification(endpoint common.URIField, accessToken string, notification types.NotificationRequest, dpopProof string) error {
-	return o.doBearerJSONRequest(observe.WithEndpoint(context.Background(), observe.EndpointNotification), endpoint, dpopBoundToken(accessToken), notification, dpopProof, nil)
-}
-
-// SendCredentialNotificationWithDpopRetry sends a Section 11 notification with
-// the RFC 9449 Section 8 nonce retry. It is not part of
-// types.OID4VCIFinalTransport and carries no context; it binds its requests to
-// context.Background().
-func (o *Oid4vciReceiver) SendCredentialNotificationWithDpopRetry(endpoint common.URIField, accessToken string, notification types.NotificationRequest, proofFactory DPoPProofFactory) error {
-	return o.doBearerJSONRequestWithDpopRetry(observe.WithEndpoint(context.Background(), observe.EndpointNotification), endpoint, dpopBoundToken(accessToken), notification, proofFactory, nil)
 }
 
 // EncodeCredentialRequest serializes a Credential Request or Deferred Credential
@@ -319,7 +226,10 @@ func (o *Oid4vciReceiver) EncodeCredentialRequest(request any, issuerMetadata *t
 	if err != nil {
 		return nil, "", err
 	}
-	enc := firstOrDefault(issuerMetadata.CredentialRequestEncryption.EncValuesSupported, "A128GCM")
+	enc, err := selectSupportedEnc(issuerMetadata.CredentialRequestEncryption.EncValuesSupported)
+	if err != nil {
+		return nil, "", fmt.Errorf("credential request encryption: %w", err)
+	}
 
 	keyAlg, err := parseJWEKeyAlgorithm(alg)
 	if err != nil {
@@ -388,138 +298,51 @@ func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType stri
 // without importing this package.
 type ProofOptions = types.ProofOptions
 
-// SelectProofSigningAlgorithm returns the algorithm to sign a jwt key proof
-// with, honouring the Credential Configuration's
-// proof_signing_alg_values_supported.
-//
-// Deprecated: use oid4vcisign.SelectProofSigningAlgorithm, which this function
-// calls.
-func SelectProofSigningAlgorithm(key jose.JSONWebKey, supported []jose.SignatureAlgorithm) (jose.SignatureAlgorithm, error) {
-	return oid4vcisign.SelectProofSigningAlgorithm(key, supported)
+// postProtected posts body to a Credential, Deferred Credential or
+// Notification Endpoint with the access token and, for a DPoP-bound token, a
+// DPoP proof per attempt. A non-2xx response is returned as the Section
+// 8.3.1.2 *types.CredentialEndpointError, or as ErrDPoPRequired when a request
+// sent with a Bearer token is asked for DPoP. An invalid_nonce refusal is
+// reported as such first, so the caller can refresh the c_nonce.
+func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+	response, err := o.postWithAccessToken(ctx, endpoint, accessToken, body, contentType, proofFactory, limit)
+	if err != nil {
+		return nil, err
+	}
+	if response.ok() {
+		return response, nil
+	}
+	responseContentType := response.header.Get("Content-Type")
+	dpopNonce := response.header.Get("DPoP-Nonce")
+	if isCredentialNonceError(responseContentType, response.body) {
+		return nil, newCredentialEndpointError(response.statusCode, responseContentType, response.body, dpopNonce)
+	}
+	if bearerTokenChallenged(&accessToken, response) {
+		return nil, ErrDPoPRequired
+	}
+	return nil, newCredentialEndpointError(response.statusCode, responseContentType, response.body, dpopNonce)
 }
 
-func (o *Oid4vciReceiver) doBearerJSONRequest(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, payload any, dpopProof string, target any) error {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return err
+// postWithAccessToken posts body with the access token in the scheme its
+// token_type names. A DPoP-bound token takes a proof from proofFactory for each
+// attempt; a Bearer token carries none (RFC 9449 Section 7.1 pairs the proof
+// with the DPoP scheme). The response is returned whatever its status.
+func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+	ex := exchange{
+		method:      http.MethodPost,
+		url:         url.URL(endpoint),
+		contentType: contentType,
+		body:        func() ([]byte, error) { return body, nil },
+		accessToken: &accessToken,
+		limit:       limit,
 	}
-
-	scheme := authorizationScheme(accessToken.TokenType)
-	headers := map[string]string{"Authorization": scheme + " " + accessToken.Token}
-	if scheme == dpopAuthorizationScheme {
-		headers["DPoP"] = dpopProof
+	if authorizationScheme(accessToken.TokenType) == dpopAuthorizationScheme {
+		if proofFactory == nil {
+			return nil, fmt.Errorf("%w: a DPoP-bound access token needs a DPoP proof factory", ErrDPoPRequired)
+		}
+		ex.dpop = proofFactory
 	}
-
-	return o.doFinalRequest(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes), "application/json", headers, target)
-}
-
-func (o *Oid4vciReceiver) doBearerJSONRequestWithDpopRetry(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, payload any, proofFactory DPoPProofFactory, target any) error {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	respBody, _, err := o.doBearerRequestWithDpopRetry(ctx, endpoint, accessToken, bodyBytes, "application/json", proofFactory)
-	if err != nil {
-		return err
-	}
-	if target == nil || len(respBody) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(respBody, target); err != nil {
-		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-	return nil
-}
-
-// doBearerRequestWithDpopRetry posts bodyBytes to a protected endpoint and owns
-// the RFC 9449 Section 8 DPoP nonce retry. The first proof is built for the
-// nonce this receiver already holds for that server, so a server that has
-// already issued one is not made to reject a proof it cannot accept; the
-// challenge retry remains the fallback for the first contact and for a rotated
-// nonce. ctx bounds every attempt.
-func (o *Oid4vciReceiver) doBearerRequestWithDpopRetry(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, bodyBytes []byte, contentType string, proofFactory DPoPProofFactory) ([]byte, string, error) {
-	if proofFactory == nil {
-		return nil, "", fmt.Errorf("DPoP proof factory is required")
-	}
-	scheme := authorizationScheme(accessToken.TokenType)
-
-	endpointURL := url.URL(endpoint)
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
-		return nil, "", fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
-	}
-
-	dpopNonce := o.dpopNonceFor(endpointURL)
-	var lastStatus int
-	var lastContentType string
-	var lastBody []byte
-	var lastNonce string
-	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL.String(), bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, "", err
-		}
-		req.Header.Set("Accept", "application/json")
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		req.Header.Set("Authorization", scheme+" "+accessToken.Token)
-		// RFC 9449 Section 7.1 pairs the DPoP proof header with the DPoP
-		// scheme. A bearer token is not bound to the wallet key, so a proof
-		// alongside it would prove nothing and is not built at all.
-		if scheme == dpopAuthorizationScheme {
-			dpopProof, err := proofFactory(dpopNonce)
-			if err != nil {
-				return nil, "", err
-			}
-			req.Header.Set("DPoP", dpopProof)
-		}
-
-		resp, err := o.httpClient().Do(req)
-		if err != nil {
-			return nil, "", err
-		}
-		respBody, readErr := io.ReadAll(resp.Body)
-		closeErr := resp.Body.Close()
-		if readErr != nil {
-			return nil, "", readErr
-		}
-		if closeErr != nil {
-			return nil, "", closeErr
-		}
-		o.rememberDPoPNonce(endpointURL, resp.Header.Get("DPoP-Nonce"))
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return respBody, resp.Header.Get("Content-Type"), nil
-		}
-		responseContentType := resp.Header.Get("Content-Type")
-		nonce := resp.Header.Get("DPoP-Nonce")
-		// OpenID4VCI 1.0 §8.3.1.2: an "invalid_nonce" error means the proof
-		// carried a stale c_nonce, and the wallet has to refresh it from the
-		// Nonce Endpoint. It takes priority over the RFC 9449 §8 DPoP challenge
-		// below: an issuer may set a DPoP-Nonce header on the same response, and
-		// treating that as the challenge would spend the one retry on a DPoP
-		// proof instead of the c_nonce the error actually named.
-		if isCredentialNonceError(responseContentType, respBody) {
-			return nil, "", newCredentialEndpointError(resp.StatusCode, responseContentType, respBody, nonce)
-		}
-		// A response may also demand a DPoP proof the wallet cannot build when
-		// the access token is not DPoP-bound. Failing closed here reports the
-		// real reason instead of repeating a request that carried no proof.
-		if scheme != dpopAuthorizationScheme && dpopChallengeRequested(nonce, resp.Header.Get("WWW-Authenticate")) {
-			return nil, "", ErrDPoPRequired
-		}
-		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) && nonce != "" {
-			dpopNonce = nonce
-			lastStatus, lastContentType, lastBody, lastNonce = resp.StatusCode, responseContentType, respBody, nonce
-			continue
-		}
-		return nil, "", newCredentialEndpointError(resp.StatusCode, responseContentType, respBody, nonce)
-	}
-
-	if lastStatus != 0 {
-		return nil, "", newCredentialEndpointError(lastStatus, lastContentType, lastBody, lastNonce)
-	}
-	return nil, "", fmt.Errorf("DPoP nonce retry exhausted for %s", endpointURL.String())
+	return o.do(ctx, ex)
 }
 
 // newCredentialEndpointError converts a non-2xx credential, deferred credential
@@ -544,8 +367,8 @@ func newCredentialEndpointError(statusCode int, contentType string, body []byte,
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return credentialErr
 	}
-	credentialErr.Code = payload.Error
-	credentialErr.Description = payload.Description
+	credentialErr.Code = sanitizeErrorText(payload.Error, maxErrorCodeLength)
+	credentialErr.Description = sanitizeErrorText(payload.Description, maxErrorDescriptionLength)
 	credentialErr.Interval = payload.Interval
 	return credentialErr
 }
@@ -568,5 +391,5 @@ func isCredentialNonceError(contentType string, body []byte) bool {
 	if !strings.Contains(strings.ToLower(contentType), "json") {
 		return false
 	}
-	return tokenErrorCode(body) == types.ErrInvalidNonce.Error()
+	return oauthErrorCode(body) == types.ErrInvalidNonce.Error()
 }

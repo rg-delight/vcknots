@@ -2,7 +2,6 @@ package oid4vci
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -21,12 +20,17 @@ func dpopNonceServerKey(endpointURL url.URL) string {
 	return strings.ToLower(endpointURL.Scheme) + "://" + strings.ToLower(endpointURL.Host)
 }
 
-// rememberDPoPNonce records a DPoP-Nonce the wallet observed on any response
-// from a server, so the next request to that same server can carry a proof that
-// already satisfies it. RFC 9449 Section 8.2: "The DPoP-Nonce HTTP header field
-// is used ... to provide the client with a nonce value to be used in a
-// subsequent DPoP proof". An empty value is ignored: a response without the
-// header does not revoke the nonce the wallet already holds.
+// maxDPoPNonceServers bounds the servers a receiver keeps a DPoP nonce for.
+const maxDPoPNonceServers = 32
+
+type dpopNonceEntry struct {
+	nonce    string
+	lastUsed uint64
+}
+
+// rememberDPoPNonce records the DPoP-Nonce a server sent (RFC 9449 Section
+// 8.2) so the next proof for that server carries it. An empty value is
+// ignored: a response without the header does not revoke a known nonce.
 func (o *Oid4vciReceiver) rememberDPoPNonce(endpointURL url.URL, nonce string) {
 	nonce = strings.TrimSpace(nonce)
 	if nonce == "" {
@@ -34,59 +38,74 @@ func (o *Oid4vciReceiver) rememberDPoPNonce(endpointURL url.URL, nonce string) {
 	}
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
-	if o.dpopNonces == nil {
-		o.dpopNonces = make(map[string]string, 1)
-	}
-	o.dpopNonces[dpopNonceServerKey(endpointURL)] = nonce
+	o.storeDPoPNonceLocked(dpopNonceServerKey(endpointURL), nonce)
 }
 
-// dpopNonceFor returns the latest DPoP nonce the wallet holds for the server
-// endpointURL addresses, or the empty string when it holds none. Seeding the
-// first proof of a request with it is what RFC 9449 Section 8.2 asks for:
-// "Clients should expect that a server will use the same nonce for all requests
-// to that server", which spares the wasted request that would otherwise be
-// rejected with "use_dpop_nonce" only to be repeated.
+// dpopNonceFor returns the latest DPoP nonce held for the server endpointURL
+// addresses, or "" when none is held.
 func (o *Oid4vciReceiver) dpopNonceFor(endpointURL url.URL) string {
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
-	return o.dpopNonces[dpopNonceServerKey(endpointURL)]
+	server := dpopNonceServerKey(endpointURL)
+	entry, found := o.dpopNonces[server]
+	if !found {
+		return ""
+	}
+	o.dpopNonceClock++
+	entry.lastUsed = o.dpopNonceClock
+	o.dpopNonces[server] = entry
+	return entry.nonce
 }
 
-// ExportDPoPNonces returns a snapshot of the RFC 9449 §8.2 per-server DPoP
-// nonce store, keyed by dpopNonceServerKey. A copy is returned so a caller can
-// carry the protocol state across an interruption (for example into an
-// OID4VCIFinalTokenGrant.DPoPNonces and back out of it) without holding or
-// mutating the receiver's map. An empty store exports an empty, non-nil map.
+// ExportDPoPNonces returns a copy of the per-server DPoP nonces, keyed by
+// scheme and authority, so a caller can carry them across an interruption.
 func (o *Oid4vciReceiver) ExportDPoPNonces() map[string]string {
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
 	exported := make(map[string]string, len(o.dpopNonces))
-	for server, nonce := range o.dpopNonces {
-		exported[server] = nonce
+	for server, entry := range o.dpopNonces {
+		exported[server] = entry.nonce
 	}
 	return exported
 }
 
-// ImportDPoPNonces restores the per-server nonces ExportDPoPNonces produced.
-// Each value is remembered for its server, so the first DPoP proof built after
-// a resume already carries the nonce that server last issued instead of paying
-// the wasted challenge round trip RFC 9449 §8.2 exists to avoid. Blank values
-// are ignored, matching rememberDPoPNonce.
+// ImportDPoPNonces restores nonces ExportDPoPNonces produced. A server the
+// receiver already holds a nonce for keeps it: that nonce was observed by this
+// receiver, while an imported one may be stale or come from another flow.
+// Blank values are ignored.
 func (o *Oid4vciReceiver) ImportDPoPNonces(nonces map[string]string) {
-	if len(nonces) == 0 {
-		return
-	}
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
-	if o.dpopNonces == nil {
-		o.dpopNonces = make(map[string]string, len(nonces))
-	}
 	for server, nonce := range nonces {
-		if strings.TrimSpace(nonce) == "" {
+		nonce = strings.TrimSpace(nonce)
+		if nonce == "" {
 			continue
 		}
-		o.dpopNonces[server] = nonce
+		if _, known := o.dpopNonces[server]; known {
+			continue
+		}
+		o.storeDPoPNonceLocked(server, nonce)
 	}
+}
+
+// storeDPoPNonceLocked stores a nonce as the most recently used entry and
+// evicts the least recently used one beyond maxDPoPNonceServers.
+func (o *Oid4vciReceiver) storeDPoPNonceLocked(server, nonce string) {
+	if o.dpopNonces == nil {
+		o.dpopNonces = make(map[string]dpopNonceEntry)
+	}
+	o.dpopNonceClock++
+	o.dpopNonces[server] = dpopNonceEntry{nonce: nonce, lastUsed: o.dpopNonceClock}
+	if len(o.dpopNonces) <= maxDPoPNonceServers {
+		return
+	}
+	oldest := ""
+	for candidate, entry := range o.dpopNonces {
+		if oldest == "" || entry.lastUsed < o.dpopNonces[oldest].lastUsed {
+			oldest = candidate
+		}
+	}
+	delete(o.dpopNonces, oldest)
 }
 
 // requireDPoPTokenType enforces HAIP §4 "Sender-constrained access token: MUST
@@ -137,14 +156,6 @@ type DPoPProofFactory = types.DPoPProofFactory
 // invent one the wallet cannot sign.
 var ErrDPoPRequired = common.NewCodedError("dpop_required", "credential endpoint requires DPoP")
 
-// dpopBoundToken adapts the access token string the established signatures take.
-// Those entry points predate the token_type being plumbed through, and every one
-// of them was sending the DPoP scheme unconditionally, so that is the scheme
-// they keep.
-func dpopBoundToken(accessToken string) types.CredentialIssuanceAccessToken {
-	return types.CredentialIssuanceAccessToken{Token: accessToken, TokenType: "DPoP"}
-}
-
 // dpopAuthorizationScheme is the RFC 9449 Section 7.1 authentication scheme for
 // a DPoP-bound access token.
 const dpopAuthorizationScheme = "DPoP"
@@ -160,28 +171,4 @@ func authorizationScheme(tokenType string) string {
 		return dpopAuthorizationScheme
 	}
 	return "Bearer"
-}
-
-// dpopChallengeRequested reports whether a response asks the client for a DPoP
-// proof: RFC 9449 §8 provides a DPoP-Nonce response header, and §7.1 names the
-// DPoP scheme in a WWW-Authenticate challenge. Either signal means the request
-// has to carry a proof bound to a key the client holds.
-func dpopChallengeRequested(dpopNonce, wwwAuthenticate string) bool {
-	if strings.TrimSpace(dpopNonce) != "" {
-		return true
-	}
-	scheme, _, _ := strings.Cut(strings.TrimSpace(wwwAuthenticate), " ")
-	scheme, _, _ = strings.Cut(scheme, ",")
-	return strings.EqualFold(scheme, dpopAuthorizationScheme)
-}
-
-func isUseDPoPNonceError(bodyBytes []byte) bool {
-	return tokenErrorCode(bodyBytes) == "use_dpop_nonce"
-}
-
-func isUseDPoPNonceResponse(resp *http.Response, bodyBytes []byte) bool {
-	if isUseDPoPNonceError(bodyBytes) {
-		return true
-	}
-	return strings.Contains(strings.ToLower(resp.Header.Get("WWW-Authenticate")), "use_dpop_nonce")
 }
