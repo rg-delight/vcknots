@@ -1,18 +1,19 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -312,17 +313,10 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	return b
 }
 
-// WithRequestObjectURI constructs the CredentialPresentationRequest
-// with fetching the request object from the given URI using the specified method,
-// and validates its claims and signature as per OID4VP and RFC9101.
-//
-// Per OID4VP draft 24 §5.11, when method is POST the request MUST use the
-// https scheme, set Content-Type: application/x-www-form-urlencoded and
-// Accept: application/oauth-authz-req+jwt. The https requirement is also
-// applied to the GET method for project-wide consistency with the same
-// guard in wallet/receiver/plugins/oid4vci/oid4vci.go (Issue #29).
-// It can be relaxed by setting the VCKNOTS_WALLET_HTTP_ALLOWED environment
-// variable for testing.
+// WithRequestObjectURI fetches the Request Object from request_uri with the
+// given method (OID4VP 1.0 §5.10) and authenticates it. The URI must use
+// https for either method unless HTTP is allowed for local tests; redirects
+// are not followed.
 func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMethod) *requestBuilder {
 	if b.errValidation != nil {
 		return b
@@ -347,10 +341,11 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	}
 
 	var req *http.Request
+	ctx := observe.WithEndpoint(b.context(), observe.EndpointRequestObject)
 
 	switch method {
 	case RequestURIMethodGET:
-		req, err = http.NewRequest(http.MethodGet, parsedURI.String(), nil)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, parsedURI.String(), nil)
 	case RequestURIMethodPOST:
 		formData := url.Values{}
 		if b.draft24 {
@@ -375,7 +370,7 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 				formData.Set("wallet_metadata", string(metadataJSON))
 			}
 		}
-		req, err = http.NewRequest(http.MethodPost, parsedURI.String(), strings.NewReader(formData.Encode()))
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, parsedURI.String(), strings.NewReader(formData.Encode()))
 	default:
 		b.errValidation = fmt.Errorf("unsupported request_uri_method: %s", method)
 		return b
@@ -386,7 +381,6 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	req = req.WithContext(observe.WithEndpoint(req.Context(), observe.EndpointRequestObject))
 	req.Header.Set("User-Agent", "")
 	req.Header.Set("Accept", "application/oauth-authz-req+jwt")
 	if b.draft24 {
@@ -395,11 +389,9 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	if method == RequestURIMethodPOST {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	client := b.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	// A redirect is not followed: it could move the fetch to plain http or
+	// to a host the https check above never saw.
+	resp, err := httpfetch.NoRedirect(b.httpClient).Do(req)
 	if err != nil {
 		b.errValidation = fmt.Errorf("failed to send %s request to %s: %w", method, uri, err)
 		return b
@@ -411,18 +403,25 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	body, err := httpfetch.ReadLimited(resp, maxRequestObjectBytes)
 	if err != nil {
-		b.errValidation = fmt.Errorf("failed to read response body: %w", err)
-		return b
-	}
-	if len(body) > 1<<20 {
-		b.errValidation = fmt.Errorf("request_uri response exceeds 1 MiB")
+		b.errValidation = fmt.Errorf("failed to read the request_uri response: %w", err)
 		return b
 	}
 
 	b.requestSource = sourceReference
 	return b.withRequestObject(string(body))
+}
+
+// maxRequestObjectBytes bounds a Request Object, fetched or passed by value.
+const maxRequestObjectBytes = 1 << 20
+
+// context returns the context this parse's outbound requests run under.
+func (b *requestBuilder) context() context.Context {
+	if b.requestObjectValidation != nil && b.requestObjectValidation.Context != nil {
+		return b.requestObjectValidation.Context
+	}
+	return context.Background()
 }
 
 // newRequestURINonce returns the wallet_nonce for a Final request_uri POST. It

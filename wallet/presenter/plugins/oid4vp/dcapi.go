@@ -137,7 +137,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(invocation DCAPIInvocation, origin st
 	if err := json.Unmarshal(rawRequest, &obj); err != nil {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API signed request member must be a compact JWS string")
 	}
-	if strings.Count(obj, ".") != 2 || len(obj) > 1<<20 {
+	if strings.Count(obj, ".") != 2 || len(obj) > maxRequestObjectBytes {
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API signed request must be a bounded compact signed JWT")
 	}
 

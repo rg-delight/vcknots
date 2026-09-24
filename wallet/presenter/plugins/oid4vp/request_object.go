@@ -349,7 +349,7 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	b.adoptCallerWalletNonce(options)
 	// A compact JWS keeps all authentication parameters in the protected
 	// header. Do not accept the general JSON serialization's unprotected x5c.
-	if strings.Count(obj, ".") != 2 || len(obj) > 1<<20 {
+	if strings.Count(obj, ".") != 2 || len(obj) > maxRequestObjectBytes {
 		return errors.New("request object must be a bounded compact signed JWT")
 	}
 	parsed, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))

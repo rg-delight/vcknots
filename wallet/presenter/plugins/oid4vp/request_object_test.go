@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -415,7 +416,7 @@ func TestFinalRequestObjectURIResponseIsBounded(t *testing.T) {
 		"request_uri": []string{server.URL},
 	}.Encode()
 	_, err := p.ParsePresentationRequest(uri)
-	if err == nil || !strings.Contains(err.Error(), "request_uri response exceeds 1 MiB") {
+	if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 		t.Fatalf("oversized request_uri response must be rejected: %v", err)
 	}
 }
