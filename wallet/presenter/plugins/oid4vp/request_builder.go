@@ -457,5 +457,11 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if err := b.enforceHAIPProfile(); err != nil {
 		return nil, err
 	}
+	if b.req.ClientMetadata != nil {
+		b.req.ClientMetadata.encryptionPolicy = encryptionPolicyFinal
+		if b.haipRequestObjectPolicy() {
+			b.req.ClientMetadata.encryptionPolicy = encryptionPolicyHAIP
+		}
+	}
 	return b.req, nil
 }

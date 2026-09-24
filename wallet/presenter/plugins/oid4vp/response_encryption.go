@@ -28,9 +28,15 @@ func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map
 }
 
 // encryptAuthorizationResponseJWE encrypts payload as an OID4VP 1.0 §8.3
-// authorization response JWE under the presenter's profile.
+// authorization response JWE. Metadata of a parsed request is encrypted under
+// the rules that request was admitted with, so a Draft24 request is not held
+// to HAIP after consent; other metadata follows the presenter's profile.
 func (p *Oid4vpPresenter) encryptAuthorizationResponseJWE(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
-	return encryptAuthorizationResponse(payloadBytes, metadata, p.Profile.IsHAIP())
+	haip := p.Profile.IsHAIP()
+	if metadata != nil && metadata.encryptionPolicy != encryptionPolicyUnset {
+		haip = metadata.encryptionPolicy == encryptionPolicyHAIP
+	}
+	return encryptAuthorizationResponse(payloadBytes, metadata, haip)
 }
 
 // encryptAuthorizationResponse selects a usable Verifier encryption key and

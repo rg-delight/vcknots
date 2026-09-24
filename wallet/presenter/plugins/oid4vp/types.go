@@ -214,7 +214,23 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseAlg   string             `json:"authorization_encrypted_response_alg,omitempty"`
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
+
+	// encryptionPolicy records the response encryption rules the request
+	// carrying this metadata was admitted under, so the response is encrypted
+	// under the same rules. It is never read from or written to JSON.
+	encryptionPolicy responseEncryptionPolicy
 }
+
+// responseEncryptionPolicy is the response encryption rule set a request was
+// admitted under.
+type responseEncryptionPolicy int
+
+const (
+	// encryptionPolicyUnset defers to the presenter's profile.
+	encryptionPolicyUnset responseEncryptionPolicy = iota
+	encryptionPolicyFinal
+	encryptionPolicyHAIP
+)
 
 func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) {
 	for _, key := range v.Jwks.Keys {
