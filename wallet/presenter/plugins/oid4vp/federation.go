@@ -43,7 +43,7 @@ type FederationTrustOptions struct {
 	// Wallet displays. Empty means English.
 	PreferredLocales []string
 	// SigningAlgorithms bounds the Request Object signature algorithms of a
-	// federation Verifier. Empty means DefaultFederationRequestObjectAlgorithms.
+	// federation Verifier. Empty means DefaultFederationRequestObjectAlgorithms().
 	SigningAlgorithms []jose.SignatureAlgorithm
 	// AllowUnsignedRequests accepts an openid_federation request in plain
 	// parameters when its response endpoint is one of the redirect_uris the
@@ -54,11 +54,14 @@ type FederationTrustOptions struct {
 	AllowUnsignedRequests bool
 }
 
-// DefaultFederationRequestObjectAlgorithms is the Request Object signature
-// policy applied when FederationTrustOptions leaves SigningAlgorithms empty.
-// It holds ES256 alone, the algorithm every OpenID Federation deployment
-// interoperates on; a deployment that accepts more says so in its options.
-var DefaultFederationRequestObjectAlgorithms = []jose.SignatureAlgorithm{jose.ES256}
+// DefaultFederationRequestObjectAlgorithms returns a copy of the Request
+// Object signature policy applied when FederationTrustOptions leaves
+// SigningAlgorithms empty: ES256 alone, the algorithm every OpenID Federation
+// deployment interoperates on. A deployment that accepts more says so in its
+// options.
+func DefaultFederationRequestObjectAlgorithms() []jose.SignatureAlgorithm {
+	return []jose.SignatureAlgorithm{jose.ES256}
+}
 
 // FederationEvidence records the Trust Chain that authenticated a Verifier.
 // No request parameter can populate it: every value is read from statements
@@ -114,7 +117,7 @@ func (b *requestCore) authenticateFederationRequestObject(
 	}
 	algorithms := options.Federation.SigningAlgorithms
 	if len(algorithms) == 0 {
-		algorithms = DefaultFederationRequestObjectAlgorithms
+		algorithms = DefaultFederationRequestObjectAlgorithms()
 	}
 	if !slices.Contains(algorithms, jose.SignatureAlgorithm(header.Algorithm)) {
 		return fmt.Errorf("openid_federation request object alg %q is not accepted: %w", header.Algorithm, ErrRequestObjectSignatureInvalid)

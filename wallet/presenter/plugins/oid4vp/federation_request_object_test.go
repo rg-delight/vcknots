@@ -346,3 +346,13 @@ func TestFederationUnsignedRequestNeedsOptIn(t *testing.T) {
 		t.Fatalf("missing federation evidence: %+v", request.VerifierFederation)
 	}
 }
+
+// The default Request Object algorithm policy is returned as a copy, so a
+// caller cannot widen it for every presenter in the process.
+func TestDefaultFederationRequestObjectAlgorithmsIsACopy(t *testing.T) {
+	algorithms := DefaultFederationRequestObjectAlgorithms()
+	algorithms[0] = jose.RS256
+	if got := DefaultFederationRequestObjectAlgorithms(); !reflect.DeepEqual(got, []jose.SignatureAlgorithm{jose.ES256}) {
+		t.Fatalf("DefaultFederationRequestObjectAlgorithms() = %v after a caller changed its copy", got)
+	}
+}
