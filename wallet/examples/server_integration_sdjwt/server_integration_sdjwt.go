@@ -292,15 +292,26 @@ func parseCredentialOffer(offerURI string, logger *slog.Logger) *wallet.Credenti
 }
 
 // buildCertPool creates the appropriate certificate pool based on the mode.
-// For conformance testing, it uses the system root certificate pool.
-// For server integration, it loads the server's specific certificate.
+// For conformance testing, it uses the system root certificate pool plus the
+// PEM file named by VCKNOTS_CONFORMANCE_CA_PATH, if set, so a suite's test CA
+// is trusted explicitly. For server integration, it loads the server's
+// specific certificate.
 func buildCertPool(isConformanceMode bool) *x509.CertPool {
 	if isConformanceMode {
-		systemRoots, err := x509.SystemCertPool()
+		roots, err := x509.SystemCertPool()
 		if err != nil {
 			panic(fmt.Sprintf("failed to load system cert pool: %v", err))
 		}
-		return systemRoots
+		if caPath := os.Getenv("VCKNOTS_CONFORMANCE_CA_PATH"); caPath != "" {
+			pem, err := os.ReadFile(caPath)
+			if err != nil {
+				panic(fmt.Sprintf("failed to read conformance CA: %v", err))
+			}
+			if !roots.AppendCertsFromPEM(pem) {
+				panic("failed to parse conformance CA")
+			}
+		}
+		return roots
 	}
 
 	certPath := os.Getenv("VCKNOTS_CERT_PATH")
@@ -360,9 +371,8 @@ func main() {
 
 	certPool := buildCertPool(isConformanceMode)
 	p := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:              env.IsHTTPAllowed(),
-		X509TrustChainRoots:    certPool,
-		InsecureSkipX509Verify: isConformanceMode,
+		AllowHTTP:           env.IsHTTPAllowed(),
+		X509TrustChainRoots: certPool,
 	}
 	presenterDisp, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, p))
 	if err != nil {

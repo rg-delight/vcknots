@@ -293,13 +293,12 @@ go run server_integration_sdjwt.go "openid4vp://authorize?client_id=...&request_
 
 - **Credential**: `example_sd_jwt.txt` の SD-JWT VC を保存して提示
 - **証明書検証**: システムルート証明書プールを `X509TrustChainRoots` に設定
-- **`InsecureSkipX509Verify: true`**: 自動設定されます。この設定が適用されるのは OpenID4VP Draft 24 の入口だけで、`PresentCredential` が使う OpenID4VP 1.0 の経路では、署名付き Request Object をすべて拒否させます。そのため、このモードが答えるのは署名なしの要求だけです。署名付きの要求には、代わりにスイートのルート証明書をトラストアンカーに設定してください（[wallet ガイド](../../docs/i18n/ja/docusaurus-plugin-content-docs/current/wallet.md)のトラブルシューティングを参照）
+- **トラストアンカー**: システムのルート証明書に加えて、`VCKNOTS_CONFORMANCE_CA_PATH` で指定した PEM ファイルを信頼します。スイートのルート証明書を指定すると、署名付き Request Object をそれで認証します。
 - **選択クレーム**: `given_name`
 - **キーバインディング**: 必須（`RequireKeyBinding: true`）
 - **Audience/Nonce**: 要求から取得
 - **OpenID4VCI のクライアント認証と DPoP**: 設定しない（このモードでは OpenID4VP の提示フローだけをテスト）
 
-> ⚠️ **警告**: `InsecureSkipX509Verify: true` はコンフォーマンステストとローカル開発専用です。本番環境では**絶対に**使用しないでください。
 
 ---
 
@@ -329,7 +328,7 @@ go run server_integration_sdjwt.go "openid4vp://authorize?..."
 ```
 - 外部のOpenID4VPコンフォーマンステストサービスに対してテスト
 - システムルート証明書プールを使用
-- `InsecureSkipX509Verify: true` を自動設定するため、署名なしの OpenID4VP 1.0 要求にだけ応答
+- 署名付き Request Object はシステムのルート証明書と `VCKNOTS_CONFORMANCE_CA_PATH` で認証
 
 ### ファイル構成
 
@@ -409,5 +408,5 @@ export VCKNOTS_WALLET_HTTP_ALLOWED=true
 コンフォーマンステストサーバーは、テスト目的で自己署名証明書や非標準的な証明書構造を使用することがあります。
 
 - **状況**: ローカルサーバー統合テストモード（引数なし）で発生する場合、証明書ファイルが正しく設定されていない可能性があります。
-- **状況**: コンフォーマンステストモード（引数あり）では `InsecureSkipX509Verify: true` が自動設定され、OpenID4VP 1.0 の経路は署名付き Request Object を拒否します。署名付きの要求には、スイートのルート証明書をトラストアンカーに設定してください。
+- **状況**: コンフォーマンステストモード（引数あり）では、`VCKNOTS_CONFORMANCE_CA_PATH` にスイートのルート証明書を指定すると、その署名付き Request Object を信頼します。
 - **解決策（ローカルサーバー統合テストモード向け）**: 正しい証明書ファイルが `../../../server/samples/certificate-openid-test/certificate_openid.pem` に配置されていることを確認するか、`VCKNOTS_CERT_PATH` で指定してください。

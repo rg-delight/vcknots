@@ -292,13 +292,12 @@ Conformance Test mode automatically applies the following settings:
 
 - **Credential**: The SD-JWT VC in `example_sd_jwt.txt` is stored and presented
 - **Certificate Verification**: The system root certificate pool is set as `X509TrustChainRoots`
-- **`InsecureSkipX509Verify: true`**: Set automatically. It applies to the OpenID4VP Draft 24 entry points only; on the OpenID4VP 1.0 path that `PresentCredential` uses, it makes the wallet refuse every signed Request Object. With it, this mode answers unsigned requests only. For a signed request, configure the suite's root certificate as a trust anchor instead (see the Troubleshooting section of the [wallet guide](../../docs/en/wallet.md))
+- **Trust anchors**: The system roots plus the PEM file named by `VCKNOTS_CONFORMANCE_CA_PATH`, if set. Point it at the suite's root certificate so signed Request Objects are authenticated against it.
 - **Selected Claims**: `given_name`
 - **Key Binding**: Required (`RequireKeyBinding: true`)
 - **Audience/Nonce**: Taken from the request
 - **OpenID4VCI Client Authentication and DPoP**: Not configured; this mode tests the OpenID4VP presentation flow only
 
-> ⚠️ **Warning**: `InsecureSkipX509Verify: true` is for conformance tests and local development only. **Never** use it in production environments.
 
 ---
 
@@ -328,7 +327,7 @@ go run server_integration_sdjwt.go "openid4vp://authorize?..."
 ```
 - Tests against external OpenID4VP conformance test services
 - Uses system root certificate pool
-- `InsecureSkipX509Verify: true` is automatically set, so only unsigned OpenID4VP 1.0 requests are answered
+- Signed Request Objects are authenticated against the system roots and `VCKNOTS_CONFORMANCE_CA_PATH`
 
 ### File Structure
 
@@ -408,4 +407,4 @@ The conformance test suite intentionally sends malformed `client_id` values to t
 Conformance test servers may use self-signed or non-standard certificate structures for testing purposes.
 
 - **When running local server integration test mode (no arguments)**: Check that the certificate file is correctly placed at `../../../server/samples/certificate-openid-test/certificate_openid.pem`, or specify it via `VCKNOTS_CERT_PATH`.
-- **When running conformance test mode (with URI argument)**: `InsecureSkipX509Verify: true` is set automatically, which makes the OpenID4VP 1.0 path refuse signed Request Objects. Configure the suite's root certificate as a trust anchor for signed requests.
+- **When running conformance test mode (with URI argument)**: set `VCKNOTS_CONFORMANCE_CA_PATH` to the suite's root certificate so its signed Request Objects are trusted.
