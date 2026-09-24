@@ -33,11 +33,8 @@ import (
 // as that call. The hook is called once per credential, and a KeyLookup keeps
 // the resolution of its most recent call.
 //
-// Keys returns every candidate the ladder produced, in ladder order. It does
-// not narrow them to the candidates whose Candidate.Issuer equals the JWT
-// `iss`: the credential acceptor authenticates the signature with whichever of
-// them verifies, which is the rule this wallet has always applied to a
-// credential (the Status List path, which does narrow, is StatusListKeys).
+// Keys returns the candidates the ladder produced whose Candidate.Issuer equals
+// the JWT `iss`, in ladder order.
 type KeyLookup struct {
 	resolver *Resolver
 	//nolint:containedctx // The acceptor's hook has no context parameter; see the type comment.
@@ -98,6 +95,9 @@ func (l *KeyLookup) KeysFromClaims(issuer string, header map[string]any, claims 
 		if errors.As(err, &didOnly) {
 			markChainUntrusted(&Resolution{Diagnostics: didOnly.Diagnostics})
 		}
+	}
+	if err == nil {
+		resolution.Candidates = issuerCandidates(resolution.Candidates, issuer)
 	}
 	if err == nil && len(resolution.Candidates) == 0 {
 		err = l.ctx.Err()
@@ -196,8 +196,7 @@ func (r *Resolver) StatusListKeyFunc(template Request, x5c *X5CTrust) func(ctx c
 // that is not a credential, such as a Token Status List token, and returns the
 // resolution they came from.
 //
-// The rules are the ones this wallet applies to any issuer JWT it verifies
-// itself:
+// The rules:
 //
 //  1. When the header carries an `x5c`, trust is non-nil, and the `x5c` rung
 //     accepted the chain for this issuer (it reports the DNS name the chain
@@ -205,8 +204,8 @@ func (r *Resolver) StatusListKeyFunc(template Request, x5c *X5CTrust) func(ctx c
 //     name exactly and the path must reach one of trust.TrustAnchors. The
 //     leaf's key is then the first candidate, as MechanismX5CTrustedChain.
 //  2. A chain that is merely not trusted - malformed, reaching no configured
-//     anchor, or not naming the issuer's host - says something about this
-//     wallet's configuration rather than about the signer. It is recorded as
+//     anchor, or not naming the issuer's host - says something about the
+//     caller's trust configuration rather than about the signer. It is recorded as
 //     the `x5c` rung's failure ("certificate chain is not trusted") and the
 //     ladder's candidates are still offered.
 //  3. Any other refusal - a revoked certificate, a revocation status that
@@ -235,11 +234,7 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 	if trusted != nil {
 		candidates = append(candidates, *trusted)
 	}
-	for _, candidate := range resolution.Candidates {
-		if candidate.Issuer == issuer {
-			candidates = append(candidates, candidate)
-		}
-	}
+	candidates = append(candidates, issuerCandidates(resolution.Candidates, issuer)...)
 
 	narrowed := &Resolution{
 		Candidates:    candidates,
@@ -316,7 +311,7 @@ func (r *Resolver) trustedChainCandidate(ctx context.Context, request Request, r
 }
 
 // chainRefusalIsStructural reports whether a signing-chain refusal is about
-// this wallet's trust configuration - the chain reaches no configured anchor -
+// the caller's trust configuration - the chain reaches no configured anchor -
 // rather than about the signer. commonX509 names that condition
 // "x509_chain_untrusted"; a revoked chain, an unknown revocation status and an
 // exhausted revocation budget carry codes of their own.
@@ -336,6 +331,18 @@ func markChainUntrusted(resolution *Resolution) {
 			diagnostic.Failure = failureChainUntrusted
 		}
 	}
+}
+
+// issuerCandidates returns the candidates attributable to issuer, the JWT
+// `iss`: those whose Candidate.Issuer equals it.
+func issuerCandidates(candidates []Candidate, issuer string) []Candidate {
+	narrowed := make([]Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Issuer == issuer {
+			narrowed = append(narrowed, candidate)
+		}
+	}
+	return narrowed
 }
 
 // requestFromHeader fills template with what a JWT's `iss` and protected header
@@ -372,12 +379,12 @@ func headerX5C(raw any) []string {
 	}
 }
 
-// candidateKeys returns the keys of candidates in order, each reduced to its
-// public half.
+// candidateKeys returns the signature keys of candidates in order, each reduced
+// to its public half.
 func candidateKeys(candidates []Candidate) []jose.JSONWebKey {
 	keys := make([]jose.JSONWebKey, 0, len(candidates))
 	for _, candidate := range candidates {
-		if key, ok := publicKey(candidate.Key); ok {
+		if key, ok := publicKey(candidate.Key); ok && isSignatureKey(key) {
 			keys = append(keys, key)
 		}
 	}

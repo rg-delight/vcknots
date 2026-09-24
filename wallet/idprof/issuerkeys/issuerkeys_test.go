@@ -2,6 +2,7 @@ package issuerkeys
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"slices"
@@ -25,7 +26,8 @@ type ladderFixture struct {
 	decoy testKey
 	// issuer is an Issuer identifier with a path, hosted by origin.
 	issuer string
-	// credentialIssuer is the Credential Issuer identifier of the issuance.
+	// credentialIssuer is the Credential Issuer identifier of the issuance,
+	// the same identifier as issuer.
 	credentialIssuer string
 }
 
@@ -37,7 +39,7 @@ func newLadderFixture(t *testing.T) *ladderFixture {
 		signer:           newES256Key(t, "issuer-key-1"),
 		decoy:            newES256Key(t, "decoy-key"),
 		issuer:           origin.url() + "/tenant",
-		credentialIssuer: origin.url() + "/issuer",
+		credentialIssuer: origin.url() + "/tenant",
 	}
 }
 
@@ -289,6 +291,32 @@ func TestJWTVCIssuerMetadataRung(t *testing.T) {
 			},
 		},
 		{
+			name: "a media type that merely contains application/json is refused",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				f.origin.set("/.well-known/jwt-vc-issuer/tenant", testRoute{contentType: "application/jsonx", body: []byte(`{}`)})
+				return f.sdJWTRequest()
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungJWTVCIssuerMetadata: {attempted: true, failure: "response is not labelled as JSON"},
+			},
+		},
+		{
+			name: "a jwks_uri served as a JWK Set media type is read",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				f.origin.json(t, "/.well-known/jwt-vc-issuer/tenant", map[string]any{
+					"issuer": f.issuer, "jwks_uri": f.origin.url() + "/jwks.json",
+				})
+				body, err := json.Marshal(jwksObject(t, f.signer.public))
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.origin.set("/jwks.json", testRoute{contentType: "application/jwk-set+json", body: body})
+				return f.sdJWTRequest()
+			},
+			wantMechanisms: []Mechanism{MechanismJWTVCIssuerMetadata},
+		},
+		{
 			name: "an error status is reported with its code only",
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				return f.sdJWTRequest()
@@ -526,13 +554,15 @@ func TestX5CRung(t *testing.T) {
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
 				request.CredentialFormat = FormatJWTVCJSON
+				request.Issuer = f.origin.url() + "/other"
 				request.X5C = x5cOf(leaf)
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
-				RungX5C: {failure: "issuer must match credential issuer metadata"},
+				RungX5C:                {failure: "issuer must match credential issuer metadata"},
+				RungIssuerMetadataJWKS: {failure: "issuer is not the credential issuer"},
 			},
 		},
 		{
@@ -568,6 +598,7 @@ func TestX5CRung(t *testing.T) {
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
 				request.Issuer = "http://issuer.example.test/tenant"
+				request.CredentialIssuer = request.Issuer
 				request.X5C = x5cOf(leaf)
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
@@ -656,6 +687,7 @@ func TestIssuerMetadataRung(t *testing.T) {
 			},
 			wantMechanisms: []Mechanism{MechanismX5CMetadataJWKSBinding, MechanismCredentialIssuerMetadataJWKS, MechanismCredentialIssuerMetadataJWKS},
 			wantKeyIDs:     []string{"", "stale-key", "issuer-key-1"},
+			wantDNSName:    "127.0.0.1",
 			diagnostics: map[string]wantDiagnostic{
 				RungIssuerMetadataJWKS: {attempted: true, count: 3},
 			},
@@ -687,6 +719,50 @@ func TestIssuerMetadataRung(t *testing.T) {
 			wantDNSName:    "127.0.0.1",
 		},
 		{
+			name:       "metadata keys are not attributed to an issuer other than the Credential Issuer",
+			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				request := f.sdJWTRequest()
+				request.Issuer = f.origin.url() + "/other"
+				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				return request
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungIssuerMetadataJWKS: {failure: "issuer is not the credential issuer"},
+			},
+		},
+		{
+			name:       "an encryption key is never a signature candidate",
+			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				request := f.sdJWTRequest()
+				encryption := f.signer.withKeyID("enc-key", "")
+				encryption.Use = "enc"
+				signing := f.decoy.withKeyID("sig-key", "")
+				signing.Use = "sig"
+				request.IssuerMetadataJWKS = keySet(encryption, signing)
+				return request
+			},
+			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantKeyIDs:     []string{"sig-key"},
+		},
+		{
+			name:       "a metadata set holding only encryption keys offers nothing",
+			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				request := f.sdJWTRequest()
+				encryption := f.signer.withKeyID("enc-key", "")
+				encryption.Use = "enc"
+				request.IssuerMetadataJWKS = keySet(encryption)
+				return request
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungIssuerMetadataJWKS: {failure: "no issuer metadata key matches the credential algorithm"},
+			},
+		},
+		{
 			name:       "a private metadata key is offered as its public half",
 			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
 			arrange: func(t *testing.T, f *ladderFixture) Request {
@@ -715,7 +791,7 @@ func TestDIDRungMethods(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, count: 1},
 			},
@@ -758,7 +834,7 @@ func TestDIDRungMethods(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 		},
 		{
 			name: "an Ed25519 did:jwk bound by the signed vc.issuer.credential_issuer",
@@ -854,7 +930,7 @@ func TestDIDRungMethods(t *testing.T) {
 			mechanisms:     func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
 			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
 			diagnostics: map[string]wantDiagnostic{
-				RungDID: {failure: "kid is not a DID"},
+				RungDID: {failure: "issuer is not a DID"},
 			},
 		},
 		{
@@ -868,7 +944,34 @@ func TestDIDRungMethods(t *testing.T) {
 			mechanisms:     func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
 			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
 			diagnostics: map[string]wantDiagnostic{
-				RungDID: {failure: "no DID-shaped issuer or kid"},
+				RungDID: {failure: "issuer is not a DID"},
+			},
+		},
+		{
+			name: "a kid naming a DID under a URL issuer is not attributed to the issuer",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				didValue := didJWK(t, f.signer.public)
+				request := f.sdJWTRequest()
+				request.CredentialFormat = FormatJWTVCJSON
+				request.KeyID = didValue + "#0"
+				return request
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungDID: {failure: "kid names a DID but the issuer is not that DID"},
+			},
+		},
+		{
+			name: "a kid naming another DID than the issuer yields no DID key",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				request := f.jwtVCRequest(didJWK(t, f.decoy.public), didJWK(t, f.signer.public)+"#0")
+				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				return request
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungDID:                {failure: "kid names a DID other than the issuer"},
+				RungIssuerMetadataJWKS: {failure: "issuer is not the credential issuer"},
 			},
 		},
 	})
@@ -886,7 +989,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 			check: func(t *testing.T, f *ladderFixture, resolution *Resolution, _ error) {
 				if got := f.origin.accept("/bank/did.json"); got != "application/did+json, application/json" {
 					t.Errorf("Accept = %q", got)
@@ -909,7 +1012,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public, f.decoy.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, count: 1},
 			},
@@ -923,7 +1026,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 		},
 		{
 			name: "a kid naming no verification method of the document yields no DID key",
@@ -934,7 +1037,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "DID resolved to no verification key"},
 			},
@@ -953,7 +1056,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 		},
 		{
 			name: "the JSON-LD DID document media type is accepted",
@@ -964,7 +1067,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 		},
 		{
 			name:       "an authentication-only verification method is never an issuer key",
@@ -992,7 +1095,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "did:web host is not the credential issuer host"},
 			},
@@ -1006,7 +1109,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "did:web host is not the credential issuer host"},
 			},
@@ -1024,7 +1127,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "DID resolved to no verification key"},
 			},
@@ -1038,7 +1141,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "DID resolved to no verification key"},
 			},
@@ -1053,7 +1156,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungDID: {attempted: true, failure: "DID resolved to no verification key"},
 			},
@@ -1068,7 +1171,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
 				if f.origin.requested("/moved/did.json") != 0 {
 					t.Errorf("redirect target was requested")
@@ -1086,7 +1189,7 @@ func TestDIDRungDIDWeb(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 		},
 	})
 }
@@ -1215,6 +1318,16 @@ func TestDIDRungDIDConfiguration(t *testing.T) {
 			wantErr: ErrDIDOnlyTrustUnsupported,
 		},
 		{
+			name: "a linkage JWT whose exp is not a NumericDate does not bind",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				return linkage(t, f, func(_ string, _, claims map[string]any) testKey {
+					claims["exp"] = "2999-01-01"
+					return testKey{}
+				})
+			},
+			wantErr: ErrDIDOnlyTrustUnsupported,
+		},
+		{
 			name: "a linkage whose expirationDate has passed does not bind",
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				return linkage(t, f, func(_ string, _, claims map[string]any) testKey {
@@ -1296,7 +1409,7 @@ func TestDIDRungDIDConfiguration(t *testing.T) {
 				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding, MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
 			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
 				if f.origin.requested(configurationPath) != 0 {
 					t.Errorf("the DID Configuration was requested although the metadata bound the key")
@@ -1317,7 +1430,7 @@ func TestEveryMechanismSwitchedOff(t *testing.T) {
 	request.X5C = x5cOf(leaf)
 	request.IssuerMetadataJWKS = keySet(f.signer.public)
 
-	// Only the x5c rung left standing: the wallet's strict X.509 setting.
+	// Only the x5c rung left standing: an X.509-only issuer policy.
 	resolver := f.origin.resolver(Mechanisms{X5C: true})
 	_, err := resolver.Resolve(context.Background(), request)
 	if !errors.Is(err, ErrNoIssuerKeyResolved) {
