@@ -166,6 +166,18 @@ type Config struct {
 	// receiver/types.OID4VCIFinalSigner, as the bundled OpenID4VCI plugin does,
 	// and oid4vcisign.Default otherwise.
 	OID4VCISigner receiverTypes.OID4VCIFinalSigner
+
+	// Issuance holds the wallet-level OpenID4VCI settings. Not read yet.
+	Issuance IssuanceConfig
+
+	// Attestation supplies and authenticates client and key attestations. Not
+	// read yet; it takes over ClientAttestation, KeyAttestation and
+	// AttestationTrust.
+	Attestation AttestationConfig
+
+	// TestHooks rewrites protocol messages the library built, for testing how
+	// a peer handles them. Nil leaves every message as built. Not read yet.
+	TestHooks *TestHooks
 }
 
 // DPoPConfig holds configuration for DPoP proof generation.
@@ -198,6 +210,43 @@ type ClientAuthConfig struct {
 	Key               IKeyEntry
 	AssertionAudience string
 	SigningAlg        jose.SignatureAlgorithm
+}
+
+// IssuanceConfig holds the wallet-level OpenID4VCI settings every issuance
+// shares.
+type IssuanceConfig struct {
+	// RedirectURI is the redirect_uri of the Authorization Code Flow
+	// (OpenID4VCI 1.0 Section 5.1).
+	RedirectURI string
+	// CredentialEncryption is the holder's policy for Credential Request and
+	// Credential Response encryption (Section 10).
+	CredentialEncryption CredentialEncryptionPolicy
+}
+
+// AttestationConfig supplies the attestations an issuance presents and the
+// policy that authenticates them before they are sent.
+type AttestationConfig struct {
+	// Client supplies the OAuth 2.0 Client Attestation of this wallet
+	// instance (OpenID4VCI 1.0 Appendix E).
+	Client ClientAttestationProvider
+	// ClientKey is the wallet instance key the Client Attestation binds and
+	// the PoP is signed with. Nil means DPoP.Key.
+	ClientKey IKeyEntry
+	// Key supplies key attestations (OpenID4VCI 1.0 Appendix D).
+	Key KeyAttestationProvider
+	// Trust authenticates the attestations Client and Key return.
+	Trust AttestationTrustPolicy
+}
+
+// TestHooks rewrite messages after the library built them, so a tester can
+// see how an issuer or verifier handles a malformed one. A nil hook leaves its
+// message unchanged. They are refused under the HAIP profile.
+type TestHooks struct {
+	// KeyProof rewrites Draft 13 key proofs.
+	KeyProof ProofTransform
+	// PresentationExchangeResponse rewrites Draft 24 Presentation Exchange
+	// responses.
+	PresentationExchangeResponse Draft24ResponseTransform
 }
 
 // signatureAlgorithm returns the configured client_assertion signing

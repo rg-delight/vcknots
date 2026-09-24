@@ -9,18 +9,30 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+
+	"github.com/trustknots/vcknots/wallet/keystore"
 )
 
-// IKeyEntry represents a key entry interface for signing operations.
-// Sign signs the input bytes. ECDSA implementations may return either
-// DER-encoded ASN.1 signatures or raw IEEE P1363 (R || S) signatures.
-// Callers that require JWS-compatible ES256 signatures should prefer
-// using JWKSigner, which normalizes DER-encoded signatures to IEEE P1363.
+// IKeyEntry is a signing key: every holder, DPoP, client authentication and
+// attester key the wallet uses. Sign signs the input bytes; ECDSA
+// implementations may return DER-encoded ASN.1 or raw IEEE P1363 (R || S)
+// signatures. PublicKey returns the public JWK only, and its alg member selects
+// the JWS algorithm (an RSA key must set it).
+//
+// IKeyEntry has the method set of keystore.KeyEntry, so values convert both
+// ways. A key held in a hardware module or remote signer may also implement
+// keystore.ContextSigner to receive the operation's context.
 type IKeyEntry interface {
 	ID() string
 	PublicKey() jose.JSONWebKey
 	Sign(data []byte) ([]byte, error)
 }
+
+var (
+	_ keystore.KeyEntry = IKeyEntry(nil)
+	_ IKeyEntry         = keystore.KeyEntry(nil)
+)
+
 type inMemoryECKeyEntry struct {
 	id      string
 	privKey *ecdsa.PrivateKey
