@@ -3,11 +3,8 @@
 // proof, the Section 8.2.1.1 "jwt" key proof and the client attestation JWTs of
 // draft-ietf-oauth-attestation-based-client-auth.
 //
-// It exists so those primitives are no longer welded to the bundled transport
-// plugin. A wallet keeps the default by doing nothing, replaces it with a
-// hardware or remote signer through the Wallet configuration, and a transport
-// plugin written outside this repository embeds Default to inherit the
-// software behaviour.
+// A wallet uses Default unless its configuration supplies another
+// types.OID4VCIFinalSigner, for example a hardware or remote signer.
 package oid4vcisign
 
 import (
@@ -111,7 +108,7 @@ func (Default) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, o
 // CreateClientAttestation self-issues the Client Attestation JWT of
 // draft-ietf-oauth-attestation-based-client-auth Section 3, signing it with a
 // locally held attester key. It is CreateClientAttestationWithOptions with no
-// options, which produces the same JWT this method always has.
+// options.
 //
 // A wallet does not hold the attester's private key: the attestation is issued
 // by the attester and reaches the wallet through a ClientAttestationProvider,
@@ -123,9 +120,8 @@ func (d Default) CreateClientAttestation(clientKey jose.JSONWebKey, attesterKey 
 }
 
 // ClientAttestationOptions carries the optional inputs of
-// Default.CreateClientAttestationWithOptions that the fixed
-// CreateClientAttestation argument list cannot express. The zero value
-// reproduces the established CreateClientAttestation behaviour.
+// Default.CreateClientAttestationWithOptions. The zero value produces the
+// attestation CreateClientAttestation does.
 type ClientAttestationOptions struct {
 	// Audience, when non-empty, is written as the aud claim and binds the
 	// attestation to a single authorization server. HAIP Section 4.4.1:
@@ -136,8 +132,7 @@ type ClientAttestationOptions struct {
 	Audience string
 }
 
-// CreateClientAttestationWithOptions is CreateClientAttestation taking the
-// optional inputs that the legacy argument list could not carry. It emits the
+// CreateClientAttestationWithOptions emits the
 // draft-ietf-oauth-attestation-based-client-auth Section 3 attester-issued
 // attestation, adding the aud claim when opts.Audience is set. HAIP Section
 // 4.4.1 requires that "Wallet Attestations MUST NOT be reused across different

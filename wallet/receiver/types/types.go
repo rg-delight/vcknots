@@ -815,9 +815,8 @@ type ProofOptions struct {
 // Request and the Token Endpoint), Section 6.3 (the Client Attestation
 // challenge), Section 7 (the Nonce Endpoint), Section 8 (the Credential
 // Endpoint), Section 11 (the Notification Endpoint) and the Credential Request
-// and Credential Response codec of Section 8.1 and Section 8.2. It
-// intentionally extends, rather than replaces, the legacy Receiver interface
-// used by the existing Draft 13 flow.
+// and Credential Response codec of Section 8.1 and Section 8.2. It extends
+// Receiver.
 //
 // It carries no signing primitive. Key proofs, DPoP proofs and Client
 // Attestation PoPs are built by an OID4VCIFinalSigner, so a transport plugin

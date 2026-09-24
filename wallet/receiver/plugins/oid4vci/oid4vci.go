@@ -139,9 +139,9 @@ func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.Sup
 	}
 }
 
-// ReceiveCredential performs a Draft 13 credential request. It is a legacy
-// types.Receiver method and therefore carries no context; it binds its request
-// to context.Background().
+// ReceiveCredential performs a Draft 13 credential request. It is a
+// types.Receiver method and carries no context; it binds its request to
+// context.Background().
 func (o *Oid4vciReceiver) ReceiveCredential(
 	receivingTypes types.SupportedReceivingTypes,
 	endpoint common.URIField,

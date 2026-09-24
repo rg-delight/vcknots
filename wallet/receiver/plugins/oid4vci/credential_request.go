@@ -31,14 +31,13 @@ const maxNonceResponseBodyBytes int64 = 4 << 10
 
 // ErrProofAlgorithmNotSupported reports that the holder key cannot produce any
 // of the algorithms the Credential Issuer lists in
-// proof_signing_alg_values_supported. It is the oid4vcisign sentinel of the same
-// name, re-exported here because the key proof used to be built by this package;
-// errors.Is matches either spelling.
+// proof_signing_alg_values_supported. It is the oid4vcisign sentinel of the
+// same name, so errors.Is matches either.
 var ErrProofAlgorithmNotSupported = oid4vcisign.ErrProofAlgorithmNotSupported
 
 // FetchNonce fetches a c_nonce from the Section 7 Nonce Endpoint. It is a
-// legacy Draft 13 types.Receiver method and therefore carries no context; it
-// binds its request to context.Background().
+// types.Receiver method and carries no context; it binds its request to
+// context.Background().
 func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingTypes, endpoint common.URIField) (*string, error) {
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)

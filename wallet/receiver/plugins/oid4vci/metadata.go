@@ -113,8 +113,8 @@ func requireMatchingCredentialIssuer(declared, identifier string) error {
 }
 
 // FetchIssuerMetadata fetches the Section 12.2 Credential Issuer Metadata. It
-// is a legacy Draft 13 types.Receiver method and therefore carries no context;
-// it binds its requests to context.Background().
+// is a types.Receiver method and carries no context; it binds its requests
+// to context.Background().
 func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivingTypes types.SupportedReceivingTypes) (*types.CredentialIssuerMetadata, error) {
 	ctx := context.Background()
 	if receivingTypes != types.Oid4vci {

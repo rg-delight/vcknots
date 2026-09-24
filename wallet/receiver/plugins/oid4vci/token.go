@@ -20,8 +20,8 @@ type OAuthClientAttestationHeadersFactory = types.OAuthClientAttestationHeadersF
 const preAuthorizedCodeGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
 // FetchAccessToken performs the pre-authorized code token request. It is a
-// legacy Draft 13 types.Receiver method and therefore carries no context; it
-// binds its request to context.Background().
+// types.Receiver method and carries no context; it binds its request to
+// context.Background().
 func (o *Oid4vciReceiver) FetchAccessToken(
 	receivingTypes types.SupportedReceivingTypes,
 	endpoint common.URIField,
@@ -38,7 +38,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 		return nil, err
 	}
 	formData := url.Values{}
-	formData.Set("grant_type", "urn:ietf:params:oauth:grant-type:pre-authorized_code")
+	formData.Set("grant_type", preAuthorizedCodeGrantType)
 	formData.Set("pre-authorized_code", authzCode)
 	if txCode != "" {
 		formData.Set("tx_code", txCode)

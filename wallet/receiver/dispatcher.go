@@ -3,10 +3,10 @@ package receiver
 
 import (
 	"fmt"
-	"github.com/trustknots/vcknots/wallet/env"
 	"path/filepath"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/mock"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -84,9 +84,9 @@ func (d *ReceivingDispatcher) Plugins() []types.Receiver {
 }
 
 // OID4VCIFinalTransport returns the optional Final 1.0 / HAIP transport
-// capability of a receiver plugin without changing the legacy Draft 13 Receiver
-// contract. A plugin that only speaks HTTP satisfies it; the signing primitives
-// are supplied separately through the wallet configuration.
+// capability of a receiver plugin. A plugin that only speaks HTTP satisfies it;
+// the signing primitives are supplied separately through the wallet
+// configuration.
 func (d *ReceivingDispatcher) OID4VCIFinalTransport(receivingType types.SupportedReceivingTypes) (types.OID4VCIFinalTransport, error) {
 	plugin, err := d.getPlugin(receivingType)
 	if err != nil {
