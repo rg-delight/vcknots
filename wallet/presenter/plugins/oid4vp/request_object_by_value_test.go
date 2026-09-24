@@ -175,7 +175,7 @@ func TestParseRequestObjectIsNotTheDCAPIEntryPoint(t *testing.T) {
 	requestObject := f.sign(t, claims, nil)
 
 	_, valueErr := f.haipPresenter(true).ParseRequestObject(requestObject, f.clientID())
-	if valueErr == nil || !strings.Contains(valueErr.Error(), "dc_api.jwt is not implemented") {
+	if valueErr == nil || !strings.Contains(valueErr.Error(), "only valid over the Digital Credentials API") {
 		t.Fatalf("want a DC API response mode refused by value, got %v", valueErr)
 	}
 	uri := "openid4vp://authorize?" + url.Values{

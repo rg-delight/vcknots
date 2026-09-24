@@ -198,8 +198,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	// enforced on the DC API delivery paths only; a request_uri-delivered
 	// dc_api.jwt request is a different (rejected) delivery and keeps its own
 	// profile error.
-	if b.requestSource.isDCAPI() &&
-		(b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPI || b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPIJWT) {
+	if b.requestSource.isDCAPI() && isDCAPIMode(b.req.ResponseMode) {
 		if redirectURIFromParam != "" || responseURIFromParam != "" {
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not be present with response_mode %s", b.req.ResponseMode)
 			return

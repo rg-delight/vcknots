@@ -56,15 +56,7 @@ func (b *requestBuilder) enforceHAIPProfile() error {
 			newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri"),
 			ErrHAIPRequestURIRequired)
 	}
-	switch b.req.ResponseMode {
-	case OAuthAuthzReqResponseModeDirectPostJWT:
-		// HAIP §5.1: response encryption MUST use direct_post.jwt.
-	case OAuthAuthzReqResponseModeDCAPI, OAuthAuthzReqResponseModeDCAPIJWT:
-		// DC API requests are not delivered through request_uri; they are
-		// handled by ParseDCAPIRequest. Reaching this path means a
-		// request_uri-delivered DC API response mode, which is rejected.
-		return newAuthorizationRequestError(InvalidRequestError, "dc_api.jwt is not implemented for request_uri delivery")
-	default:
+	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT {
 		// HAIP §5.1: "Response encryption MUST be used by utilizing response
 		// mode direct_post.jwt".
 		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires response_mode direct_post.jwt")

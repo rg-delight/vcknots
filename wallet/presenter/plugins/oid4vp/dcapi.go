@@ -110,16 +110,10 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(invocation DCAPIInvocation, origin 
 	b := p.newDCAPIRequestBuilder(normalizedProfile)
 	b.requestSource = sourceDCAPIUnsigned
 	b.setParamsWithAnyMap(params)
-	if b.errValidation != nil {
-		return nil, b.errValidation
+	if b.errValidation == nil {
+		b.errValidation = b.validate()
 	}
-	if err := b.validate(); err != nil {
-		return nil, err
-	}
-	if err := b.enforceHAIPProfile(); err != nil {
-		return nil, err
-	}
-	return b.req, nil
+	return b.Build()
 }
 
 // parseDCAPISigned handles Appendix A.3.2.1: data.request is a compact JWS
@@ -330,22 +324,17 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 		return nil, fmt.Errorf("JWT standard claims validation failed: %w", err)
 	}
 	b.setParamsWithAnyMap(verified)
-	if b.errValidation != nil {
-		return nil, b.errValidation
-	}
-	if err := b.validate(); err != nil {
-		return nil, err
-	}
-	if err := b.enforceHAIPProfile(); err != nil {
-		return nil, err
+	if b.errValidation == nil {
+		b.errValidation = b.validate()
 	}
 	b.req.RequestObjectVerification = &RequestObjectVerification{
 		ClientID: b.req.ClientID, CertificateSHA256: chainResult.Fingerprints,
 		RevocationChecked:      chainResult.Revocation.CheckedCertificates,
 		RevocationUnadvertised: chainResult.Revocation.NoMechanismCertificates,
 		ExpiresAt:              requestObjectExpiry(commonJOSE.Claims(verified)),
+		Certificate:            describeRequestObjectCertificate(certificates[0]),
 	}
-	return b.req, nil
+	return b.Build()
 }
 
 // BuildDCAPIResponse builds the object returned to the platform for an already

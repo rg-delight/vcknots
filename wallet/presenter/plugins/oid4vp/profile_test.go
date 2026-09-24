@@ -114,15 +114,15 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("dc_api.jwt under HAIP is not implemented", func(t *testing.T) {
+	t.Run("dc_api.jwt outside the DC API", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
 		claims["response_mode"] = "dc_api.jwt"
 		delete(claims, "response_uri")
 		claims["redirect_uri"] = "https://verifier.example/cb"
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
-		if err == nil || !strings.Contains(err.Error(), "dc_api.jwt is not implemented") {
-			t.Fatalf("HAIP must reject dc_api.jwt with a distinct message: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "only valid over the Digital Credentials API") {
+			t.Fatalf("dc_api.jwt must be refused outside the DC API: %v", err)
 		}
 	})
 
@@ -437,13 +437,17 @@ func TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 // with the given Response Mode (OID4VP 1.0 Appendix A.3.1).
 func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation {
 	t.Helper()
-	data, err := json.Marshal(map[string]any{
+	params := map[string]any{
 		"response_type": "vp_token", "response_mode": responseMode, "nonce": "n-1",
 		"dcql_query": map[string]any{"credentials": []any{map[string]any{
 			"id": "pid", "format": "dc+sd-jwt",
 			"meta": map[string]any{"vct_values": []string{"urn:eudi:pid:1"}},
 		}}},
-	})
+	}
+	if responseMode == string(OAuthAuthzReqResponseModeDCAPIJWT) {
+		params["client_metadata"] = responseEncryptionClientMetadataClaim()
+	}
+	data, err := json.Marshal(params)
 	if err != nil {
 		t.Fatal(err)
 	}

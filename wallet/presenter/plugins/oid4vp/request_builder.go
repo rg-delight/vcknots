@@ -166,6 +166,12 @@ func isDirectPostMode(mode OAuthAuthzReqResponseMode) bool {
 	return mode == OAuthAuthzReqResponseModeDirectPost || mode == OAuthAuthzReqResponseModeDirectPostJWT
 }
 
+// isDCAPIMode reports whether the Response Mode returns the response through
+// the Digital Credentials API (OID4VP 1.0 Appendix A.2).
+func isDCAPIMode(mode OAuthAuthzReqResponseMode) bool {
+	return mode == OAuthAuthzReqResponseModeDCAPI || mode == OAuthAuthzReqResponseModeDCAPIJWT
+}
+
 // WithHTTPAllowed enables HTTP response endpoints for local tests only.
 func (b *requestBuilder) WithHTTPAllowed(allow bool) *requestBuilder {
 	b.allowHTTP = allow
@@ -206,14 +212,16 @@ func (b *requestBuilder) validate() error {
 		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 
-	// OID4VP 1.0 Appendix A.2: dc_api and dc_api.jwt return the response through
-	// the platform, so no redirect_uri is required. The response endpoint is the
-	// DC API, validated where the response is built.
-	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPI &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT &&
-		b.req.RedirectURI == "" {
+	// OID4VP 1.0 Appendix A.2: a DC API request uses dc_api or dc_api.jwt, and
+	// those modes return the response through the platform, not to a URI.
+	dcAPIMode := isDCAPIMode(b.req.ResponseMode)
+	if b.requestSource.isDCAPI() && !dcAPIMode {
+		return newAuthorizationRequestError(InvalidRequestError, "a Digital Credentials API request must use response_mode dc_api or dc_api.jwt, got %q", b.req.ResponseMode)
+	}
+	if !b.requestSource.isDCAPI() && dcAPIMode {
+		return newAuthorizationRequestError(InvalidRequestError, "response_mode %s is only valid over the Digital Credentials API", b.req.ResponseMode)
+	}
+	if !isDirectPostMode(b.req.ResponseMode) && !dcAPIMode && b.req.RedirectURI == "" {
 		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri is required")
 	}
 

@@ -560,7 +560,7 @@ func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
 func TestFinalQueryParametersWithoutAuthority(t *testing.T) {
 	uri := func(responseURI string) string {
 		return "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=n&dcql_query=" +
-			testDcqlQueryParam + "&response_mode=direct_post&response_uri=" + responseURI
+			url.QueryEscape(finalDcqlParam) + "&response_mode=direct_post&response_uri=" + responseURI
 	}
 	p := &Oid4vpPresenter{}
 	req, err := p.ParsePresentationRequest(uri("https://example.com/response"))
