@@ -217,3 +217,33 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 		t.Fatal("an x509_hash certificate outside the configured roots must be refused")
 	}
 }
+
+// TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint covers the
+// InsecureSkipX509Verify mode, which shares the X.509 binding of the verified
+// path and skips only the chain: the DNS name binds the Response URI under
+// both direct_post modes.
+func TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint(t *testing.T) {
+	f := newRequestObjectFixture(t, "verifier.example")
+	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: true}
+	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
+		t.Run(mode, func(t *testing.T) {
+			claims := f.claims()
+			claims["client_id"] = "x509_san_dns:verifier.example"
+			claims["response_mode"] = mode
+			parse := func() (*CredentialPresentationRequest, error) {
+				return p.ParseDraft24RequestObject(f.sign(t, claims, nil), "x509_san_dns:verifier.example")
+			}
+			request, err := parse()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.RequestObjectVerification != nil {
+				t.Fatal("an unverified chain must not be reported as authenticated")
+			}
+			claims["response_uri"] = "https://other.example/response"
+			if _, err := parse(); !errors.Is(err, ErrRequestObjectClientIDMismatch) {
+				t.Fatalf("endpoint host mismatch: want ErrRequestObjectClientIDMismatch, got %v", err)
+			}
+		})
+	}
+}

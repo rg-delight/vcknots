@@ -7,14 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	commonJOSE "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
@@ -149,16 +147,24 @@ func requestObjectExpiry(claims commonJOSE.Claims) time.Time {
 // WithRequestObjectValidation configures the public builder before loading a
 // Request Object. The presenter configures it once for each parse operation.
 func (b *requestBuilder) WithRequestObjectValidation(options RequestObjectValidationOptions) *requestBuilder {
+	b.setRequestObjectValidation(options)
+	return b
+}
+
+// setRequestObjectValidation stores a copy of options for this parse.
+func (c *requestCore) setRequestObjectValidation(options RequestObjectValidationOptions) {
 	options.TrustAnchors = append([]*x509.Certificate(nil), options.TrustAnchors...)
 	options.CertificateKeyUsages = append([]x509.ExtKeyUsage(nil), options.CertificateKeyUsages...)
 	options.WalletAudience = append([]string(nil), options.WalletAudience...)
 	options.SigningAlgorithms = append([]jose.SignatureAlgorithm(nil), options.SigningAlgorithms...)
-	b.requestObjectValidation = &options
-	return b
+	c.requestObjectValidation = &options
+	c.ctx = options.Context
+	c.deliveredByReference = options.DeliveredByReference
+	c.callerWalletNonce = options.WalletNonce
 }
 
 // WithExpectedClientID supplies the outer Authorization Request client_id that
-// a Final Request Object's client_id claim must equal.
+// a Request Object's client_id claim must equal.
 func (b *requestBuilder) WithExpectedClientID(clientID string) *requestBuilder {
 	b.expectedClientID = strings.TrimSpace(clientID)
 	return b
@@ -173,12 +179,10 @@ func (b *requestBuilder) WithRequestObject(obj string) *requestBuilder {
 // withRequestObject authenticates a Request Object delivered as b.requestSource
 // records.
 func (b *requestBuilder) withRequestObject(obj string) *requestBuilder {
-	if b.draft24 {
-		return b.withDraft24RequestObject(obj)
-	}
 	if b.errValidation != nil {
 		return b
 	}
+	b.requestObject = obj
 	b.errorResponseAllowed = false
 	if b.insecureSkipX509Verify {
 		b.errValidation = errors.New("final Request Object authentication cannot skip X.509 verification")
@@ -188,59 +192,6 @@ func (b *requestBuilder) withRequestObject(obj string) *requestBuilder {
 		b.errValidation = err
 	}
 	return b
-}
-
-// requestObjectValidationOptions resolves the effective trust, time and
-// signing policy from the builder's explicit validation options and the legacy
-// X509TrustChainRoots, rejecting a configuration that specifies trust roots in
-// both places. X509TrustChainRoots alone keeps its upstream revocation meaning:
-// a certificate that advertises no revocation mechanism is accepted.
-func (b *requestBuilder) requestObjectValidationOptions() (RequestObjectValidationOptions, error) {
-	options := RequestObjectValidationOptions{RootCAs: b.x509TrustChainRoots, AllowUnadvertisedRevocation: true}
-	if b.requestObjectValidation != nil {
-		options = *b.requestObjectValidation
-		if b.x509TrustChainRoots != nil && (options.RootCAs != nil || len(options.TrustAnchors) != 0) {
-			return options, errors.New("configure Request Object trust roots in only one place")
-		}
-		if options.RootCAs == nil && len(options.TrustAnchors) == 0 {
-			options.RootCAs = b.x509TrustChainRoots
-		}
-	}
-	if options.ClockSkew < 0 {
-		return options, errors.New("request object clock skew cannot be negative")
-	}
-	return options, nil
-}
-
-// verifyRequestObjectCertificateChain runs the configured X.509 chain and
-// revocation checks for a leaf-first certificate list. It is shared by the
-// request_uri signed Request Object path and the signed DC API paths.
-func (b *requestBuilder) verifyRequestObjectCertificateChain(certificates []*x509.Certificate, options RequestObjectValidationOptions, now time.Time) (*commonX509.SigningChainResult, error) {
-	client := options.CRL.HTTPClient
-	if client == nil {
-		client = b.httpClient
-		if client == nil {
-			client = (&Oid4vpPresenter{}).httpClient()
-		}
-	}
-	return commonX509.VerifySigningChainWithPolicy(options.resolveContext(), certificates, commonX509.SigningChainPolicy{
-		TrustAnchors:                options.TrustAnchors,
-		Roots:                       options.RootCAs,
-		KeyUsages:                   options.CertificateKeyUsages,
-		CRL:                         options.CRL,
-		AllowUnadvertisedRevocation: options.AllowUnadvertisedRevocation,
-		CurrentTime:                 now,
-		HTTPClient:                  client,
-	})
-}
-
-// resolveContext returns the context the revocation fetches of one Request
-// Object authentication run under.
-func (options RequestObjectValidationOptions) resolveContext() context.Context {
-	if options.Context != nil {
-		return options.Context
-	}
-	return context.Background()
 }
 
 // resolveRequestObjectAlgorithms returns the signature algorithms a Request
@@ -262,21 +213,11 @@ func requestObjectNow(options RequestObjectValidationOptions) time.Time {
 	return time.Now()
 }
 
-// haipRequestObjectPolicy reports whether the HAIP Request Object rules apply.
-// The Draft24 entrypoints are exempt from the profile, exactly as
-// enforceHAIPProfile is, so a Draft24 request keeps its own wire contract even
-// when the presenter is configured for HAIP.
-func (b *requestBuilder) haipRequestObjectPolicy() bool {
-	return !b.draft24 && b.profile.IsHAIP()
-}
-
 // requestObjectClaimPolicy is the resolved registered-claim policy applied to
 // one authenticated Request Object.
 type requestObjectClaimPolicy struct {
 	Audiences []string
-	// AudienceOptional keeps the Draft24 contract, which authenticated an
-	// X.509 Request Object without ever reading aud. A Draft24 caller opts
-	// into the check by naming its WalletAudience.
+	// AudienceOptional skips the aud check (the Draft 24 contract).
 	AudienceOptional bool
 	Now              time.Time
 	ClockSkew        time.Duration
@@ -284,44 +225,8 @@ type requestObjectClaimPolicy struct {
 	MaxAge           time.Duration
 }
 
-// resolveClaimPolicy resolves the caller's options against the active profile
-// and wire contract.
-func (b *requestBuilder) resolveClaimPolicy(options RequestObjectValidationOptions, now time.Time) requestObjectClaimPolicy {
-	policy := requestObjectClaimPolicy{
-		Audiences:        options.WalletAudience,
-		AudienceOptional: b.draft24 && len(options.WalletAudience) == 0,
-		Now:              now,
-		ClockSkew:        options.ClockSkew,
-		RequireExpiry:    options.RequireExpiry,
-		MaxAge:           options.MaxAge,
-	}
-	if b.haipRequestObjectPolicy() && policy.MaxAge == 0 {
-		// HAIP bounds the lifetime of a Request Object that does carry exp;
-		// it does not require exp (see RequireExpiry).
-		policy.MaxAge = haipRequestObjectMaxAge
-	}
-	return policy
-}
-
-// rejectTrustAnchorInX5C enforces HAIP Sections 5 and 6.1.1: "The X.509
-// certificate of the trust anchor MUST NOT be included in the x5c JOSE header
-// of the signed request." The shared check also sees anchors configured as a
-// *x509.CertPool, which the TrustAnchors-only loop it replaces silently
-// ignored. It is inert outside the HAIP profile.
-func (b *requestBuilder) rejectTrustAnchorInX5C(certificates []*x509.Certificate, options RequestObjectValidationOptions) error {
-	if !b.haipRequestObjectPolicy() {
-		return nil
-	}
-	anchored, err := commonX509.ContainsTrustAnchor(certificates, options.TrustAnchors, options.RootCAs)
-	if err != nil {
-		return err
-	}
-	if anchored {
-		return errors.New("HAIP forbids including the trust anchor certificate in the x5c header")
-	}
-	return nil
-}
-
+// authenticateFinalRequestObject authenticates an OpenID4VP 1.0 Request
+// Object (OID4VP 1.0 §5.10.1, RFC 9101) and loads its claims.
 func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if b.expectedClientID == "" && !b.expectedClientIDAbsent {
 		return errors.New("client_id Authorization Request parameter is required with a Request Object")
@@ -330,29 +235,10 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err != nil {
 		return err
 	}
-	b.adoptCallerWalletNonce(options)
-	// A compact JWS keeps all authentication parameters in the protected
-	// header. Do not accept the general JSON serialization's unprotected x5c.
-	if strings.Count(obj, ".") != 2 || len(obj) > maxRequestObjectBytes {
-		return errors.New("request object must be a bounded compact signed JWT")
-	}
-	parsed, err := jwt.ParseSigned(obj, resolveRequestObjectAlgorithms(options))
+	b.adoptCallerWalletNonce()
+	parsed, claims, err := decodeRequestObject(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
-		return fmt.Errorf("failed to parse request object JWT: %w: %w", err, ErrRequestObjectSignatureInvalid)
-	}
-	if len(parsed.Headers) != 1 {
-		return fmt.Errorf("request object JWT must have one protected header: %w", ErrRequestObjectTypInvalid)
-	}
-	typ, exists := parsed.Headers[0].ExtraHeaders["typ"]
-	if !exists {
-		return fmt.Errorf("request object JWT must include 'typ' header parameter: %w", ErrRequestObjectTypInvalid)
-	}
-	if typ != "oauth-authz-req+jwt" {
-		return fmt.Errorf("request object JWT 'typ' header must be 'oauth-authz-req+jwt': %w", ErrRequestObjectTypInvalid)
-	}
-	claims := make(commonJOSE.Claims)
-	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
-		return fmt.Errorf("failed to decode request object claims: %w", err)
+		return err
 	}
 	if _, present := claims["request"]; present {
 		return errors.New("request object must not contain request or request_uri")
@@ -365,74 +251,6 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 		return err
 	}
 	return b.authenticateRequestObjectByClientIdentifier(obj, parsed, options)
-}
-
-// authenticateX509RequestObject authenticates an x509_san_dns or x509_hash
-// Request Object for both wire contracts: chain and revocation, the Client
-// Identifier binding to the leaf and the response endpoint, and the claim
-// policy. b.req must already hold the request parameters.
-func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.JSONWebToken, options RequestObjectValidationOptions) error {
-	clientID, err := parseOID4VPClientID(b.req.ClientID)
-	if err != nil {
-		return err
-	}
-	if clientID.prefix != OID4VPClientIDPrefixX509Hash && clientID.prefix != OID4VPClientIDPrefixX509SanDNS {
-		// Final 5.1: client_metadata keys are never request-signature keys.
-		return fmt.Errorf("%w: %q", ErrRequestObjectClientAuthUnsupported, clientID.prefix)
-	}
-	certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
-	if err != nil {
-		return err
-	}
-	if err := b.rejectTrustAnchorInX5C(certificates, options); err != nil {
-		return err
-	}
-	if err := bindX509ClientID(clientID, certificates[0], b.req); err != nil {
-		return err
-	}
-	verified := make(commonJOSE.Claims)
-	if err := parsed.Claims(certificates[0].PublicKey, &verified); err != nil {
-		return fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
-	}
-	// OID4VP 1.0 §5.10.1: "if the Wallet passed a wallet_nonce in the POST
-	// request, the Wallet MUST validate whether the request object contains the
-	// respective nonce value in a wallet_nonce claim. If it does not, the Wallet
-	// MUST terminate request processing." GET never sends a nonce, so a present
-	// wallet_nonce claim is ignored in that case.
-	if b.sentWalletNonce != "" {
-		claimedNonce, ok := verified["wallet_nonce"].(string)
-		if !ok || claimedNonce != b.sentWalletNonce {
-			return newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectWalletNonceMismatch)
-		}
-	}
-	now := requestObjectNow(options)
-	if err := validateRequestObjectClaims(verified, b.resolveClaimPolicy(options, now)); err != nil {
-		return fmt.Errorf("JWT standard claims validation failed: %w", err)
-	}
-	result, err := b.verifyRequestObjectCertificateChain(certificates, options, now)
-	if err != nil {
-		return fmt.Errorf("request object certificate chain is not trusted: %w", err)
-	}
-	b.req.RequestObjectVerification = &RequestObjectVerification{
-		ClientID: b.req.ClientID, CertificateSHA256: result.Fingerprints,
-		RevocationChecked:      result.Revocation.CheckedCertificates,
-		RevocationUnadvertised: result.Revocation.NoMechanismCertificates,
-		WalletNonce:            b.sentWalletNonce,
-		ExpiresAt:              requestObjectExpiry(verified),
-		Certificate:            describeRequestObjectCertificate(certificates[0]),
-	}
-	return nil
-}
-
-// adoptCallerWalletNonce takes the wallet_nonce the application attests it
-// sent when it fetched a Request Object that now arrives by value, so the echo
-// rule of OpenID4VP 1.0 Section 5.10.1 binds that Request Object exactly as it
-// binds one this library fetched. A nonce this library sent itself always wins:
-// it is the one the Verifier actually received from this parse.
-func (b *requestBuilder) adoptCallerWalletNonce(options RequestObjectValidationOptions) {
-	if b.sentWalletNonce == "" && b.requestSource == sourceValue && options.WalletNonce != "" {
-		b.sentWalletNonce = options.WalletNonce
-	}
 }
 
 // describeRequestObjectCertificate reports the identity of the leaf that
@@ -451,27 +269,6 @@ func describeRequestObjectCertificate(leaf *x509.Certificate) *RequestObjectCert
 		NotAfter:     leaf.NotAfter.UTC(),
 		SerialNumber: leaf.SerialNumber.String(),
 	}
-}
-
-// bindX509ClientID binds an x509_hash or x509_san_dns Client Identifier to the
-// signing leaf and, for x509_san_dns, the response endpoint's host to the
-// DNS name. The SAN match is exact, never wildcard (OID4VP 1.0 §5.9.3).
-func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request *CredentialPresentationRequest) error {
-	if clientID.prefix == OID4VPClientIDPrefixX509Hash {
-		// Final 5.9.3 and HAIP 5: x509_hash does not imply a DNS binding.
-		if err := commonX509.RequireLeafThumbprint(leaf, clientID.original); err != nil {
-			return fmt.Errorf("%w: %w", err, ErrX509HashMismatch)
-		}
-		return nil
-	}
-	if err := commonX509.RequireLeafDNSName(leaf, clientID.original, false); err != nil {
-		return fmt.Errorf("%w: %w", err, ErrRequestObjectClientIDMismatch)
-	}
-	uri, err := url.Parse(request.responseEndpoint())
-	if err != nil || !strings.EqualFold(uri.Hostname(), clientID.original) {
-		return fmt.Errorf("redirect_uri/response_uri and client_id (origin) must be same: %w", ErrRequestObjectClientIDMismatch)
-	}
-	return nil
 }
 
 // validateRequestObjectClaims applies the registered-claim policy to the claims

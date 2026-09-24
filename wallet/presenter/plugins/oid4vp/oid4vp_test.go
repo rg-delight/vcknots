@@ -517,7 +517,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create signed JWT: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(mockJWT)
 
 		req, err := builder.Build()
@@ -543,7 +543,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create JWT without 'typ' header: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(invalidJWT)
 
 		_, err = builder.Build()
@@ -572,7 +572,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 			t.Fatalf("Failed to create JWT with wrong 'typ' header: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(invalidJWT)
 
 		_, err = builder.Build()
@@ -623,7 +623,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T)
 			t.Fatalf("Failed to create signed JWT: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(mockJWT)
 
 		req, err := builder.Build()
@@ -698,7 +698,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			t.Fatalf("Failed to create JWT with valid time claims: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(validJWT)
 
 		req, err := builder.Build()
@@ -720,7 +720,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			t.Fatalf("Failed to create expired JWT: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(expiredJWT)
 
 		_, err = builder.Build()
@@ -742,7 +742,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			t.Fatalf("Failed to create JWT with future iat: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(futureIatJWT)
 
 		_, err = builder.Build()
@@ -777,7 +777,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			t.Fatalf("Failed to create JWT without exp claim: %v", err)
 		}
 
-		builder := NewDraft24RequestBuilder()
+		builder := newDraft24RequestBuilder()
 		builder = builder.WithRequestObject(noExpJWT)
 
 		req, err := builder.Build()
@@ -1366,7 +1366,7 @@ func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFail
 	}
 
 	// Success: SAN matches client_id and response_uri host
-	builder := NewDraft24RequestBuilder()
+	builder := newDraft24RequestBuilder()
 	builder.x509TrustChainRoots = pool
 	builder = builder.WithRequestObject(jwtStr)
 	if _, err := builder.Build(); err != nil {
@@ -1379,7 +1379,7 @@ func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFail
 	signerOpts2 = signerOpts2.WithType("oauth-authz-req+jwt").WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(der)})
 	signer2, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: priv}, signerOpts2)
 	badJWT1, _ := jwt.Signed(signer2).Claims(claims).Serialize()
-	b := NewDraft24RequestBuilder()
+	b := newDraft24RequestBuilder()
 	b.x509TrustChainRoots = pool
 	b = b.WithRequestObject(badJWT1)
 	if _, err := b.Build(); err == nil || !strings.Contains(err.Error(), "SAN") {
@@ -1393,7 +1393,7 @@ func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFail
 	signerOpts3 = signerOpts3.WithType("oauth-authz-req+jwt").WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(der)})
 	signer3, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: priv}, signerOpts3)
 	badJWT2, _ := jwt.Signed(signer3).Claims(claims).Serialize()
-	b2 := NewDraft24RequestBuilder()
+	b2 := newDraft24RequestBuilder()
 	b2.x509TrustChainRoots = pool
 	b2 = b2.WithRequestObject(badJWT2)
 	if _, err := b2.Build(); err == nil || !strings.Contains(err.Error(), "client_id (origin) must be same") {
@@ -1531,7 +1531,8 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 
 		requestObjectURI, _ := url.Parse(m.URL() + "/request-object")
 
-		rb := NewDraft24RequestBuilder().WithHTTPAllowed(true)
+		rb := newDraft24RequestBuilder()
+		rb.allowHTTP = true
 		rb.WithRequestObjectURI(requestObjectURI.String(), RequestURIMethodPOST)
 		if !called {
 			t.Fatal("handler was not invoked")

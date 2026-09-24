@@ -135,7 +135,7 @@ func (e *AuthorizationRequestError) SendErrorResponse(ctx context.Context, clien
 
 // attachErrorResponseTarget records on the refusal in err where an error
 // authorization response may be sent, when b's request binds one.
-func (b *requestBuilder) attachErrorResponseTarget(err error) {
+func (b *requestCore) attachErrorResponseTarget(err error) {
 	var authzErr *AuthorizationRequestError
 	if !b.errorResponseAllowed || !errors.As(err, &authzErr) || !isDirectPostMode(b.req.ResponseMode) {
 		return

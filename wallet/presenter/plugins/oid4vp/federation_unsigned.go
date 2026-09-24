@@ -12,8 +12,8 @@ import (
 // the Verifier metadata (OID4VP 1.0 §5.9.3) and the response endpoint must be
 // one of its redirect_uris. Nothing authenticates the request parameters
 // themselves.
-func (b *requestBuilder) authenticateUnsignedFederationRequest(params map[string]any) error {
-	clientID, err := b.parseClientID(b.req.ClientID)
+func (b *requestCore) authenticateUnsignedFederationRequest(parseClientID func(string) (*OID4VPClientID, error), params map[string]any) error {
+	clientID, err := parseClientID(b.req.ClientID)
 	if err != nil || clientID.prefix != OID4VPClientIDPrefixOIDFederation {
 		return nil
 	}
@@ -35,7 +35,7 @@ func (b *requestBuilder) authenticateUnsignedFederationRequest(params map[string
 		}
 	}
 	trust, err := b.federationResolver(options).ResolveVerifierTrust(
-		options.resolveContext(),
+		b.context(),
 		clientID.original,
 		carried,
 		options.Federation.PreferredLocales,
