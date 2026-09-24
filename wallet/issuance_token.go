@@ -20,7 +20,7 @@ func (w *Wallet) AuthorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 }
 
 func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuthorizedIssuanceRequest) (*IssuanceGrant, error) {
-	if err := w.requireFinalIssuance(ctx); err != nil {
+	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
 		return nil, err
 	}
 	if req.CredentialOffer == nil {

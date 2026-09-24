@@ -28,7 +28,7 @@ func (w *Wallet) BeginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 }
 
 func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
-	if err := w.requireFinalIssuance(ctx); err != nil {
+	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
 		return nil, err
 	}
 	clientID, redirectURI, err := w.authorizationCodeClient()
@@ -161,7 +161,7 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	if err := w.checkAuthorizationState(a, IssuanceVersionFinal); err != nil {
 		return nil, err
 	}
-	if err := w.requireFinalIssuance(ctx); err != nil {
+	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
 		return nil, err
 	}
 	transport, err := w.oid4vciTransport()
@@ -246,9 +246,8 @@ func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, version Issua
 }
 
 // requireFinalIssuance applies the preconditions of every OpenID4VCI 1.0
-// stage: a live context, an acceptance policy, and under HAIP a client
-// authentication mechanism (HAIP Section 4.4.1) and a DPoP key (HAIP Section
-// 4).
+// stage: a live context, an acceptance policy, and under HAIP a DPoP key (HAIP
+// Section 4).
 func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -256,13 +255,21 @@ func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 	if w.credentialAcceptance == nil {
 		return fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
-	if w.profile.IsHAIP() {
-		if w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
-			return invalidArgument("HAIP requires an OAuth2 client authentication mechanism")
-		}
-		if w.dpop.Key == nil {
-			return fmt.Errorf("HAIP requires Config.DPoP.Key: %w", ErrDPoPKeyRequired)
-		}
+	if w.profile.IsHAIP() && w.dpop.Key == nil {
+		return fmt.Errorf("HAIP requires Config.DPoP.Key: %w", ErrDPoPKeyRequired)
+	}
+	return nil
+}
+
+// requireFinalAuthorizationStage is requireFinalIssuance for the stages that
+// call the PAR or token endpoint, where HAIP Section 4.4.1 also requires a
+// client authentication mechanism.
+func (w *Wallet) requireFinalAuthorizationStage(ctx context.Context) error {
+	if err := w.requireFinalIssuance(ctx); err != nil {
+		return err
+	}
+	if w.profile.IsHAIP() && w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
+		return invalidArgument("HAIP requires an OAuth2 client authentication mechanism")
 	}
 	return nil
 }

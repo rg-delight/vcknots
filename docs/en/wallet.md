@@ -640,7 +640,7 @@ The state types (`IssuanceAuthorization`, `IssuanceGrant`, `DeferredIssuance`, `
 
 **The state JSON is a bearer secret.** It carries the PKCE `code_verifier`, the access token or the ephemeral response decryption key. Keep it server-side or encrypted, and out of logs.
 
-Every OpenID4VCI 1.0 method requires `Config.CredentialAcceptance`. Under HAIP each stage also requires a client authentication mechanism (`private_key_jwt` or `Config.Attestation.Client`) and `Config.DPoP.Key`.
+Every OpenID4VCI 1.0 method requires `Config.CredentialAcceptance`. Under HAIP each stage also requires `Config.DPoP.Key`, and the stages that call the PAR or token endpoint (`BeginIssuance`, `AuthorizeIssuance`, `AuthorizePreAuthorizedIssuance`) require a client authentication mechanism (`private_key_jwt` or `Config.Attestation.Client`, HAIP §4.4.1).
 
 ### Authorization Code Flow
 

@@ -693,7 +693,7 @@ PKCE の `code_verifier`、アクセストークン、または応答復号用�
 サーバー側か暗号化して保管し、ログに出さないでください。
 
 OpenID4VCI 1.0 のすべてのメソッドは `Config.CredentialAcceptance` を要求します。
-HAIP では、各段階がクライアント認証の手段（`private_key_jwt` または `Config.Attestation.Client`）と `Config.DPoP.Key` も要求します。
+HAIP では、各段階が `Config.DPoP.Key` も要求し、PAR または token エンドポイントを呼ぶ段階（`BeginIssuance`、`AuthorizeIssuance`、`AuthorizePreAuthorizedIssuance`）はクライアント認証の手段（`private_key_jwt` または `Config.Attestation.Client`、HAIP §4.4.1）も要求します。
 
 ### Authorization Code Flow
 

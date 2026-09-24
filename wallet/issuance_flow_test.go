@@ -1299,3 +1299,43 @@ func TestIssuanceAgainstAStrictIssuer(t *testing.T) {
 	require.Equal(t, 1, obs.callCount("deferred"))
 	require.Equal(t, 1, obs.callCount("notification"))
 }
+
+// HAIP Section 4.4.1 requires client authentication at the endpoints that
+// support it (PAR and token). The Credential and Deferred Credential Requests
+// authenticate with the access token alone, so a wallet without a client
+// authentication mechanism still sends them.
+func TestIssuanceHAIPCredentialStagesNeedNoClientAuthentication(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeDeferredEndpoint = true
+		f.credentialHandler = func(w http.ResponseWriter, _ *http.Request) {
+			mockserver.JSONResponse(w, http.StatusAccepted, map[string]any{"transaction_id": "tx-1"})
+		}
+		f.deferredHandler = func(w http.ResponseWriter, _ *http.Request) {
+			mockserver.JSONResponse(w, http.StatusBadRequest, map[string]any{"error": "issuance_pending"})
+		}
+	})
+	ctx := context.Background()
+	authorization := flowTestBegin(t, fixture)
+	location, err := fixture.followAuthorization(authorization)
+	require.NoError(t, err)
+	grant, err := fixture.wallet.AuthorizeIssuance(ctx, authorization, location)
+	require.NoError(t, err)
+
+	fixture.clientAuthKey = nil
+	poller := fixture.newWallet(t)
+
+	result, err := poller.RequestCredential(ctx, grant, fixture.credentialRequest())
+	require.NoError(t, err)
+	require.NotNil(t, result.Deferred)
+	require.Equal(t, 1, fixture.credentialCalls)
+
+	pending, err := poller.RequestDeferredCredential(ctx, result.Deferred)
+	require.NoError(t, err)
+	require.NotNil(t, pending.Deferred)
+	require.Equal(t, 1, fixture.deferredCalls)
+
+	// The token endpoint still requires it.
+	_, err = poller.AuthorizeIssuance(ctx, authorization, location)
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+}
