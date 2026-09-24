@@ -102,7 +102,7 @@ func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry,
 }
 
 func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
-	for _, api := range []string{"present", "build-final"} {
+	for _, api := range []string{"present", "submit"} {
 		for _, tc := range []struct {
 			name                                                                             string
 			requestValue                                                                     any
@@ -117,8 +117,8 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 			{name: "false permits unbound credential", requestValue: false},
 			{name: "caller can request optional binding", requestValue: false, bound: true, forceBinding: true, wantBinding: true},
 		} {
-			if api == "build-final" && tc.forceBinding {
-				continue // The Build API does not accept caller serialization options.
+			if api == "submit" && (tc.forceBinding || tc.explicitOptions || tc.typedNil) {
+				continue // The submit case passes no serialization options.
 			}
 			t.Run(api+"/"+tc.name, func(t *testing.T) {
 				controller, key, baseURL, posted := receiveSDJWTForHolderBinding(t, tc.bound)
@@ -161,10 +161,9 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 						}
 					}
 				} else {
-					var response OID4VPFinalAuthorizationResponse
-					response, err = controller.BuildOID4VPFinalAuthorizationResponse(uri, key)
+					err = submitSelectedForTest(t, controller, uri, key)
 					if err == nil {
-						tokens = response["vp_token"].(map[string][]string)
+						require.NoError(t, json.Unmarshal([]byte(<-posted), &tokens))
 					}
 				}
 				if tc.wantError {
@@ -200,15 +199,15 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 }
 
 func TestWallet_FinalBindingRequirementsArePerQuery(t *testing.T) {
-	controller, key, baseURL, _ := receiveSDJWTForHolderBinding(t, true)
+	controller, key, baseURL, posted := receiveSDJWTForHolderBinding(t, true)
 	query := `{"credentials":[{"id":"unbound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"require_cryptographic_holder_binding":false},{"id":"bound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]}}]}`
 	uri := "openid4vp://present?" + url.Values{
 		"client_id": {"redirect_uri:" + baseURL + "/response"}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
 		"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
 	}.Encode()
-	response, err := controller.BuildOID4VPFinalAuthorizationResponse(uri, key)
-	require.NoError(t, err)
-	tokens := response["vp_token"].(map[string][]string)
+	require.NoError(t, submitSelectedForTest(t, controller, uri, key))
+	var tokens map[string][]string
+	require.NoError(t, json.Unmarshal([]byte(<-posted), &tokens))
 	require.Len(t, tokens["unbound"], 1)
 	require.Len(t, tokens["bound"], 1)
 	require.True(t, strings.HasSuffix(tokens["unbound"][0], "~"))
@@ -244,15 +243,9 @@ func TestWallet_TransactionDataBindingChecksReferencedQueries(t *testing.T) {
 			}
 		})
 	}
-	// The public response-building implementation must run the guard before
-	// credential selection or signing; an empty Wallet intentionally has neither.
 	req := &oid4vp.CredentialPresentationRequest{
-		DcqlQuery:       &oid4vp.DcqlQuery{Credentials: []oid4vp.CredentialQuery{{ID: "unbound", Format: "dc+sd-jwt", RequireCryptographicHolderBinding: &optional}}},
-		TransactionData: []string{base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["unbound"]}`))},
+		DcqlQuery: &oid4vp.DcqlQuery{Credentials: []oid4vp.CredentialQuery{{ID: "unbound", Format: "dc+sd-jwt", RequireCryptographicHolderBinding: &optional}}},
 	}
-	var empty Wallet
-	_, err := empty.buildOID4VPFinalAuthorizationResponse(req, nil)
-	require.ErrorContains(t, err, "requires cryptographic holder binding")
 	req.TransactionData = []string{"not-valid-base64!"}
 	require.ErrorContains(t, validateTransactionDataHolderBinding(req), "encoding")
 	req.TransactionData = nil
@@ -280,7 +273,7 @@ func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
 	_, err = transactionDataForQuery([]string{"not-base64!"}, "pid")
 	require.ErrorContains(t, err, "transaction_data entry 0")
 
-	selections := []oid4vp.DCQLCredentialSelection{{QueryID: "pid"}, {QueryID: "addr"}}
+	selections := []string{"pid", "addr"}
 	owners, err := assignTransactionDataOwners(entries, selections)
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{first: "pid", both: "addr"}, owners)
@@ -298,7 +291,7 @@ func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, owners)
 
-	_, err = assignTransactionDataOwners([]string{both}, []oid4vp.DCQLCredentialSelection{{QueryID: "other"}})
+	_, err = assignTransactionDataOwners([]string{both}, []string{"other"})
 	require.ErrorContains(t, err, "references no selected credential (invalid_transaction_data)")
 	_, err = assignTransactionDataOwners([]string{"not-base64!"}, selections)
 	require.ErrorContains(t, err, "transaction_data entry 0")
@@ -318,6 +311,27 @@ func TestWallet_TransactionDataOwnedByANonSDJWTCredentialFails(t *testing.T) {
 		TransactionData: []string{base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["vc"]}`))},
 	}
 
-	_, err := controller.buildDCQLVPToken(req, key, nil)
+	entries, _, err := controller.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	_, err = controller.buildDCQLVPToken(req, Presentation{Key: key, Credentials: []CredentialSelection{
+		{CredentialID: entries[0].Entry.Id, QueryIDs: []string{"vc"}},
+	}})
 	require.ErrorContains(t, err, "invalid_transaction_data")
+}
+
+// submitSelectedForTest presents the library's own choice for uri through
+// ParsePresentationRequest, SelectCredentials and SubmitPresentation.
+func submitSelectedForTest(t *testing.T, w *Wallet, uri string, key IKeyEntry) error {
+	t.Helper()
+	request, err := w.ParsePresentationRequest(t.Context(), uri)
+	if err != nil {
+		return err
+	}
+	selections, err := w.SelectCredentials(t.Context(), request)
+	if err != nil {
+		return err
+	}
+	_, err = w.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
+	return err
 }

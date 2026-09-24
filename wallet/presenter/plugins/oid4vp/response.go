@@ -75,12 +75,16 @@ func postAuthorizationResponse(ctx context.Context, client *http.Client, endpoin
 // defined in OID4VP 1.0 Section 8.1:
 // {"<credential query id>": ["<presentation>"]}
 func (p *Oid4vpPresenter) Present(protocol types.SupportedPresentationProtocol, endpoint url.URL, serializedPresentation []byte, request *types.PresentationRequest) (string, error) {
+	if protocol != types.Oid4vp {
+		return "", fmt.Errorf("plugin type mismatch")
+	}
 	if request == nil || request.CredentialQueryID == "" {
 		return "", fmt.Errorf("credential query id is required to build vp_token")
 	}
-	return p.PresentDCQL(protocol, endpoint, map[string][]string{
-		request.CredentialQueryID: {string(serializedPresentation)},
-	}, request)
+	metadata, _ := request.ClientMetadata.(*VerifierMetadata)
+	vpToken := map[string][]string{request.CredentialQueryID: {string(serializedPresentation)}}
+	redirectURI, _, err := p.postDCQLResponse(context.Background(), endpoint.String(), vpToken, request.State, request.ResponseMode, metadata)
+	return redirectURI, err
 }
 
 // SubmitDCQLResponse answers an admitted OpenID4VP 1.0 request with vp_token,

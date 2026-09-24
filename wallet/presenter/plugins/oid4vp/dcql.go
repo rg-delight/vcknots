@@ -62,7 +62,7 @@ type CredentialSetQuery struct {
 // Query: "If omitted, the default value is true", so a set that names no
 // `required` member must be answered. Callers read the default here instead of
 // re-deriving it, which is what makes a Wallet's own selection screen agree
-// with ValidateDCQLCredentialSelections about which sets it may leave
+// with ValidateDCQLMatches about which sets it may leave
 // unanswered.
 func (s CredentialSetQuery) IsRequired() bool {
 	return s.Required == nil || *s.Required

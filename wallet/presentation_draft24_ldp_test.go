@@ -68,12 +68,12 @@ func seedKey(t *testing.T, encoded string) ed25519.PrivateKey {
 }
 
 type ldpPresentationFixture struct {
-	wallet   *Wallet
-	baseURL  string
-	posted   chan url.Values
-	vectors  ldpPresentationVectors
-	holder   ed25519KeyEntry
-	endpoint url.URL
+	wallet     *Wallet
+	presenting *presenter.PresentationDispatcher
+	baseURL    string
+	posted     chan url.Values
+	vectors    ldpPresentationVectors
+	holder     ed25519KeyEntry
 }
 
 func newLdpPresentationFixture(t *testing.T) ldpPresentationFixture {
@@ -93,31 +93,44 @@ func newLdpPresentationFixture(t *testing.T) ldpPresentationFixture {
 	controller, err := NewWalletWithConfig(Config{Presenter: presenting, Storeless: true})
 	require.NoError(t, err)
 	vectors := loadLdpPresentationVectors(t)
-	endpoint, err := url.Parse(server.URL + "/response")
-	require.NoError(t, err)
 	return ldpPresentationFixture{
-		wallet:   controller,
-		baseURL:  server.URL,
-		posted:   posted,
-		vectors:  vectors,
-		holder:   ed25519KeyEntry{private: seedKey(t, vectors.Holder.PrivateJWK.D)},
-		endpoint: *endpoint,
+		wallet:     controller,
+		presenting: presenting,
+		baseURL:    server.URL,
+		posted:     posted,
+		vectors:    vectors,
+		holder:     ed25519KeyEntry{private: seedKey(t, vectors.Holder.PrivateJWK.D)},
 	}
 }
 
-func (f ldpPresentationFixture) selection(t *testing.T, id string, descriptors ...string) Draft24CredentialSelection {
+// request admits the fixture's Draft 24 request on w.
+func (f ldpPresentationFixture) request(t *testing.T, w *Wallet) *oid4vp.AdmittedRequest {
+	t.Helper()
+	return parseDraft24(t, w, draft24PresentationURI(f.baseURL, "direct_post", ""))
+}
+
+// present submits selections with the fixture's holder key and LDP options.
+func (f ldpPresentationFixture) present(t *testing.T, w *Wallet, key IKeyEntry, options *ldpvc.LdpVcPresentationOptions, selections ...CredentialSelection) (string, error) {
+	t.Helper()
+	result, err := w.SubmitPresentation(t.Context(), f.request(t, w), Presentation{Key: key, Credentials: selections, SerializeOptions: options})
+	if err != nil {
+		return "", err
+	}
+	return result.RedirectURI, nil
+}
+
+func (f ldpPresentationFixture) selection(t *testing.T, id string, descriptors ...string) CredentialSelection {
 	t.Helper()
 	raw, err := json.Marshal(f.vectors.Cases[0].Credential)
 	require.NoError(t, err)
-	return Draft24CredentialSelection{
-		CredentialID: id,
+	return CredentialSelection{
 		Credential: &credstoreTypes.CredentialEntry{
 			Id:         id,
 			ReceivedAt: time.Now(),
 			Raw:        raw,
 			MimeType:   string(credential.LdpVc),
 		},
-		InputDescriptorIDs: descriptors,
+		QueryIDs: descriptors,
 	}
 }
 
@@ -132,15 +145,13 @@ func (f ldpPresentationFixture) options() *ldpvc.LdpVcPresentationOptions {
 // Presentation that embeds the credentials and is bound to the request by an
 // authentication proof whose challenge is the nonce and whose domain is the
 // client_id (OpenID4VP Appendix B.1.3.1).
-func TestWallet_PresentDraft24SelectionSignsAnLdpVp(t *testing.T) {
+func TestWallet_SubmitPresentationDraft24SignsAnLdpVp(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
 
-	redirect, err := fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, fixture.holder, []Draft24CredentialSelection{
+	redirect, err := fixture.present(t, fixture.wallet, fixture.holder, fixture.options(),
 		fixture.selection(t, "degree-1", "identity"),
 		fixture.selection(t, "degree-2", "address"),
-	}, fixture.options())
+	)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 
@@ -183,68 +194,61 @@ func TestWallet_PresentDraft24SelectionSignsAnLdpVp(t *testing.T) {
 
 // The options the caller passes are not written back: a second presentation
 // with the same options object is bound to its own request.
-func TestWallet_PresentDraft24SelectionDoesNotMutateLdpOptions(t *testing.T) {
+func TestWallet_SubmitPresentationDraft24DoesNotMutateLdpOptions(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
 	options := fixture.options()
-	_, err = fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, fixture.holder, []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}, options)
+	_, err := fixture.present(t, fixture.wallet, fixture.holder, options, fixture.selection(t, "degree-1", "identity"))
 	require.NoError(t, err)
 	<-fixture.posted
 	require.Empty(t, options.Challenge)
 	require.Empty(t, options.Domain)
 }
 
-func TestWallet_PresentDraft24SelectionLdpRefusesANonEd25519Key(t *testing.T) {
+func TestWallet_SubmitPresentationDraft24LdpRefusesANonEd25519Key(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
-	_, err = fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, newMockKeyEntry(), []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}, fixture.options())
+	_, err := fixture.present(t, fixture.wallet, newMockKeyEntry(), fixture.options(), fixture.selection(t, "degree-1", "identity"))
 	require.Error(t, err)
 	require.Len(t, fixture.posted, 0, "nothing may be sent when the proof cannot be made")
 }
 
-func TestWallet_PresentDraft24SelectionLdpRefusesAnUnpinnedContext(t *testing.T) {
+func TestWallet_SubmitPresentationDraft24LdpRefusesAnUnpinnedContext(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
 	options := fixture.options()
 	options.Context = []any{fixture.vectors.ContextURL, "https://www.w3.org/ns/credentials/v2"}
-	_, err = fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, fixture.holder, []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}, options)
+	_, err := fixture.present(t, fixture.wallet, fixture.holder, options, fixture.selection(t, "degree-1", "identity"))
 	require.ErrorIs(t, err, dataintegrity.ErrContextNotPinned)
 	require.Len(t, fixture.posted, 0)
 }
 
-// ResponseTransform sees the finished response and what it returns is what
-// the Verifier receives; its refusal stops the presentation before sending.
-func TestWallet_PresentDraft24SelectionAppliesTheResponseTransform(t *testing.T) {
+// TestHooks.PresentationExchangeResponse sees the finished response and what
+// it returns is what the Verifier receives; its refusal stops the
+// presentation before sending.
+func TestWallet_SubmitPresentationAppliesTheResponseTransform(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
-	require.NoError(t, err)
-	selections := []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}
+	hooked := func(transform Draft24ResponseTransform) *Wallet {
+		w, err := NewWalletWithConfig(Config{Presenter: fixture.presenting, Storeless: true, TestHooks: &TestHooks{PresentationExchangeResponse: transform}})
+		require.NoError(t, err)
+		return w
+	}
 
-	_, err = fixture.wallet.PresentDraft24SelectionWithOptions(request, fixture.endpoint, fixture.holder, selections, Draft24PresentOptions{
-		SerializeOptions: fixture.options(),
-		ResponseTransform: func(vpToken []byte, submission presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error) {
-			var presentation map[string]any
-			require.NoError(t, json.Unmarshal(vpToken, &presentation))
-			require.Contains(t, presentation, "proof")
-			submission.DescriptorMap[0].ID = "renamed"
-			return []byte(`{"rewritten":true}`), submission, nil
-		},
+	rewriting := hooked(func(vpToken []byte, submission presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error) {
+		var presentation map[string]any
+		require.NoError(t, json.Unmarshal(vpToken, &presentation))
+		require.Contains(t, presentation, "proof")
+		submission.DescriptorMap[0].ID = "renamed"
+		return []byte(`{"rewritten":true}`), submission, nil
 	})
+	_, err := fixture.present(t, rewriting, fixture.holder, fixture.options(), fixture.selection(t, "degree-1", "identity"))
 	require.NoError(t, err)
 	form := <-fixture.posted
 	require.JSONEq(t, `{"rewritten":true}`, form.Get("vp_token"))
 	require.Contains(t, form.Get("presentation_submission"), `"id":"renamed"`)
 
 	refusal := errors.New("knob refused")
-	_, err = fixture.wallet.PresentDraft24SelectionWithOptions(request, fixture.endpoint, fixture.holder, selections, Draft24PresentOptions{
-		SerializeOptions: fixture.options(),
-		ResponseTransform: func([]byte, presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error) {
-			return nil, presenterTypes.PresentationSubmission{}, refusal
-		},
+	refusing := hooked(func([]byte, presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error) {
+		return nil, presenterTypes.PresentationSubmission{}, refusal
 	})
+	_, err = fixture.present(t, refusing, fixture.holder, fixture.options(), fixture.selection(t, "degree-1", "identity"))
 	require.ErrorIs(t, err, ErrDraft24ResponseTransformFailed)
 	require.ErrorIs(t, err, refusal)
 	require.Len(t, fixture.posted, 0)

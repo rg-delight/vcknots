@@ -43,7 +43,7 @@ func TestPresentDCQLDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &Oid4vpPresenter{HTTPClient: origin.Client()}
-	_, err = p.PresentDCQL(types.Oid4vp, *endpoint, map[string][]string{"pid": {"SECRET-VP"}},
+	_, err = sendDCQLForTest(p, *endpoint, map[string][]string{"pid": {"SECRET-VP"}},
 		&types.PresentationRequest{State: "s", ResponseMode: string(OAuthAuthzReqResponseModeDirectPost)})
 	var verifierErr *VerifierResponseError
 	if !errors.As(err, &verifierErr) || verifierErr.StatusCode != http.StatusTemporaryRedirect {

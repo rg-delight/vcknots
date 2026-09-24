@@ -363,8 +363,8 @@ func TestFinalErrorCodesRegistered(t *testing.T) {
 	}
 }
 
-// SubmitEncryptedAuthorizationResponse bounds the Verifier's response body.
-func TestSubmitEncryptedAuthorizationResponseBoundedBody(t *testing.T) {
+// A direct_post.jwt response bounds the Verifier's response body.
+func TestDirectPostJWTResponseBoundedBody(t *testing.T) {
 	recipient := newP256Recipient(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -374,12 +374,13 @@ func TestSubmitEncryptedAuthorizationResponseBoundedBody(t *testing.T) {
 	endpoint, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	p := &Oid4vpPresenter{}
-	_, err = p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
-		"vp_token": map[string]any{"pid": []string{"presented"}},
-	}, &VerifierMetadata{
-		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: "ECDH-ES",
-		}}},
+	_, err = sendDCQLForTest(p, *endpoint, map[string][]string{"pid": {"presented"}}, &types.PresentationRequest{
+		ResponseMode: string(OAuthAuthzReqResponseModeDirectPostJWT),
+		ClientMetadata: &VerifierMetadata{
+			Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+				Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: "ECDH-ES",
+			}}},
+		},
 	})
 	require.ErrorIs(t, err, httpfetch.ErrBodyTooLarge)
 }
@@ -394,7 +395,7 @@ func TestPresentDCQLRejectsEncryptionKeyWithoutAlg(t *testing.T) {
 			Key: &recipient.PublicKey, KeyID: "no-alg", Use: "enc",
 		}}},
 	}}
-	_, err := p.PresentDCQL(types.Oid4vp, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request)
+	_, err := sendDCQLForTest(p, s.endpoint(t), map[string][]string{"pid": {"credential"}}, request)
 	require.ErrorContains(t, err, "no usable verifier encryption key")
 	require.Equal(t, int32(0), s.calls.Load())
 }

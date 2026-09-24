@@ -50,7 +50,7 @@ func disclosedNames(t *testing.T, wire string) []string {
 }
 
 func TestWallet_PublicDCQLPresentation(t *testing.T) {
-	for _, api := range []string{"present", "build-final"} {
+	{
 		for _, tc := range []struct {
 			name, query string
 			want        map[string][]string
@@ -70,7 +70,7 @@ func TestWallet_PublicDCQLPresentation(t *testing.T) {
 			{name: "claim value matches", query: `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"],"values":["Taro"]}]}]}`, want: map[string][]string{"pid": {"given_name"}}},
 			{name: "claim value mismatch sends nothing", query: `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"],"values":["Hanako"]}]}]}`, wantError: true},
 		} {
-			t.Run(api+"/"+tc.name, func(t *testing.T) {
+			t.Run(tc.name, func(t *testing.T) {
 				fixture := newSDJWTPresentationFixture(t)
 				holder := fixture.key.PublicKey()
 				fixture.receive("urn:test:identity", &holder, map[string]any{"nationality": "JP"}, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
@@ -78,26 +78,15 @@ func TestWallet_PublicDCQLPresentation(t *testing.T) {
 				fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St", "postal_code": "100-0000"})
 				uri := presentationURI(fixture.baseURL, tc.query)
 				var tokens map[string][]string
-				var err error
-				if api == "present" {
-					var redirect string
-					redirect, err = fixture.wallet.PresentCredential(uri, fixture.key, nil)
-					if err == nil {
-						require.Equal(t, fixture.baseURL+"/done", redirect)
-						select {
-						case form := <-fixture.posted:
-							require.Equal(t, "state-to-preserve", form.Get("state"))
-							require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
-						default:
-							t.Fatal("no response received")
-						}
-					}
-				} else {
-					var response OID4VPFinalAuthorizationResponse
-					response, err = fixture.wallet.BuildOID4VPFinalAuthorizationResponse(uri, fixture.key)
-					if err == nil {
-						tokens = response["vp_token"].(map[string][]string)
-						require.Equal(t, "state-to-preserve", response["state"])
+				redirect, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
+				if err == nil {
+					require.Equal(t, fixture.baseURL+"/done", redirect)
+					select {
+					case form := <-fixture.posted:
+						require.Equal(t, "state-to-preserve", form.Get("state"))
+						require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+					default:
+						t.Fatal("no response received")
 					}
 				}
 				if tc.wantError {
@@ -384,35 +373,33 @@ func TestWallet_SubmitHandlesTransactionData(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
+	fixturePresenter(t, fixture.wallet).SetSupportedTransactionDataTypes([]string{"example"})
 
 	recipient, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	metadata := &oid4vp.VerifierMetadata{
-		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+	metadata, err := json.Marshal(map[string]any{
+		"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 			Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: string(jose.ECDH_ES),
 		}}},
-		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
-	}
-	transactionData := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["pid"]}`))
-	req := &oid4vp.CredentialPresentationRequest{
-		OAuthAuthzRequest: &oid4vp.OAuthAuthzRequest{
-			ResponseType: "vp_token", ClientID: "redirect_uri:" + fixture.baseURL + "/response",
-			Nonce: "n", State: "s", ResponseMode: oid4vp.OAuthAuthzReqResponseModeDirectPostJWT,
-			RedirectURI: fixture.baseURL + "/response",
-		},
-		DcqlQuery: &oid4vp.DcqlQuery{Credentials: []oid4vp.CredentialQuery{{
-			ID: "pid", Format: "dc+sd-jwt", Meta: map[string]any{"vct_values": []string{"urn:test:identity"}},
-			Claims: []oid4vp.DCQLClaimQuery{{Path: []any{"given_name"}}},
-		}}},
-		ClientMetadata:           metadata,
-		TransactionData:          []string{transactionData},
-		TransactionDataHashesAlg: "sha-384",
-		ResponseURI:              fixture.baseURL + "/response",
-	}
-	endpoint, err := url.Parse(fixture.baseURL + "/response")
+		"encrypted_response_enc_values_supported": []string{"A256GCM"},
+	})
 	require.NoError(t, err)
-	_, err = fixture.wallet.SubmitOID4VPFinalAuthorizationRequest(req, *endpoint, fixture.key)
+	transactionData := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["pid"],"transaction_data_hashes_alg":["sha-384"]}`))
+	entries, err := json.Marshal([]string{transactionData})
 	require.NoError(t, err)
+	uri := "openid4vp://present?" + url.Values{
+		"client_id": {"redirect_uri:" + fixture.baseURL + "/response"}, "response_uri": {fixture.baseURL + "/response"},
+		"response_type": {"vp_token"}, "response_mode": {"direct_post.jwt"}, "nonce": {"n"}, "state": {"s"},
+		"dcql_query":       {`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`},
+		"client_metadata":  {string(metadata)},
+		"transaction_data": {string(entries)},
+	}.Encode()
+	request := parsedPresentationRequest(t, fixture, uri)
+	selections, err := fixture.wallet.SelectCredentials(t.Context(), request)
+	require.NoError(t, err)
+	result, err := fixture.wallet.SubmitPresentation(t.Context(), request, Presentation{Key: fixture.key, Credentials: selections})
+	require.NoError(t, err)
+	require.True(t, result.Encrypted)
 
 	select {
 	case form := <-fixture.posted:
@@ -499,9 +486,7 @@ func transactionDataFixture(t *testing.T) sdjwtPresentationFixture {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
-	presenting, err := fixture.wallet.oid4vpPresenter()
-	require.NoError(t, err)
-	presenting.SetSupportedTransactionDataTypes([]string{"example"})
+	fixturePresenter(t, fixture.wallet).SetSupportedTransactionDataTypes([]string{"example"})
 	return fixture
 }
 
@@ -587,16 +572,26 @@ func TestDCQLTransactionDataRejectsUnmatchedEntry(t *testing.T) {
 	require.ErrorContains(t, err, "transaction_data entry 0 references no selected credential (invalid_transaction_data)")
 }
 
-// parsedPresentationRequest parses an Authorization Request the way an
+// parsedPresentationRequest admits an Authorization Request the way an
 // application does before it renders a consent screen and hands the Holder's
 // decision back to the wallet.
-func parsedPresentationRequest(t *testing.T, fixture sdjwtPresentationFixture, uri string) (*oid4vp.CredentialPresentationRequest, url.URL) {
+func parsedPresentationRequest(t *testing.T, fixture sdjwtPresentationFixture, uri string) *oid4vp.AdmittedRequest {
 	t.Helper()
-	req, err := fixture.wallet.presenter.ParseRequestURI(uri)
+	request, err := fixture.wallet.ParsePresentationRequest(t.Context(), uri)
 	require.NoError(t, err)
-	endpoint, err := url.Parse(req.ResponseURI)
-	require.NoError(t, err)
-	return req, *endpoint
+	return request
+}
+
+// fixturePresenter returns the OpenID4VP plugin registered with w.
+func fixturePresenter(t *testing.T, w *Wallet) *oid4vp.Oid4vpPresenter {
+	t.Helper()
+	for _, plugin := range w.presenter.Plugins() {
+		if presenting, ok := plugin.(*oid4vp.Oid4vpPresenter); ok {
+			return presenting
+		}
+	}
+	t.Fatal("no OpenID4VP presenter registered")
+	return nil
 }
 
 // storedCredentialID returns the wallet credential id a consent screen shows
@@ -622,22 +617,20 @@ const claimSetsDCQLQuery = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","me
 // OID4VP 1.0 Section 6.3: "the Wallet MUST return one of the sets that it can
 // satisfy". The library's own selection always takes the first satisfiable set
 // (TestWallet_PublicDCQLPresentation), so a Holder who chose the second one
-// needs PresentDCQLSelection to reach the Verifier with that choice intact.
-func TestWallet_PresentDCQLSelectionDisclosesTheChosenClaimSet(t *testing.T) {
+// must reach the Verifier with that choice intact.
+func TestWallet_SubmitPresentationDisclosesTheChosenClaimSet(t *testing.T) {
 	for _, claims := range [][]string{{"given_name"}, {"family_name"}} {
 		t.Run(claims[0], func(t *testing.T) {
 			fixture := newSDJWTPresentationFixture(t)
 			holder := fixture.key.PublicKey()
 			fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
-			req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, claimSetsDCQLQuery))
+			request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, claimSetsDCQLQuery))
 
-			redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, []oid4vp.DCQLCredentialSelection{{
-				QueryID:         "pid",
-				CandidateID:     storedCredentialID(t, fixture.wallet, "urn:test:identity"),
-				Format:          "dc+sd-jwt",
-				VCT:             "urn:test:identity",
-				RequestedClaims: claims,
-			}}, nil)
+			redirect, err := presentSelections(t, fixture.wallet, request, fixture.key, []CredentialSelection{{
+				CredentialID:    storedCredentialID(t, fixture.wallet, "urn:test:identity"),
+				QueryIDs:        []string{"pid"},
+				DisclosedClaims: claims,
+			}})
 			require.NoError(t, err)
 			require.Equal(t, fixture.baseURL+"/done", redirect)
 
@@ -657,38 +650,38 @@ func TestWallet_PresentDCQLSelectionDisclosesTheChosenClaimSet(t *testing.T) {
 
 // A consent decision the request cannot accept must fail before anything is
 // serialized, and must be distinguishable from a transport failure.
-func TestWallet_PresentDCQLSelectionRejectsUnsatisfyingSelection(t *testing.T) {
+func TestWallet_SubmitPresentationRejectsUnsatisfyingSelection(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		query      string
-		selections func(identity, address string) []oid4vp.DCQLCredentialSelection
+		selections func(identity, address string) []CredentialSelection
 	}{
 		{
 			name:  "claims outside every claim set",
 			query: claimSetsDCQLQuery,
-			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
-				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: identity, RequestedClaims: []string{"given_name", "family_name"}}}
+			selections: func(identity, _ string) []CredentialSelection {
+				return []CredentialSelection{{CredentialID: identity, QueryIDs: []string{"pid"}, DisclosedClaims: []string{"birthdate"}}}
 			},
 		},
 		{
 			name:  "credential the credential query does not accept",
 			query: claimSetsDCQLQuery,
-			selections: func(_, address string) []oid4vp.DCQLCredentialSelection {
-				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: address, RequestedClaims: []string{"given_name"}}}
+			selections: func(_, address string) []CredentialSelection {
+				return []CredentialSelection{{CredentialID: address, QueryIDs: []string{"pid"}}}
 			},
 		},
 		{
 			name:  "credential query the request does not contain",
 			query: claimSetsDCQLQuery,
-			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
-				return []oid4vp.DCQLCredentialSelection{{QueryID: "passport", CandidateID: identity, RequestedClaims: []string{"given_name"}}}
+			selections: func(identity, _ string) []CredentialSelection {
+				return []CredentialSelection{{CredentialID: identity, QueryIDs: []string{"passport"}}}
 			},
 		},
 		{
 			name:  "required credential query left unanswered",
 			query: twoCredentialDCQLQuery,
-			selections: func(identity, _ string) []oid4vp.DCQLCredentialSelection {
-				return []oid4vp.DCQLCredentialSelection{{QueryID: "pid", CandidateID: identity, RequestedClaims: []string{"given_name"}}}
+			selections: func(identity, _ string) []CredentialSelection {
+				return []CredentialSelection{{CredentialID: identity, QueryIDs: []string{"pid"}}}
 			},
 		},
 	} {
@@ -697,12 +690,12 @@ func TestWallet_PresentDCQLSelectionRejectsUnsatisfyingSelection(t *testing.T) {
 			holder := fixture.key.PublicKey()
 			fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro", "family_name": "Yamada"})
 			fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St"})
-			req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, tc.query))
+			request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, tc.query))
 
-			_, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, tc.selections(
+			_, err := presentSelections(t, fixture.wallet, request, fixture.key, tc.selections(
 				storedCredentialID(t, fixture.wallet, "urn:test:identity"),
 				storedCredentialID(t, fixture.wallet, "urn:test:address"),
-			), nil)
+			))
 			require.ErrorIs(t, err, oid4vp.ErrDCQLSelectionUnsatisfied)
 			select {
 			case <-fixture.posted:
@@ -716,15 +709,15 @@ func TestWallet_PresentDCQLSelectionRejectsUnsatisfyingSelection(t *testing.T) {
 // OID4VP 1.0 Section 6.4.2 lets the Holder decline an optional credential_set,
 // and Section 8.1 defines the vp_token as an object, so the answer to declining
 // everything is the empty object rather than an error or an absent parameter.
-func TestWallet_PresentDCQLSelectionSendsEmptyVPTokenWhenNothingIsSelected(t *testing.T) {
+func TestWallet_SubmitPresentationSendsEmptyVPTokenWhenNothingIsSelected(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}],` +
 		`"credential_sets":[{"options":[["pid"]],"required":false}]}`
-	req, endpoint := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
+	request := parsedPresentationRequest(t, fixture, presentationURI(fixture.baseURL, query))
 
-	redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, nil, nil)
+	redirect, err := presentSelections(t, fixture.wallet, request, fixture.key, nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 
@@ -741,16 +734,16 @@ func TestWallet_PresentDCQLSelectionSendsEmptyVPTokenWhenNothingIsSelected(t *te
 // library-chosen path does: OID4VP 1.0 Final Section 5.1 allows only one of the
 // referenced Credentials to authorize the transaction, and Section 8.4 puts the
 // hash in that Credential's presentation alone.
-func TestWallet_PresentDCQLSelectionKeepsTransactionDataAssignment(t *testing.T) {
+func TestWallet_SubmitPresentationKeepsTransactionDataAssignment(t *testing.T) {
 	fixture := transactionDataFixture(t)
 	entry := encodedTransactionData(`{"type":"example","credential_ids":["addr","pid"]}`)
-	req, endpoint := parsedPresentationRequest(t, fixture,
+	request := parsedPresentationRequest(t, fixture,
 		presentationURIWithTransactionData(t, fixture.baseURL, twoCredentialDCQLQuery, []string{entry}))
 
-	redirect, err := fixture.wallet.PresentDCQLSelection(req, endpoint, fixture.key, []oid4vp.DCQLCredentialSelection{
-		{QueryID: "pid", CandidateID: storedCredentialID(t, fixture.wallet, "urn:test:identity"), RequestedClaims: []string{"given_name"}},
-		{QueryID: "addr", CandidateID: storedCredentialID(t, fixture.wallet, "urn:test:address"), RequestedClaims: []string{"street_address"}},
-	}, nil)
+	redirect, err := presentSelections(t, fixture.wallet, request, fixture.key, []CredentialSelection{
+		{CredentialID: storedCredentialID(t, fixture.wallet, "urn:test:identity"), QueryIDs: []string{"pid"}},
+		{CredentialID: storedCredentialID(t, fixture.wallet, "urn:test:address"), QueryIDs: []string{"addr"}},
+	})
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 

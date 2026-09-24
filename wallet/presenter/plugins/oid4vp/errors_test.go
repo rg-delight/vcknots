@@ -117,7 +117,7 @@ func TestParsePresentationRequestReturnsRequestObjectSentinels(t *testing.T) {
 // object {}, not an omitted or null value.
 func TestPresentDCQLSendsEmptyVPTokenObject(t *testing.T) {
 	p, endpoint, forms, calls := dcqlTransportEndpoint(t)
-	redirect, err := p.PresentDCQL(types.Oid4vp, endpoint, map[string][]string{}, &types.PresentationRequest{})
+	redirect, err := sendDCQLForTest(p, endpoint, map[string][]string{}, &types.PresentationRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "https://verifier.example/complete", redirect)
 	form := requireDCQLForm(t, forms, calls)
@@ -140,7 +140,7 @@ func TestPresentDCQLVerifierResponseErrorHidesBody(t *testing.T) {
 	require.NoError(t, err)
 
 	p := &Oid4vpPresenter{}
-	_, err = p.PresentDCQL(types.Oid4vp, *endpoint, map[string][]string{"identity": {"presentation"}}, &types.PresentationRequest{})
+	_, err = sendDCQLForTest(p, *endpoint, map[string][]string{"identity": {"presentation"}}, &types.PresentationRequest{})
 	require.Error(t, err)
 
 	var verifierErr *VerifierResponseError

@@ -90,6 +90,8 @@ type Wallet struct {
 	oid4vciSigner receiverTypes.OID4VCIFinalSigner
 
 	credentialAcceptance *CredentialAcceptancePolicy
+
+	testHooks *TestHooks
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -420,6 +422,8 @@ func newWallet(config Config) (*Wallet, error) {
 		oid4vciSigner:     config.OID4VCISigner,
 
 		credentialAcceptance: config.CredentialAcceptance,
+
+		testHooks: config.TestHooks,
 	}, nil
 }
 

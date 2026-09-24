@@ -874,7 +874,7 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 	}
 }
 
-func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
+func TestController_ParsePresentationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
@@ -888,12 +888,12 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 		dcqlQuery,
 	)
 
-	_, _, err := controller.parseAuthorizationRequest(uri)
+	_, err := controller.ParsePresentationRequest(t.Context(), uri)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "response_uri must use https scheme")
 }
 
-func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
+func TestController_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
@@ -905,13 +905,14 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 		dcqlQuery,
 	)
 
-	_, endpoint, err := controller.parseAuthorizationRequest(uri)
+	request, err := controller.ParsePresentationRequest(t.Context(), uri)
 	require.NoError(t, err)
+	endpoint := request.ResponseEndpoint()
 	require.NotNil(t, endpoint)
 	assert.Equal(t, "http", endpoint.Scheme)
 }
 
-func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
+func TestController_ParsePresentationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`)
 	// direct_post.jwt is refused while parsing when the Verifier leaves no key
@@ -927,9 +928,11 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *te
 		dcqlQuery, url.QueryEscape(string(clientMetadata)),
 	)
 
-	req, endpoint, err := controller.parseAuthorizationRequest(uri)
+	request, err := controller.ParsePresentationRequest(t.Context(), uri)
 	require.NoError(t, err)
+	endpoint := request.ResponseEndpoint()
 	require.NotNil(t, endpoint)
+	req := request.Request()
 	require.NotNil(t, req.DcqlQuery)
 	// VP §5.9.3: the Client Identifier binds response_uri, and the wallet
 	// keeps the value there rather than in redirect_uri.
@@ -939,7 +942,7 @@ func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *te
 	assert.Equal(t, oid4vp.OAuthAuthzReqResponseModeDirectPostJWT, req.ResponseMode)
 }
 
-func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
+func TestWallet_SelectCredentialsForConsent(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -979,43 +982,20 @@ func TestWallet_BuildOID4VPFinalAuthorizationResponse(t *testing.T) {
 		dcqlQuery, url.QueryEscape(string(clientMetadata)),
 	)
 
-	response, err := controller.BuildOID4VPFinalAuthorizationResponse(uri, key)
+	request, err := controller.ParsePresentationRequest(t.Context(), uri)
 	require.NoError(t, err)
-	assert.Equal(t, "state-1", response["state"])
-	vpToken, ok := response["vp_token"].(map[string][]string)
-	require.True(t, ok)
-	require.Len(t, vpToken["pid"], 1)
-
-	presentation := vpToken["pid"][0]
-	assert.Contains(t, presentation, ".")
-	assert.Contains(t, presentation, "~")
-	assert.Contains(t, presentation, "ey")
-
-	parts := strings.Split(presentation, "~")
-	disclosureNames := map[string]bool{}
-	for _, part := range parts[1:] {
-		if part == "" || strings.Count(part, ".") == 2 {
-			continue
-		}
-		var disclosure []any
-		decoded, err := base64.RawURLEncoding.DecodeString(part)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(decoded, &disclosure))
-		if len(disclosure) == 3 {
-			if name, ok := disclosure[1].(string); ok {
-				disclosureNames[name] = true
-			}
-		}
-	}
-	assert.True(t, disclosureNames["given_name"])
-	assert.True(t, disclosureNames["family_name"])
-	assert.False(t, disclosureNames["birthdate"])
-
-	kbJwt := parts[len(parts)-1]
-	assert.Equal(t, 2, strings.Count(kbJwt, "."))
+	selections, err := controller.SelectCredentials(t.Context(), request)
+	require.NoError(t, err)
+	// The consent screen shows what SubmitPresentation would disclose: the
+	// requested claims, and not birthdate.
+	require.Equal(t, []CredentialSelection{{
+		CredentialID:    "credential-1",
+		QueryIDs:        []string{"pid"},
+		DisclosedClaims: []string{"given_name", "family_name"},
+	}}, selections)
 }
 
-func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
+func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
@@ -1099,9 +1079,9 @@ func TestWallet_SubmitOID4VPFinalAuthorizationResponse(t *testing.T) {
 		url.QueryEscape(string(clientMetadataBytes)),
 	)
 
-	body, err := controller.SubmitOID4VPFinalAuthorizationResponse(uri, holderKey)
+	redirect, err := controller.PresentCredential(uri, holderKey, nil)
 	require.NoError(t, err)
-	assert.Contains(t, body, "redirect_uri")
+	assert.Equal(t, "https://example.com/done", redirect)
 	decryptedPayload, _ := obs.get("decrypted_payload").(map[string]any)
 	assert.Equal(t, "state-1", decryptedPayload["state"])
 	vpToken, ok := decryptedPayload["vp_token"].(map[string]any)
@@ -5168,7 +5148,13 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 			}
 			uri := "openid4vp://present?" + params.Encode()
 			if draft {
-				require.NoError(t, controller.PresentDraft24Credential(uri, key, nil))
+				request, err := controller.Draft24().ParsePresentationRequest(t.Context(), uri)
+				require.NoError(t, err)
+				selections, err := controller.SelectCredentials(t.Context(), request)
+				require.NoError(t, err)
+				result, err := controller.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
+				require.NoError(t, err)
+				require.Equal(t, "https://verifier.example/done", result.RedirectURI)
 			} else {
 				redirect, err := controller.PresentCredential(uri, key, nil)
 				require.NoError(t, err)

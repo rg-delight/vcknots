@@ -21,26 +21,26 @@ func sdJWTRaw(t *testing.T, payload map[string]any) []byte {
 		base64.RawURLEncoding.EncodeToString(body) + ".signature~disclosure")
 }
 
-// TestSDJWTCarriesConfirmation pins the holder-binding signal OpenID4VP
+// TestsdJWTCarriesConfirmation pins the holder-binding signal OpenID4VP
 // 1.0 Appendix B.3 relies on: the issuer JWT payload carries cnf.
 func TestSDJWTCarriesConfirmation(t *testing.T) {
 	t.Run("carries-cnf", func(t *testing.T) {
-		require.True(t, SDJWTCarriesConfirmation(sdJWTRaw(t, map[string]any{
+		require.True(t, sdJWTCarriesConfirmation(sdJWTRaw(t, map[string]any{
 			"vct": "https://example/pid",
 			"cnf": map[string]any{"jwk": map[string]any{"kty": "EC"}},
 		})))
 	})
 	t.Run("without-cnf", func(t *testing.T) {
-		require.False(t, SDJWTCarriesConfirmation(sdJWTRaw(t, map[string]any{"vct": "https://example/pid"})))
+		require.False(t, sdJWTCarriesConfirmation(sdJWTRaw(t, map[string]any{"vct": "https://example/pid"})))
 	})
 	t.Run("not-a-compact-jws", func(t *testing.T) {
-		require.False(t, SDJWTCarriesConfirmation([]byte("not-a-jwt")))
+		require.False(t, sdJWTCarriesConfirmation([]byte("not-a-jwt")))
 	})
 	t.Run("payload-not-a-json-object", func(t *testing.T) {
 		raw := []byte("header." + base64.RawURLEncoding.EncodeToString([]byte("[1,2]")) + ".signature")
-		require.False(t, SDJWTCarriesConfirmation(raw))
+		require.False(t, sdJWTCarriesConfirmation(raw))
 	})
 	t.Run("payload-not-base64url", func(t *testing.T) {
-		require.False(t, SDJWTCarriesConfirmation([]byte("header.!!!.signature")))
+		require.False(t, sdJWTCarriesConfirmation([]byte("header.!!!.signature")))
 	})
 }
