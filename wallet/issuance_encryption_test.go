@@ -16,7 +16,7 @@ func encryptionTestMetadata(request bool, response bool, required bool) *receive
 		metadata.CredentialRequestEncryption = &receiverTypes.CredentialRequestEncryption{}
 	}
 	if response {
-		metadata.CredentialResponseEncryption = &receiverTypes.CredentialResponseEncryption{EncryptionRequired: &required}
+		metadata.CredentialResponseEncryption = &receiverTypes.CredentialResponseEncryption{EncValuesSupported: []string{"A128GCM"}, EncryptionRequired: &required}
 	}
 	return metadata
 }
@@ -127,4 +127,59 @@ func TestCredentialEncryptionFollowsTheIssuerEndToEnd(t *testing.T) {
 	require.Len(t, result.Credentials, 1)
 	require.Contains(t, fixture.lastCredentialBody, "credential_response_encryption")
 	require.Contains(t, fixture.credentialHeaders.Get("Content-Type"), "application/jwt")
+}
+
+// Response encryption follows what the issuer can decrypt to and the wallet can
+// read: an optional one that no listed alg or enc allows is not requested, a
+// required one is refused before the grant is spent, and a key-wrapping ECDH
+// alg is used when it is the one listed.
+func TestCredentialResponseEncryptionNegotiatesTheAlgorithm(t *testing.T) {
+	encryption := func(algValues, encValues []string, required bool, policy CredentialEncryptionPolicy) func(*finalIssuanceFixture) {
+		return func(f *finalIssuanceFixture) {
+			f.responseEncryption = true
+			f.requestEncryption = true
+			f.encryptionRequired = required
+			f.responseAlgValues = algValues
+			f.responseEncValues = encValues
+			f.encryptionPolicy = policy
+		}
+	}
+	for name, test := range map[string]struct {
+		algValues, encValues []string
+	}{
+		"only an RSA alg":     {algValues: []string{"RSA-OAEP-256"}},
+		"only an unknown alg": {algValues: []string{"ECDH-1PU"}},
+		"only an unknown enc": {algValues: []string{"ECDH-ES"}, encValues: []string{"XC20P"}},
+	} {
+		t.Run("optional with "+name+" is not requested", func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, encryption(test.algValues, test.encValues, false, CredentialEncryptionPolicy{}))
+			result, err := fixture.receive(fixture.issuanceRequest())
+			require.NoError(t, err)
+			require.Len(t, result.Credentials, 1)
+			require.NotContains(t, fixture.lastCredentialBody, "credential_response_encryption")
+		})
+		t.Run("required with "+name+" is refused before the token request", func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, encryption(test.algValues, test.encValues, true, CredentialEncryptionPolicy{}))
+			_, err := fixture.wallet.AuthorizePreAuthorizedIssuance(context.Background(), fixture.tokenTestPreAuthorizedRequest(nil))
+			require.ErrorIs(t, err, ErrCredentialEncryptionUnavailable)
+			require.Equal(t, 0, fixture.tokenCalls)
+		})
+		t.Run("required by the holder with "+name+" is refused before the token request", func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, encryption(test.algValues, test.encValues, false, CredentialEncryptionPolicy{Response: CredentialEncryptionRequired}))
+			_, err := fixture.wallet.AuthorizePreAuthorizedIssuance(context.Background(), fixture.tokenTestPreAuthorizedRequest(nil))
+			require.ErrorIs(t, err, ErrCredentialEncryptionUnavailable)
+			require.Equal(t, 0, fixture.tokenCalls)
+		})
+	}
+
+	t.Run("required ECDH-ES+A128KW is used end to end", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t, encryption([]string{"RSA-OAEP-256", "ECDH-ES+A128KW"}, nil, true, CredentialEncryptionPolicy{}))
+		result, err := fixture.receive(fixture.issuanceRequest())
+		require.NoError(t, err)
+		require.Len(t, result.Credentials, 1)
+		requested, _ := fixture.lastCredentialBody["credential_response_encryption"].(map[string]any)
+		jwk, _ := requested["jwk"].(map[string]any)
+		require.Equal(t, "ECDH-ES+A128KW", jwk["alg"])
+		require.Contains(t, fixture.credentialHeaders.Get("Content-Type"), "application/jwt")
+	})
 }

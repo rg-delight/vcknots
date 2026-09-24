@@ -5,8 +5,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -52,11 +55,41 @@ func (p CredentialEncryptionPolicy) responseEncryptionKey(md *receiverTypes.Cred
 	if p.disablesEncryption() || md == nil || md.CredentialResponseEncryption == nil || md.CredentialRequestEncryption == nil {
 		return nil, nil
 	}
+	// validate refused a required encryption the wallet cannot read, so an
+	// unusable one here is optional and is not asked for.
+	if !responseEncryptionUsable(md.CredentialResponseEncryption) {
+		return nil, nil
+	}
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate a credential response encryption key: %w", err)
 	}
-	return &jose.JSONWebKey{Key: private, Algorithm: string(jose.ECDH_ES), Use: "enc"}, nil
+	// The key names no alg: the receiver takes the first ECDH-ES algorithm of
+	// alg_values_supported (Section 10).
+	return &jose.JSONWebKey{Key: private, Use: "enc"}, nil
+}
+
+// responseEncryptionUsable reports whether the wallet's P-256 response key can
+// be used with one of the issuer's alg_values_supported (any ECDH-ES
+// algorithm the JWE allowlist admits, ECDH-ES itself when none is listed) and
+// the wallet can decrypt one of its enc_values_supported.
+func responseEncryptionUsable(encryption *receiverTypes.CredentialResponseEncryption) bool {
+	algUsable := len(encryption.AlgValuesSupported) == 0
+	for _, alg := range encryption.AlgValuesSupported {
+		keyAlgorithm := jose.KeyAlgorithm(alg)
+		if strings.HasPrefix(alg, string(jose.ECDH_ES)) && slices.Contains(oid4vcijwe.KeyAlgorithms(), keyAlgorithm) {
+			algUsable = true
+			break
+		}
+	}
+	encUsable := false
+	for _, enc := range encryption.EncValuesSupported {
+		if slices.Contains(oid4vcijwe.ContentEncryptions(), jose.ContentEncryption(enc)) {
+			encUsable = true
+			break
+		}
+	}
+	return algUsable && encUsable
 }
 
 // validate reports whether the issuer metadata can honour the policy.
@@ -83,6 +116,8 @@ func (p CredentialEncryptionPolicy) validate(md *receiverTypes.CredentialIssuerM
 		return fmt.Errorf("%w: the credential issuer advertises no credential_request_encryption", ErrCredentialEncryptionUnavailable)
 	case p.Response == CredentialEncryptionRequired && (responseEncryption == nil || requestEncryption == nil):
 		return fmt.Errorf("%w: the credential issuer advertises no encrypted credential response", ErrCredentialEncryptionUnavailable)
+	case (issuerRequiresResponseEncryption || p.Response == CredentialEncryptionRequired) && !responseEncryptionUsable(responseEncryption):
+		return fmt.Errorf("%w: the wallet can use none of the credential response encryption algorithms %v and encodings %v", ErrCredentialEncryptionUnavailable, responseEncryption.AlgValuesSupported, responseEncryption.EncValuesSupported)
 	}
 	return nil
 }

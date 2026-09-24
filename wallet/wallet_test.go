@@ -422,7 +422,7 @@ func writeObservedFinalCredentialResponse(obs *serverObservations, w http.Respon
 	}
 	encrypter, err := jose.NewEncrypter(
 		jose.A128GCM,
-		jose.Recipient{Algorithm: jose.ECDH_ES, Key: key.Public().Key, KeyID: key.KeyID},
+		jose.Recipient{Algorithm: responseKeyAlgorithm(key), Key: key.Public().Key, KeyID: key.KeyID},
 		(&jose.EncrypterOptions{}).WithContentType("json"),
 	)
 	if !assert.NoError(obs, err) {
@@ -442,6 +442,15 @@ func writeObservedFinalCredentialResponse(obs *serverObservations, w http.Respon
 	w.Header().Set("Content-Type", "application/jwt")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(serialized))
+}
+
+// responseKeyAlgorithm is the JWE alg the wallet's response key names, ECDH-ES
+// when it names none.
+func responseKeyAlgorithm(key jose.JSONWebKey) jose.KeyAlgorithm {
+	if key.Algorithm == "" {
+		return jose.ECDH_ES
+	}
+	return jose.KeyAlgorithm(key.Algorithm)
 }
 
 func newPrivateJWKForFinalVCITest(t *testing.T, keyID string) jose.JSONWebKey {

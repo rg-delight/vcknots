@@ -77,9 +77,13 @@ type finalIssuanceFixture struct {
 	includeNotification      bool
 	responseEncryption       bool
 	encryptionRequired       bool
-	requestEncryption        bool
-	omitPAREndpoint          bool
-	issParameterSupported    bool
+	// responseAlgValues and responseEncValues, when set, are the
+	// credential_response_encryption alg and enc values published.
+	responseAlgValues     []string
+	responseEncValues     []string
+	requestEncryption     bool
+	omitPAREndpoint       bool
+	issParameterSupported bool
 	// walletProfile selects the wallet and plugin profile; HAIP also serves
 	// TLS (HAIP Section 4).
 	walletProfile           profile.Profile
@@ -290,12 +294,21 @@ func (f *finalIssuanceFixture) authorizeRedirect(base string) string {
 	return location
 }
 
+// writeDefaultCredentialResponse encrypts the response when the request asked
+// for it (Section 8.2).
 func (f *finalIssuanceFixture) writeDefaultCredentialResponse(w http.ResponseWriter, payload any) {
-	if f.responseEncryption {
+	if f.responseEncryption && f.responseEncryptionRequested() {
 		writeObservedFinalCredentialResponse(f.obs, w, f.responseKeyFromRequest(), payload)
 		return
 	}
 	mockserver.JSONResponse(w, http.StatusOK, payload)
+}
+
+// responseEncryptionRequested reports whether the last (Deferred) Credential
+// Request carried credential_response_encryption.
+func (f *finalIssuanceFixture) responseEncryptionRequested() bool {
+	return f.lastCredentialBody["credential_response_encryption"] != nil ||
+		(f.lastDeferredBody != nil && f.lastDeferredBody["credential_response_encryption"] != nil)
 }
 
 // responseKeyFromRequest is the credential_response_encryption.jwk of the
@@ -362,10 +375,17 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			metadata["batch_credential_issuance"] = map[string]any{"batch_size": f.batchSize}
 		}
 		if f.responseEncryption {
-			metadata["credential_response_encryption"] = map[string]any{
+			responseEncryption := map[string]any{
 				"enc_values_supported": []string{"A128GCM"},
 				"encryption_required":  f.encryptionRequired,
 			}
+			if f.responseAlgValues != nil {
+				responseEncryption["alg_values_supported"] = f.responseAlgValues
+			}
+			if f.responseEncValues != nil {
+				responseEncryption["enc_values_supported"] = f.responseEncValues
+			}
+			metadata["credential_response_encryption"] = responseEncryption
 		}
 		if f.requestEncryption {
 			metadata["credential_request_encryption"] = map[string]any{
