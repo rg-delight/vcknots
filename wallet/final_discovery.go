@@ -31,6 +31,24 @@ func offeredAuthorizationServer(grant *CredentialOfferGrant) authorizationServer
 	}
 }
 
+// pinnedAuthorizationServer selects the authorization server a resumed
+// issuance started with. It must still be one the Credential Issuer delegates
+// to: listed in authorization_servers, or the Credential Issuer itself when
+// none are listed (§12.2.4).
+func pinnedAuthorizationServer(authorizationServer string) authorizationServerSelector {
+	return func(issuerMetadata *receiverTypes.CredentialIssuerMetadata, issuerEndpoint common.URIField) (common.URIField, error) {
+		if len(issuerMetadata.AuthorizationServers) == 0 && authorizationServer == issuerEndpoint.String() {
+			return issuerEndpoint, nil
+		}
+		for _, server := range issuerMetadata.AuthorizationServers {
+			if server.String() == authorizationServer {
+				return server, nil
+			}
+		}
+		return common.URIField{}, fmt.Errorf("authorization server %q is not one the credential issuer delegates to: %w", authorizationServer, ErrIssuanceStateInvalid)
+	}
+}
+
 // discoverOID4VCIIssuer resolves the Credential Issuer metadata for
 // issuerIdentifier (§12.2.2), or takes cached, whose credential_issuer must be
 // identical to it either way (§12.2.4). It then selects the authorization

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -60,12 +61,16 @@ func (e *AuthorizationResponseError) Error() string {
 	return fmt.Sprintf("authorization response error: %s: %s", e.Code, e.Description)
 }
 
-// OID4VCIFinalAuthorization is the state a caller holds between the two halves
-// of the OpenID4VCI 1.0 §5 authorization code flow: BeginOID4VCIFinalAuthorization
-// produces it, the caller sends the user to AuthorizationURL in a browser, and
-// ResumeOID4VCIFinalAuthorization consumes it together with the redirect the
-// browser came back with. Every member is JSON-serialisable so the state can
-// survive a process restart.
+// OID4VCIFinalAuthorization is the state a caller holds between
+// BeginOID4VCIFinalAuthorization and ResumeOID4VCIFinalAuthorization or
+// AuthorizeOID4VCIFinalToken. It is JSON-serialisable so it can survive a
+// process restart.
+//
+// The state is confidential: CodeVerifier is the RFC 7636 verifier that
+// redeems the authorization code. Keep it where only the wallet can read it,
+// protect it against modification, and resume from it once. Resuming checks it
+// against the request and re-fetches the issuer and authorization server
+// metadata; no endpoint is taken from the state.
 type OID4VCIFinalAuthorization struct {
 	// AuthorizationURL is the §5.2 authorization request the caller must open
 	// in the system browser.
@@ -79,10 +84,61 @@ type OID4VCIFinalAuthorization struct {
 	RequestURI string `json:"request_uri,omitempty"`
 	// ExpiresAt is the §5.1.4 request_uri expiry measured from the PAR
 	// response; the zero value disables the check.
-	ExpiresAt                   time.Time                                  `json:"expires_at"`
-	IssuerMetadata              *receiverTypes.CredentialIssuerMetadata    `json:"issuer_metadata"`
-	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata"`
-	CredentialConfigurationID   string                                     `json:"credential_configuration_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	// CredentialIssuer is the Credential Issuer Identifier of the issuance.
+	CredentialIssuer string `json:"credential_issuer"`
+	// AuthorizationServer is the RFC 8414 issuer identifier of the
+	// authorization server the request was sent to.
+	AuthorizationServer       string `json:"authorization_server"`
+	CredentialConfigurationID string `json:"credential_configuration_id"`
+	// ClientID and RedirectURI are those of the authorization request; the
+	// resuming request must name the same.
+	ClientID    string `json:"client_id"`
+	RedirectURI string `json:"redirect_uri"`
+	// AuthorizationDetailsRequested records that the request used
+	// authorization_details rather than scope, which decides how the Token
+	// Response is read (§6.2).
+	AuthorizationDetailsRequested bool `json:"authorization_details_requested,omitempty"`
+}
+
+// requireFor checks that the state is complete and belongs to req.
+func (a *OID4VCIFinalAuthorization) requireFor(req OID4VCIFinalReceiveRequest) error {
+	for name, value := range map[string]string{
+		"state":                       a.State,
+		"code_verifier":               a.CodeVerifier,
+		"credential_issuer":           a.CredentialIssuer,
+		"authorization_server":        a.AuthorizationServer,
+		"credential_configuration_id": a.CredentialConfigurationID,
+		"client_id":                   a.ClientID,
+		"redirect_uri":                a.RedirectURI,
+	} {
+		if value == "" {
+			return fmt.Errorf("authorization state is missing %s: %w", name, ErrIssuanceStateInvalid)
+		}
+	}
+	if req.ClientID != a.ClientID || req.RedirectURI != a.RedirectURI {
+		return fmt.Errorf("the request names another client_id or redirect_uri than the authorization state: %w", ErrIssuanceStateInvalid)
+	}
+	return requireOID4VCIIssuanceTarget(req, a.CredentialIssuer, a.CredentialConfigurationID)
+}
+
+// requireOID4VCIIssuanceTarget checks that the Credential Issuer and Credential
+// Configuration req names, through its offer or directly, are the ones the
+// resumed state was created for. A request that names neither is not checked.
+func requireOID4VCIIssuanceTarget(req OID4VCIFinalReceiveRequest, credentialIssuer, credentialConfigurationID string) error {
+	switch {
+	case req.CredentialOffer != nil && req.CredentialOffer.CredentialIssuer != nil:
+		if req.CredentialOffer.CredentialIssuer.String() != credentialIssuer ||
+			!slices.Contains(req.CredentialOffer.CredentialConfigurationIDs, credentialConfigurationID) {
+			return fmt.Errorf("the credential offer names another issuance than the resumed state: %w", ErrIssuanceStateInvalid)
+		}
+	case req.CredentialIssuer != nil:
+		if req.CredentialIssuer.String() != credentialIssuer ||
+			strings.TrimSpace(req.CredentialConfigurationID) != credentialConfigurationID {
+			return fmt.Errorf("the request names another issuance than the resumed state: %w", ErrIssuanceStateInvalid)
+		}
+	}
+	return nil
 }
 
 // RequestURIExpired reports whether the RFC 9126 §2.2 request_uri lifetime has
@@ -145,10 +201,8 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 		issuerIdentifier = req.CredentialIssuer.String()
 	}
 
-	// HAIP §4.4.1: "Wallets MUST use ... an OAuth2 Client authentication
-	// mechanism at OAuth2 Endpoints that support client authentication".
-	if w.profile.IsHAIP() && w.clientAttestation == nil && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
-		return nil, nil, fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
+	if err := w.requireHAIPClientAuthentication(req); err != nil {
+		return nil, nil, err
 	}
 
 	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
@@ -226,12 +280,18 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 	if err := requireOID4VCIContext(ctx, "the authorization request"); err != nil {
 		return nil, nil, err
 	}
+	if len(authorizationDetails) > 0 {
+		flow.authorizationDetailsMode = AuthorizationDetailsRequired
+	}
 	authorization := &OID4VCIFinalAuthorization{
-		State:                       state,
-		CodeVerifier:                codeVerifier,
-		IssuerMetadata:              issuerMetadata,
-		AuthorizationServerMetadata: authorizationServerMetadata,
-		CredentialConfigurationID:   credentialConfigurationID,
+		State:                         state,
+		CodeVerifier:                  codeVerifier,
+		CredentialIssuer:              issuerMetadata.CredentialIssuer,
+		AuthorizationServer:           discovery.authorizationServer,
+		CredentialConfigurationID:     credentialConfigurationID,
+		ClientID:                      req.ClientID,
+		RedirectURI:                   req.RedirectURI,
+		AuthorizationDetailsRequested: len(authorizationDetails) > 0,
 	}
 	if usePAR {
 		attestationHeaders, _, err := w.createOID4VCIAttestationHeaders(ctx, finalReceiver, req, authorizationServerMetadata, flow.authorizationServerIssuer)
@@ -258,6 +318,16 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 	}
 	authorization.AuthorizationURL = oid4vciAuthorizationRequestURL(authorizationServerMetadata.AuthorizationEndpoint, req.ClientID, parRequest, authorization.RequestURI)
 	return authorization, flow, nil
+}
+
+// requireHAIPClientAuthentication applies HAIP §4.4.1: "Wallets MUST use ...
+// an OAuth2 Client authentication mechanism at OAuth2 Endpoints that support
+// client authentication (such as the PAR and Token Endpoints)".
+func (w *Wallet) requireHAIPClientAuthentication(req OID4VCIFinalReceiveRequest) error {
+	if w.profile.IsHAIP() && w.clientAttestation == nil && req.AttesterKey.Key == nil && !clientAuthenticationConfigured(w.clientAuth) {
+		return fmt.Errorf("HAIP requires an OAuth2 client authentication mechanism")
+	}
+	return nil
 }
 
 // oid4vciAuthorizationRequestParameters resolves how the selected Credential

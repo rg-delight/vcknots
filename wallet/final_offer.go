@@ -198,16 +198,6 @@ func (w *Wallet) newOID4VCIFinalFlow(
 			)
 		}
 	}
-
-	// §6.2 judges the Token Response by whether the authorization request used
-	// authorization_details (§5.1.1) or scope (§5.1.2).
-	_, authorizationDetails, err := oid4vciAuthorizationRequestParameters(req.AuthorizationRequestType, credentialConfigurationID, flow.credentialConfiguration, w.profile.IsHAIP())
-	if err != nil {
-		return nil, err
-	}
-	if len(authorizationDetails) > 0 {
-		flow.authorizationDetailsMode = AuthorizationDetailsRequired
-	}
 	return flow, nil
 }
 

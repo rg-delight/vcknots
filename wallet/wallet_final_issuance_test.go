@@ -1867,8 +1867,9 @@ func TestBeginOID4VCIFinalAuthorizationReturnsResumableState(t *testing.T) {
 	require.Equal(t, authorization.State, restored.State)
 	require.Equal(t, authorization.CodeVerifier, restored.CodeVerifier)
 	require.Equal(t, authorization.AuthorizationURL, restored.AuthorizationURL)
-	require.NotNil(t, restored.IssuerMetadata)
-	require.NotNil(t, restored.AuthorizationServerMetadata)
+	require.Equal(t, fixture.server.URL, restored.CredentialIssuer)
+	require.Equal(t, fixture.server.URL, restored.AuthorizationServer)
+	require.Equal(t, "client-1", restored.ClientID)
 
 	redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(restored.State)
 	result, err := fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), fixture.request(), &restored, redirect)

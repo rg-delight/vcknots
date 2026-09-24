@@ -111,16 +111,14 @@ func (w *Wallet) BeginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 }
 
 // ResumeOID4VCIFinalAuthorization continues the flow from the redirect the
-// browser delivered to the wallet's registered redirect_uri. It validates the
-// RFC 6749 §4.1.2 / RFC 9207 authorization response against auth, exchanges the
-// code at the token endpoint and performs the §8 credential request. req must
-// carry the same client, redirect_uri and holder keys the matching
-// BeginOID4VCIFinalAuthorization call used.
+// browser delivered to the wallet's registered redirect_uri. It checks auth
+// against req (ErrIssuanceStateInvalid), re-fetches the metadata, validates the
+// RFC 6749 §4.1.2 / RFC 9207 authorization response, exchanges the code and
+// performs the §8 credential request. req names the same offer or issuer,
+// client_id and redirect_uri as the BeginOID4VCIFinalAuthorization call, and
+// the holder keys to bind.
 func (w *Wallet) ResumeOID4VCIFinalAuthorization(ctx context.Context, req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization, redirectURL string) (*OID4VCIFinalReceiveResult, error) {
-	if auth == nil {
-		return nil, fmt.Errorf("authorization state is required")
-	}
-	flow, err := w.restoreOID4VCIFinalFlow(req, auth)
+	flow, err := w.restoreOID4VCIFinalFlow(ctx, req, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -144,34 +142,42 @@ func requireOID4VCIContext(ctx context.Context, step string) error {
 	return nil
 }
 
-// restoreOID4VCIFinalFlow rebuilds the non-serialisable half of an issuance
-// from the request and the persisted authorization state. The issuer and
-// authorization server metadata come from the state, not from a fresh fetch, so
-// a restarted wallet continues against exactly the metadata the authorization
-// request was built from.
-func (w *Wallet) restoreOID4VCIFinalFlow(req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization) (*oid4vciFinalFlow, error) {
+// restoreOID4VCIFinalFlow rebuilds an issuance from the request and the
+// persisted authorization state. The state is checked against the request and
+// the metadata is fetched again, so the token request goes to an endpoint the
+// Credential Issuer publishes now, not to one carried in caller storage.
+func (w *Wallet) restoreOID4VCIFinalFlow(ctx context.Context, req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization) (*oid4vciFinalFlow, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("authorization state is required")
+	}
 	if err := validateOID4VCIFinalReceiveRequest(req); err != nil {
 		return nil, err
 	}
-	if auth.IssuerMetadata == nil {
-		return nil, fmt.Errorf("authorization state is missing the issuer metadata")
+	if err := w.requireHAIPClientAuthentication(req); err != nil {
+		return nil, err
 	}
-	if auth.AuthorizationServerMetadata == nil {
-		return nil, fmt.Errorf("authorization state is missing the authorization server metadata")
+	if err := auth.requireFor(req); err != nil {
+		return nil, err
 	}
-	if auth.AuthorizationServerMetadata.TokenEndpoint == nil {
-		return nil, fmt.Errorf("token endpoint is missing on authorization server")
+	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
+		return nil, err
 	}
 	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	discovery := &oid4vciDiscovery{
-		issuerMetadata:              auth.IssuerMetadata,
-		authorizationServerMetadata: auth.AuthorizationServerMetadata,
-		authorizationServer:         auth.AuthorizationServerMetadata.Issuer.String(),
+	discovery, err := discoverOID4VCIIssuer(finalReceiver, req.Type, auth.CredentialIssuer, nil, pinnedAuthorizationServer(auth.AuthorizationServer))
+	if err != nil {
+		return nil, err
 	}
-	return w.newOID4VCIFinalFlow(req, finalReceiver, discovery, auth.CredentialConfigurationID, true)
+	flow, err := w.newOID4VCIFinalFlow(req, finalReceiver, discovery, auth.CredentialConfigurationID, true)
+	if err != nil {
+		return nil, err
+	}
+	if auth.AuthorizationDetailsRequested {
+		flow.authorizationDetailsMode = AuthorizationDetailsRequired
+	}
+	return flow, nil
 }
 
 // resumeOID4VCIFinalAuthorization is the composition of the two halves of the
@@ -364,6 +370,9 @@ func (w *Wallet) ResumeOID4VCIFinalDeferredCredentialContext(ctx context.Context
 	}
 	if strings.TrimSpace(req.TransactionID) == "" {
 		return nil, fmt.Errorf("transaction ID is required")
+	}
+	if err := w.requireProfileAccessToken(req.AccessToken); err != nil {
+		return nil, err
 	}
 	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {

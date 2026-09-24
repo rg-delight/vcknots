@@ -25,16 +25,15 @@ const dpopTokenType = "DPoP"
 // needs from the §6.1 Token Response, in a form that survives being written to
 // a database and read back in another process.
 //
-// It is the second interruption point of a Final issuance. The first one is the
-// browser: BeginOID4VCIFinalAuthorization hands out an OID4VCIFinalAuthorization
-// and AuthorizeOID4VCIFinalToken consumes it. The second one is the key
-// attestation: OpenID4VCI 1.0 Appendix D binds the attestation to the issuer's
-// c_nonce, so a wallet whose attester lives outside this process cannot sign it
-// before the token exchange has happened. AuthorizeOID4VCIFinalToken stops
-// there and returns this grant; RequestOID4VCIFinalCredential resumes from it.
+// AuthorizeOID4VCIFinalToken and AuthorizeOID4VCIFinalPreAuthorizedToken return
+// it, and RequestOID4VCIFinalCredential resumes from it, so a key attestation
+// bound to the issuer's c_nonce (Appendix D) can be minted outside this
+// process in between.
 //
 // The grant carries an access token. A caller that persists it must treat it as
-// a credential: encrypt it at rest and keep it out of logs and traces.
+// a credential: encrypt it at rest, protect it against modification and keep it
+// out of logs and traces. The credential stage re-fetches the Credential Issuer
+// metadata; no endpoint is taken from the grant.
 type OID4VCIFinalTokenGrant struct {
 	// AccessToken is the parsed §6.2 Token Response, including its token_type,
 	// so the Credential Request presents the token with the scheme the
@@ -45,9 +44,8 @@ type OID4VCIFinalTokenGrant struct {
 	// advertises no nonce_endpoint, which §7 permits.
 	CNonce string `json:"c_nonce,omitempty"`
 	// DPoPNonces is the RFC 9449 §8.2 per-server nonce store exported from the
-	// receiver, so the first DPoP proof built after the interruption already
-	// carries the nonce each server last issued instead of paying a challenge
-	// round trip.
+	// receiver, so the first DPoP proof after the interruption carries the
+	// nonce each server last issued.
 	DPoPNonces map[string]string `json:"dpop_nonces,omitempty"`
 	// DPoPKeyThumbprint is the RFC 7638 thumbprint of the key the access token
 	// is bound to, set only for a DPoP-bound token. RequestOID4VCIFinalCredential
@@ -61,17 +59,12 @@ type OID4VCIFinalTokenGrant struct {
 	// CredentialConfigurationID is the Credential Configuration this grant was
 	// obtained for.
 	CredentialConfigurationID string `json:"credential_configuration_id"`
-	// IssuerMetadata is the §12.2.2 Credential Issuer metadata the flow was
-	// built from. The credential stage uses this snapshot rather than a fresh
-	// fetch, so the request goes to exactly the issuer the token was obtained
-	// from.
-	IssuerMetadata *receiverTypes.CredentialIssuerMetadata `json:"issuer_metadata"`
-	// AuthorizationServerMetadata and AuthorizationServerIssuer record which
-	// authorization server issued the token. They are not needed to spend the
-	// grant; they are carried so a caller can report and audit the issuance
-	// from the persisted state alone.
-	AuthorizationServerMetadata *receiverTypes.AuthorizationServerMetadata `json:"authorization_server_metadata,omitempty"`
-	AuthorizationServerIssuer   string                                     `json:"authorization_server_issuer,omitempty"`
+	// CredentialIssuer is the Credential Issuer Identifier the token was
+	// obtained for.
+	CredentialIssuer string `json:"credential_issuer"`
+	// AuthorizationServerIssuer is the RFC 8414 issuer identifier of the
+	// authorization server that issued the token, for reporting.
+	AuthorizationServerIssuer string `json:"authorization_server_issuer,omitempty"`
 	// KeyAttestation is the Appendix D request the caller must satisfy before
 	// the Credential Request can be sent, present only when this issuance needs
 	// an attestation. Its Keys are public.
@@ -265,14 +258,13 @@ func (w *Wallet) newOID4VCIFinalTokenGrant(
 	}
 
 	grant := &OID4VCIFinalTokenGrant{
-		AccessToken:                 token,
-		CNonce:                      cNonce,
-		CredentialIdentifier:        credentialIdentifier,
-		CredentialConfigurationID:   flow.credentialConfigurationID,
-		IssuerMetadata:              issuerMetadata,
-		AuthorizationServerMetadata: flow.authorizationServerMetadata,
-		AuthorizationServerIssuer:   flow.authorizationServerIssuer,
-		DPoPNonces:                  exportOID4VCIDPoPNonces(flow),
+		AccessToken:               token,
+		CNonce:                    cNonce,
+		CredentialIdentifier:      credentialIdentifier,
+		CredentialConfigurationID: flow.credentialConfigurationID,
+		CredentialIssuer:          issuerMetadata.CredentialIssuer,
+		AuthorizationServerIssuer: flow.authorizationServerIssuer,
+		DPoPNonces:                exportOID4VCIDPoPNonces(flow),
 	}
 	if flow.keyAttestation != nil {
 		// Only public keys leave the wallet: the attester needs the key
@@ -305,15 +297,10 @@ func (w *Wallet) newOID4VCIFinalTokenGrant(
 // a JSON-serialisable OID4VCIFinalTokenGrant, so the flow may stop here while a
 // key attestation is minted elsewhere.
 //
-// req must carry the same client, redirect_uri and holder keys the matching
-// BeginOID4VCIFinalAuthorization call used.
-// ResumeOID4VCIFinalAuthorization is this call followed by
-// RequestOID4VCIFinalCredential and behaves identically.
+// auth is checked against req as ResumeOID4VCIFinalAuthorization does, which
+// is this call followed by RequestOID4VCIFinalCredential.
 func (w *Wallet) AuthorizeOID4VCIFinalToken(ctx context.Context, req OID4VCIFinalReceiveRequest, auth *OID4VCIFinalAuthorization, redirectURL string) (*OID4VCIFinalTokenGrant, error) {
-	if auth == nil {
-		return nil, fmt.Errorf("authorization state is required")
-	}
-	flow, err := w.restoreOID4VCIFinalFlow(req, auth)
+	flow, err := w.restoreOID4VCIFinalFlow(ctx, req, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -328,13 +315,15 @@ func (w *Wallet) AuthorizeOID4VCIFinalToken(ctx context.Context, req OID4VCIFina
 //
 // grant may have been marshalled to JSON and read back in another process; the
 // wallet it is presented to needs the same holder keys, credential store and
-// acceptance policy, but no memory of the token exchange. Two conditions stop
+// acceptance policy, but no memory of the token exchange. When req names an
+// offer or a Credential Issuer, it must be the grant's (ErrIssuanceStateInvalid).
+// Two conditions stop
 // the call and hand the caller an updated grant instead of an error it can only
 // report: *KeyAttestationRequiredError when no attestation is available, and
 // *KeyAttestationNonceError when the one supplied does not match the c_nonce
 // the request must carry.
 func (w *Wallet) RequestOID4VCIFinalCredential(ctx context.Context, req OID4VCIFinalReceiveRequest, grant *OID4VCIFinalTokenGrant) (*OID4VCIFinalReceiveResult, error) {
-	flow, err := w.restoreOID4VCIFinalCredentialFlow(req.Type, grant, oid4vciFinalCredentialInputsFromRequest(req))
+	flow, err := w.restoreOID4VCIFinalCredentialFlow(ctx, req, grant)
 	if err != nil {
 		return nil, err
 	}
@@ -386,15 +375,13 @@ type oid4vciFinalCredentialInputs struct {
 	withoutProofs bool
 }
 
-// restoreOID4VCIFinalCredentialFlow rebuilds the non-serialisable half of an
-// issuance from a token grant. The issuer metadata comes from the grant, not
-// from a fresh fetch, so the credential request goes to exactly the issuer the
-// access token was obtained from; the wallet profile, the batch size and the
-// key attestation plan are re-evaluated here, so a grant decoded into another
-// wallet is judged by that wallet's policy.
-func (w *Wallet) restoreOID4VCIFinalCredentialFlow(receivingType receiverTypes.SupportedReceivingTypes, grant *OID4VCIFinalTokenGrant, in oid4vciFinalCredentialInputs) (*oid4vciFinalFlow, error) {
-	if receivingType != receiverTypes.Oid4vci {
-		return nil, fmt.Errorf("unsupported OID4VCI Final receiving type: %v", receivingType)
+// restoreOID4VCIFinalCredentialFlow rebuilds the credential stage from a token
+// grant. The grant is checked against the request and the Credential Issuer
+// metadata is fetched again; the wallet profile, the batch size and the key
+// attestation plan are those of this wallet.
+func (w *Wallet) restoreOID4VCIFinalCredentialFlow(ctx context.Context, req OID4VCIFinalReceiveRequest, grant *OID4VCIFinalTokenGrant) (*oid4vciFinalFlow, error) {
+	if req.Type != receiverTypes.Oid4vci {
+		return nil, fmt.Errorf("unsupported OID4VCI Final receiving type: %v", req.Type)
 	}
 	if grant == nil {
 		return nil, fmt.Errorf("token grant is required")
@@ -402,14 +389,37 @@ func (w *Wallet) restoreOID4VCIFinalCredentialFlow(receivingType receiverTypes.S
 	if grant.AccessToken == nil || strings.TrimSpace(grant.AccessToken.Token) == "" {
 		return nil, fmt.Errorf("token grant is missing the access token")
 	}
-	if grant.IssuerMetadata == nil {
-		return nil, fmt.Errorf("token grant is missing the issuer metadata")
+	if grant.CredentialIssuer == "" || grant.CredentialConfigurationID == "" {
+		return nil, fmt.Errorf("token grant does not name its credential issuer and configuration: %w", ErrIssuanceStateInvalid)
 	}
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(receivingType)
+	if err := requireOID4VCIIssuanceTarget(req, grant.CredentialIssuer, grant.CredentialConfigurationID); err != nil {
+		return nil, err
+	}
+	if err := w.requireProfileAccessToken(grant.AccessToken); err != nil {
+		return nil, err
+	}
+	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
+		return nil, err
+	}
+	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
 	if err != nil {
 		return nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
-	return w.newOID4VCIFinalCredentialFlow(finalReceiver, grant.IssuerMetadata, grant.CredentialConfigurationID, in)
+	issuerMetadata, err := resolveOID4VCIIssuerMetadata(finalReceiver, req.Type, grant.CredentialIssuer, nil)
+	if err != nil {
+		return nil, err
+	}
+	return w.newOID4VCIFinalCredentialFlow(finalReceiver, issuerMetadata, grant.CredentialConfigurationID, oid4vciFinalCredentialInputsFromRequest(req))
+}
+
+// requireProfileAccessToken applies HAIP §4 ("Sender-constrained access token:
+// MUST support DPoP") to an access token the wallet did not just obtain: one
+// read back from a grant or a deferred request.
+func (w *Wallet) requireProfileAccessToken(token *receiverTypes.CredentialIssuanceAccessToken) error {
+	if w.profile.IsHAIP() && !isDPoPAccessToken(token) {
+		return fmt.Errorf("HAIP requires a DPoP-bound access token, the token has token_type %q: %w", token.TokenType, ErrDPoPRequired)
+	}
+	return nil
 }
 
 // newOID4VCIFinalCredentialFlow builds the flow the §8 Credential Request runs
