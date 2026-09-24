@@ -535,3 +535,38 @@ func TestResolveDCQLValuesNarrowWildcards(t *testing.T) {
 		})
 	}
 }
+
+// ResolveDCQLClaimSets lists the satisfiable claim sets in the Verifier's
+// order, so a Holder's choice can be made among them.
+func TestResolveDCQLClaimSets(t *testing.T) {
+	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{
+		ID: "pid", Format: "dc+sd-jwt",
+		Claims: []DCQLClaimQuery{
+			{ID: "age", Path: []any{"age_over_18"}},
+			{ID: "birth", Path: []any{"birthdate"}},
+			{ID: "missing", Path: []any{"not_available"}},
+		},
+		ClaimSets: [][]string{{"missing"}, {"age"}, {"birth", "age"}},
+	}}}
+	candidate := DCQLCredentialCandidate{ID: "c", Format: "dc+sd-jwt", Claims: []string{"age_over_18", "birthdate"}}
+
+	sets, err := ResolveDCQLClaimSets(query, "pid", candidate)
+	if err != nil || !reflect.DeepEqual(sets, [][]string{{"age_over_18"}, {"birthdate", "age_over_18"}}) {
+		t.Fatalf("claim sets = %q, %v", sets, err)
+	}
+	for name, run := range map[string]func() error{
+		"unknown query": func() error { _, err := ResolveDCQLClaimSets(query, "other", candidate); return err },
+		"wrong format": func() error {
+			_, err := ResolveDCQLClaimSets(query, "pid", DCQLCredentialCandidate{ID: "c", Format: "jwt_vc_json"})
+			return err
+		},
+		"no claim set held": func() error {
+			_, err := ResolveDCQLClaimSets(query, "pid", DCQLCredentialCandidate{ID: "c", Format: "dc+sd-jwt"})
+			return err
+		},
+	} {
+		if err := run(); !errors.Is(err, ErrDCQLSelectionUnsatisfied) {
+			t.Fatalf("%s: error = %v, want ErrDCQLSelectionUnsatisfied", name, err)
+		}
+	}
+}

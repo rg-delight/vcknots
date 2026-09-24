@@ -161,6 +161,39 @@ func ResolveSatisfiableDCQLCredentials(query *DCQLQuery, candidates []DCQLCreden
 	return selections, nil
 }
 
+// ResolveDCQLClaimSets returns, in the Verifier's order of preference (OID4VP
+// 1.0 Section 6.4.1), the claims each claim set of credential query queryID
+// resolves to for candidate, leaving out the sets candidate cannot satisfy. A
+// Wallet whose Holder chooses the claim set picks one of these and checks the
+// result with ValidateDCQLCredentialSelections.
+//
+// A candidate that fails the query's constraints or satisfies no claim set, and
+// a queryID the request does not contain, are reported as errors wrapping
+// ErrDCQLSelectionUnsatisfied.
+func ResolveDCQLClaimSets(query *DCQLQuery, queryID string, candidate DCQLCredentialCandidate) ([][]string, error) {
+	plan, err := planDCQLQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	credentialQuery, requested := plan.queries[queryID]
+	if !requested {
+		return nil, fmt.Errorf("%w: the request contains no credential query %q", ErrDCQLSelectionUnsatisfied, queryID)
+	}
+	if err := dcqlCandidateConstraintError(credentialQuery, candidate); err != nil {
+		return nil, err
+	}
+	var claimSets [][]string
+	for _, claims := range plan.claimOptions[queryID] {
+		if resolved, satisfied := matchDCQLClaims(claims, candidate); satisfied {
+			claimSets = append(claimSets, resolved)
+		}
+	}
+	if len(claimSets) == 0 {
+		return nil, fmt.Errorf("%w: credential %q satisfies no claim set of credential query %q", ErrDCQLSelectionUnsatisfied, candidate.ID, queryID)
+	}
+	return claimSets, nil
+}
+
 // ValidateDCQLCredentialSelections reports whether credentials chosen outside
 // this library - by the Holder on a consent screen - answer the DCQL query.
 //
