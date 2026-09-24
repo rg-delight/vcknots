@@ -7,6 +7,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
 // PresentationDefinition is used only by the explicit Draft24 entrypoint.
@@ -56,33 +57,15 @@ const (
 	DCAPIProtocolMultiSigned = "openid4vp-v1-multisigned"
 )
 
-// DCAPIRequest is one entry of the platform's DigitalCredentialGetRequest
-// requests array. Data is the protocol data object exactly as delivered by the
-// platform: for unsigned requests it holds the Authorization Request members
-// directly, for signed requests a {"request": <compact JWS>} object, and for
-// multi-signed requests a {"request": {"payload":..,"signatures":[..]}} object.
-type DCAPIRequest struct {
-	Protocol string          `json:"protocol"`
-	Data     json.RawMessage `json:"data"`
-}
+// The DC API value types live in the presenter types package; see
+// types.DCAPIRequest, types.DCAPIInvocation and types.DCAPIResponse.
+type (
+	DCAPIRequest    = types.DCAPIRequest
+	DCAPIInvocation = types.DCAPIInvocation
+	DCAPIResponse   = types.DCAPIResponse
+)
 
-// DCAPIInvocation is what the platform (browser/OS) supplies to the Wallet. The
-// origin is authenticated by the platform and is never taken from the request.
-type DCAPIInvocation struct {
-	Request DCAPIRequest
-	// Origin is the calling web origin as reported by the platform, for example
-	// "https://verifier.example".
-	Origin string
-}
-
-// DCAPIResponse is the object returned to the platform (OID4VP 1.0 Appendix
-// A.4). Protocol echoes the request protocol and Data holds the response
-// members: {"vp_token": {...}} for dc_api, or {"response": <JWE compact>} for
-// dc_api.jwt.
-type DCAPIResponse struct {
-	Protocol string         `json:"protocol"`
-	Data     map[string]any `json:"data"`
-}
+var _ types.TransactionDataConfigurer = (*Oid4vpPresenter)(nil)
 
 // OAuthAuthorizationResponse represents a OAuth 2.0 Authorization Response
 // These fields are defined in RFC6749.
