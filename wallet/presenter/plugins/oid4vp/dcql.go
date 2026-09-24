@@ -21,7 +21,8 @@ type DcqlQuery struct {
 // TrustedAuthority is one entry of the DCQL trusted_authorities query
 // (OID4VP 1.0 Section 6.1.1). Each entry identifies expected Issuers or trust
 // frameworks by type. This wallet evaluates the "aki" (Authority Key
-// Identifier) type, which HAIP 1.0 section 5 requires to be supported.
+// Identifier) type, which HAIP 1.0 section 5 requires to be supported; an
+// entry of another type matches no credential.
 type TrustedAuthority struct {
 	Type   string   `json:"type"`
 	Values []string `json:"values"`

@@ -517,28 +517,26 @@ func dcqlPathIndex(value any) (int64, bool) {
 	}
 }
 
-// candidateMatchesTrustedAuthorities applies the OID4VP 1.0 Section 6.1.1
-// matching rule: a credential matches when it matches one of the values of one
-// of the entries. This wallet supports the HAIP 1.0 section 5 "aki" type; other
-// types cannot be evaluated and are ignored. A query whose entries are all of an
-// unknown type therefore places no constraint.
+// candidateMatchesTrustedAuthorities applies OID4VP 1.0 Section 6.1.1: a
+// credential matches when it matches one of the values of one of the entries.
+// Only the "aki" type (HAIP 1.0 Section 5) is evaluated; an entry of any other
+// type matches no credential, so a query naming only such types is
+// unsatisfiable rather than unconstrained.
 func candidateMatchesTrustedAuthorities(authorities []TrustedAuthority, candidate DCQLCredentialCandidate) bool {
 	if len(authorities) == 0 {
 		return true
 	}
-	supported := 0
 	for _, authority := range authorities {
 		if authority.Type != "aki" {
 			continue
 		}
-		supported++
 		for _, value := range authority.Values {
 			if containsString(candidate.AuthorityKeyIDs, value) {
 				return true
 			}
 		}
 	}
-	return supported == 0
+	return false
 }
 
 func dcqlClaimOptions(query DCQLCredentialQuery) ([][]DCQLClaimQuery, error) {
