@@ -17,6 +17,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
+	"github.com/trustknots/vcknots/wallet/serializer"
+	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
 // requireIssuerKey asserts that verification reports want as the key the
@@ -334,5 +337,60 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &stranger.PublicKey, KeyID: "issuer-key-1"}}}
 		_, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved))
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
+	})
+}
+
+// TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly pins HAIP §6.1.1 ("This
+// specification mandates the support for X.509 certificate-based key
+// resolution to validate the issuer signature of an SD-JWT VC"): under HAIP
+// the x5c chain must be validated, so a policy without IssuerX509 is refused
+// and key resolution never replaces a chain that reaches no anchor.
+func TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly(t *testing.T) {
+	serialization, err := serializer.NewSerializationDispatcher(serializer.WithDefaultConfig())
+	require.NoError(t, err)
+	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
+	require.NoError(t, err)
+	haip, err := NewCredentialAcceptor(profile.HAIP, serialization, verification)
+	require.NoError(t, err)
+
+	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
+	unrelated := newTestIssuerChain(t, []string{"issuer.example.test"})
+	leafOnly := []string{base64.StdEncoding.EncodeToString(chain.leafCert.Raw)}
+	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: leafOnly}))
+	calls := 0
+	resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) {
+		calls++
+		return []jose.JSONWebKey{{Key: &chain.leafKey.PublicKey}}, nil
+	}
+
+	t.Run("key resolution alone does not authenticate the issuer", func(t *testing.T) {
+		calls = 0
+		_, err := haip.Verify(t.Context(), wire, CredentialAcceptancePolicy{ResolveIssuerKeys: resolve})
+		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+		require.Zero(t, calls)
+	})
+
+	t.Run("UnverifiedIssuer does not waive the x5c check", func(t *testing.T) {
+		_, err := haip.Verify(t.Context(), wire, CredentialAcceptancePolicy{UnverifiedIssuer: true})
+		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+	})
+
+	t.Run("an unanchored chain never falls back to key resolution", func(t *testing.T) {
+		calls = 0
+		_, err := haip.Verify(t.Context(), wire, CredentialAcceptancePolicy{
+			IssuerX509:                        &IssuerX509TrustOptions{TrustAnchors: unrelated.anchors(), AllowUnadvertisedRevocation: true},
+			ResolveIssuerKeys:                 resolve,
+			ResolveIssuerKeysWhenX5CUntrusted: true,
+		})
+		require.ErrorIs(t, err, commonX509.ErrNoTrustAnchor)
+		require.Zero(t, calls)
+	})
+
+	t.Run("an anchored chain is accepted", func(t *testing.T) {
+		result, err := haip.Verify(t.Context(), wire, CredentialAcceptancePolicy{
+			IssuerX509: &IssuerX509TrustOptions{TrustAnchors: chain.anchors(), AllowUnadvertisedRevocation: true},
+		})
+		require.NoError(t, err)
+		require.Len(t, result.CertificateSHA256, 2)
 	})
 }

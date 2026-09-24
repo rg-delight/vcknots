@@ -32,7 +32,8 @@ import (
 // with ErrCredentialAcceptancePolicyRequired. A deployment that accepts
 // unauthenticated issuers says so with UnverifiedIssuer.
 type CredentialAcceptancePolicy struct {
-	// IssuerX509 authenticates the issuer key from the credential's x5c JOSE header.
+	// IssuerX509 authenticates the issuer key from the credential's x5c JOSE
+	// header. The HAIP profile requires it for SD-JWT VC (HAIP §6.1.1).
 	IssuerX509 *IssuerX509TrustOptions
 	// ResolveIssuerKeys returns candidate issuer public keys when the credential has
 	// no x5c header (JWKS, DID or a static registry chosen by the caller). header is
@@ -52,7 +53,7 @@ type CredentialAcceptancePolicy struct {
 	// trust anchors (commonX509.ErrNoTrustAnchor). Every other chain refusal
 	// (an undecodable x5c, a self-signed or CA leaf, an expired or mis-used
 	// certificate, a name-constraint violation, revocation) still refuses the
-	// credential.
+	// credential. It never applies to an SD-JWT VC under the HAIP profile.
 	ResolveIssuerKeysWhenX5CUntrusted bool
 	// RequireHolderBinding rejects a credential whose holder binding this
 	// wallet cannot establish: one that carries no cnf claim at all, and one
@@ -64,7 +65,8 @@ type CredentialAcceptancePolicy struct {
 	// key. It only takes effect when neither IssuerX509 nor ResolveIssuerKeys
 	// is configured: with either of them present the issuer signature is still
 	// verified. Everything else the policy checks (holder binding, exp/nbf and
-	// SD-JWT disclosure integrity) keeps applying.
+	// SD-JWT disclosure integrity) keeps applying. Under the HAIP profile an
+	// SD-JWT VC is refused instead, because HAIP requires x5c authentication.
 	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS "alg" values an issuer may sign a
 	// credential with. Empty means DefaultCredentialSigningAlgorithms(). The
@@ -305,11 +307,12 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 		}
 	}
 
-	if a.profile.IsHAIP() && flavor == credential.SDJwtVC {
+	// HAIP §6.1.1 mandates X.509 issuer key resolution for SD-JWT VC: "The
+	// SD-JWT VC MUST contain the credential issuer's signing certificate along
+	// with a trust chain in the x5c JOSE header".
+	haipX5C := a.profile.IsHAIP() && flavor == credential.SDJwtVC
+	if haipX5C {
 		if _, present := header["x5c"]; !present {
-			// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's
-			// signing certificate along with a trust chain in the x5c JOSE
-			// header".
 			return nil, nil, ErrHAIPX5CRequired
 		}
 	}
@@ -395,7 +398,7 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 	}
 
 	issuer, _ := payload["iss"].(string)
-	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, payload, issuer, now, verification); err != nil {
+	if err := a.resolveAndVerifyIssuerKey(ctx, parsedCredential, policy, header, payload, issuer, now, haipX5C, verification); err != nil {
 		return nil, nil, err
 	}
 
@@ -414,9 +417,16 @@ func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor cred
 
 // resolveAndVerifyIssuerKey authenticates the issuer key and verifies the
 // issuer signature, recording the authentication outcome in verification. ctx
-// bounds the CRL retrieval the trust path may perform.
-func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, payload map[string]any, issuer string, now time.Time, verification *CredentialVerification) error {
+// bounds the CRL retrieval the trust path may perform. requireX5C (HAIP
+// SD-JWT VC) makes the x5c chain the only way to establish the issuer key: the
+// policy must configure IssuerX509, and neither UnverifiedIssuer nor
+// ResolveIssuerKeysWhenX5CUntrusted applies.
+func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, parsedCredential *credential.Credential, policy *CredentialAcceptancePolicy, header map[string]any, payload map[string]any, issuer string, now time.Time, requireX5C bool, verification *CredentialVerification) error {
 	var candidateKeys []jose.JSONWebKey
+
+	if requireX5C && policy.IssuerX509 == nil {
+		return fmt.Errorf("%w: HAIP requires x5c issuer authentication (IssuerX509)", ErrIssuerKeyUnresolved)
+	}
 
 	// An x5c header is trust evidence only when the caller configured X.509
 	// issuer trust. A caller that resolves issuer keys itself (JWKS, DID or a
@@ -465,7 +475,7 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			HTTPClient:                  issuerRevocationHTTPClient(policy.IssuerX509.HTTPClient),
 		})
 		if err != nil {
-			if policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && errors.Is(err, commonX509.ErrNoTrustAnchor) {
+			if !requireX5C && policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && errors.Is(err, commonX509.ErrNoTrustAnchor) {
 				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 				if resolveErr != nil {
 					// The chain was only this wallet's configuration; the
