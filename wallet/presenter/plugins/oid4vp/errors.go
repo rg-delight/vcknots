@@ -1,8 +1,11 @@
 package oid4vp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -57,12 +60,108 @@ var (
 	// the platform-authenticated Origin of an unsigned Digital Credentials API
 	// request (Appendix A.2).
 	ErrClientIDPrefixReserved = common.NewCodedError("client_id_prefix_reserved", "client_id prefix is reserved for the wallet and is not accepted in requests")
-	// ErrRequestObjectSignatureRequired reports an Authorization Request whose
-	// Client Identifier Prefix is authenticated by the certificate that signed
-	// a Request Object ("x509_san_dns", "x509_hash"), delivered in plain query
-	// parameters with no Request Object to authenticate it (OID4VP 1.0 §5.9.3).
+	// ErrRequestObjectSignatureRequired reports an Authorization Request in
+	// plain parameters from a Verifier that can only be authenticated by a
+	// signed Request Object: the x509_san_dns, x509_hash and
+	// verifier_attestation prefixes (OID4VP 1.0 §5.9.3), openid_federation
+	// unless FederationTrustOptions.AllowUnsignedRequests is set, and a
+	// pre-registered client with RequireSignedRequestObject.
 	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "this client identifier requires a signed Request Object")
 )
+
+// ErrErrorResponseEndpointUnbound reports that a refused Authorization Request
+// names no Response URI the Wallet may send an error authorization response
+// to (see AuthorizationRequestError.ResponseURI).
+var ErrErrorResponseEndpointUnbound = common.NewCodedError("error_response_endpoint_unbound", "the refused request names no Response URI the wallet may answer")
+
+// errorResponseTarget is the Response URI and request state an error
+// authorization response for a refused request is sent with.
+type errorResponseTarget struct {
+	responseURI  string
+	responseMode OAuthAuthzReqResponseMode
+	state        string
+	metadata     *VerifierMetadata
+	haip         bool
+}
+
+// ResponseURI returns the Response URI an error authorization response for
+// this refusal may be sent to, or "" when there is none. Only an unsigned
+// direct_post or direct_post.jwt request whose Client Identifier has the
+// redirect_uri prefix names one: that prefix binds the Response URI to the
+// Client Identifier (OID4VP 1.0 §5.9.3). It authenticates nobody, so sending
+// is the caller's decision.
+func (e *AuthorizationRequestError) ResponseURI() string {
+	if e.response == nil {
+		return ""
+	}
+	return e.response.responseURI
+}
+
+// SendErrorResponse posts the error authorization response for this refusal
+// (OID4VP 1.0 §8.5, RFC 6749 §4.1.2.1) to ResponseURI. A direct_post.jwt
+// request is answered encrypted when its metadata allows it, and in plaintext
+// otherwise (§8.3.1). Redirects are not followed. A nil client uses a default
+// client. It returns ErrErrorResponseEndpointUnbound when ResponseURI is "".
+func (e *AuthorizationRequestError) SendErrorResponse(ctx context.Context, client *http.Client) error {
+	if e.response == nil {
+		return ErrErrorResponseEndpointUnbound
+	}
+	target := e.response
+	values := map[string]string{"error": string(e.Code)}
+	if e.Err != nil {
+		values["error_description"] = sanitizeOAuthErrorDescription(e.Err.Error())
+	}
+	if target.state != "" {
+		values["state"] = target.state
+	}
+	formData := url.Values{}
+	if target.responseMode == OAuthAuthzReqResponseModeDirectPostJWT {
+		if payload, err := json.Marshal(values); err == nil {
+			if token, err := encryptAuthorizationResponse(payload, target.metadata, target.haip); err == nil {
+				formData.Set("response", token)
+			}
+		}
+	}
+	if formData.Get("response") == "" {
+		for name, value := range values {
+			formData.Set(name, value)
+		}
+	}
+	if _, err := postAuthorizationResponse(ctx, client, target.responseURI, formData); err != nil {
+		return fmt.Errorf("failed to send error authorization response: %w", err)
+	}
+	return nil
+}
+
+// attachErrorResponseTarget records on the refusal in err where an error
+// authorization response may be sent, when b's request binds one.
+func (b *requestBuilder) attachErrorResponseTarget(err error) {
+	var authzErr *AuthorizationRequestError
+	if !b.errorResponseAllowed || !errors.As(err, &authzErr) || !isDirectPostMode(b.req.ResponseMode) {
+		return
+	}
+	if _, parseErr := parseResponseURI(b.req.ResponseURI, b.allowHTTP); parseErr != nil {
+		return
+	}
+	authzErr.response = &errorResponseTarget{
+		responseURI:  b.req.ResponseURI,
+		responseMode: b.req.ResponseMode,
+		state:        b.req.State,
+		metadata:     b.req.ClientMetadata,
+		haip:         b.haipRequestObjectPolicy(),
+	}
+}
+
+// sanitizeOAuthErrorDescription replaces every character outside the RFC 6749
+// §4.1.2.1 error_description set with a space.
+func sanitizeOAuthErrorDescription(description string) string {
+	return strings.Map(func(character rune) rune {
+		if validateOAuthErrorDescription(string(character)) != nil {
+			return ' '
+		}
+		return character
+	}, description)
+}
 
 // ErrDCQLSelectionUnsatisfied reports that credentials chosen outside this
 // library do not answer the DCQL query: a selected credential does not satisfy
@@ -73,7 +172,7 @@ var (
 // decision the request cannot accept from a transport or serialization failure.
 var ErrDCQLSelectionUnsatisfied = common.NewCodedError("dcql_selection_unsatisfied", "DCQL credential selection does not satisfy the query")
 
-// VerifierResponseError reports a non-200 response from the Verifier's
+// VerifierResponseError reports a non-2xx response from the Verifier's
 // Response Endpoint. It deliberately retains only the HTTP status and the
 // OAuth 2.0 error code normalized from the response body: the body is under
 // the Verifier's control and may echo protocol state or secrets, so it never
@@ -150,7 +249,7 @@ func normalizeOAuthErrorCode(code string) string {
 // it holds a CredentialPresentationRequest. OID4VP 1.0 §8.3.1 permits the error
 // response to be sent unencrypted, so this form is always plaintext. The
 // endpoint must use https unless the presenter enables AllowHTTP for a local
-// test. A non-200 answer is reported as a *VerifierResponseError that does not
+// test. A non-2xx answer is reported as a *VerifierResponseError that does not
 // carry the response body.
 //
 // The two caller-supplied values that reach the wire are checked before

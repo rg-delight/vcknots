@@ -220,7 +220,7 @@ func TestBuildDCAPIResponseEncrypted(t *testing.T) {
 		enc       jose.ContentEncryption
 	}{
 		{name: "final defaults to A128GCM", enc: jose.A128GCM},
-		{name: "haip allows A256GCM", profile: profile.HAIP, encValues: []string{"A256GCM"}, enc: jose.A256GCM},
+		{name: "haip prefers A256GCM", profile: profile.HAIP, encValues: []string{"A128GCM", "A256GCM"}, enc: jose.A256GCM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recipient := newDCAPIRecipient(t)
@@ -253,10 +253,8 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 	t.Run("unsigned", func(t *testing.T) {
 		p := &Oid4vpPresenter{Profile: profile.HAIP}
 		invocation := DCAPIInvocation{
-			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
-				"response_type": "vp_token", "response_mode": "dc_api.jwt", "nonce": "n-1", "dcql_query": dcapiDCQL(),
-			})},
-			Origin: "https://verifier.example",
+			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, newDCAPIRecipient(t), []string{"A128GCM", "A256GCM"})},
+			Origin:  "https://verifier.example",
 		}
 		_, err := p.ParseDCAPIRequest(invocation)
 		require.NoError(t, err)
@@ -512,4 +510,54 @@ func TestParseDCAPIRequestRequestObjectSentinels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A DC API request is admitted through the same final checks as every other
+// delivery: the response mode must be a DC API mode (OID4VP 1.0 Appendix A.2),
+// and a dc_api.jwt request must leave the Wallet a key to encrypt to.
+func TestParseDCAPIRequestAdmission(t *testing.T) {
+	unsigned := func(data map[string]any) DCAPIInvocation {
+		return DCAPIInvocation{
+			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, data)},
+			Origin:  "https://verifier.example",
+		}
+	}
+	base := func(mode string) map[string]any {
+		return map[string]any{"response_type": "vp_token", "response_mode": mode, "nonce": "n-1", "dcql_query": dcapiDCQL()}
+	}
+
+	t.Run("non-DC API response mode", func(t *testing.T) {
+		for _, mode := range []string{"direct_post", "fragment"} {
+			data := base(mode)
+			data["redirect_uri"] = "https://verifier.example/cb"
+			_, err := (&Oid4vpPresenter{}).ParseDCAPIRequest(unsigned(data))
+			assertAuthzErrorCode(t, err, InvalidRequestError)
+		}
+	})
+
+	t.Run("dc_api.jwt without an encryption key", func(t *testing.T) {
+		_, err := (&Oid4vpPresenter{}).ParseDCAPIRequest(unsigned(base("dc_api.jwt")))
+		require.ErrorIs(t, err, ErrResponseEncryptionKeyMissing)
+	})
+
+	t.Run("HAIP requires both content encryptions on dc_api.jwt too", func(t *testing.T) {
+		recipient := newDCAPIRecipient(t)
+		invocation := DCAPIInvocation{
+			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
+			Origin:  "https://verifier.example",
+		}
+		_, err := (&Oid4vpPresenter{Profile: profile.HAIP}).ParseDCAPIRequest(invocation)
+		require.ErrorIs(t, err, ErrResponseEncryptionEncMissing)
+	})
+}
+
+// dc_api and dc_api.jwt are DC API response modes; another delivery cannot
+// use them.
+func TestDCAPIResponseModeRefusedOutsideTheDCAPI(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	claims["response_mode"] = "dc_api"
+	delete(claims, "response_uri")
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Delivery: deliverByReference})
+	assertAuthzErrorCode(t, err, InvalidRequestError)
 }

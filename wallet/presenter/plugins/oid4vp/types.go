@@ -142,20 +142,13 @@ type CredentialPresentationRequest struct {
 	// that accepts the parameter resolves it after admitting the request.
 	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
 	// VerifierFederation is the Trust Chain that authenticated an
-	// openid_federation Verifier, whether its request was signed (then it is
-	// also RequestObjectVerification.Federation) or carried in plain
-	// parameters. Like RequestObjectVerification it is produced by this
-	// library and never read from request data. It is nil for every other
-	// Client Identifier Prefix.
+	// openid_federation Verifier, signed or (when allowed) unsigned. It is
+	// produced by this library, never read from request data.
 	VerifierFederation     *FederationEvidence     `json:"-"`
 	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
-	// RawPresentationDefinition is the presentation_definition parameter of a
-	// Draft 24 Authorization Request exactly as it arrived, before this library
-	// reduced it to the id it uses. Presentation Exchange is not modelled here,
-	// so a caller that has to show or forward the Verifier's own definition
-	// reads it from this value. It is nil on the Final path, which refuses
-	// presentation_definition outright, and it is never serialized back into an
-	// authorization request.
+	// RawPresentationDefinition is the Draft24 presentation_definition
+	// exactly as it arrived; PresentationDefinition keeps only its id. It is
+	// nil on the Final path.
 	RawPresentationDefinition json.RawMessage   `json:"-"`
 	DcqlQuery                 *DcqlQuery        `json:"dcql_query"`                            // required
 	ClientMetadata            *VerifierMetadata `json:"client_metadata,omitempty"`             // optional
@@ -172,6 +165,16 @@ type CredentialPresentationRequest struct {
 	// with so the response echoes it (OID4VP 1.0 Appendix A.4). Empty for
 	// non-DC-API requests.
 	DCAPIProtocol string `json:"-"`
+}
+
+// responseEndpoint is the endpoint the Authorization Response reaches:
+// response_uri under direct_post and direct_post.jwt, which exclude
+// redirect_uri (OID4VP 1.0 §8.2), and redirect_uri otherwise.
+func (r *CredentialPresentationRequest) responseEndpoint() string {
+	if isDirectPostMode(r.ResponseMode) {
+		return r.ResponseURI
+	}
+	return r.RedirectURI
 }
 
 type RequestURIMethod string
@@ -204,7 +207,23 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseAlg   string             `json:"authorization_encrypted_response_alg,omitempty"`
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
+
+	// encryptionPolicy records the response encryption rules the request
+	// carrying this metadata was admitted under, so the response is encrypted
+	// under the same rules. It is never read from or written to JSON.
+	encryptionPolicy responseEncryptionPolicy
 }
+
+// responseEncryptionPolicy is the response encryption rule set a request was
+// admitted under.
+type responseEncryptionPolicy int
+
+const (
+	// encryptionPolicyUnset defers to the presenter's profile.
+	encryptionPolicyUnset responseEncryptionPolicy = iota
+	encryptionPolicyFinal
+	encryptionPolicyHAIP
+)
 
 func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) {
 	for _, key := range v.Jwks.Keys {
@@ -215,35 +234,34 @@ func (v *VerifierMetadata) FetchKeyWithKID(kid string) (jose.JSONWebKey, error) 
 	return jose.JSONWebKey{}, fmt.Errorf("key with kid %s not found", kid)
 }
 
-// ErrPreRegisteredClientUnknown reports that an Authorization Request used a
-// pre-registered Client Identifier that this wallet's registry does not hold.
-// OpenID4VP 1.0 Section 5.9.2 requires such a Client Identifier to be "known to
-// the Wallet in advance of the Authorization Request", so an unresolvable one
-// is refused rather than accepted unauthenticated.
-//
-// The root wallet package declares a sentinel of the same name; this package
-// cannot import it (the root imports this plugin), so the root value is
-// intended to become an alias of this one.
+// ErrPreRegisteredClientUnknown reports an Authorization Request whose
+// pre-registered Client Identifier is not in this wallet's registry (OID4VP
+// 1.0 §5.9.2: it "needs to be known to the Wallet in advance").
 var ErrPreRegisteredClientUnknown = common.NewCodedError("pre_registered_client_unknown", "pre-registered client_id is not in the wallet registry")
 
+// ErrPreRegisteredClientEndpointUnregistered reports a pre-registered
+// client's request whose response endpoint (response_uri, or redirect_uri
+// outside direct_post) is not one of the registered redirect_uris.
+var ErrPreRegisteredClientEndpointUnregistered = common.NewCodedError("pre_registered_client_endpoint_unregistered", "the response endpoint is not registered for this pre-registered client")
+
 // PreRegisteredClient is a Verifier this wallet knows before an Authorization
-// Request arrives. OpenID4VP 1.0 Section 5.9.2: "If a `:` character is not
-// present in the Client Identifier, the Wallet MUST treat the Client Identifier
-// as referencing a pre-registered client" and "the Client Identifier needs to
-// be known to the Wallet in advance of the Authorization Request."
+// Request arrives: a Client Identifier without ":" (OID4VP 1.0 §5.9.2).
 type PreRegisteredClient struct {
-	// ClientID is the registered Client Identifier exactly as it appears in the
-	// Authorization Request, without a Client Identifier Prefix. It may be left
-	// empty in a map registration, where the map key is authoritative.
+	// ClientID is the registered Client Identifier. It may be left empty in a
+	// map registration, where the map key is authoritative.
 	ClientID string
-	// Metadata is the Verifier metadata registered out of band (RFC 7591 or a
-	// manual registration). When present it is authoritative for this client:
-	// it replaces any client_metadata carried by the request, which nothing
-	// authenticates for a pre-registered Client Identifier.
+	// Metadata is the registered Verifier metadata (RFC 7591 or out of band).
+	// It replaces the request's metadata, and a request that also carries
+	// client_metadata is refused with invalid_client (§8.5). Its RedirectURIs
+	// are the only response endpoints the request may name, compared exactly;
+	// a registration without them accepts no request.
 	Metadata *VerifierMetadata
-	// JWKS holds the keys that sign this client's Request Objects. A nil value
-	// registers a client for unsigned requests only.
+	// JWKS holds the keys that sign this client's Request Objects. A signed
+	// Request Object is refused when it is nil.
 	JWKS *jose.JSONWebKeySet
+	// RequireSignedRequestObject refuses an unsigned request from this client
+	// (the require_signed_request_object client metadata of RFC 9101 §10.5).
+	RequireSignedRequestObject bool
 }
 
 // PreRegisteredClientResolver looks up a pre-registered Client Identifier in a

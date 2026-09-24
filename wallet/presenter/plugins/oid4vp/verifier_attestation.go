@@ -133,6 +133,8 @@ func (b *requestBuilder) authenticateRequestObjectByClientIdentifier(obj string,
 		return b.authenticateVerifierAttestationRequestObject(parsed, clientID, options)
 	case OID4VPClientIDPrefixOIDFederation:
 		return b.authenticateFederationRequestObject(obj, parsed, clientID, options)
+	case OID4VPClientIDPrefixPreRegistered:
+		return b.authenticatePreRegisteredRequestObject(parsed, options)
 	default:
 		// Final 5.1: client_metadata keys are never request-signature keys, so
 		// a prefix with no other authentication method cannot be authenticated
@@ -357,13 +359,17 @@ func readVerifierAttestationClaims(
 	if err != nil {
 		return nil, err
 	}
+	redirectURIs, err := verifierAttestationRedirectURIs(claims)
+	if err != nil {
+		return nil, err
+	}
 	seconds, _ := expiry.Float64()
 	return &verifierAttestationClaims{
 		issuer:       issuer,
 		subject:      claimedSubject,
 		expiry:       time.Unix(0, int64(seconds*float64(time.Second))).UTC(),
 		confirmation: *confirmation,
-		redirectURIs: verifierAttestationStringArray(claims["redirect_uris"]),
+		redirectURIs: redirectURIs,
 	}, nil
 }
 
@@ -394,24 +400,15 @@ func verifierAttestationConfirmationKey(claims commonJOSE.Claims) (*jose.JSONWeb
 	return key, nil
 }
 
-// requireVerifierAttestationResponseEndpoint holds the request to the
-// `redirect_uris` the attester constrained the Verifier with: "If the issuer of
-// the Verifier Attestation JWT adds a `redirect_uris` claim to the attestation,
-// the Wallet MUST ensure the `redirect_uri` request parameter value exactly
-// matches one of the `redirect_uris` claim entries."
-//
-// An attestation that omits the claim constrains nothing. Where the response
-// mode sends the Authorization Response to response_uri, OpenID4VP forbids
-// redirect_uri in the same request, so the endpoint the response actually
-// reaches is the one held to the claim.
+// requireVerifierAttestationResponseEndpoint holds the response endpoint to
+// the attestation's redirect_uris, exactly (OID4VP 1.0 §5.9.3). Under
+// direct_post the endpoint is response_uri. An attestation without the claim
+// constrains nothing.
 func requireVerifierAttestationResponseEndpoint(redirectURIs []string, request *CredentialPresentationRequest) error {
 	if len(redirectURIs) == 0 {
 		return nil
 	}
-	bound := request.RedirectURI
-	if request.ResponseMode == OAuthAuthzReqResponseModeDirectPost || request.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		bound = request.ResponseURI
-	}
+	bound := request.responseEndpoint()
 	if bound == "" || !slices.Contains(redirectURIs, bound) {
 		return fmt.Errorf("%w: the response endpoint %q is not one of the verifier attestation redirect_uris",
 			ErrVerifierAttestationInvalid, bound)
@@ -422,24 +419,28 @@ func requireVerifierAttestationResponseEndpoint(redirectURIs []string, request *
 	return nil
 }
 
-// verifierAttestationStringArray reads an optional array-of-strings claim,
-// treating any other shape as absent. The specification requires the Wallet to
-// ignore what it does not recognize, and a claim of the wrong type carries no
-// constraint this library can apply.
-func verifierAttestationStringArray(value any) []string {
-	items, ok := value.([]any)
-	if !ok {
-		return nil
+// verifierAttestationRedirectURIs reads the optional redirect_uris claim. A
+// claim that is present must be a non-empty array of non-empty strings: an
+// attester that tried to constrain the endpoint must not lose the constraint
+// to a malformed value.
+func verifierAttestationRedirectURIs(claims commonJOSE.Claims) ([]string, error) {
+	value, present := claims["redirect_uris"]
+	if !present {
+		return nil, nil
 	}
-	var values []string
+	items, ok := value.([]any)
+	if !ok || len(items) == 0 {
+		return nil, fmt.Errorf("%w: verifier attestation redirect_uris must be a non-empty array of strings", ErrVerifierAttestationInvalid)
+	}
+	values := make([]string, 0, len(items))
 	for _, item := range items {
 		text, ok := item.(string)
 		if !ok || text == "" {
-			return nil
+			return nil, fmt.Errorf("%w: verifier attestation redirect_uris must be a non-empty array of strings", ErrVerifierAttestationInvalid)
 		}
 		values = append(values, text)
 	}
-	return values
+	return values, nil
 }
 
 // verifierAttestationNumericDate reads one optional NumericDate claim of a

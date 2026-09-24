@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -63,7 +64,8 @@ func TestFinalRequestObjectClaims(t *testing.T) {
 		{"nbf boundary", "", func(c map[string]any) { c["nbf"] = f.now.Unix() }},
 		{"fractional expiration", "", func(c map[string]any) { c["exp"] = float64(f.now.Unix()) + 0.5 }},
 		{"fractional nbf", "request object is outside its nbf validity", func(c map[string]any) { c["nbf"] = float64(f.now.Unix()) + 0.5 }},
-		{"iat is not max age policy", "", func(c map[string]any) { c["iat"] = f.now.Add(time.Hour).Unix() }},
+		{"future iat", "request object is issued in the future", func(c map[string]any) { c["iat"] = f.now.Add(time.Hour).Unix() }},
+		{"iat boundary", "", func(c map[string]any) { c["iat"] = f.now.Unix() }},
 		{"string exp", "exp must be a NumericDate", func(c map[string]any) { c["exp"] = "2000000000" }},
 		{"null nbf", "nbf must be a NumericDate", func(c map[string]any) { c["nbf"] = nil }},
 		{"string iat", "iat must be a NumericDate", func(c map[string]any) { c["iat"] = "yesterday" }},
@@ -415,7 +417,7 @@ func TestFinalRequestObjectURIResponseIsBounded(t *testing.T) {
 		"request_uri": []string{server.URL},
 	}.Encode()
 	_, err := p.ParsePresentationRequest(uri)
-	if err == nil || !strings.Contains(err.Error(), "request_uri response exceeds 1 MiB") {
+	if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 		t.Fatalf("oversized request_uri response must be rejected: %v", err)
 	}
 }
@@ -561,5 +563,31 @@ func TestRequestObjectVerificationReportsExpiry(t *testing.T) {
 				t.Fatalf("expiry location = %v, want UTC", expiry.Location())
 			}
 		})
+	}
+}
+
+// A Final Request Object issued in the future is refused, so a lifetime bound
+// measured as exp - iat cannot be bypassed by moving iat forward.
+func TestFinalRequestObjectIssuedInTheFuture(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := f.claims()
+	claims["iat"] = f.now.Add(time.Hour).Unix()
+	claims["exp"] = f.now.Add(time.Hour + 5*time.Minute).Unix()
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	if !errors.Is(err, ErrRequestObjectExpired) {
+		t.Fatalf("want ErrRequestObjectExpired for a future iat, got %v", err)
+	}
+
+	claims = f.claims()
+	claims["iat"] = f.now.Add(30 * time.Second).Unix()
+	options := requestFixtureOptions{Delivery: deliverByReference}
+	presenter := f.presenterWith(options)
+	presenter.RequestObjectValidation.ClockSkew = time.Minute
+	f.mu.Lock()
+	f.requestObject = []byte(f.signWithRoot(t, claims, false))
+	f.mu.Unlock()
+	uri := "openid4vp://authorize?" + url.Values{"client_id": {f.clientID()}, "request_uri": {f.server.URL + "/request-object"}}.Encode()
+	if _, err := presenter.ParsePresentationRequest(uri); err != nil {
+		t.Fatalf("an iat within the clock skew must be accepted: %v", err)
 	}
 }

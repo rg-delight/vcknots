@@ -97,14 +97,8 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 				// The request is authenticated by
 				// authenticateRequestObjectByClientIdentifier.
 			case OID4VPClientIDPrefixPreRegistered:
-				// OID4VP 1.0 §5.9.2: "If a `:` character is not present in the
-				// Client Identifier, the Wallet MUST treat the Client Identifier
-				// as referencing a pre-registered client", and "the Client
-				// Identifier needs to be known to the Wallet in advance of the
-				// Authorization Request". The wallet's registry is therefore the
-				// only source of Verifier metadata and request-signature keys
-				// for this prefix; an unregistered identifier is refused instead
-				// of accepted unauthenticated.
+				// OID4VP 1.0 §5.9.2: the client must be known in advance; the
+				// registration is checked in checkPreRegisteredClient.
 				if b.draft24 {
 					b.errValidation = fmt.Errorf("invalid client_id format")
 					return
@@ -204,8 +198,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	// enforced on the DC API delivery paths only; a request_uri-delivered
 	// dc_api.jwt request is a different (rejected) delivery and keeps its own
 	// profile error.
-	if (b.requestSource == "dcapi-unsigned" || b.requestSource == "dcapi-signed") &&
-		(b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPI || b.req.ResponseMode == OAuthAuthzReqResponseModeDCAPIJWT) {
+	if b.requestSource.isDCAPI() && isDCAPIMode(b.req.ResponseMode) {
 		if redirectURIFromParam != "" || responseURIFromParam != "" {
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not be present with response_mode %s", b.req.ResponseMode)
 			return
@@ -214,7 +207,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ResponseURI = ""
 	}
 
-	if b.requestSource == "query" && !b.draft24 {
+	if b.requestSource == sourceQuery && !b.draft24 {
 		if _, hasMethod := params["request_uri_method"]; hasMethod {
 			// OID4VP 1.0 §5.1: "request_uri_method parameter MUST NOT be
 			// present if a request_uri parameter is not present." This path is
@@ -299,11 +292,14 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		b.req.ClientMetadata = &clientMeta
 	}
 
-	// OID4VP 1.0 §5.9.2: a pre-registered Verifier's metadata "needs to be known
-	// to the Wallet in advance of the Authorization Request", so the registered
-	// metadata wins over a client_metadata parameter, which nothing
-	// authenticates for this Client Identifier Prefix.
+	// A pre-registered Verifier's metadata is the registered one (OID4VP 1.0
+	// §5.9.2); a request that also carries client_metadata is invalid_client
+	// (§8.5).
 	if b.preRegisteredClient != nil && b.preRegisteredClient.Metadata != nil {
+		if cm, exists := params["client_metadata"]; exists && cm != nil {
+			b.errValidation = newAuthorizationRequestError(InvalidClientError, "client_metadata must not be sent by a pre-registered client")
+			return
+		}
 		registeredMetadata := *b.preRegisteredClient.Metadata
 		b.req.ClientMetadata = &registeredMetadata
 	}
@@ -392,19 +388,17 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 
 // validateFinalTransactionData enforces OID4VP 1.0 §5.1 and §8.4/§8.5 for the
 // Final path: every transaction_data entry must be base64url-encoded JSON with
-// a supported type and a non-empty credential_ids array referencing the DCQL
-// queries. Any failure is invalid_transaction_data.
+// a supported type and a non-empty credential_ids array naming dc+sd-jwt
+// queries that require holder binding. Any failure is invalid_transaction_data.
 func (b *requestBuilder) validateFinalTransactionData() error {
 	supported := make(map[string]bool, len(b.supportedTransactionDataTypes))
 	for _, dataType := range b.supportedTransactionDataTypes {
 		supported[dataType] = true
 	}
-	// queryIDs maps each Credential Query id to whether it requires
-	// cryptographic holder binding.
-	queryIDs := make(map[string]bool)
+	queries := make(map[string]CredentialQuery)
 	if b.req.DcqlQuery != nil {
 		for _, query := range b.req.DcqlQuery.Credentials {
-			queryIDs[query.ID] = query.RequiresHolderBinding()
+			queries[query.ID] = query
 		}
 	}
 	resolvedAlg := ""
@@ -432,15 +426,18 @@ func (b *requestBuilder) validateFinalTransactionData() error {
 		}
 		for _, rawID := range credentialIDs {
 			id, ok := rawID.(string)
-			bindingRequired, known := queryIDs[id]
+			query, known := queries[id]
 			if !ok || !known {
 				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
 			}
-			// OID4VP 1.0 Section 8.4 carries the transaction data hashes in
-			// the Key Binding of the presentation, so a Credential Query that
-			// waives cryptographic holder binding has nowhere to carry them
-			// and cannot authorize the transaction.
-			if !bindingRequired {
+			// The transaction data hashes travel in the SD-JWT VC Key Binding
+			// JWT (OID4VP 1.0 §8.4, Appendix B.3.3), the only place this
+			// wallet can put them: the query must be dc+sd-jwt with holder
+			// binding.
+			if query.Format != "dc+sd-jwt" {
+				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a %s credential query, which cannot carry transaction data", i, query.Format)
+			}
+			if !query.RequiresHolderBinding() {
 				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a credential query without cryptographic holder binding", i)
 			}
 		}

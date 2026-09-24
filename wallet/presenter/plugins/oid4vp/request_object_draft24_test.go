@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"crypto/x509"
 	"errors"
 	"net/url"
 	"strings"
@@ -181,5 +182,38 @@ func TestDraft24ClientMetadataRequestObjectUsesTheCallerClock(t *testing.T) {
 	}
 	if err := parse(early, 2*time.Hour); err != nil {
 		t.Fatalf("the caller's ClockSkew must be applied to iat: %v", err)
+	}
+}
+
+// A Draft24 x509_hash Request Object is authenticated through the shared X.509
+// path even when the caller configured only X509TrustChainRoots: the
+// thumbprint names the certificate, but only the chain says it is trusted.
+func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	claims := map[string]any{
+		"aud": "https://self-issued.me/v2", "client_id": f.clientID(), "nonce": "n",
+		"response_type": "vp_token", "response_mode": "direct_post",
+		"response_uri":            "https://verifier.example/response",
+		"presentation_definition": map[string]any{"id": "definition"},
+	}
+	token := f.sign(t, claims, nil)
+
+	trusted := x509.NewCertPool()
+	trusted.AddCert(f.root)
+	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: trusted}
+	request, err := p.ParseDraft24RequestObject(token, f.clientID())
+	if err != nil {
+		t.Fatalf("a chain to the configured root must be accepted: %v", err)
+	}
+	if request.RequestObjectVerification == nil {
+		t.Fatal("the X.509 authentication was not recorded")
+	}
+
+	other := newRequestObjectFixture(t)
+	untrusted := x509.NewCertPool()
+	untrusted.AddCert(other.root)
+	p = &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: untrusted}
+	if _, err := p.ParseDraft24RequestObject(token, f.clientID()); err == nil {
+		t.Fatal("an x509_hash certificate outside the configured roots must be refused")
 	}
 }

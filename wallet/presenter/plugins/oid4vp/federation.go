@@ -45,6 +45,13 @@ type FederationTrustOptions struct {
 	// SigningAlgorithms bounds the Request Object signature algorithms of a
 	// federation Verifier. Empty means DefaultFederationRequestObjectAlgorithms.
 	SigningAlgorithms []jose.SignatureAlgorithm
+	// AllowUnsignedRequests accepts an openid_federation request in plain
+	// parameters when its response endpoint is one of the redirect_uris the
+	// Trust Chain registers. OpenID Federation authenticates a Relying Party
+	// by its signed Request Object, so the zero value refuses unsigned
+	// requests with ErrRequestObjectSignatureRequired before resolving any
+	// Trust Chain.
+	AllowUnsignedRequests bool
 }
 
 // DefaultFederationRequestObjectAlgorithms is the Request Object signature
@@ -128,7 +135,7 @@ func (b *requestBuilder) authenticateFederationRequestObject(
 		return err
 	}
 
-	verified, err := verifyFederationRequestObjectSignature(parsed, trust.RequestObjectJWKS, header.KeyID)
+	verified, err := verifyRequestObjectWithKeySet(parsed, trust.RequestObjectJWKS)
 	if err != nil {
 		return err
 	}
@@ -142,7 +149,7 @@ func (b *requestBuilder) authenticateFederationRequestObject(
 	// The response endpoint the Verifier names must be one the federation
 	// metadata registered for it, which is the only statement about the
 	// Verifier's endpoints that the Trust Chain authenticates.
-	if err := federation.AssertResponseURIAllowed(trust.Metadata, b.federationResponseEndpoint()); err != nil {
+	if err := federation.AssertResponseURIAllowed(trust.Metadata, b.req.responseEndpoint()); err != nil {
 		return err
 	}
 	if err := b.adoptFederationVerifierMetadata(trust.Metadata); err != nil {
@@ -200,17 +207,6 @@ func (b *requestBuilder) federationResolver(options RequestObjectValidationOptio
 	}
 }
 
-// federationResponseEndpoint reports the endpoint the Authorization Response
-// will actually reach, which is the one the Verifier's registered redirect_uris
-// are checked against. Under direct_post and direct_post.jwt OpenID4VP forbids
-// redirect_uri, so response_uri is that endpoint.
-func (b *requestBuilder) federationResponseEndpoint() string {
-	if b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPost || b.req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT {
-		return b.req.ResponseURI
-	}
-	return b.req.RedirectURI
-}
-
 // federationTrustChainFromRequestObject reads the Trust Chain a Verifier
 // supplied with its request. OpenID Federation carries it in the `trust_chain`
 // JOSE header of the signed Request Object; OpenID4VP 1.0 Section 5.9.3 also
@@ -236,18 +232,13 @@ func federationTrustChainFromRequestObject(parsed *jwt.JSONWebToken) ([]string, 
 	return federation.ParseTrustChainParameter(raw)
 }
 
-// verifyFederationRequestObjectSignature verifies the Request Object against
-// the Verifier's own Entity Statement keys. The kid narrows the candidates, and
-// when it names no published key every key is still tried, so an entity that
-// rotated a key without republishing its identifier is not refused for that
-// alone.
-func verifyFederationRequestObjectSignature(
-	parsed *jwt.JSONWebToken,
-	jwks jose.JSONWebKeySet,
-	keyID string,
-) (commonJOSE.Claims, error) {
+// verifyRequestObjectWithKeySet verifies the Request Object against a key set
+// the Wallet already trusts for this Verifier. The kid narrows the candidates;
+// when it names no key in the set every key is still tried, so a key rotated
+// without a new identifier is not refused for that alone.
+func verifyRequestObjectWithKeySet(parsed *jwt.JSONWebToken, jwks jose.JSONWebKeySet) (commonJOSE.Claims, error) {
 	candidates := jwks.Keys
-	if keyID != "" {
+	if keyID := parsed.Headers[0].KeyID; keyID != "" {
 		if narrowed := jwks.Key(keyID); len(narrowed) != 0 {
 			candidates = narrowed
 		}
@@ -258,7 +249,7 @@ func verifyFederationRequestObjectSignature(
 			return claims, nil
 		}
 	}
-	return nil, fmt.Errorf("request object signature does not verify with any key the trust chain published: %w", ErrRequestObjectSignatureInvalid)
+	return nil, fmt.Errorf("request object signature does not verify with any trusted key of the verifier: %w", ErrRequestObjectSignatureInvalid)
 }
 
 // adoptFederationVerifierMetadata replaces whatever client_metadata the request

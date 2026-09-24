@@ -1,20 +1,57 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
+
+// requestSource records how the Authorization Request parameters arrived.
+type requestSource int
+
+const (
+	// sourceQuery is plain query parameters.
+	sourceQuery requestSource = iota + 1
+	// sourceValue is a Request Object passed by value (request=, or
+	// ParseRequestObject).
+	sourceValue
+	// sourceReference is a Request Object fetched through request_uri.
+	sourceReference
+	// sourceDCAPIUnsigned and sourceDCAPISigned are Digital Credentials API
+	// requests (OID4VP 1.0 Appendix A.3).
+	sourceDCAPIUnsigned
+	sourceDCAPISigned
+)
+
+// isDCAPI reports whether the request arrived through the DC API.
+func (s requestSource) isDCAPI() bool {
+	return s == sourceDCAPIUnsigned || s == sourceDCAPISigned
+}
+
+// delivery is the RequestObjectVerification.Delivery value for s.
+func (s requestSource) delivery() string {
+	switch s {
+	case sourceQuery:
+		return "query"
+	case sourceValue:
+		return "value"
+	case sourceReference:
+		return "reference"
+	default:
+		return ""
+	}
+}
 
 type requestBuilder struct {
 	req                     *CredentialPresentationRequest
@@ -55,21 +92,12 @@ type requestBuilder struct {
 	// (OID4VP 1.0 §5.10.1). It is empty for GET and when no nonce was sent.
 	sentWalletNonce string
 	errValidation   error
-	// requestSource records how the Authorization Request parameters arrived:
-	// "query" for plain query parameters, "value" for a Request Object supplied
-	// with the request= parameter, and "reference" for a Request Object fetched
-	// through request_uri. HAIP §5.1 requires reference.
-	requestSource string
-	// errorResponseAllowed marks that a refusal of this request may be
-	// answered with an error authorization response. It holds only for plain
-	// query parameters whose Client Identifier carries the redirect_uri prefix,
-	// the one delivery whose response endpoint is bound to the Client
-	// Identifier without any further evidence (OID4VP 1.0 §5.9.3). Validation
-	// failures on the Request Object paths occur before the object's
-	// signature is verified, and every other unsigned Client Identifier names
-	// its response endpoint in parameters nothing has authenticated, so none
-	// of them receives an error authorization response (unauthenticated
-	// outbound POST / SSRF primitive).
+	requestSource   requestSource
+	// errorResponseAllowed marks a request whose Response URI a refusal may
+	// name: plain query parameters with a redirect_uri Client Identifier,
+	// which binds the Response URI (OID4VP 1.0 §5.9.3). A Request Object
+	// fails validation before its signature is verified, and every other
+	// unsigned Client Identifier names an endpoint nothing authenticated.
 	errorResponseAllowed bool
 }
 
@@ -129,44 +157,18 @@ func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
 	return b
 }
 
-// lookupPreRegisteredClient resolves a pre-registered Client Identifier against
-// the wallet's registry: the in-memory map first, then the caller's resolver.
-// OID4VP 1.0 §5.9.2: "the Client Identifier needs to be known to the Wallet in
-// advance of the Authorization Request", so an unresolved identifier is an
-// error rather than an unauthenticated Verifier.
-func (b *requestBuilder) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
-	if registered, exists := b.preRegisteredClients[clientID]; exists {
-		return preRegisteredClientWithID(&registered, clientID), nil
-	}
-	if b.resolvePreRegisteredClient != nil {
-		resolved, err := b.resolvePreRegisteredClient(clientID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve pre-registered client_id %q: %w", clientID, err)
-		}
-		if resolved != nil {
-			copied := *resolved
-			return preRegisteredClientWithID(&copied, clientID), nil
-		}
-	}
-	return nil, fmt.Errorf("pre-registered client_id %q is not known to this wallet: %w", clientID, ErrPreRegisteredClientUnknown)
-}
-
-// preRegisteredClientWithID fills in the registration's ClientID from the
-// request when a map registration left it empty, so consumers never have to
-// consult the map key.
-func preRegisteredClientWithID(client *PreRegisteredClient, clientID string) *PreRegisteredClient {
-	if client.ClientID == "" {
-		client.ClientID = clientID
-	}
-	return client
-}
-
 // isDirectPostMode reports whether the Response Mode delivers the Authorization
 // Response to the Verifier's Response URI (OID4VP 1.0 §8.2), which is what
 // binds response_uri to the Client Identifier in §5.9.3 and makes redirect_uri
 // and response_uri mutually exclusive.
 func isDirectPostMode(mode OAuthAuthzReqResponseMode) bool {
 	return mode == OAuthAuthzReqResponseModeDirectPost || mode == OAuthAuthzReqResponseModeDirectPostJWT
+}
+
+// isDCAPIMode reports whether the Response Mode returns the response through
+// the Digital Credentials API (OID4VP 1.0 Appendix A.2).
+func isDCAPIMode(mode OAuthAuthzReqResponseMode) bool {
+	return mode == OAuthAuthzReqResponseModeDCAPI || mode == OAuthAuthzReqResponseModeDCAPIJWT
 }
 
 // WithHTTPAllowed enables HTTP response endpoints for local tests only.
@@ -209,14 +211,16 @@ func (b *requestBuilder) validate() error {
 		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 
-	// OID4VP 1.0 Appendix A.2: dc_api and dc_api.jwt return the response through
-	// the platform, so no redirect_uri is required. The response endpoint is the
-	// DC API, validated where the response is built.
-	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPost &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPI &&
-		b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT &&
-		b.req.RedirectURI == "" {
+	// OID4VP 1.0 Appendix A.2: a DC API request uses dc_api or dc_api.jwt, and
+	// those modes return the response through the platform, not to a URI.
+	dcAPIMode := isDCAPIMode(b.req.ResponseMode)
+	if b.requestSource.isDCAPI() && !dcAPIMode {
+		return newAuthorizationRequestError(InvalidRequestError, "a Digital Credentials API request must use response_mode dc_api or dc_api.jwt, got %q", b.req.ResponseMode)
+	}
+	if !b.requestSource.isDCAPI() && dcAPIMode {
+		return newAuthorizationRequestError(InvalidRequestError, "response_mode %s is only valid over the Digital Credentials API", b.req.ResponseMode)
+	}
+	if !isDirectPostMode(b.req.ResponseMode) && !dcAPIMode && b.req.RedirectURI == "" {
 		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri is required")
 	}
 
@@ -239,7 +243,7 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		return b
 	}
 
-	b.requestSource = "query"
+	b.requestSource = sourceQuery
 
 	singleParams := make(map[string]any)
 	for key, values := range params {
@@ -250,30 +254,17 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		singleParams[key] = values[0]
 	}
 
-	// OID4VP 1.0 §5.9.3: an "x509_san_dns" or "x509_hash" Client Identifier is
-	// authenticated by the certificate that signed the Request Object, so the
-	// same identifier delivered in plain query parameters authenticates
-	// nothing. The Draft24 wire contract names the same two prefixes and has no
-	// other way to authenticate them either, so both parse entry points refuse
-	// the unsigned form rather than returning a request a caller could consent
-	// to. It is decided before any other parameter is read, so the refusal is
-	// never answered to the Verifier: the response_uri of an unauthenticated
-	// request must not receive an outbound POST.
+	// A Client Identifier authenticated only by a signed Request Object is
+	// refused in plain parameters before anything else is read (OID4VP 1.0
+	// §5.9.3).
 	if value, isString := singleParams["client_id"].(string); isString {
 		clientID, err := b.parseClientID(strings.TrimSpace(value))
 		if err == nil && clientID.RequiresRequestObjectSignature() {
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectSignatureRequired)
 			return b
 		}
-		// OID4VP 1.0 §5.9.3: with the redirect_uri prefix "the original Client
-		// Identifier part ... is the Verifier's Redirect URI (or Response URI
-		// when Response Mode direct_post is used)", and setParamsWithAnyMap
-		// answers a refused response_uri at that URI, never at the one the
-		// request chose. No other unsigned Client Identifier binds its response
-		// endpoint: an openid_federation request names it in parameters
-		// nothing has authenticated until the Trust Chain has been resolved, a
-		// pre-registered registration carries no response endpoint, and a
-		// missing or unparsable client_id binds nothing at all.
+		// Only the redirect_uri prefix binds the Response URI before the
+		// request is authenticated (OID4VP 1.0 §5.9.3).
 		b.errorResponseAllowed = err == nil && clientID.prefix == OID4VPClientIDPrefixRedirectURI
 	}
 
@@ -291,17 +282,10 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	return b
 }
 
-// WithRequestObjectURI constructs the CredentialPresentationRequest
-// with fetching the request object from the given URI using the specified method,
-// and validates its claims and signature as per OID4VP and RFC9101.
-//
-// Per OID4VP draft 24 §5.11, when method is POST the request MUST use the
-// https scheme, set Content-Type: application/x-www-form-urlencoded and
-// Accept: application/oauth-authz-req+jwt. The https requirement is also
-// applied to the GET method for project-wide consistency with the same
-// guard in wallet/receiver/plugins/oid4vci/oid4vci.go (Issue #29).
-// It can be relaxed by setting the VCKNOTS_WALLET_HTTP_ALLOWED environment
-// variable for testing.
+// WithRequestObjectURI fetches the Request Object from request_uri with the
+// given method (OID4VP 1.0 §5.10) and authenticates it. The URI must use
+// https for either method unless HTTP is allowed for local tests; redirects
+// are not followed.
 func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMethod) *requestBuilder {
 	if b.errValidation != nil {
 		return b
@@ -326,10 +310,11 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	}
 
 	var req *http.Request
+	ctx := observe.WithEndpoint(b.context(), observe.EndpointRequestObject)
 
 	switch method {
 	case RequestURIMethodGET:
-		req, err = http.NewRequest(http.MethodGet, parsedURI.String(), nil)
+		req, err = http.NewRequestWithContext(ctx, http.MethodGet, parsedURI.String(), nil)
 	case RequestURIMethodPOST:
 		formData := url.Values{}
 		if b.draft24 {
@@ -354,7 +339,7 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 				formData.Set("wallet_metadata", string(metadataJSON))
 			}
 		}
-		req, err = http.NewRequest(http.MethodPost, parsedURI.String(), strings.NewReader(formData.Encode()))
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, parsedURI.String(), strings.NewReader(formData.Encode()))
 	default:
 		b.errValidation = fmt.Errorf("unsupported request_uri_method: %s", method)
 		return b
@@ -365,7 +350,6 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	req = req.WithContext(observe.WithEndpoint(req.Context(), observe.EndpointRequestObject))
 	req.Header.Set("User-Agent", "")
 	req.Header.Set("Accept", "application/oauth-authz-req+jwt")
 	if b.draft24 {
@@ -374,11 +358,9 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	if method == RequestURIMethodPOST {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	client := b.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	// A redirect is not followed: it could move the fetch to plain http or
+	// to a host the https check above never saw.
+	resp, err := httpfetch.NoRedirect(b.httpClient).Do(req)
 	if err != nil {
 		b.errValidation = fmt.Errorf("failed to send %s request to %s: %w", method, uri, err)
 		return b
@@ -390,21 +372,25 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 		return b
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	body, err := httpfetch.ReadLimited(resp, maxRequestObjectBytes)
 	if err != nil {
-		b.errValidation = fmt.Errorf("failed to read response body: %w", err)
-		return b
-	}
-	if len(body) > 1<<20 {
-		b.errValidation = fmt.Errorf("request_uri response exceeds 1 MiB")
+		b.errValidation = fmt.Errorf("failed to read the request_uri response: %w", err)
 		return b
 	}
 
-	b.WithRequestObject(string(body))
-	// The Request Object arrived by reference; HAIP §5.1 distinguishes this from
-	// a Request Object supplied by value in the request= parameter.
-	b.requestSource = "reference"
-	return b
+	b.requestSource = sourceReference
+	return b.withRequestObject(string(body))
+}
+
+// maxRequestObjectBytes bounds a Request Object, fetched or passed by value.
+const maxRequestObjectBytes = 1 << 20
+
+// context returns the context this parse's outbound requests run under.
+func (b *requestBuilder) context() context.Context {
+	if b.requestObjectValidation != nil && b.requestObjectValidation.Context != nil {
+		return b.requestObjectValidation.Context
+	}
+	return context.Background()
 }
 
 // newRequestURINonce returns the wallet_nonce for a Final request_uri POST. It
@@ -452,6 +438,9 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
 	}
+	if err := b.checkPreRegisteredClient(); err != nil {
+		return nil, err
+	}
 	if err := b.validateResponseEncryptionMetadata(); err != nil {
 		// The Verifier asked for an encrypted response and left nothing to
 		// encrypt it to, so even the refusal is not sent in the clear.
@@ -460,6 +449,12 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 	}
 	if err := b.enforceHAIPProfile(); err != nil {
 		return nil, err
+	}
+	if b.req.ClientMetadata != nil {
+		b.req.ClientMetadata.encryptionPolicy = encryptionPolicyFinal
+		if b.haipRequestObjectPolicy() {
+			b.req.ClientMetadata.encryptionPolicy = encryptionPolicyHAIP
+		}
 	}
 	return b.req, nil
 }

@@ -43,13 +43,9 @@ func (p *Oid4vpPresenter) PresentDraft24(protocol types.SupportedPresentationPro
 			}
 			form = url.Values{"response": {encrypted}}
 		case request.ResponseMode == "" && metadata != nil && metadata.AuthorizationEncryptedResponseAlg != "":
-			// The legacy fork JARM shape, kept for a caller that names no
-			// response mode and asks for encryption through client_metadata
-			// alone: the submission stays a double-encoded JSON string there.
-			// A request that named direct_post is answered in plaintext, the
-			// way PresentDCQL treats the response mode as authoritative, so a
-			// verifier advertising an algorithm without a usable key does not
-			// make the presentation unsendable.
+			// A caller that names no response mode and asks for encryption
+			// through authorization_encrypted_response_alg gets the JARM shape,
+			// with presentation_submission as a JSON string.
 			payload := map[string]interface{}{"vp_token": string(serializedPresentation), "presentation_submission": string(submissionJSON)}
 			if request.State != "" {
 				payload["state"] = request.State

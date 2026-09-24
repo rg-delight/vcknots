@@ -12,8 +12,10 @@ type OID4VPClientID struct {
 type OID4VPClientIDPrefix string
 
 const (
-	OID4VPClientIDPrefixRedirectURI         OID4VPClientIDPrefix = "redirect_uri"
-	OID4VPClientIDPrefixOIDFederation       OID4VPClientIDPrefix = "openid_federation"
+	OID4VPClientIDPrefixRedirectURI   OID4VPClientIDPrefix = "redirect_uri"
+	OID4VPClientIDPrefixOIDFederation OID4VPClientIDPrefix = "openid_federation"
+	// OID4VPClientIDPrefixDID is parsed, but the parse entry points refuse it:
+	// this library does not resolve DIDs to authenticate a Request Object.
 	OID4VPClientIDPrefixDID                 OID4VPClientIDPrefix = "decentralized_identifier"
 	OID4VPClientIDPrefixVerifierAttestation OID4VPClientIDPrefix = "verifier_attestation"
 	OID4VPClientIDPrefixX509SanDNS          OID4VPClientIDPrefix = "x509_san_dns"
@@ -24,20 +26,12 @@ const (
 	OID4VPClientIDPrefixPreRegistered OID4VPClientIDPrefix = "pre-registered"
 )
 
-// ParseOID4VPClientID parses and validates a client_id that arrived over the
-// wire, from any delivery: query parameters, a request= Request Object, a
-// request_uri Request Object, a signed DC API request or the Draft24 paths. It
-// is the same parse every entry point of this package applies, exported so an
-// application that has to know which Client Identifier Prefix it is talking to
-// - to render it, or to decide what evidence the prefix demands - reads it from
-// the Client Identifier syntax of OID4VP 1.0 Section 5.9.2 rather than from a
-// second copy of the rules.
-//
-// A Client Identifier with no ":" is a pre-registered client and reports
-// OID4VPClientIDPrefixPreRegistered. A Client Identifier Prefix that only the
-// Wallet itself is allowed to mint is refused with ErrClientIDPrefixReserved:
-// "origin" (Section 5.9.3) and "web-origin" (Appendix A.2). Every other
-// unknown prefix is refused as a plain syntax error.
+// ParseOID4VPClientID parses a client_id with the OID4VP 1.0 §5.9.2 syntax
+// every entry point of this package applies. A Client Identifier with no ":"
+// reports OID4VPClientIDPrefixPreRegistered. The Wallet-only prefixes "origin"
+// (§5.9.3) and "web-origin" (Appendix A.2) are refused with
+// ErrClientIDPrefixReserved, and unknown prefixes as a syntax error. Parsing
+// a prefix does not mean the parse entry points can authenticate it.
 func ParseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 	return parseOID4VPClientIDAllowingWebOrigin(clientID, false)
 }
@@ -54,14 +48,10 @@ func (c *OID4VPClientID) Original() string {
 	return c.original
 }
 
-// RequiresRequestObjectSignature reports whether this Client Identifier can
-// only be authenticated by the signature over a Request Object: the X.509
-// certificate that signed it (OID4VP 1.0 Section 5.9.3 "x509_san_dns" and
-// "x509_hash"), or the key a Verifier Attestation confirms
-// ("verifier_attestation": "the Verifier MUST sign the request object with the
-// private key corresponding to the public key in the `cnf` claim"). A request
-// carrying such an identifier in plain query parameters authenticates nothing,
-// and the parse entry points refuse it with ErrRequestObjectSignatureRequired.
+// RequiresRequestObjectSignature reports whether the prefix itself can only be
+// authenticated by a signed Request Object: x509_san_dns, x509_hash and
+// verifier_attestation (OID4VP 1.0 §5.9.3). The parse entry points refuse
+// such a request in plain parameters with ErrRequestObjectSignatureRequired.
 func (c *OID4VPClientID) RequiresRequestObjectSignature() bool {
 	return c.prefix == OID4VPClientIDPrefixX509SanDNS ||
 		c.prefix == OID4VPClientIDPrefixX509Hash ||
@@ -73,26 +63,15 @@ func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 	return ParseOID4VPClientID(clientID)
 }
 
-// parseClientID parses a client_id in the context of the delivery this builder
-// is processing. It is parseOID4VPClientID with one exception: while parsing an
-// unsigned Digital Credentials API request the Wallet-synthesised
-// "web-origin:<origin>" effective identifier is accepted, because
-// parseDCAPIUnsigned put it there itself after discarding whatever the request
-// carried.
-//
-// OID4VP 1.0 Appendix A.2: "The `client_id` parameter MUST be omitted in
-// unsigned requests defined in (#unsigned_request). The Wallet MUST ignore any
-// `client_id` parameter that is present in an unsigned request." Every other
-// requestSource therefore reaches the strict parse, so a "web-origin" prefix
-// read off the wire is rejected exactly like the reserved "origin" prefix of
-// OID4VP 1.0 Section 5.9.3: "This reserved Client Identifier Prefix is defined
-// in (#dc_api_request). The Wallet MUST NOT accept this Client Identifier
-// Prefix in requests."
+// parseClientID parses a client_id for the delivery this builder processes.
+// Only an unsigned DC API request accepts "web-origin:<origin>", which
+// parseDCAPIUnsigned synthesised itself after discarding the request's
+// client_id (OID4VP 1.0 Appendix A.2).
 func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error) {
 	if b.draft24 {
 		return parseDraft24ClientID(clientID)
 	}
-	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == "dcapi-unsigned")
+	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == sourceDCAPIUnsigned)
 }
 
 // ParseDraft24OID4VPClientID is ParseOID4VPClientID for a client_id that

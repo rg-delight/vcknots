@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"sync"
 	"testing"
@@ -323,5 +324,35 @@ func requireErrorIs(t *testing.T, err, want error) {
 	t.Helper()
 	if !errors.Is(err, want) {
 		t.Fatalf("expected %v, got %v", want, err)
+	}
+}
+
+// An unsigned openid_federation request authenticates nothing about the
+// request itself, so it is refused before any Trust Chain is resolved unless
+// the Wallet opts in with AllowUnsignedRequests.
+func TestFederationUnsignedRequestNeedsOptIn(t *testing.T) {
+	f := newFederationRequestFixture(t)
+	query := url.Values{
+		"client_id": {f.clientID()}, "response_type": {"vp_token"}, "response_mode": {"direct_post"},
+		"response_uri": {federationResponseURI}, "nonce": {"n"},
+		"dcql_query": {`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]}}]}`},
+	}
+	uri := "openid4vp://authorize?" + query.Encode()
+
+	options := f.options()
+	refusing := &Oid4vpPresenter{HTTPClient: offlineClient(t), RequestObjectValidation: &options}
+	if _, err := refusing.ParsePresentationRequest(uri); !errors.Is(err, ErrRequestObjectSignatureRequired) {
+		t.Fatalf("want ErrRequestObjectSignatureRequired, got %v", err)
+	}
+
+	allowing := f.options()
+	allowing.Federation.AllowUnsignedRequests = true
+	presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &allowing}
+	request, err := presenter.ParsePresentationRequest(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.VerifierFederation == nil || request.VerifierFederation.SubjectEntityID != f.verifierID {
+		t.Fatalf("missing federation evidence: %+v", request.VerifierFederation)
 	}
 }

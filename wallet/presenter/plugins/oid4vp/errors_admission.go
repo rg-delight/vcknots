@@ -29,11 +29,11 @@ var (
 	// Identifier "is the Verifier's Redirect URI (or Response URI when
 	// Response Mode direct_post is used)".
 	ErrResponseURIClientIDMismatch = common.NewCodedError("response_uri_client_id_mismatch", "response_uri does not match the redirect_uri Client Identifier")
-	// ErrResponseEncryptionKeyMissing reports a direct_post.jwt request whose
-	// Verifier metadata carries no jwks to encrypt the Authorization Response
-	// to (OpenID4VP 1.0 Section 8.3).
-	ErrResponseEncryptionKeyMissing = common.NewCodedError("response_encryption_jwks_missing", "direct_post.jwt requires verifier encryption keys in client_metadata.jwks")
-	// ErrResponseEncryptionKeyUnusable reports a direct_post.jwt request whose
+	// ErrResponseEncryptionKeyMissing reports a direct_post.jwt or dc_api.jwt
+	// request whose Verifier metadata carries no jwks to encrypt the
+	// Authorization Response to (OpenID4VP 1.0 Section 8.3).
+	ErrResponseEncryptionKeyMissing = common.NewCodedError("response_encryption_jwks_missing", "response encryption requires verifier encryption keys in client_metadata.jwks")
+	// ErrResponseEncryptionKeyUnusable reports an encrypted-response request whose
 	// Verifier metadata jwks holds no key this Wallet can encrypt to under the
 	// active profile (OpenID4VP 1.0 Section 8.3, HAIP Section 5).
 	ErrResponseEncryptionKeyUnusable = common.NewCodedError("response_encryption_jwks_invalid", "client_metadata.jwks holds no usable response encryption key")
@@ -41,7 +41,7 @@ var (
 	// encrypted_response_enc_values_supported offers no content encryption
 	// this Wallet supports under the active profile.
 	ErrResponseEncryptionEncUnsupported = common.NewCodedError("response_encryption_enc_unsupported", "encrypted_response_enc_values_supported offers no supported content encryption")
-	// ErrResponseEncryptionEncMissing reports a HAIP direct_post.jwt request
+	// ErrResponseEncryptionEncMissing reports a HAIP encrypted-response request
 	// whose Verifier does not list both A128GCM and A256GCM in
 	// encrypted_response_enc_values_supported, which HAIP Section 5 requires
 	// of every Verifier using response encryption.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -47,7 +48,9 @@ func TestFinalResponseTypeMustBeVPToken(t *testing.T) {
 func TestFinalPreRegisteredClientID(t *testing.T) {
 	// §5.9.2 also requires the Client Identifier to be "known to the Wallet in
 	// advance of the Authorization Request", so these cases register it.
-	registry := map[string]PreRegisteredClient{"example-client": {}}
+	registry := map[string]PreRegisteredClient{"example-client": {
+		Metadata: &VerifierMetadata{RedirectURIs: []string{"https://verifier.example/cb"}},
+	}}
 
 	t.Run("accepted on the Final path", func(t *testing.T) {
 		uri := finalQueryURI(url.Values{
@@ -62,26 +65,12 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "example-client", req.ClientID)
 	})
-
-	t.Run("signed pre-registered request object stays unsupported", func(t *testing.T) {
-		f := newRequestObjectFixture(t)
-		claims := f.claims()
-		claims["client_id"] = "example-client"
-		uri := "openid4vp://authorize?" + url.Values{
-			"client_id": {"example-client"},
-			"request":   {f.sign(t, claims, nil)},
-		}.Encode()
-		p := f.presenter()
-		p.PreRegisteredClients = registry
-		_, err := p.ParsePresentationRequest(uri)
-		require.ErrorContains(t, err, "no configured authentication method")
-	})
 }
 
 func TestHAIPRejectsPreRegisteredClientID(t *testing.T) {
 	builder := NewRequestBuilder()
 	builder.profile = profile.HAIP
-	builder.requestSource = "reference"
+	builder.requestSource = sourceReference
 	builder.req.ClientID = "example-client"
 	builder.req.ResponseMode = OAuthAuthzReqResponseModeDirectPostJWT
 	err := builder.enforceHAIPProfile()
@@ -229,6 +218,29 @@ func TestFinalTransactionDataValidation(t *testing.T) {
 		require.NoError(t, parse(`{"type":"example","credential_ids":["pid"]}`))
 	})
 
+	// Only an SD-JWT VC Key Binding JWT carries transaction_data_hashes
+	// (OID4VP 1.0 Appendix B.3.3), so a transaction naming a query of another
+	// format could never be authorized by the presentation.
+	t.Run("credential query whose format cannot carry transaction data", func(t *testing.T) {
+		f := newRequestObjectFixture(t)
+		claims := f.claims()
+		query := claims["dcql_query"].(map[string]any)["credentials"].([]any)
+		query = append(query, map[string]any{
+			"id": "jwt", "format": "jwt_vc_json", "meta": map[string]any{"type_values": [][]string{{"VerifiableCredential"}}},
+		})
+		claims["dcql_query"] = map[string]any{"credentials": query}
+		claims["transaction_data"] = []any{encode(`{"type":"example","credential_ids":["jwt"]}`)}
+		p := f.presenter()
+		p.SupportedTransactionDataTypes = []string{"example"}
+		uri := "openid4vp://authorize?" + url.Values{
+			"client_id": {f.clientID()},
+			"request":   {f.sign(t, claims, nil)},
+		}.Encode()
+		_, err := p.ParsePresentationRequest(uri)
+		assertAuthzErrorCode(t, err, InvalidTransactionDataError)
+		require.ErrorContains(t, err, "cannot carry transaction data")
+	})
+
 	t.Run("query-encoded transaction_data is validated", func(t *testing.T) {
 		entry := encode(`{"type":"example","credential_ids":["cred"]}`)
 		raw, err := json.Marshal([]string{entry})
@@ -319,7 +331,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 	t.Run("encrypted", func(t *testing.T) {
 		server, captured := newServer(t)
 		defer server.Close()
-		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client()}
+		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client(), SendParseErrorResponses: true}
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, metadata()))
 		require.Error(t, err)
 		token := captured.Get("response")
@@ -334,7 +346,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 		defer server.Close()
 		md := metadata()
 		md.Jwks = jose.JSONWebKeySet{}
-		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client()}
+		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client(), SendParseErrorResponses: true}
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, md))
 		require.Error(t, err)
 		require.Empty(t, captured.Get("response"))
@@ -351,26 +363,25 @@ func TestFinalErrorCodesRegistered(t *testing.T) {
 	}
 }
 
-// Fix 9: SubmitEncryptedAuthorizationResponse bounds the verifier body.
+// SubmitEncryptedAuthorizationResponse bounds the Verifier's response body.
 func TestSubmitEncryptedAuthorizationResponseBoundedBody(t *testing.T) {
 	recipient := newP256Recipient(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(bytes.Repeat([]byte("a"), maxVerifierResponseBodySize+512))
+		_, _ = w.Write(bytes.Repeat([]byte("a"), int(httpfetch.DefaultBodyLimit)+512))
 	}))
 	defer server.Close()
 	endpoint, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	p := &Oid4vpPresenter{}
-	body, err := p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
+	_, err = p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
 		"vp_token": map[string]any{"pid": []string{"presented"}},
 	}, &VerifierMetadata{
 		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 			Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: "ECDH-ES",
 		}}},
 	})
-	require.NoError(t, err)
-	require.Len(t, body, maxVerifierResponseBodySize)
+	require.ErrorIs(t, err, httpfetch.ErrBodyTooLarge)
 }
 
 // Fix 10: OID4VP 1.0 §8.3 requires alg on JWKs used for encryption.
@@ -446,7 +457,7 @@ func TestRedirectURIClientIDRejectsForeignResponseURI(t *testing.T) {
 		"nonce":         {"n"},
 		"dcql_query":    {finalDcqlParam},
 	})
-	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}
 	_, err := p.ParsePresentationRequest(uri)
 	assertAuthzErrorCode(t, err, InvalidRequestError)
 	require.ErrorContains(t, err, "response_uri does not match the redirect_uri Client Identifier")
@@ -498,7 +509,7 @@ func TestPreRegisteredClientIDAcceptedFromRegistry(t *testing.T) {
 		"dcql_query":    {finalDcqlParam},
 	})
 	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
-		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
+		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier", RedirectURIs: []string{"https://verifier.example/cb"}}},
 	}}
 	req, err := p.ParsePresentationRequest(uri)
 	require.NoError(t, err)
@@ -521,12 +532,12 @@ func TestPreRegisteredClientIDResolverConsultedWhenMapMisses(t *testing.T) {
 	var asked []string
 	p := &Oid4vpPresenter{
 		PreRegisteredClients: map[string]PreRegisteredClient{
-			"mapped-client": {Metadata: &VerifierMetadata{ClientName: "From map"}},
+			"mapped-client": {Metadata: &VerifierMetadata{ClientName: "From map", RedirectURIs: []string{"https://verifier.example/cb"}}},
 		},
 		ResolvePreRegisteredClient: func(clientID string) (*PreRegisteredClient, error) {
 			asked = append(asked, clientID)
 			if clientID == "resolved-client" {
-				return &PreRegisteredClient{Metadata: &VerifierMetadata{ClientName: "From resolver"}}, nil
+				return &PreRegisteredClient{Metadata: &VerifierMetadata{ClientName: "From resolver", RedirectURIs: []string{"https://verifier.example/cb"}}}, nil
 			}
 			return nil, nil
 		},
@@ -563,4 +574,22 @@ func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
 	_, err := p.ParseDraft24PresentationRequest(uri)
 	require.ErrorContains(t, err, "invalid client_id format")
 	require.NotErrorIs(t, err, ErrPreRegisteredClientUnknown)
+}
+
+// An Authorization Request URI without an authority ("openid4vp:?...") is
+// parsed like any other. OID4VP 1.0 §5.9.3 binds the Response URI of a
+// direct_post request to the redirect_uri Client Identifier, so the request is
+// accepted only when both name the same URI.
+func TestFinalQueryParametersWithoutAuthority(t *testing.T) {
+	uri := func(responseURI string) string {
+		return "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=n&dcql_query=" +
+			url.QueryEscape(finalDcqlParam) + "&response_mode=direct_post&response_uri=" + responseURI
+	}
+	p := &Oid4vpPresenter{}
+	req, err := p.ParsePresentationRequest(uri("https://example.com/response"))
+	require.NoError(t, err)
+	require.Equal(t, "https://example.com/response", req.ResponseURI)
+
+	_, err = p.ParsePresentationRequest(uri("https://example.com/elsewhere"))
+	require.ErrorIs(t, err, ErrResponseURIClientIDMismatch)
 }

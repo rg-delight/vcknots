@@ -114,7 +114,6 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 					p := &Oid4vpPresenter{
 						AllowHTTP:                      true,
 						HTTPClient:                     verifier.server.Client(),
-						DisableParseErrorResponses:     true,
 						RequireClientMetadataJWKKeyIDs: required,
 					}
 

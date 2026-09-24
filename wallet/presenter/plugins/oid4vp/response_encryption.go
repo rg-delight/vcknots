@@ -5,7 +5,6 @@ import (
 	"crypto/elliptic"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
 
 	"github.com/go-jose/go-jose/v4"
@@ -28,12 +27,23 @@ func (p *Oid4vpPresenter) CreateEncryptedAuthorizationResponse(authzResponse map
 	return p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
 }
 
-// encryptAuthorizationResponseJWE selects a usable verifier encryption key and
-// encrypts payload as an OID4VP 1.0 §8.3 authorization response JWE. It is the
-// single selection path shared by PresentDCQL and
-// CreateEncryptedAuthorizationResponse so both behave identically.
+// encryptAuthorizationResponseJWE encrypts payload as an OID4VP 1.0 §8.3
+// authorization response JWE. Metadata of a parsed request is encrypted under
+// the rules that request was admitted with, so a Draft24 request is not held
+// to HAIP after consent; other metadata follows the presenter's profile.
 func (p *Oid4vpPresenter) encryptAuthorizationResponseJWE(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
-	selection, err := p.selectResponseEncryption(metadata)
+	haip := p.Profile.IsHAIP()
+	if metadata != nil && metadata.encryptionPolicy != encryptionPolicyUnset {
+		haip = metadata.encryptionPolicy == encryptionPolicyHAIP
+	}
+	return encryptAuthorizationResponse(payloadBytes, metadata, haip)
+}
+
+// encryptAuthorizationResponse selects a usable Verifier encryption key and
+// encrypts payload as an OID4VP 1.0 §8.3 authorization response JWE, applying
+// the HAIP rules when haip is set.
+func encryptAuthorizationResponse(payloadBytes []byte, metadata *VerifierMetadata, haip bool) (string, error) {
+	selection, err := selectResponseEncryptionForProfile(metadata, haip)
 	if err != nil {
 		return "", err
 	}
@@ -102,17 +112,11 @@ var (
 	}
 )
 
-// selectResponseEncryption applies OID4VP 1.0 §8.3 and RFC 7517 §5 key
-// selection, then enforces the HAIP combination when the profile is HAIP:
-// ECDH-ES with a P-256 key and A128GCM or A256GCM content encryption.
-func (p *Oid4vpPresenter) selectResponseEncryption(metadata *VerifierMetadata) (*responseEncryption, error) {
-	return selectResponseEncryptionForProfile(metadata, p.Profile.IsHAIP())
-}
-
-// selectResponseEncryptionForProfile is selectResponseEncryption for an
-// explicit profile decision, so parsing a request and encrypting its response
-// apply the one selection rule. A failure wraps ErrResponseEncryptionKeyUnusable
-// or ErrResponseEncryptionEncUnsupported.
+// selectResponseEncryptionForProfile applies OID4VP 1.0 §8.3 and RFC 7517 §5
+// key selection, and with haip the HAIP §5 combination: ECDH-ES on P-256 with
+// A128GCM or A256GCM. Parsing a request and encrypting its response share it.
+// A failure wraps ErrResponseEncryptionKeyUnusable or
+// ErrResponseEncryptionEncUnsupported.
 func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (*responseEncryption, error) {
 	if metadata == nil {
 		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response: %w", ErrResponseEncryptionKeyMissing)
@@ -259,24 +263,9 @@ func (p *Oid4vpPresenter) SubmitEncryptedAuthorizationResponse(endpoint url.URL,
 	}
 
 	formData := url.Values{"response": []string{encryptedResponse}}
-	resp, err := p.postResponseForm(endpoint.String(), formData, true)
+	body, err := p.postAuthorizationResponse(endpoint.String(), formData)
 	if err != nil {
 		return "", fmt.Errorf("failed to submit encrypted authorization response: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
-	if err != nil {
-		return "", fmt.Errorf("failed to read authorization response submission body: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// As in postAuthorizationResponse, only the status and the normalized
-		// OAuth error code leave this boundary; the verifier-controlled body is
-		// discarded.
-		return "", &VerifierResponseError{
-			StatusCode: resp.StatusCode,
-			OAuthError: oauthErrorCodeFromResponseBody(body),
-		}
 	}
 	return string(body), nil
 }

@@ -88,7 +88,7 @@ func TestDraft24RedirectURIClientIDMismatchAnswersTheClientIdentifier(t *testing
 	attacker := newCountingResponseServer(t)
 	verifier := newCountingResponseServer(t)
 	values := draft24RedirectURIValues(verifier.server.URL+"/response", attacker.server.URL+"/post")
-	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}
 	_, err := p.ParseDraft24PresentationRequest(finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseURIClientIDMismatch), "want ErrResponseURIClientIDMismatch, got %v", err)
 	require.Equal(t, int32(0), attacker.calls.Load(), "the foreign response_uri must receive nothing")

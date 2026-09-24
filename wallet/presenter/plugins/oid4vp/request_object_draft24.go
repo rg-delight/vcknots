@@ -12,17 +12,10 @@ import (
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
-// withDraft24RequestObject authenticates a Draft24 Request Object. It uses the
-// provided JWT string as the request object to populate the
-// CredentialPresentationRequest, validating its claims and signature as per
-// OID4VP and RFC 9101.
-//
-// The Draft24 wire contract (the client_id_scheme parameter and
-// presentation_definition) is preserved here, but an X.509 signed Request
-// Object is authenticated by the same shared path Final uses whenever the
-// caller configured RequestObjectValidationOptions. A caller that configured
-// only the legacy X509TrustChainRoots pool, or the InsecureSkipX509Verify test
-// escape, keeps the original Draft24 behaviour.
+// withDraft24RequestObject authenticates a Draft24 Request Object and loads
+// its claims. X.509 Request Objects go through authenticateX509RequestObject,
+// except x509_san_dns with only X509TrustChainRoots configured and the
+// InsecureSkipX509Verify test escape.
 func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	if b.errValidation != nil {
 		return b
@@ -94,19 +87,20 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// A configured RequestObjectValidationOptions is the caller's request for
-	// the shared authentication path: trust anchors or a root pool, the CRL
-	// policy, the wallet audience, the clock skew and the signature algorithms
-	// all apply to Draft24 exactly as they do to Final.
-	if isX509ClientID && b.requestObjectValidation != nil && !b.insecureSkipX509Verify {
+	// The shared X.509 path applies when the caller configured
+	// RequestObjectValidationOptions, and always to x509_hash, whose thumbprint
+	// names a certificate without saying it is trusted. Only x509_san_dns
+	// without options keeps the X509TrustChainRoots check below.
+	useShared := b.requestObjectValidation != nil || (clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash)
+	if isX509ClientID && useShared && !b.insecureSkipX509Verify {
 		if err := b.authenticateX509RequestObject(obj, parsedJWT, options); err != nil {
 			b.errValidation = err
 		}
 		return b
 	}
 
-	// x509_hash, legacy configuration: the Client Identifier is the leaf
-	// certificate thumbprint, so no chain is verified.
+	// x509_hash under InsecureSkipX509Verify: the thumbprint and signature are
+	// checked, the chain is not.
 	if clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash {
 		certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
 		if err != nil {
@@ -175,7 +169,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			return b
 		}
 
-		// ClientID should contain DNS name which is same as the SAN of the leaf certificate in the x5c array (OID4VP x509_san_dns). #106
+		// ClientID should contain DNS name which is same as the SAN of the leaf certificate in the x5c array (OID4VP x509_san_dns).
 		matched := false
 		for _, n := range certificates[0].DNSNames {
 			if clientID.original == n {
@@ -188,7 +182,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			return b
 		}
 
-		// response_uri / redirect_uri check #107
+		// The response endpoint host must be the DNS name.
 		var uri *url.URL
 		if b.req.ResponseMode == "direct_post" {
 			uri, err = url.Parse(b.req.ResponseURI)
@@ -231,23 +225,12 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// The registered claims (RFC 9101 Section 10.2, RFC 7519 Section 4.1)
-	// are judged by the same policy as every other Request Object: at the
-	// caller's verification time (RequestObjectValidationOptions.Now) with
-	// the caller's ClockSkew. A wallet that re-authenticates at consent the
-	// Request Object it admitted earlier names the admission instant, so a
-	// Request Object whose exp falls between the two is not refused at
-	// consent. This path never read aud, and keeps not reading it.
+	// The registered claims are judged at the caller's verification time
+	// with its ClockSkew; this path never read aud.
 	policy := b.resolveClaimPolicy(options, requestObjectNow(options))
 	policy.Audiences = nil
 	policy.AudienceOptional = true
 	if err := validateRequestObjectClaims(verifiedClaims, policy); err != nil {
-		b.errValidation = fmt.Errorf("JWT standard claims validation failed: %w", err)
-		return b
-	}
-	// This path has always refused a Request Object issued in the future;
-	// it keeps doing so, against the same instant and skew.
-	if err := validateDraft24IssuedAt(verifiedClaims, policy); err != nil {
 		b.errValidation = fmt.Errorf("JWT standard claims validation failed: %w", err)
 		return b
 	}
@@ -261,17 +244,4 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	}
 
 	return b
-}
-
-// validateDraft24IssuedAt refuses an iat later than the verification time plus
-// the clock skew (RFC 7519 Section 4.1.6 leaves the check to the recipient).
-func validateDraft24IssuedAt(claims commonJOSE.Claims, policy requestObjectClaimPolicy) error {
-	issuedAt, err := requestObjectNumericDate(claims, "iat")
-	if err != nil || issuedAt == nil {
-		return err
-	}
-	if requestObjectInstant(policy.Now.Add(policy.ClockSkew)).Cmp(issuedAt) < 0 {
-		return fmt.Errorf("request object is issued in the future: %w", ErrRequestObjectExpired)
-	}
-	return nil
 }
