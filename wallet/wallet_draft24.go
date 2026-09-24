@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/credential"
@@ -47,10 +48,16 @@ func (w *Wallet) PresentDraft24Credential(uriString string, key IKeyEntry, optio
 }
 
 func (w *Wallet) parseDraft24AuthorizationRequest(uriString string) (*oid4vp.CredentialPresentationRequest, *url.URL, error) {
-	req, err := w.presenter.ParseDraft24RequestURI(uriString)
+	admitted, err := w.presenter.ParseDraft24Request(context.Background(), presenterTypes.Oid4vp, uriString)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse request URI: %w", err)
 	}
+	handle, ok := admitted.(*oid4vp.AdmittedRequest)
+	if !ok {
+		return nil, nil, fmt.Errorf("failed to parse request URI: the registered OID4VP presenter returned an unsupported request handle")
+	}
+	admittedRequest := handle.Request()
+	req := &admittedRequest
 
 	if req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPost && req.ResponseMode != oid4vp.OAuthAuthzReqResponseModeDirectPostJWT && req.RedirectURI == "" {
 		return nil, nil, fmt.Errorf("redirect_uri is not specified")
@@ -191,6 +198,6 @@ func (w *Wallet) submitDraft24Presentation(presentation *credential.CredentialPr
 		presentationRequest.AuthorizationEncryptedRespEnc = req.ClientMetadata.AuthorizationEncryptedResponseEnc
 	}
 
-	_, err = w.presenter.PresentDraft24(presenterTypes.Oid4vp, *endpoint, bytes, presentationSubmission, presentationRequest)
+	_, err = w.presentDraft24At(*endpoint, bytes, presentationSubmission, presentationRequest)
 	return err
 }

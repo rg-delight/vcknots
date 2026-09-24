@@ -166,7 +166,7 @@ func TestFinalAndHAIPProfileDraft24Exempt(t *testing.T) {
 	uri := "openid4vp://authorize?" + url.Values{"client_id": {claims["client_id"].(string)}, "request": {token}}.Encode()
 	p := f.presenter()
 	p.Profile = profile.HAIP
-	if _, err := p.ParseDraft24PresentationRequest(uri); err != nil {
+	if _, err := parseDraft24ForTest(p, uri); err != nil {
 		t.Fatalf("Draft24 must not enforce HAIP: %v", err)
 	}
 }
@@ -411,16 +411,16 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 	})
 }
 
-// TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL proves both public
+// TestEncryptedAuthorizationResponseMatchesPresentDCQL proves both
 // encryption paths select the same key/alg/enc.
-func TestCreateEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
+func TestEncryptedAuthorizationResponseMatchesPresentDCQL(t *testing.T) {
 	recipient := newP256Recipient(t)
 	metadata := &VerifierMetadata{
 		Jwks:                                jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "shared", Use: "enc", Algorithm: "ECDH-ES"}}},
 		EncryptedResponseEncValuesSupported: []string{"A256GCM"},
 	}
 	p := &Oid4vpPresenter{}
-	token, err := p.CreateEncryptedAuthorizationResponse(map[string]any{"vp_token": map[string]any{"pid": []string{"credential"}}}, metadata)
+	token, err := encryptResponseForTest(p, map[string]any{"vp_token": map[string]any{"pid": []string{"credential"}}}, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func dcapiUnsignedInvocation(t *testing.T, responseMode string) DCAPIInvocation 
 // acceptable under HAIP.
 func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
 	p := &Oid4vpPresenter{Profile: profile.HAIP}
-	_, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	_, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api"))
 	if err == nil {
 		t.Fatal("HAIP must reject the unencrypted dc_api response mode")
 	}
@@ -473,7 +473,7 @@ func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
 
 func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
 	p := &Oid4vpPresenter{Profile: profile.HAIP}
-	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api.jwt"))
+	request, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api.jwt"))
 	if err != nil {
 		t.Fatalf("HAIP must accept dc_api.jwt: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
 // outside HAIP.
 func TestFinalDCAPIStillAcceptsDCAPI(t *testing.T) {
 	p := &Oid4vpPresenter{Profile: profile.Final}
-	request, err := p.ParseDCAPIRequest(dcapiUnsignedInvocation(t, "dc_api"))
+	request, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api"))
 	if err != nil {
 		t.Fatalf("Final must accept dc_api: %v", err)
 	}
@@ -527,30 +527,19 @@ func TestNewRequestBuilderDefaultsToFinalProfile(t *testing.T) {
 	}
 }
 
-func TestNewRequestBuilderForProfileEnforcesHAIP(t *testing.T) {
-	b, err := NewRequestBuilderForProfile(profile.HAIP)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestRequestBuilderWithProfileEnforcesHAIP(t *testing.T) {
+	b := NewRequestBuilder().WithProfile(profile.HAIP)
 	if b.profile != profile.HAIP {
 		t.Fatalf("profile = %q, want %q", b.profile, profile.HAIP)
 	}
-	_, err = b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
-	if err == nil || !strings.Contains(err.Error(), "request_uri") {
-		t.Fatalf("HAIP must reject an unsigned query request: %v", err)
-	}
-	// WithProfile reaches the same policy on an existing builder.
-	_, err = NewRequestBuilder().WithProfile(profile.HAIP).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
+	_, err := b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
 	if err == nil || !strings.Contains(err.Error(), "request_uri") {
 		t.Fatalf("WithProfile must apply HAIP: %v", err)
 	}
 }
 
-func TestNewRequestBuilderForProfileRejectsUnknownProfile(t *testing.T) {
+func TestRequestBuilderWithProfileRejectsUnknownProfile(t *testing.T) {
 	for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
-		if _, err := NewRequestBuilderForProfile(unknown); err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
-			t.Fatalf("profile %q: want unknown profile error, got %v", unknown, err)
-		}
 		_, err := NewRequestBuilder().WithProfile(unknown).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
 		if err == nil || !strings.Contains(err.Error(), "unknown OID4VP profile") {
 			t.Fatalf("WithProfile(%q): want unknown profile error, got %v", unknown, err)

@@ -96,7 +96,7 @@ type FederationEvidence struct {
 // Verifier metadata is obtained from the Trust Chain after applying the
 // policies ... The `client_metadata` parameter, if present in the Authorization
 // Request, MUST be ignored when this Client Identifier Prefix is used."
-func (b *requestBuilder) authenticateFederationRequestObject(
+func (b *requestCore) authenticateFederationRequestObject(
 	obj string,
 	parsed *jwt.JSONWebToken,
 	clientID *OID4VPClientID,
@@ -126,7 +126,7 @@ func (b *requestBuilder) authenticateFederationRequestObject(
 	}
 	resolver := b.federationResolver(options)
 	trust, err := resolver.ResolveVerifierTrust(
-		options.resolveContext(),
+		b.context(),
 		clientID.original,
 		carried,
 		options.Federation.PreferredLocales,
@@ -188,7 +188,7 @@ func newFederationEvidence(trust *federation.VerifierTrust) *FederationEvidence 
 // federationResolver builds the Trust Chain resolver one authentication run
 // uses, so the transport, the anchors and the time policy of a federation
 // resolution are the ones the caller configured for this parse.
-func (b *requestBuilder) federationResolver(options RequestObjectValidationOptions) *federation.Resolver {
+func (b *requestCore) federationResolver(options RequestObjectValidationOptions) *federation.Resolver {
 	client := options.Federation.HTTPClient
 	if client == nil {
 		client = b.httpClient
@@ -257,7 +257,7 @@ func verifyRequestObjectWithKeySet(parsed *jwt.JSONWebToken, jwks jose.JSONWebKe
 // Section 5.9.3 makes the only Verifier metadata this Client Identifier Prefix
 // has: "The `client_metadata` parameter, if present in the Authorization
 // Request, MUST be ignored when this Client Identifier Prefix is used."
-func (b *requestBuilder) adoptFederationVerifierMetadata(metadata map[string]any) error {
+func (b *requestCore) adoptFederationVerifierMetadata(metadata map[string]any) error {
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("%w: verifier metadata is not serializable: %w", federation.ErrMetadataDerivationFailed, err)

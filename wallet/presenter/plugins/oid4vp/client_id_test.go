@@ -95,9 +95,9 @@ func TestDraft24QueryParamX509ClientIDRefused(t *testing.T) {
 	for _, clientID := range []string{"x509_san_dns:verifier.example", "x509_hash:YWJj", "verifier_attestation:verifier.example"} {
 		request := "openid4vp://?response_type=vp_token&client_id=" + clientID +
 			"&response_mode=direct_post&response_uri=https://verifier.example/response&nonce=n"
-		_, err := presenter.ParseDraft24PresentationRequest(request)
+		_, err := parseDraft24ForTest(presenter, request)
 		if !errors.Is(err, ErrRequestObjectSignatureRequired) {
-			t.Fatalf("ParseDraft24PresentationRequest(%q) error = %v, want ErrRequestObjectSignatureRequired", clientID, err)
+			t.Fatalf("ParseDraft24Request(%q) error = %v, want ErrRequestObjectSignatureRequired", clientID, err)
 		}
 	}
 }
@@ -148,7 +148,7 @@ func TestMissingNonceNamesItsSentinel(t *testing.T) {
 	}
 	draft24 := "openid4vp://?response_type=vp_token&client_id=redirect_uri:https://verifier.example/cb" +
 		"&response_mode=fragment&presentation_definition=" + url.QueryEscape(`{"id":"definition"}`)
-	if _, err := presenter.ParseDraft24PresentationRequest(draft24); !errors.Is(err, ErrNonceRequired) {
+	if _, err := parseDraft24ForTest(presenter, draft24); !errors.Is(err, ErrNonceRequired) {
 		t.Fatalf("Draft24 error = %v, want ErrNonceRequired", err)
 	}
 

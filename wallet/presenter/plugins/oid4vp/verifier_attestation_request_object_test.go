@@ -97,7 +97,7 @@ func (f *attestationFixture) options() RequestObjectValidationOptions {
 
 func (f *attestationFixture) parse(requestObject string, options RequestObjectValidationOptions) (*CredentialPresentationRequest, error) {
 	presenter := &Oid4vpPresenter{RequestObjectValidation: &options}
-	return presenter.ParseRequestObject(requestObject, f.clientID())
+	return parseRequestObjectForTest(presenter, requestObject, f.clientID())
 }
 
 func TestVerifierAttestationRequestObjectIsAuthenticated(t *testing.T) {

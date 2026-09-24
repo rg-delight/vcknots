@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -49,7 +50,7 @@ func TestParseDCAPIRequestUnsigned(t *testing.T) {
 		})},
 		Origin: "https://verifier.example",
 	}
-	request, err := p.ParseDCAPIRequest(invocation)
+	request, err := parseDCAPIForTest(p, invocation)
 	require.NoError(t, err)
 	require.Equal(t, "web-origin:https://verifier.example", request.ClientID)
 	require.Equal(t, "origin:https://verifier.example", request.ResponseAudience)
@@ -67,7 +68,7 @@ func TestParseDCAPIRequestUnsignedIgnoresClientIDAndOrigins(t *testing.T) {
 		})},
 		Origin: "https://verifier.example",
 	}
-	request, err := p.ParseDCAPIRequest(invocation)
+	request, err := parseDCAPIForTest(p, invocation)
 	require.NoError(t, err)
 	require.Equal(t, "web-origin:https://verifier.example", request.ClientID)
 }
@@ -81,7 +82,7 @@ func TestParseDCAPIRequestRejectsResponseURI(t *testing.T) {
 		})},
 		Origin: "https://verifier.example",
 	}
-	_, err := p.ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest(p, invocation)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "response_uri")
 }
@@ -93,7 +94,7 @@ func TestParseDCAPIRequestSigned(t *testing.T) {
 		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://verifier.example",
 	}
-	request, err := f.presenter().ParseDCAPIRequest(invocation)
+	request, err := parseDCAPIForTest(f.presenter(), invocation)
 	require.NoError(t, err)
 	require.Equal(t, f.clientID(), request.ClientID)
 	require.Equal(t, "origin:https://verifier.example", request.ResponseAudience)
@@ -110,7 +111,7 @@ func TestParseDCAPIRequestSignedWrongExpectedOrigins(t *testing.T) {
 		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://verifier.example",
 	}
-	_, err := f.presenter().ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest(f.presenter(), invocation)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected_origins")
 }
@@ -126,7 +127,7 @@ func TestParseDCAPIRequestOriginComesFromInvocation(t *testing.T) {
 		Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": obj})},
 		Origin:  "https://attacker.example",
 	}
-	_, err := f.presenter().ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest(f.presenter(), invocation)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expected_origins")
 }
@@ -170,7 +171,7 @@ func TestParseDCAPIRequestMultiSigned(t *testing.T) {
 		Request: DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": multi})},
 		Origin:  "https://verifier.example",
 	}
-	request, err := trusted.presenter().ParseDCAPIRequest(invocation)
+	request, err := parseDCAPIForTest(trusted.presenter(), invocation)
 	require.NoError(t, err)
 	require.Equal(t, trusted.clientID(), request.ClientID)
 	require.Equal(t, "origin:https://verifier.example", request.ResponseAudience)
@@ -199,20 +200,19 @@ func dcapiUnsignedDataWithMetadata(t *testing.T, recipient *ecdsa.PrivateKey, en
 	})
 }
 
-func TestBuildDCAPIResponsePlaintext(t *testing.T) {
+func TestSubmitDCQLResponseDCAPIPlaintext(t *testing.T) {
 	p := &Oid4vpPresenter{}
-	request := &CredentialPresentationRequest{
-		OAuthAuthzRequest: &OAuthAuthzRequest{ResponseMode: OAuthAuthzReqResponseModeDCAPI},
-		DCAPIProtocol:     DCAPIProtocolUnsigned,
-	}
-	vpToken := map[string][]string{"pid": {"credential"}}
-	response, err := p.BuildDCAPIResponse(request, vpToken)
+	request, err := p.ParseDCAPIRequest(context.Background(), dcapiUnsignedInvocation(t, "dc_api"))
 	require.NoError(t, err)
-	require.Equal(t, DCAPIProtocolUnsigned, response.Protocol)
-	require.Equal(t, vpToken, response.Data["vp_token"])
+	vpToken := map[string][]string{"pid": {"credential"}}
+	result, err := p.SubmitDCQLResponse(context.Background(), request, vpToken)
+	require.NoError(t, err)
+	require.False(t, result.Encrypted)
+	require.Equal(t, DCAPIProtocolUnsigned, result.DCAPIResponse.Protocol)
+	require.Equal(t, vpToken, result.DCAPIResponse.Data["vp_token"])
 }
 
-func TestBuildDCAPIResponseEncrypted(t *testing.T) {
+func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		profile   profile.Profile
@@ -229,10 +229,12 @@ func TestBuildDCAPIResponseEncrypted(t *testing.T) {
 				Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, tc.encValues)},
 				Origin:  "https://verifier.example",
 			}
-			request, err := p.ParseDCAPIRequest(invocation)
+			request, err := p.ParseDCAPIRequest(context.Background(), invocation)
 			require.NoError(t, err)
-			response, err := p.BuildDCAPIResponse(request, map[string][]string{"pid": {"credential"}})
+			result, err := p.SubmitDCQLResponse(context.Background(), request, map[string][]string{"pid": {"credential"}})
 			require.NoError(t, err)
+			require.True(t, result.Encrypted)
+			response := result.DCAPIResponse
 			require.Equal(t, DCAPIProtocolUnsigned, response.Protocol)
 			token, ok := response.Data["response"].(string)
 			require.True(t, ok)
@@ -256,7 +258,7 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, newDCAPIRecipient(t), []string{"A128GCM", "A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
-		_, err := p.ParseDCAPIRequest(invocation)
+		_, err := parseDCAPIForTest(p, invocation)
 		require.NoError(t, err)
 	})
 
@@ -268,7 +270,7 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 			Origin:  "https://verifier.example",
 		}
 		p := f.presenterWithHAIP()
-		_, err := p.ParseDCAPIRequest(invocation)
+		_, err := parseDCAPIForTest(p, invocation)
 		require.NoError(t, err)
 	})
 
@@ -295,7 +297,7 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 			Origin:  "https://verifier.example",
 		}
 		p := trusted.presenterWithHAIP()
-		_, err = p.ParseDCAPIRequest(invocation)
+		_, err = parseDCAPIForTest(p, invocation)
 		require.NoError(t, err)
 	})
 }
@@ -308,7 +310,7 @@ func TestParseDCAPIRequestHAIPRejectsDirectPost(t *testing.T) {
 		})},
 		Origin: "https://verifier.example",
 	}
-	_, err := p.ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest(p, invocation)
 	require.Error(t, err)
 }
 
@@ -330,11 +332,11 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	}
 
 	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
-	_, err := haip.ParseDCAPIRequest(invocation)
+	_, err := parseDCAPIForTest(haip, invocation)
 	require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
 
 	final := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
-	_, err = final.ParseDCAPIRequest(invocation)
+	_, err = parseDCAPIForTest(final, invocation)
 	require.NoError(t, err, "Final must still accept a chain that includes the anchor")
 }
 
@@ -411,7 +413,7 @@ func TestParseRequestRejectsWebOriginClientIDFromTheWire(t *testing.T) {
 			"response_uri":            {"https://attacker.example/cb"},
 			"presentation_definition": {`{"id":"pd","input_descriptors":[]}`},
 		}.Encode()
-		_, err := p.ParseDraft24PresentationRequest(uri)
+		_, err := parseDraft24ForTest(p, uri)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "web-origin")
 	})
@@ -426,7 +428,7 @@ func TestParseRequestRejectsWebOriginClientIDFromTheWire(t *testing.T) {
 		claims["response_mode"] = "direct_post"
 		claims["response_uri"] = "https://attacker.example/cb"
 		uri := "openid4vp://authorize?" + url.Values{"request": {f.sign(t, claims, nil)}}.Encode()
-		_, err := f.presenter().ParseDraft24PresentationRequest(uri)
+		_, err := parseDraft24ForTest(f.presenter(), uri)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "web-origin")
 	})
@@ -504,7 +506,7 @@ func TestParseDCAPIRequestRequestObjectSentinels(t *testing.T) {
 				Request: DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": tt.object(t, f)})},
 				Origin:  "https://verifier.example",
 			}
-			_, err := f.presenter().ParseDCAPIRequest(invocation)
+			_, err := parseDCAPIForTest(f.presenter(), invocation)
 			if !errors.Is(err, tt.sentinel) {
 				t.Fatalf("ParseDCAPIRequest did not return %v: %v", tt.sentinel, err)
 			}
@@ -530,13 +532,13 @@ func TestParseDCAPIRequestAdmission(t *testing.T) {
 		for _, mode := range []string{"direct_post", "fragment"} {
 			data := base(mode)
 			data["redirect_uri"] = "https://verifier.example/cb"
-			_, err := (&Oid4vpPresenter{}).ParseDCAPIRequest(unsigned(data))
+			_, err := parseDCAPIForTest((&Oid4vpPresenter{}), unsigned(data))
 			assertAuthzErrorCode(t, err, InvalidRequestError)
 		}
 	})
 
 	t.Run("dc_api.jwt without an encryption key", func(t *testing.T) {
-		_, err := (&Oid4vpPresenter{}).ParseDCAPIRequest(unsigned(base("dc_api.jwt")))
+		_, err := parseDCAPIForTest((&Oid4vpPresenter{}), unsigned(base("dc_api.jwt")))
 		require.ErrorIs(t, err, ErrResponseEncryptionKeyMissing)
 	})
 
@@ -546,7 +548,7 @@ func TestParseDCAPIRequestAdmission(t *testing.T) {
 			Request: DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
-		_, err := (&Oid4vpPresenter{Profile: profile.HAIP}).ParseDCAPIRequest(invocation)
+		_, err := parseDCAPIForTest((&Oid4vpPresenter{Profile: profile.HAIP}), invocation)
 		require.ErrorIs(t, err, ErrResponseEncryptionEncMissing)
 	})
 }

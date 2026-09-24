@@ -128,7 +128,7 @@ func (b *requestBuilder) authenticateRequestObjectByClientIdentifier(obj string,
 	}
 	switch clientID.prefix {
 	case OID4VPClientIDPrefixX509SanDNS, OID4VPClientIDPrefixX509Hash:
-		return b.authenticateX509RequestObject(obj, parsed, options)
+		return b.authenticateX509RequestObject(obj, parsed, options, true)
 	case OID4VPClientIDPrefixVerifierAttestation:
 		return b.authenticateVerifierAttestationRequestObject(parsed, clientID, options)
 	case OID4VPClientIDPrefixOIDFederation:
@@ -143,30 +143,13 @@ func (b *requestBuilder) authenticateRequestObjectByClientIdentifier(obj string,
 	}
 }
 
-// requireWalletNonceEcho applies OID4VP 1.0 Section 5.10.1 to an already
-// signature-verified Request Object: "if the Wallet passed a wallet_nonce in
-// the POST request, the Wallet MUST validate whether the request object
-// contains the respective nonce value in a wallet_nonce claim. If it does not,
-// the Wallet MUST terminate request processing." GET never sends a nonce, so a
-// present wallet_nonce claim is ignored in that case.
-func (b *requestBuilder) requireWalletNonceEcho(verified commonJOSE.Claims) error {
-	if b.sentWalletNonce == "" {
-		return nil
-	}
-	claimed, ok := verified["wallet_nonce"].(string)
-	if !ok || claimed != b.sentWalletNonce {
-		return newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectWalletNonceMismatch)
-	}
-	return nil
-}
-
 // authenticateVerifierAttestationRequestObject implements the
 // verifier_attestation Client Identifier Prefix of OpenID4VP 1.0 Section 5.9.3:
 // the Request Object carries a Verifier Attestation JWT in its `jwt` JOSE
 // header, the Wallet validates that attestation against an attester it trusts,
 // and the Request Object must be signed with the private key matching the
 // attestation's `cnf` JWK, "which serves as proof of possession".
-func (b *requestBuilder) authenticateVerifierAttestationRequestObject(
+func (b *requestCore) authenticateVerifierAttestationRequestObject(
 	parsed *jwt.JSONWebToken,
 	clientID *OID4VPClientID,
 	options RequestObjectValidationOptions,

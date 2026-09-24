@@ -1,23 +1,54 @@
 package presenter
 
 import (
+	"context"
 	"errors"
-	"net/url"
 	"reflect"
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
-func TestPresentationDispatcher_PresentDCQL_RequiresRegisteredCapability(t *testing.T) {
-	endpoint := url.URL{Scheme: "https", Host: "verifier.example", Path: "/response"}
+// customProtocol is a protocol value no bundled plugin uses, so a routing
+// test proves the dispatcher routes by the request rather than by Oid4vp.
+const customProtocol types.SupportedPresentationProtocol = 7
+
+type routedRequest struct {
+	protocol types.SupportedPresentationProtocol
+}
+
+func (r routedRequest) Protocol() types.SupportedPresentationProtocol { return r.protocol }
+
+type respondingPresenter struct {
+	mockPresenter
+	submit func(ctx context.Context, req types.AdmittedRequest, vpToken map[string][]string) (*types.SubmitResult, error)
+	parse  func(ctx context.Context, uri string) (types.AdmittedRequest, error)
+}
+
+func (p *respondingPresenter) SubmitDCQLResponse(ctx context.Context, req types.AdmittedRequest, vpToken map[string][]string) (*types.SubmitResult, error) {
+	return p.submit(ctx, req, vpToken)
+}
+
+func (p *respondingPresenter) SubmitErrorResponse(context.Context, types.AdmittedRequest, string, string) (*types.SubmitResult, error) {
+	return &types.SubmitResult{}, nil
+}
+
+func (p *respondingPresenter) ParseRequest(ctx context.Context, uri string) (types.AdmittedRequest, error) {
+	return p.parse(ctx, uri)
+}
+
+func (p *respondingPresenter) ParseRequestObject(context.Context, string, types.RequestObjectSource) (types.AdmittedRequest, error) {
+	return nil, errors.New("not used")
+}
+
+func TestPresentationDispatcher_SubmitDCQLResponse_RequiresRegisteredCapability(t *testing.T) {
 	tests := []struct {
 		name   string
 		plugin types.Presenter
 		op     string
 	}{
 		{name: "no registered plugin", op: "get_plugin"},
-		{name: "plugin has only single-query Present", plugin: &mockPresenter{}, op: "present_dcql"},
+		{name: "plugin has only single-query Present", plugin: &mockPresenter{}, op: "submit_dcql"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -26,69 +57,86 @@ func TestPresentationDispatcher_PresentDCQL_RequiresRegisteredCapability(t *test
 				t.Fatalf("NewPresentationDispatcher() error = %v", err)
 			}
 			if tt.plugin != nil {
-				if err := dispatcher.registerPlugin(types.Oid4vp, tt.plugin); err != nil {
+				if err := dispatcher.registerPlugin(customProtocol, tt.plugin); err != nil {
 					t.Fatalf("register plugin: %v", err)
 				}
 			}
-			redirect, err := dispatcher.PresentDCQL(types.Oid4vp, endpoint, map[string][]string{"identity": {"presentation"}}, &PresentationRequest{})
-			if redirect != "" || !errors.Is(err, types.ErrUnsupportedProtocol) {
-				t.Fatalf("PresentDCQL() = (%q, %v), want ErrUnsupportedProtocol", redirect, err)
+			result, err := dispatcher.SubmitDCQLResponse(context.Background(), routedRequest{customProtocol}, map[string][]string{"identity": {"presentation"}})
+			if result != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
+				t.Fatalf("SubmitDCQLResponse() = (%v, %v), want ErrUnsupportedProtocol", result, err)
 			}
 			var presenterError *types.PresenterError
-			if !errors.As(err, &presenterError) || presenterError.Protocol != types.Oid4vp || presenterError.Op != tt.op {
+			if !errors.As(err, &presenterError) || presenterError.Protocol != customProtocol || presenterError.Op != tt.op {
 				t.Fatalf("expected contextual PresenterError, got %#v", err)
 			}
 		})
 	}
 }
 
-func TestPresentationDispatcher_PresentDCQL_ForwardsAllInputsAndResult(t *testing.T) {
-	endpoint := url.URL{Scheme: "https", Host: "verifier.example", Path: "/response"}
+func TestPresentationDispatcher_SubmitDCQLResponse_RoutesByRequestProtocol(t *testing.T) {
 	tokens := map[string][]string{"identity": {"identity-token"}, "accounts": {"account-one", "account-two"}}
-	request := &PresentationRequest{State: "state"}
+	request := routedRequest{customProtocol}
+	want := &types.SubmitResult{RedirectURI: "https://verifier.example/complete"}
 	called := 0
-	plugin := &dcqlDispatchPresenter{present: func(protocol types.SupportedPresentationProtocol, gotEndpoint url.URL, gotTokens map[string][]string, gotRequest *PresentationRequest) (string, error) {
+	plugin := &respondingPresenter{submit: func(_ context.Context, gotRequest types.AdmittedRequest, gotTokens map[string][]string) (*types.SubmitResult, error) {
 		called++
-		if protocol != types.Oid4vp || gotEndpoint != endpoint || !reflect.DeepEqual(gotTokens, tokens) || gotRequest != request {
-			t.Errorf("plugin received modified inputs: protocol=%v endpoint=%v tokens=%v request=%#v", protocol, gotEndpoint, gotTokens, gotRequest)
+		if gotRequest != request || !reflect.DeepEqual(gotTokens, tokens) {
+			t.Errorf("plugin received modified inputs: request=%#v tokens=%v", gotRequest, gotTokens)
 		}
-		return "https://verifier.example/complete", nil
+		return want, nil
 	}}
-	dispatcher, err := NewPresentationDispatcher(WithPlugin(types.Oid4vp, plugin))
+	dispatcher, err := NewPresentationDispatcher(WithPlugin(customProtocol, plugin))
 	if err != nil {
 		t.Fatalf("NewPresentationDispatcher() error = %v", err)
 	}
-	redirect, err := dispatcher.PresentDCQL(types.Oid4vp, endpoint, tokens, request)
-	if err != nil || redirect != "https://verifier.example/complete" || called != 1 {
-		t.Fatalf("PresentDCQL() = (%q, %v), calls=%d", redirect, err, called)
+	result, err := dispatcher.SubmitDCQLResponse(context.Background(), request, tokens)
+	if err != nil || result != want || called != 1 {
+		t.Fatalf("SubmitDCQLResponse() = (%v, %v), calls=%d", result, err, called)
+	}
+	if _, err := dispatcher.SubmitDCQLResponse(context.Background(), nil, tokens); !errors.Is(err, types.ErrInvalidPresentation) {
+		t.Fatalf("a nil request must be refused, got %v", err)
 	}
 }
 
-func TestPresentationDispatcher_PresentDCQL_PreservesPluginError(t *testing.T) {
-	endpoint := url.URL{Scheme: "https", Host: "verifier.example", Path: "/response"}
+func TestPresentationDispatcher_SubmitDCQLResponse_PreservesPluginError(t *testing.T) {
 	failure := errors.New("verifier rejected authorization response")
-	plugin := &dcqlDispatchPresenter{present: func(types.SupportedPresentationProtocol, url.URL, map[string][]string, *PresentationRequest) (string, error) {
-		return "", failure
+	plugin := &respondingPresenter{submit: func(context.Context, types.AdmittedRequest, map[string][]string) (*types.SubmitResult, error) {
+		return nil, failure
 	}}
-	dispatcher, err := NewPresentationDispatcher(WithPlugin(types.Oid4vp, plugin))
+	dispatcher, err := NewPresentationDispatcher(WithPlugin(customProtocol, plugin))
 	if err != nil {
 		t.Fatalf("NewPresentationDispatcher() error = %v", err)
 	}
-	redirect, err := dispatcher.PresentDCQL(types.Oid4vp, endpoint, map[string][]string{"identity": {"token"}}, &PresentationRequest{})
-	if redirect != "" || !errors.Is(err, failure) {
-		t.Fatalf("PresentDCQL() = (%q, %v), want plugin error", redirect, err)
+	_, err = dispatcher.SubmitDCQLResponse(context.Background(), routedRequest{customProtocol}, map[string][]string{"identity": {"token"}})
+	if !errors.Is(err, failure) {
+		t.Fatalf("SubmitDCQLResponse() error = %v, want plugin error", err)
 	}
 	var presenterError *types.PresenterError
-	if !errors.As(err, &presenterError) || presenterError.Op != "present_dcql" || presenterError.Endpoint != endpoint.String() {
-		t.Fatalf("expected endpoint and operation in PresenterError, got %#v", err)
+	if !errors.As(err, &presenterError) || presenterError.Op != "submit_dcql" {
+		t.Fatalf("expected operation in PresenterError, got %#v", err)
 	}
 }
 
-type dcqlDispatchPresenter struct {
-	mockPresenter
-	present func(types.SupportedPresentationProtocol, url.URL, map[string][]string, *PresentationRequest) (string, error)
-}
-
-func (p *dcqlDispatchPresenter) PresentDCQL(protocol types.SupportedPresentationProtocol, endpoint url.URL, tokens map[string][]string, request *PresentationRequest) (string, error) {
-	return p.present(protocol, endpoint, tokens, request)
+func TestPresentationDispatcher_ParseRequest_UsesTheNamedProtocol(t *testing.T) {
+	admitted := routedRequest{customProtocol}
+	plugin := &respondingPresenter{parse: func(_ context.Context, uri string) (types.AdmittedRequest, error) {
+		if uri != "openid4vp://authorize?request_uri=x" {
+			t.Errorf("uri = %q", uri)
+		}
+		return admitted, nil
+	}}
+	dispatcher, err := NewPresentationDispatcher(WithPlugin(customProtocol, plugin))
+	if err != nil {
+		t.Fatalf("NewPresentationDispatcher() error = %v", err)
+	}
+	got, err := dispatcher.ParseRequest(context.Background(), customProtocol, "openid4vp://authorize?request_uri=x")
+	if err != nil || got != admitted {
+		t.Fatalf("ParseRequest() = (%v, %v)", got, err)
+	}
+	if _, err := dispatcher.ParseDraft24Request(context.Background(), customProtocol, "x"); !errors.Is(err, types.ErrUnsupportedProtocol) {
+		t.Fatalf("a plugin without Draft 24 support must be refused, got %v", err)
+	}
+	if _, err := dispatcher.ParseRequest(context.Background(), types.Oid4vp, "x"); !errors.Is(err, types.ErrUnsupportedProtocol) {
+		t.Fatalf("an unregistered protocol must be refused, got %v", err)
+	}
 }

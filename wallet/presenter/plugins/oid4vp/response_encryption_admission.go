@@ -6,8 +6,8 @@ import "slices"
 // direct_post.jwt or dc_api.jwt request whose response this Wallet could not
 // encrypt, with the selection the response will be encrypted with, so the
 // refusal comes before consent. Under HAIP the Verifier must also list both
-// A128GCM and A256GCM (HAIP §5). Draft24 is exempt from HAIP.
-func (b *requestBuilder) validateResponseEncryptionMetadata() error {
+// A128GCM and A256GCM (HAIP §5).
+func (b *requestCore) validateResponseEncryptionMetadata() error {
 	if b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT && b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
 		return nil
 	}

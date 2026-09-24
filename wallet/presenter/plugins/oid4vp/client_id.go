@@ -68,44 +68,7 @@ func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 // parseDCAPIUnsigned synthesised itself after discarding the request's
 // client_id (OID4VP 1.0 Appendix A.2).
 func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error) {
-	if b.draft24 {
-		return parseDraft24ClientID(clientID)
-	}
 	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == sourceDCAPIUnsigned)
-}
-
-// ParseDraft24OID4VPClientID is ParseOID4VPClientID for a client_id that
-// arrived over the Draft24 wire contract, whose "https" Client Identifier
-// Scheme names an OpenID Federation Entity Identifier (see
-// parseDraft24ClientID). An application that routes a request to the Draft24
-// parser reads the Client Identifier Prefix through this function, so it
-// treats a Draft24 Federation Verifier exactly as the parser does.
-func ParseDraft24OID4VPClientID(clientID string) (*OID4VPClientID, error) {
-	return parseDraft24ClientID(clientID)
-}
-
-// parseDraft24ClientID is the Client Identifier syntax of the Draft24 wire
-// contract. It differs from OpenID4VP 1.0 in one prefix only: Draft24 Section
-// 5.10.1 names an OpenID Federation Entity Identifier with the "https" Client
-// Identifier Scheme, so the whole https URL is both the Client Identifier and
-// the Entity Identifier, where OpenID4VP 1.0 spells the same Verifier
-// "openid_federation:<entity id>". The Draft24 identifier is reported with the
-// Final prefix so both wire contracts reach the one federation authentication.
-func parseDraft24ClientID(clientID string) (*OID4VPClientID, error) {
-	trimmed := strings.TrimSpace(clientID)
-	if strings.HasPrefix(trimmed, "https://") {
-		return &OID4VPClientID{original: trimmed, prefix: OID4VPClientIDPrefixOIDFederation}, nil
-	}
-	return parseOID4VPClientID(trimmed)
-}
-
-// parseClientIDForWire parses the outer Authorization Request client_id with
-// the syntax of the wire contract being parsed.
-func parseClientIDForWire(clientID string, draft24 bool) (*OID4VPClientID, error) {
-	if draft24 {
-		return parseDraft24ClientID(clientID)
-	}
-	return parseOID4VPClientID(clientID)
 }
 
 // parseOID4VPClientIDAllowingWebOrigin implements the OID4VP 1.0 Section 5.9.2

@@ -29,9 +29,11 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/presenter"
+	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
@@ -420,7 +422,10 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 	}
 
 	if config.Presenter == nil {
-		presenter, err := presenter.NewPresentationDispatcher(presenter.WithDefaultConfig())
+		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{
+			AllowHTTP: env.IsHTTPAllowed(),
+			Profile:   normalizedProfile,
+		}))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default presenter: %w", err)
 		}
@@ -434,7 +439,6 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 		return nil, err
 	}
 	if !presenterInjected {
-		propagatePresenterProfile(config.Presenter, normalizedProfile)
 		propagatePresenterTransactionDataTypes(config.Presenter, config.SupportedTransactionDataTypes)
 	}
 	if err := validatePresenterPluginProfiles(config.Presenter, normalizedProfile); err != nil {
@@ -504,13 +508,6 @@ type setSupportedTransactionDataTypes interface {
 }
 
 func propagateReceiverProfile(dispatcher *receiver.ReceivingDispatcher, value profile.Profile) {
-	for _, plugin := range dispatcher.Plugins() {
-		if setter, ok := plugin.(setProtocolProfile); ok {
-			setter.SetProtocolProfile(value)
-		}
-	}
-}
-func propagatePresenterProfile(dispatcher *presenter.PresentationDispatcher, value profile.Profile) {
 	for _, plugin := range dispatcher.Plugins() {
 		if setter, ok := plugin.(setProtocolProfile); ok {
 			setter.SetProtocolProfile(value)

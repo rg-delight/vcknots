@@ -571,7 +571,7 @@ func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
 	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
 		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
 	}}
-	_, err := p.ParseDraft24PresentationRequest(uri)
+	_, err := parseDraft24ForTest(p, uri)
 	require.ErrorContains(t, err, "invalid client_id format")
 	require.NotErrorIs(t, err, ErrPreRegisteredClientUnknown)
 }

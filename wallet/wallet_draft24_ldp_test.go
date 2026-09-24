@@ -134,7 +134,7 @@ func (f ldpPresentationFixture) options() *ldpvc.LdpVcPresentationOptions {
 // client_id (OpenID4VP Appendix B.1.3.1).
 func TestWallet_PresentDraft24SelectionSignsAnLdpVp(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 
 	redirect, err := fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, fixture.holder, []Draft24CredentialSelection{
@@ -185,7 +185,7 @@ func TestWallet_PresentDraft24SelectionSignsAnLdpVp(t *testing.T) {
 // with the same options object is bound to its own request.
 func TestWallet_PresentDraft24SelectionDoesNotMutateLdpOptions(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	options := fixture.options()
 	_, err = fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, fixture.holder, []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}, options)
@@ -197,7 +197,7 @@ func TestWallet_PresentDraft24SelectionDoesNotMutateLdpOptions(t *testing.T) {
 
 func TestWallet_PresentDraft24SelectionLdpRefusesANonEd25519Key(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	_, err = fixture.wallet.PresentDraft24Selection(request, fixture.endpoint, newMockKeyEntry(), []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}, fixture.options())
 	require.Error(t, err)
@@ -206,7 +206,7 @@ func TestWallet_PresentDraft24SelectionLdpRefusesANonEd25519Key(t *testing.T) {
 
 func TestWallet_PresentDraft24SelectionLdpRefusesAnUnpinnedContext(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	options := fixture.options()
 	options.Context = []any{fixture.vectors.ContextURL, "https://www.w3.org/ns/credentials/v2"}
@@ -219,7 +219,7 @@ func TestWallet_PresentDraft24SelectionLdpRefusesAnUnpinnedContext(t *testing.T)
 // the Verifier receives; its refusal stops the presentation before sending.
 func TestWallet_PresentDraft24SelectionAppliesTheResponseTransform(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	request, err := fixture.wallet.presenter.ParseDraft24RequestURI(draft24PresentationURI(fixture.baseURL, "direct_post", ""))
+	request, err := parseDraft24RequestForTest(fixture.wallet.presenter, draft24PresentationURI(fixture.baseURL, "direct_post", ""))
 	require.NoError(t, err)
 	selections := []Draft24CredentialSelection{fixture.selection(t, "degree-1", "identity")}
 

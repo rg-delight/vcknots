@@ -151,7 +151,20 @@ func (w *Wallet) PresentDraft24SelectionWithOptions(
 			return "", fmt.Errorf("%w: %w", ErrDraft24ResponseTransformFailed, err)
 		}
 	}
-	return w.presenter.PresentDraft24(presenterTypes.Oid4vp, endpoint, vpToken, submission, presentationRequest)
+	return w.presentDraft24At(endpoint, vpToken, submission, presentationRequest)
+}
+
+// presentDraft24At posts a Presentation Exchange response for a request the
+// caller holds to endpoint, through the registered OID4VP plugin.
+func (w *Wallet) presentDraft24At(endpoint url.URL, vpToken []byte, submission presenterTypes.PresentationSubmission, request *presenterTypes.PresentationRequest) (string, error) {
+	if len(vpToken) == 0 {
+		return "", presenterTypes.NewPresenterError(presenterTypes.Oid4vp, endpoint.String(), "present_draft24", presenterTypes.ErrInvalidPresentation)
+	}
+	presenter, err := w.oid4vpPresenter()
+	if err != nil {
+		return "", err
+	}
+	return presenter.PresentDraft24(presenterTypes.Oid4vp, endpoint, vpToken, submission, request)
 }
 
 // draft24SelectedCredentials resolves the caller's credential ids against the
