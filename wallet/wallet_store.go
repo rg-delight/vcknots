@@ -3,6 +3,7 @@ package wallet
 import (
 	"fmt"
 
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore/types"
@@ -21,7 +22,7 @@ type SavedCredential struct {
 	Entry      *types.CredentialEntry
 	// Verification records what the wallet authenticated before storing this
 	// credential. It is nil for credentials loaded from storage.
-	Verification *CredentialVerification
+	Verification *acceptance.Verification
 }
 
 // convertEntryToSavedCredential converts a CredentialEntry to SavedCredential.
@@ -50,6 +51,11 @@ var ErrNoCredentialStore = common.NewCodedError("no_credential_store", "this wal
 
 // GetCredentialEntries retrieves credential entries with optional filtering.
 func (w *Wallet) GetCredentialEntries(req GetCredentialEntriesRequest) ([]*SavedCredential, int, error) {
+	entries, total, err := w.getCredentialEntries(req)
+	return entries, total, classify(err)
+}
+
+func (w *Wallet) getCredentialEntries(req GetCredentialEntriesRequest) ([]*SavedCredential, int, error) {
 	if w.credStore == nil {
 		return nil, 0, ErrNoCredentialStore
 	}
@@ -110,8 +116,14 @@ func (w *Wallet) GetCredentialEntries(req GetCredentialEntriesRequest) ([]*Saved
 	return savedCredentials, totalCount, nil
 }
 
-// GetCredentialEntry retrieves a single credential entry by ID.
+// GetCredentialEntry retrieves a single credential entry by ID. It returns
+// nil and no error when no entry has that ID.
 func (w *Wallet) GetCredentialEntry(id string) (*SavedCredential, error) {
+	entry, err := w.getCredentialEntry(id)
+	return entry, classify(err)
+}
+
+func (w *Wallet) getCredentialEntry(id string) (*SavedCredential, error) {
 	if w.credStore == nil {
 		return nil, ErrNoCredentialStore
 	}
