@@ -40,7 +40,9 @@ type CredentialAcceptancePolicy struct {
 	// no x5c header (JWKS, DID or a static registry chosen by the caller). header is
 	// the issuer JWT's protected header. It is not called when x5c is present and
 	// IssuerX509 is configured, unless ResolveIssuerKeysWhenX5CUntrusted lets it
-	// take over from a chain that reached no configured trust anchor.
+	// take over from a chain that reached no configured trust anchor. A
+	// returned key whose JWK use is not "sig", or whose alg differs from the
+	// JWS alg, is ignored.
 	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
 	// ResolveIssuerKeysFromClaims is ResolveIssuerKeys for a resolver that also
 	// reads the issuer-signed claims, such as the W3C JWT VC `vc.issuer`
@@ -74,14 +76,14 @@ type CredentialAcceptancePolicy struct {
 	// verification dispatcher must also implement the algorithm: a registered
 	// plugin makes an algorithm verifiable, this list makes it acceptable.
 	SigningAlgorithms []jose.SignatureAlgorithm
-	// ExpectedSDJWTVCType is the SD-JWT VC `vct` claim the credential must
-	// carry. An empty value checks nothing, which is the behaviour before this
-	// field existed; a non-empty value rejects a credential whose vct differs,
-	// so a wallet that asked one Credential Configuration for a credential
-	// cannot store a credential of another type under it.
+	// ExpectedSDJWTVCType, when set, is the SD-JWT VC vct the credential must
+	// carry, so a credential of another type is not stored under the
+	// requested Credential Configuration.
 	ExpectedSDJWTVCType string
-	Now                 func() time.Time
-	ClockSkew           time.Duration
+	// Now is the verification clock; nil means time.Now.
+	Now func() time.Time
+	// ClockSkew is the tolerance applied to exp and nbf.
+	ClockSkew time.Duration
 }
 
 // DefaultCredentialSigningAlgorithms returns the issuer signature algorithms
@@ -103,12 +105,8 @@ func acceptedSigningAlgorithms(policy *CredentialAcceptancePolicy) []jose.Signat
 }
 
 // CredentialAcceptor runs the credential acceptance rules over a raw
-// credential without a credential store. It holds only the profile,
-// serializer and verifier an acceptance run needs, so an integrator that
-// accepts credentials outside a Wallet build can construct it once and reuse
-// it for every credential instead of creating a Wallet — and with it a
-// credstore dispatcher — per credential. Its fields are never mutated after
-// construction, so concurrent calls are safe.
+// credential without a Wallet or credential store. It is safe for concurrent
+// use.
 type CredentialAcceptor struct {
 	profile    profile.Profile
 	serializer *serializer.SerializationDispatcher
@@ -479,8 +477,6 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 			if !requireX5C && policy.ResolveIssuerKeysWhenX5CUntrusted && policy.resolvesIssuerKeys() && errors.Is(err, commonX509.ErrNoTrustAnchor) {
 				keys, resolveErr := resolveIssuerKeyCandidates(policy, issuer, header, payload)
 				if resolveErr != nil {
-					// The chain was only this wallet's configuration; the
-					// verdict that stands is the key resolution's own.
 					return fmt.Errorf("issuer certificate chain reaches no configured trust anchor, and %w", resolveErr)
 				}
 				candidateKeys = keys

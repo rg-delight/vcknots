@@ -199,7 +199,7 @@ func signingPaths(certificates []*x509.Certificate, options SigningChainOptions)
 	// explicit anchors we can defer only that check, on private copies, until
 	// after standard signature, constraints, EKU and policy validation. Original
 	// certificate fields and signed DER remain untouched. A CertPool cannot be
-	// enumerated, so legacy pools retain Go's stricter path-length behavior.
+	// enumerated, so a Roots pool keeps Go's stricter path-length behavior.
 	deferPathLength := len(options.TrustAnchors) != 0
 	originals := make(map[string]*x509.Certificate)
 	prepare := func(cert *x509.Certificate) *x509.Certificate {
