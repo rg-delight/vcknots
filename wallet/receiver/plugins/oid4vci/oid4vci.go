@@ -34,6 +34,11 @@ type Oid4vciReceiver struct {
 	HTTPClient *http.Client
 	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
 	AllowHTTP bool
+	// AppendedMetadataPathFallback retries Credential Issuer Metadata at the
+	// OpenID4VCI Draft 13 Section 11.2.2 location, the well-known path appended
+	// to an identifier that has a path, when the Section 12.2.2 location
+	// answers 404. It is off by default and never applies under HAIP.
+	AppendedMetadataPathFallback bool
 	// Profile selects the OpenID4VCI Final/HAIP policy. The zero value normalizes
 	// to profile.Final, which applies no HAIP constraints. Set it to profile.HAIP
 	// to enforce HAIP 1.0 on the Final path.

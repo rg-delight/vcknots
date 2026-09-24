@@ -166,9 +166,8 @@ func sanitizeErrorText(text string, max int) string {
 	return sanitized.String()
 }
 
-// isNotFound reports the one status the issuer metadata discovery fallback
-// distinguishes: a Credential Issuer that answers the Final well-known URL with
-// 404 may still publish the legacy document.
+// isNotFound reports the status after which FetchIssuerMetadata may try the
+// Draft 13 metadata location.
 func (e *httpStatusError) isNotFound() bool {
 	return e != nil && e.statusCode == http.StatusNotFound
 }

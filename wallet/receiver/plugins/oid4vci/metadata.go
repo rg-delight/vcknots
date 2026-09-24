@@ -131,23 +131,20 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 	if err == nil {
 		return &finalMetadata, nil
 	}
-	// Keep the legacy discovery path only for local test issuers that explicitly
-	// report the Final endpoint missing. Never retry malformed or forbidden metadata,
-	// and never repeat the same URL. Each attempt decodes into a fresh value.
+	// The Draft 13 location is tried only when asked for, only after a 404 and
+	// only when it differs from the Section 12.2.2 one. Each attempt decodes
+	// into a fresh value.
 	endpointURL := url.URL(endpoint)
 	var statusError *httpStatusError
-	if !o.AllowHTTP || !strings.EqualFold(endpointURL.Scheme, "http") ||
+	if !o.AppendedMetadataPathFallback || normalized.IsHAIP() ||
 		strings.Trim(endpointURL.Path, "/") == "" ||
-		strings.Contains(endpointURL.Path, "/.well-known/openid-credential-issuer") ||
+		strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) ||
 		!errors.As(err, &statusError) || !statusError.isNotFound() {
 		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
 	}
 	var metadata types.CredentialIssuerMetadata
-	legacyURL := endpointURL
-	if !strings.HasSuffix(legacyURL.Path, wellKnownCredentialIssuer) {
-		legacyURL = *legacyURL.JoinPath(wellKnownCredentialIssuer)
-	}
-	if err := o.fetchIssuerMetadataDocument(ctx, legacyURL, identifier, signing, normalized, &metadata); err != nil {
+	appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
+	if err := o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, normalized, &metadata); err != nil {
 		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
 	}
 
