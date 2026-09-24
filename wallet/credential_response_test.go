@@ -57,7 +57,7 @@ func TestDecodeOID4VCIFinalCredentialResponse_RejectsTransactionIDWithCredential
 func TestDecodeOID4VCIFinalCredentialResponse_RejectsMultipleCredentials(t *testing.T) {
 	body := []byte(`{"credentials":[{"credential":"eyJ.abc.def"},{"credential":"eyJ.ghi.jkl"}]}`)
 	_, err := DecodeOID4VCIFinalCredentialResponse(body, "application/json", CredentialResponseDecodeOptions{})
-	require.ErrorContains(t, err, "exactly one")
+	require.ErrorContains(t, err, "asked for 1")
 	require.ErrorIs(t, err, ErrCredentialResponseMultipleCredentials)
 }
 
@@ -176,6 +176,21 @@ func TestValidateOID4VCIFinalCredentialResponse_AcceptsDeferredResponse(t *testi
 // exported validator.
 func TestValidateOID4VCIFinalCredentialResponse_RejectsNil(t *testing.T) {
 	require.Error(t, ValidateOID4VCIFinalCredentialResponse(nil))
+}
+
+// §8.2: notification_id "MUST not be used if the credentials parameter is not
+// present", and interval belongs to the deferred shape only.
+func TestValidateOID4VCIFinalCredentialResponse_RejectsMembersOfTheOtherShape(t *testing.T) {
+	err := ValidateOID4VCIFinalCredentialResponse(&receiverTypes.CredentialResponse{TransactionID: "tx-1", Interval: 5, NotificationID: "n-1"})
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
+	require.ErrorContains(t, err, "notification_id")
+
+	err = ValidateOID4VCIFinalCredentialResponse(&receiverTypes.CredentialResponse{
+		Credentials: []any{map[string]any{"credential": "eyJ.abc.def"}},
+		Interval:    5,
+	})
+	require.ErrorIs(t, err, ErrCredentialResponseShape)
+	require.ErrorContains(t, err, "interval")
 }
 
 // encryptOID4VCIFinalCredentialResponseForTest wraps payload in an

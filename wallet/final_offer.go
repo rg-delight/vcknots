@@ -4,21 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-// maxCredentialOfferResponseBytes bounds the §4.1.1 credential_offer_uri
-// response so a hostile issuer cannot exhaust wallet memory during offer
-// resolution.
-const maxCredentialOfferResponseBytes int64 = 64 << 10
 
 // parseCredentialOfferJSON decodes the §4.1.1 Credential Offer JSON shared by
 // the by-value and by-reference offer variants.
@@ -81,12 +75,9 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	if err != nil {
 		return "", fmt.Errorf("invalid credential_offer_uri: %w", err)
 	}
-	client, allowHTTP := w.credentialOfferHTTPClient()
-	if !strings.EqualFold(parsedURI.Scheme, "https") && !(allowHTTP || env.IsHTTPAllowed()) {
+	policy := w.oid4vciHTTPPolicy()
+	if !strings.EqualFold(parsedURI.Scheme, "https") && !(policy.allowHTTP && strings.EqualFold(parsedURI.Scheme, "http")) {
 		return "", fmt.Errorf("credential_offer_uri must use https")
-	}
-	if client == nil {
-		client = http.DefaultClient
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedURI.String(), nil)
@@ -95,21 +86,22 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	}
 	request.Header.Set("Accept", "application/json")
 
-	response, err := client.Do(request)
+	response, err := httpfetch.NoRedirect(policy.client).Do(request)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch credential_offer_uri: %w", err)
 	}
 	defer response.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxCredentialOfferResponseBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("failed to read credential_offer_uri response: %w", err)
-	}
-	if int64(len(body)) > maxCredentialOfferResponseBytes {
-		return "", fmt.Errorf("credential_offer_uri response exceeds %d bytes", maxCredentialOfferResponseBytes)
-	}
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("credential_offer_uri request failed: status=%d", response.StatusCode)
+	}
+	// §4.1.3: the Credential Offer Object MUST use the media type
+	// application/json.
+	if !httpfetch.MediaTypeIs(response.Header, "application/json") {
+		return "", fmt.Errorf("credential_offer_uri response is not application/json")
+	}
+	body, err := httpfetch.ReadLimited(response, httpfetch.DefaultBodyLimit)
+	if err != nil {
+		return "", fmt.Errorf("failed to read credential_offer_uri response: %w", err)
 	}
 	if strings.TrimSpace(string(body)) == "" {
 		return "", fmt.Errorf("credential_offer_uri response body is empty")
@@ -117,21 +109,28 @@ func (w *Wallet) fetchCredentialOfferJSON(ctx context.Context, credentialOfferUR
 	return string(body), nil
 }
 
-// credentialOfferHTTPClient returns the OID4VCI receiver's configured HTTP
-// client (and its AllowHTTP test escape) so offer resolution uses the same
-// transport policy as the rest of the receiving flow.
-func (w *Wallet) credentialOfferHTTPClient() (*http.Client, bool) {
+// oid4vciHTTPPolicy is the outbound HTTP configuration of the registered
+// OpenID4VCI receiver, which the root-level fetches share.
+type oid4vciHTTPPolicy struct {
+	// client is the receiver's HTTP client; nil means a default one.
+	client *http.Client
+	// allowHTTP is the receiver's plain-HTTP escape for local test issuers.
+	allowHTTP bool
+}
+
+// oid4vciHTTPPolicy reads the transport policy from the bundled OID4VCI
+// receiver. A receiver of another type yields the default policy: a bounded
+// client and no plain HTTP.
+func (w *Wallet) oid4vciHTTPPolicy() oid4vciHTTPPolicy {
 	if w.receiver == nil {
-		return nil, false
+		return oid4vciHTTPPolicy{}
 	}
 	for _, plugin := range w.receiver.Plugins() {
-		oid4vciPlugin, ok := plugin.(*receiverOid4vci.Oid4vciReceiver)
-		if !ok {
-			continue
+		if receiver, ok := plugin.(*receiverOid4vci.Oid4vciReceiver); ok {
+			return oid4vciHTTPPolicy{client: receiver.HTTPClient, allowHTTP: receiver.AllowHTTP}
 		}
-		return oid4vciPlugin.HTTPClient, oid4vciPlugin.AllowHTTP
 	}
-	return nil, false
+	return oid4vciHTTPPolicy{}
 }
 
 // requireOfferedCredentialConfiguration resolves the selected Credential
@@ -149,79 +148,36 @@ func requireOfferedCredentialConfiguration(issuerMetadata *receiverTypes.Credent
 	return config, nil
 }
 
-// newOID4VCIFinalFlow validates the selected Credential Configuration against
-// the wallet profile, plans the key attestation and resolves how the client
-// authenticates at the PAR and token endpoints.
-// holderKeysRequired says whether the stage this flow is built for needs the
-// holder keys. Only the §8 Credential Request and the Appendix D key attestation
-// it may carry use them, so the §5 authorization stage passes false.
+// newOID4VCIFinalFlow builds the flow of an authorization code issuance: the
+// credential stage of newOID4VCIFinalCredentialFlow plus how the client
+// authenticates at the PAR and token endpoints. holderKeysRequired is false for
+// the §5 authorization stage, which signs nothing with a holder key.
 func (w *Wallet) newOID4VCIFinalFlow(
 	req OID4VCIFinalReceiveRequest,
 	finalReceiver receiverTypes.OID4VCIFinalTransport,
-	issuerMetadata *receiverTypes.CredentialIssuerMetadata,
-	authorizationServerMetadata *receiverTypes.AuthorizationServerMetadata,
+	discovery *oid4vciDiscovery,
 	credentialConfigurationID string,
 	holderKeysRequired bool,
 ) (*oid4vciFinalFlow, error) {
-	holderKeys, err := resolveOID4VCIFinalHolderKeys(req, holderKeysRequired)
+	authorizationServerMetadata := discovery.authorizationServerMetadata
+	if authorizationServerMetadata.TokenEndpoint == nil {
+		return nil, fmt.Errorf("token endpoint is missing on authorization server")
+	}
+	inputs := oid4vciFinalCredentialInputsFromRequest(req)
+	inputs.holderKeysOptional = !holderKeysRequired
+	flow, err := w.newOID4VCIFinalCredentialFlow(finalReceiver, discovery.issuerMetadata, credentialConfigurationID, inputs)
 	if err != nil {
 		return nil, err
 	}
-
-	config, err := requireOfferedCredentialConfiguration(issuerMetadata, credentialConfigurationID)
-	if err != nil {
-		return nil, err
-	}
-
-	// HAIP §4.1 constraints on the issuer metadata and the selected credential
-	// configuration are enforced before PAR so an unsupported issuer never sees
-	// an authorization request.
-	profileValidator, _ := finalReceiver.(oid4vciProfileValidator)
-	if w.profile.IsHAIP() && profileValidator == nil {
-		return nil, fmt.Errorf("HAIP requires a receiver plugin that validates issuer metadata against the profile")
-	}
-	if profileValidator != nil {
-		if err := profileValidator.ValidateIssuerMetadataForProfile(issuerMetadata); err != nil {
-			return nil, fmt.Errorf("issuer metadata does not satisfy the wallet profile: %w", err)
-		}
-		if err := profileValidator.ValidateCredentialConfigurationForProfile(config); err != nil {
-			return nil, fmt.Errorf("credential configuration does not satisfy the wallet profile: %w", err)
-		}
-	}
-
-	// OpenID4VCI 1.0 Appendix D / HAIP §4.5.1: a provider must be available
-	// before anything is sent to the issuer when the selected configuration
-	// requires a key attestation, unless the caller declared that it mints the
-	// attestation itself.
-	keyAttestation, err := w.planOID4VCIKeyAttestation(
-		issuerMetadata,
-		credentialConfigurationID,
-		req.IncludeKeyAttestation || req.KeyAttestation != nil,
-		req.ExternalKeyAttestation || req.KeyAttestation != nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// §14.6: never request more proofs than the issuer's batch_size.
-	if len(holderKeys) > issuerMetadata.BatchSize() {
-		return nil, fmt.Errorf("requested %d credentials but the issuer batch_size is %d", len(holderKeys), issuerMetadata.BatchSize())
-	}
+	flow.authorizationServerMetadata = authorizationServerMetadata
+	flow.authorizationServerIssuer = discovery.authorizationServer
 
 	// RFC 9126 §2 / HAIP §4.3: the PAR and token endpoints authenticate the
-	// client the same way. When private_key_jwt is configured, each endpoint
-	// gets its own freshly signed assertion because RFC 7523 §3 requires a
-	// unique jti. The authorization server must advertise the method before any
-	// request leaves the wallet.
-	authorizationServerIssuer := authorizationServerMetadata.Issuer.String()
-	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
-	clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
-	usePrivateKeyJwt := false
-	// Attestation-based client authentication (Appendix E) and private_key_jwt
-	// are alternative mechanisms; a wallet uses one per issuance. When an
-	// attestation provider is in use it authenticates the client, so a
-	// ClientAuth configured for other flows is not sent and the authorization
-	// server need not advertise private_key_jwt.
+	// client the same way. Attestation-based client authentication (Appendix
+	// E) and private_key_jwt are alternatives; with an attestation provider in
+	// use no client_assertion is sent. private_key_jwt must be advertised by
+	// the authorization server, and each request signs a fresh assertion
+	// (RFC 7523 §3 unique jti).
 	attestationInUse := w.clientAttestation != nil || req.AttesterKey.Key != nil
 	if !attestationInUse && w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
 		if !asMetadataSupportsAuthMethod(authorizationServerMetadata, receiverTypes.PrivateKeyJwt) {
@@ -230,50 +186,37 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		if _, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); !ok {
 			return nil, errNoUsableClientAuthMethod
 		}
-		usePrivateKeyJwt = true
-	}
-
-	// §5.1.1/§5.1.2: record whether the request used authorization_details, so
-	// the Token Response is judged against the §6.2 mode that matches the
-	// request that produced it. The mode is derived here, from the same
-	// oid4vciAuthorizationRequestParameters decision the PAR uses, rather than
-	// being stored on the serialisable authorization state.
-	_, authorizationDetails, err := oid4vciAuthorizationRequestParameters(req.AuthorizationRequestType, credentialConfigurationID, config, w.profile.IsHAIP())
-	if err != nil {
-		return nil, err
-	}
-	authorizationDetailsMode := AuthorizationDetailsOptional
-	if len(authorizationDetails) > 0 {
-		authorizationDetailsMode = AuthorizationDetailsRequired
-	}
-
-	return &oid4vciFinalFlow{
-		receiver:                    finalReceiver,
-		signer:                      w.oid4vciFinalSigner(finalReceiver),
-		issuerMetadata:              issuerMetadata,
-		authorizationServerMetadata: authorizationServerMetadata,
-		authorizationServerIssuer:   authorizationServerIssuer,
-		credentialConfigurationID:   credentialConfigurationID,
-		credentialConfiguration:     config,
-		authorizationDetailsMode:    authorizationDetailsMode,
-		holderKeys:                  holderKeys,
-		keyAttestation:              keyAttestation,
-		suppliedKeyAttestation:      req.KeyAttestation,
-		policy: oid4vciFinalCredentialPolicy{
-			encryption:              req.CredentialEncryption,
-			skipNotification:        req.SkipNotification,
-			requireSingleCredential: req.RequireSingleCredential,
-		},
-		usePrivateKeyJwt: usePrivateKeyJwt,
-		generateClientAssertion: func() (string, error) {
+		tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
+		clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
+		flow.usePrivateKeyJwt = true
+		flow.generateClientAssertion = func() (string, error) {
 			return w.generateClientAssertion(
 				w.clientAuth.Key,
 				w.clientAuth.ClientID,
 				clientAssertionAudience,
 				w.clientAuth.signatureAlgorithm(),
 			)
+		}
+	}
+	return flow, nil
+}
+
+// oid4vciFinalCredentialInputsFromRequest collects the credential stage inputs
+// of an authorization code request.
+func oid4vciFinalCredentialInputsFromRequest(req OID4VCIFinalReceiveRequest) oid4vciFinalCredentialInputs {
+	return oid4vciFinalCredentialInputs{
+		holderKey:              req.HolderKey,
+		additionalHolderKeys:   req.AdditionalHolderKeys,
+		includeKeyAttestation:  req.IncludeKeyAttestation,
+		externalKeyAttestation: req.ExternalKeyAttestation,
+		keyAttestation:         req.KeyAttestation,
+		policy: oid4vciFinalCredentialPolicy{
+			encryption:                   req.CredentialEncryption,
+			skipNotification:             req.SkipNotification,
+			requireSingleCredential:      req.RequireSingleCredential,
+			allowDraftCredentialResponse: req.AllowDraftCredentialResponse,
 		},
-	}, nil
+	}
 }
 
 func validateOID4VCIFinalReceiveRequest(req OID4VCIFinalReceiveRequest) error {

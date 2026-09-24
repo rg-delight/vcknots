@@ -164,6 +164,77 @@ func TestReceiveOID4VCIFinalCredential_RequireSingleCredentialRefusesLegacyMembe
 	require.ErrorIs(t, err, ErrCredentialResponseShape)
 }
 
+// The Final path reads the Credential Response in the strict §8.2 shape unless
+// the caller opts in to the pre-Final one.
+func TestReceiveOID4VCIFinalCredential_DraftResponseShapeIsOptIn(t *testing.T) {
+	for name, payload := range map[string]func(*finalIssuanceFixture) map[string]any{
+		"singular credential member": func(f *finalIssuanceFixture) map[string]any {
+			return map[string]any{"credential": f.issuedCredential}
+		},
+		"bare string element": func(f *finalIssuanceFixture) map[string]any {
+			return map[string]any{"credentials": []any{f.issuedCredential}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+				f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+					mockserver.JSONResponse(w, http.StatusOK, payload(f))
+				}
+			})
+			_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+			require.ErrorIs(t, err, ErrCredentialResponseShape)
+
+			req := fixture.request()
+			req.AllowDraftCredentialResponse = true
+			result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+			require.NoError(t, err)
+			require.Len(t, result.SavedCredentials, 1)
+		})
+	}
+}
+
+// A 200 Credential Response that carries neither credentials nor a
+// transaction_id issues nothing; it is refused on every path, including the §9
+// deferred poll and the pre-Final opt-in.
+func TestReceiveOID4VCIFinalCredential_RefusesEmptySuccessResponse(t *testing.T) {
+	for name, body := range map[string]map[string]any{
+		"empty":                           {},
+		"notification_id without content": {"notification_id": "notification-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+				f.includeNotification = true
+				f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+					mockserver.JSONResponse(w, http.StatusOK, body)
+				}
+			})
+			req := fixture.request()
+			req.AllowDraftCredentialResponse = true
+			result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+			require.ErrorIs(t, err, ErrCredentialResponseShape)
+			require.Nil(t, result)
+			require.Empty(t, fixture.notificationEvents)
+		})
+	}
+
+	t.Run("deferred poll", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+			f.includeDeferredEndpoint = true
+			f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+				mockserver.JSONResponse(w, http.StatusAccepted, map[string]any{"transaction_id": "tx-1", "interval": 1})
+			}
+			f.deferredHandler = func(w http.ResponseWriter, r *http.Request) {
+				mockserver.JSONResponse(w, http.StatusOK, map[string]any{})
+			}
+		})
+		req := fixture.request()
+		req.DeferredPollAttempts = 3
+		_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+		require.ErrorIs(t, err, ErrCredentialResponseShape)
+		require.Equal(t, 1, fixture.deferredCalls)
+	})
+}
+
 // TestClampDeferredIntervalSeconds is the single cap an application that owns
 // its own §9 polling schedule reads instead of choosing a second one.
 func TestClampDeferredIntervalSeconds(t *testing.T) {

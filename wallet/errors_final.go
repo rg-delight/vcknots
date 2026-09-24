@@ -4,6 +4,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // Sentinel errors the OpenID4VCI Final and HAIP paths wrap with context. They
@@ -29,6 +30,15 @@ var (
 	// share no proof signing algorithm. It aliases the oid4vci plugin's
 	// sentinel for the same reason as ErrHTTPRedirectNotAllowed.
 	ErrProofAlgorithmNotSupported = receiverOid4vci.ErrProofAlgorithmNotSupported
+	// ErrProofTypeUnsupported reports that the Credential Configuration lists
+	// proof_types_supported without the jwt proof type, the only key proof
+	// this wallet produces (OpenID4VCI 1.0 §12.2.4, Appendix F). It aliases the
+	// receiver types sentinel of the same code.
+	ErrProofTypeUnsupported = receiverTypes.ErrInvalidProofType
+	// ErrDPoPRequired reports that a DPoP-bound access token is required, as
+	// HAIP §4 does, and the token or the server exchange did not provide one.
+	// It aliases the oid4vci plugin's sentinel.
+	ErrDPoPRequired = receiverOid4vci.ErrDPoPRequired
 	// ErrIssuerIdentifierMismatch reports that issuer metadata named a
 	// credential_issuer other than the requested Credential Issuer Identifier
 	// (VCI 1.0 §12.2.4). It aliases the oid4vci plugin's sentinel of that name.
@@ -250,6 +260,12 @@ var (
 	// compared by scheme, host and path. A redirect to any other target is not
 	// this request's response, whatever parameters it carries.
 	ErrAuthorizationRedirectURIMismatch = common.NewCodedError("authorization_redirect_uri_mismatch", "authorization redirect does not match the registered redirect_uri")
+	// ErrIssuanceStateInvalid reports that a resumed OID4VCIFinalAuthorization
+	// or OID4VCIFinalTokenGrant is incomplete or does not belong to the request
+	// it is presented with: another client_id, redirect_uri, Credential Issuer
+	// or Credential Configuration, or an authorization server the issuer does
+	// not delegate to.
+	ErrIssuanceStateInvalid = common.NewCodedError("issuance_state_invalid", "resumed issuance state does not match the request")
 	// ErrAuthorizationStateMismatch reports that the redirect does not echo the
 	// RFC 6749 §4.1.1 state of the authorization request it is presented
 	// against, which is what binds the response to the request.

@@ -52,10 +52,11 @@ func (w *Wallet) BeginOID4VCIDraft13Authorization(ctx context.Context, req OID4V
 	if err != nil {
 		return nil, err
 	}
-	issuerMetadata, authorizationServerMetadata, err := w.discoverDraft13Metadata(transport, req, grant)
+	discovery, err := w.discoverDraft13Metadata(transport, req, grant)
 	if err != nil {
 		return nil, err
 	}
+	issuerMetadata, authorizationServerMetadata := discovery.issuerMetadata, discovery.authorizationServerMetadata
 	if authorizationServerMetadata.AuthorizationEndpoint == nil {
 		return nil, ErrDraft13AuthorizationEndpointMissing
 	}
@@ -108,8 +109,8 @@ func (w *Wallet) BeginOID4VCIDraft13Authorization(ctx context.Context, req OID4V
 		CodeVerifier:                  codeVerifier,
 		RedirectURI:                   req.RedirectURI,
 		ClientID:                      req.ClientID,
-		IssuerMetadata:                issuerMetadata,
-		AuthorizationServerMetadata:   authorizationServerMetadata,
+		CredentialIssuer:              issuerMetadata.CredentialIssuer,
+		AuthorizationServer:           discovery.authorizationServer,
 		CredentialConfigurationID:     configurationID,
 		AuthorizationDetailsRequested: len(authorizationDetails) > 0,
 	}
@@ -201,27 +202,32 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 	if auth == nil {
 		return nil, ErrDraft13AuthorizationStateMissing
 	}
-	if err := requireOID4VCIContext(ctx, "the token request"); err != nil {
+	if err := auth.requireFor(req); err != nil {
 		return nil, err
 	}
-	if auth.AuthorizationServerMetadata == nil || auth.AuthorizationServerMetadata.TokenEndpoint == nil {
-		return nil, ErrDraft13TokenEndpointMissing
-	}
-	if auth.IssuerMetadata == nil {
-		return nil, fmt.Errorf("authorization state carries no issuer metadata: %w", ErrDraft13AuthorizationStateMissing)
+	if err := requireOID4VCIContext(ctx, "issuer metadata discovery"); err != nil {
+		return nil, err
 	}
 
 	transport, err := w.draft13Transport(req.Type)
 	if err != nil {
 		return nil, err
 	}
+	discovery, err := discoverOID4VCIIssuer(transport, req.Type, auth.CredentialIssuer, req.CachedIssuerMetadata, pinnedAuthorizationServer(auth.AuthorizationServer))
+	if err != nil {
+		return nil, err
+	}
+	authorizationServerMetadata := discovery.authorizationServerMetadata
+	if authorizationServerMetadata.TokenEndpoint == nil {
+		return nil, ErrDraft13TokenEndpointMissing
+	}
 
 	// RFC 9207 Section 2.4: an iss that is present MUST identify the
 	// authorization server; when the server advertises support the parameter
 	// MUST be present, so a mix-up cannot simply omit it.
-	advertised := auth.AuthorizationServerMetadata.AuthorizationResponseIssParameterSupported
+	advertised := authorizationServerMetadata.AuthorizationResponseIssParameterSupported
 	issuerPolicy := authorizationResponseIssuerPolicy{
-		expected: auth.AuthorizationServerMetadata.Issuer.String(),
+		expected: discovery.authorizationServer,
 		required: advertised != nil && *advertised,
 	}
 	code, err := validateOID4VCIAuthorizationRedirect(redirectURL, auth.AuthorizationURL, auth.State, auth.RedirectURI, issuerPolicy)
@@ -229,25 +235,28 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 		return nil, err
 	}
 
-	configuration, ok := auth.IssuerMetadata.CredentialConfigurationSupported[auth.CredentialConfigurationID]
+	configuration, ok := discovery.issuerMetadata.CredentialConfigurationSupported[auth.CredentialConfigurationID]
 	if !ok {
 		return nil, fmt.Errorf("credential configuration %q: %w", auth.CredentialConfigurationID, ErrDraft13CredentialConfigurationUnknown)
 	}
 	flow := &oid4vciDraft13Flow{
 		transport:                   transport,
-		issuerMetadata:              auth.IssuerMetadata,
-		authorizationServerMetadata: auth.AuthorizationServerMetadata,
+		issuerMetadata:              discovery.issuerMetadata,
+		authorizationServerMetadata: authorizationServerMetadata,
 		credentialConfigurationID:   auth.CredentialConfigurationID,
 		credentialConfiguration:     configuration,
 	}
 
-	tokenEndpoint := *auth.AuthorizationServerMetadata.TokenEndpoint
+	if err := requireOID4VCIContext(ctx, "the token request"); err != nil {
+		return nil, err
+	}
+	tokenEndpoint := *authorizationServerMetadata.TokenEndpoint
 	tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(tokenEndpoint)
 	// The transport's authorization code exchange always asks for a proof; one
 	// that returns nothing sends the request without a DPoP header, which is
 	// what a server that never advertised DPoP gets.
 	proofFactory := receiverTypes.DPoPProofFactory(func(string) (string, error) { return "", nil })
-	if w.draft13DPoPEnabled(auth.AuthorizationServerMetadata) {
+	if w.draft13DPoPEnabled(authorizationServerMetadata) {
 		proofFactory = w.draft13DPoPProofFactory(w.dpop.Key, http.MethodPost, tokenEndpointURL, "")
 	}
 
@@ -257,8 +266,8 @@ func (w *Wallet) ResumeOID4VCIDraft13Authorization(
 		CodeVerifier: auth.CodeVerifier,
 		ClientID:     auth.ClientID,
 	}
-	if method, ok := resolveClientAuthMethod(w.clientAuth, auth.AuthorizationServerMetadata); ok && method == receiverTypes.PrivateKeyJwt {
-		audience := resolveClientAssertionAudience(w.clientAuth, auth.AuthorizationServerMetadata, tokenEndpointURL)
+	if method, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); ok && method == receiverTypes.PrivateKeyJwt {
+		audience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
 		tokenRequest.ClientAssertionFactory = func() (string, error) {
 			return w.generateClientAssertion(w.clientAuth.Key, w.clientAuth.ClientID, audience, w.clientAuth.signatureAlgorithm())
 		}

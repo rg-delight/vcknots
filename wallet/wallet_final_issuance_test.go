@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/env"
@@ -83,10 +84,14 @@ type finalIssuanceFixture struct {
 	// walletProfile selects the wallet and receiver plugin profile. HAIP also
 	// forces a TLS server, because HAIP §4 requires TLS for the issuer and
 	// authorization server endpoints.
-	walletProfile            profile.Profile
-	clientAuthKey            IKeyEntry
-	omitScope                bool
-	keyAttestationsRequired  bool
+	walletProfile           profile.Profile
+	clientAuthKey           IKeyEntry
+	omitScope               bool
+	keyAttestationsRequired bool
+	// proofTypesSupported, when set, is published as the configuration's
+	// proof_types_supported verbatim.
+	proofTypesSupported      map[string]any
+	bindingMethods           []string
 	batchSize                int
 	parExpiresIn             int
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
@@ -294,6 +299,12 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		if !f.omitScope {
 			credentialConfiguration["scope"] = "pid-scope"
 		}
+		if f.bindingMethods != nil {
+			credentialConfiguration["cryptographic_binding_methods_supported"] = f.bindingMethods
+		}
+		if f.proofTypesSupported != nil {
+			credentialConfiguration["proof_types_supported"] = f.proofTypesSupported
+		}
 		if f.keyAttestationsRequired {
 			credentialConfiguration["proof_types_supported"] = map[string]any{
 				"jwt": map[string]any{
@@ -402,7 +413,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			f.credentialHandler(w, r)
 			return
 		}
-		payload := map[string]any{"credential": f.issuedCredential}
+		payload := map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}}
 		if f.includeNotification {
 			payload["notification_id"] = "notification-1"
 		}
@@ -414,7 +425,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			f.deferredHandler(w, r)
 			return
 		}
-		payload := map[string]any{"credential": f.issuedCredential}
+		payload := map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}}
 		if f.includeNotification {
 			payload["notification_id"] = "notification-1"
 		}
@@ -560,6 +571,62 @@ func TestResolveCredentialOffer_ByReferenceEnforcesSizeLimit(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 }
 
+// offerResolutionWallet is a wallet whose OID4VCI receiver talks to server
+// with the given plain-HTTP allowance.
+func offerResolutionWallet(t *testing.T, server *httptest.Server, allowHTTP bool) *Wallet {
+	t.Helper()
+	plugin := &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: allowHTTP}
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
+	require.NoError(t, err)
+	w, err := NewWalletWithConfig(Config{CredStore: newProfileCredStore(t), Receiver: receiving})
+	require.NoError(t, err)
+	return w
+}
+
+// The plain-HTTP escape is the receiver's AllowHTTP alone: the process-wide
+// environment switch does not widen it for offer resolution.
+func TestResolveCredentialOffer_PlainHTTPFollowsReceiverPolicyOnly(t *testing.T) {
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential_issuer": "https://issuer.example"})
+	}))
+	defer server.Close()
+
+	w := offerResolutionWallet(t, server, false)
+	_, err := w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/offer"))
+	require.ErrorContains(t, err, "https")
+	require.Equal(t, 0, calls)
+}
+
+// A credential_offer_uri that redirects is refused rather than followed, and
+// §4.1.3 requires the offer to be served as application/json.
+func TestResolveCredentialOffer_RefusesRedirectAndWrongMediaType(t *testing.T) {
+	offerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/offer", http.StatusFound)
+		case "/text":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(`{"credential_issuer":"https://issuer.example"}`))
+		default:
+			offerCalls++
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential_issuer": "https://issuer.example"})
+		}
+	}))
+	defer server.Close()
+	w := offerResolutionWallet(t, server, true)
+
+	_, err := w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/redirect"))
+	require.ErrorContains(t, err, "status=302")
+	require.Equal(t, 0, offerCalls)
+
+	_, err = w.ResolveCredentialOfferContext(context.Background(), "openid-credential-offer://?credential_offer_uri="+url.QueryEscape(server.URL+"/text"))
+	require.ErrorContains(t, err, "application/json")
+}
+
 func TestReceiveOID4VCIFinalCredential_IssuerIdentifierMismatch(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.credentialIssuerOverride = "https://other.example"
@@ -663,7 +730,7 @@ func TestReceiveOID4VCIFinalCredential_ErrorRedirectSurfaced(t *testing.T) {
 // §5.1.4: the pushed request_uri expires, and the wallet does not send an
 // authorization request that carries an expired one.
 func TestRequestOID4VCIAuthorizationCode_ExpiredRequestURI(t *testing.T) {
-	_, err := followOID4VCIAuthorizationEndpoint(nil, &OID4VCIFinalAuthorization{
+	_, err := followOID4VCIAuthorizationEndpoint(context.Background(), nil, &OID4VCIFinalAuthorization{
 		AuthorizationURL: "https://as.example/authorize?client_id=client-1&request_uri=urn%3Arequest%3A1",
 		State:            "state-1",
 		RequestURI:       "urn:request:1",
@@ -863,7 +930,7 @@ func TestReceiveOID4VCIFinalCredential_InvalidNonceRetriedOnce(t *testing.T) {
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
@@ -886,14 +953,50 @@ func TestReceiveOID4VCIFinalCredential_EncryptionRequiredWithoutKey(t *testing.T
 func TestReceiveOID4VCIFinalCredential_RequestedEncryptionPlaintextResponseFailsClosed(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.responseEncryption = true
+		f.requestEncryption = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	req := fixture.request()
 	req.CredentialResponseEncryptionKey = &fixture.encryptionKey
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
-	require.ErrorContains(t, err, "encryption was requested")
+	require.ErrorIs(t, err, ErrCredentialResponsePlaintext)
+	require.Equal(t, 1, fixture.credentialCalls)
+	require.NotNil(t, fixture.lastCredentialBody["credential_response_encryption"])
+}
+
+// §8.2 lets the wallet send credential_response_encryption only inside an
+// encrypted Credential Request. An issuer that offers response encryption
+// without requiring it, and offers no request encryption, is served plaintext.
+func TestReceiveOID4VCIFinalCredential_OptionalResponseEncryptionWithoutRequestEncryption(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.responseEncryption = true
+		f.encryptionRequired = false
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	_, requested := fixture.lastCredentialBody["credential_response_encryption"]
+	require.False(t, requested)
+}
+
+// An issuer that requires response encryption but offers no request encryption
+// cannot be served under §8.2; the issuance stops before the Credential
+// Request.
+func TestReceiveOID4VCIFinalCredential_RequiredResponseEncryptionWithoutRequestEncryption(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.responseEncryption = true
+		f.encryptionRequired = true
+	})
+	req := fixture.request()
+	req.CredentialResponseEncryptionKey = &fixture.encryptionKey
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorIs(t, err, ErrCredentialEncryptionUnavailable)
+	require.Equal(t, 0, fixture.credentialCalls)
 }
 
 func TestReceiveOID4VCIFinalCredential_BatchWithTwoKeys(t *testing.T) {
@@ -903,7 +1006,7 @@ func TestReceiveOID4VCIFinalCredential_BatchWithTwoKeys(t *testing.T) {
 		secondCredential = f.issueCredential(f.additionalKey, map[string]string{"given_name": "Hanako"})
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
-				"credentials": []string{f.issuedCredential, secondCredential},
+				"credentials": []any{map[string]any{"credential": f.issuedCredential}, map[string]any{"credential": secondCredential}},
 			})
 		}
 	})
@@ -1032,7 +1135,7 @@ func TestReceiveOID4VCIFinalCredential_DeferredPollIntervalThenSuccess(t *testin
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]any{"error": "issuance_pending", "interval": 1})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	req := fixture.request()
@@ -1088,7 +1191,7 @@ func TestReceiveOID4VCIFinalCredential_NotificationFailureOnInvalidCredential(t 
 		f.includeNotification = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
-				"credential":      badCredential,
+				"credentials":     []any{map[string]any{"credential": badCredential}},
 				"notification_id": "notification-1",
 			})
 		}
@@ -1129,7 +1232,7 @@ func TestRequestOID4VCIAuthorizationCodeValidatesIssuer(t *testing.T) {
 	}
 	call := func(server *httptest.Server, policy authorizationResponseIssuerPolicy) (string, error) {
 		authorizationURL := server.URL + "/authorize?client_id=client-1&request_uri=urn%3Arequest%3A1"
-		location, err := followOID4VCIAuthorizationEndpoint(server.Client(), &OID4VCIFinalAuthorization{
+		location, err := followOID4VCIAuthorizationEndpoint(context.Background(), server.Client(), &OID4VCIFinalAuthorization{
 			AuthorizationURL: authorizationURL,
 			State:            "state-1",
 			RequestURI:       "urn:request:1",
@@ -1764,8 +1867,9 @@ func TestBeginOID4VCIFinalAuthorizationReturnsResumableState(t *testing.T) {
 	require.Equal(t, authorization.State, restored.State)
 	require.Equal(t, authorization.CodeVerifier, restored.CodeVerifier)
 	require.Equal(t, authorization.AuthorizationURL, restored.AuthorizationURL)
-	require.NotNil(t, restored.IssuerMetadata)
-	require.NotNil(t, restored.AuthorizationServerMetadata)
+	require.Equal(t, fixture.server.URL, restored.CredentialIssuer)
+	require.Equal(t, fixture.server.URL, restored.AuthorizationServer)
+	require.Equal(t, "client-1", restored.ClientID)
 
 	redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(restored.State)
 	result, err := fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), fixture.request(), &restored, redirect)
@@ -1823,11 +1927,61 @@ func TestResumeOID4VCIFinalAuthorizationReturnsAuthorizationError(t *testing.T) 
 	require.NoError(t, err)
 
 	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
-		"openid-credential-offer://callback?error=access_denied&error_description=user%20said%20no")
+		"openid-credential-offer://callback?error=access_denied&error_description=user%20said%20no&state="+url.QueryEscape(authorization.State))
 	var authorizationError *AuthorizationResponseError
 	require.ErrorAs(t, err, &authorizationError)
 	require.Equal(t, "access_denied", authorizationError.Code)
 	require.Equal(t, "user said no", authorizationError.Description)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 6749 §4.1.2.1 makes state REQUIRED on an error redirect when the request
+// carried one, and §10.12 requires CSRF protection of the redirect URI: an
+// error redirect any page can forge must not abort the issuance.
+func TestResumeOID4VCIFinalAuthorizationIgnoresErrorRedirectWithoutState(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	for name, redirect := range map[string]string{
+		"missing state": "openid-credential-offer://callback?error=access_denied&error_description=attacker%20text",
+		"foreign state": "openid-credential-offer://callback?error=access_denied&state=someone-elses-state",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization, redirect)
+			require.ErrorIs(t, err, ErrAuthorizationStateMismatch)
+			var authorizationError *AuthorizationResponseError
+			require.False(t, errors.As(err, &authorizationError))
+		})
+	}
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// RFC 9207 §2.4 applies iss to error responses as well, so a server that
+// advertises the parameter cannot be impersonated by an error redirect that
+// omits or forges it.
+func TestResumeOID4VCIFinalAuthorizationChecksIssuerOnErrorRedirect(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.issParameterSupported = true
+	})
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+	state := url.QueryEscape(authorization.State)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state)
+	require.ErrorIs(t, err, ErrAuthorizationIssMissing)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state+"&iss="+url.QueryEscape("https://attacker.example"))
+	require.ErrorIs(t, err, ErrAuthorizationIssMismatch)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalAuthorization(context.Background(), req, authorization,
+		"openid-credential-offer://callback?error=access_denied&state="+state+"&iss="+url.QueryEscape(fixture.server.URL))
+	var authorizationError *AuthorizationResponseError
+	require.ErrorAs(t, err, &authorizationError)
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 
@@ -1921,12 +2075,35 @@ func TestOID4VCIFinalAuthorizationRequestURIExpiry(t *testing.T) {
 		t.Fatalf("the authorization endpoint must not be reached with an expired request_uri")
 	}))
 	defer server.Close()
-	_, err := followOID4VCIAuthorizationEndpoint(server.Client(), &OID4VCIFinalAuthorization{
+	_, err := followOID4VCIAuthorizationEndpoint(context.Background(), server.Client(), &OID4VCIFinalAuthorization{
 		AuthorizationURL: server.URL + "/authorize",
 		RequestURI:       "urn:request:1",
 		ExpiresAt:        time.Now().Add(-time.Second),
 	})
 	require.ErrorIs(t, err, ErrAuthorizationRequestURIExpired)
+}
+
+// The self-driven authorization GET is bound to the flow context, so a caller
+// can abandon an authorization endpoint that never answers.
+func TestFollowOID4VCIAuthorizationEndpointHonoursContext(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := followOID4VCIAuthorizationEndpoint(ctx, &http.Client{}, &OID4VCIFinalAuthorization{
+		AuthorizationURL: server.URL + "/authorize",
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(started), 5*time.Second)
 }
 
 // A real wallet needs a system browser at the authorization endpoint, so
@@ -1961,6 +2138,114 @@ func (s *fakeFinalSigner) CreateDpopProof(jose.JSONWebKey, string, string, strin
 func (s *fakeFinalSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
 	s.proofCalls++
 	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// unboundTestSDJWTVC is an SD-JWT VC signed by issuerKey that carries no cnf.
+func unboundTestSDJWTVC(t *testing.T, issuerKey *ecdsa.PrivateKey) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: issuerKey}, (&jose.SignerOptions{}).WithType("dc+sd-jwt"))
+	require.NoError(t, err)
+	signed, err := jwt.Signed(signer).Claims(map[string]any{
+		"iss": "https://issuer.example.test", "vct": "urn:eudi:pid:1",
+		"iat": time.Now().Unix(), "exp": time.Now().Add(time.Hour).Unix(),
+	}).Serialize()
+	require.NoError(t, err)
+	return signed + "~"
+}
+
+// §12.2.4: cryptographic_binding_methods_supported is present exactly when the
+// credential is bound to a key, so a credential without cnf is not what was
+// requested and is not stored as unbound.
+func TestReceiveOID4VCIFinalCredential_RefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNotification = true
+		f.bindingMethods = []string{"jwk"}
+		f.proofTypesSupported = map[string]any{
+			"jwt": map[string]any{"proof_signing_alg_values_supported": []string{"ES256"}},
+		}
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials":     []any{map[string]any{"credential": unboundTestSDJWTVC(f.t, f.issuerKey)}},
+				"notification_id": "notification-1",
+			})
+		}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrHolderBindingMissing)
+	require.Equal(t, []string{"credential_failure"}, fixture.notificationEvents)
+	entries, _, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+// Without cryptographic_binding_methods_supported the credential is not bound
+// to a key, and one without cnf is accepted.
+func TestReceiveOID4VCIFinalCredential_AcceptsUnboundCredentialWhenBindingIsNotRequired(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials": []any{map[string]any{"credential": unboundTestSDJWTVC(f.t, f.issuerKey)}},
+			})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+}
+
+// fixedAlgorithmSigner signs every key proof with one algorithm, ignoring the
+// issuer's proof_signing_alg_values_supported.
+type fixedAlgorithmSigner struct {
+	oid4vcisign.Default
+	algorithm jose.SignatureAlgorithm
+}
+
+func (s fixedAlgorithmSigner) CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts receiverTypes.ProofOptions) (string, error) {
+	opts.SigningAlgValues = []jose.SignatureAlgorithm{s.algorithm}
+	return s.Default.CreateCredentialRequestJWTProofWithOptions(key, opts)
+}
+
+// §12.2.4.1: a configuration that lists proof types but not jwt cannot be
+// served by this wallet, which says so before any request leaves it.
+func TestReceiveOID4VCIFinalCredential_RefusesConfigurationWithoutJWTProofType(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.proofTypesSupported = map[string]any{
+			"attestation": map[string]any{"proof_signing_alg_values_supported": []string{"ES256"}},
+		}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofTypeUnsupported)
+	require.Equal(t, 0, fixture.parCalls)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// Appendix F.1: the key proof's alg MUST be one of the configuration's
+// proof_signing_alg_values_supported, whichever signer produced it.
+func TestReceiveOID4VCIFinalCredential_RefusesProofWithUnlistedAlgorithm(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.proofTypesSupported = map[string]any{
+			"jwt": map[string]any{"proof_signing_alg_values_supported": []string{"ES384"}},
+		}
+		f.oid4vciSigner = fixedAlgorithmSigner{algorithm: jose.ES256}
+	})
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofAlgorithmNotSupported)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// Appendix F.1: the key_attestation's alg is held to the same list.
+func TestReceiveOID4VCIFinalCredential_RefusesKeyAttestationWithUnlistedAlgorithm(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.keyAttestationsRequired = true
+	})
+	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	attesterKey := jose.JSONWebKey{Key: privateKey, KeyID: "key-attester-p384", Algorithm: string(jose.ES384), Use: "sig"}
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}
+
+	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.ErrorIs(t, err, ErrProofAlgorithmNotSupported)
+	require.Equal(t, 0, fixture.credentialCalls)
 }
 
 // transportOnlyOID4VCIPlugin is a receiver plugin that implements the Final

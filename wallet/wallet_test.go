@@ -1415,8 +1415,8 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 				http.Error(w, "invalid_encryption_parameters", http.StatusBadRequest)
 				return
 			}
-			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]string{
-				"credential":      issuedCredential,
+			writeObservedFinalCredentialResponse(obs, w, responseEncryptionKey, map[string]any{
+				"credentials":     []any{map[string]any{"credential": issuedCredential}},
 				"notification_id": "notification-1",
 			})
 		case "/notification":
@@ -1468,7 +1468,7 @@ func TestWallet_ReceiveOID4VCIFinalCredential(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result.CredentialResponse)
-	require.Equal(t, issuedCredential, result.CredentialResponse.Credential)
+	require.Equal(t, []any{map[string]any{"credential": issuedCredential}}, result.CredentialResponse.Credentials)
 	require.Len(t, result.SavedCredentials, 1)
 	require.Equal(t, []byte(issuedCredential), result.SavedCredentials[0].Entry.Raw)
 	require.Equal(t, string(credential.SDJwtVC), result.SavedCredentials[0].Entry.MimeType)

@@ -33,6 +33,7 @@ type draft13Fixture struct {
 	mu                    sync.Mutex
 	configuration         map[string]any
 	authorizationServers  bool
+	asIssuerOverride      string
 	tokenForms            []url.Values
 	credentialRequests    []map[string]any
 	deferredRequests      []map[string]any
@@ -89,8 +90,14 @@ func newDraft13Fixture(t *testing.T) *draft13Fixture {
 	})
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
 		base := fixture.server.URL
+		issuer := base
+		fixture.mu.Lock()
+		if fixture.asIssuerOverride != "" {
+			issuer = fixture.asIssuerOverride
+		}
+		fixture.mu.Unlock()
 		writeDraft13FixtureJSON(w, http.StatusOK, map[string]any{
-			"issuer":                   base,
+			"issuer":                   issuer,
 			"authorization_endpoint":   base + "/authorize",
 			"token_endpoint":           base + "/token",
 			"response_types_supported": []string{"code"},
@@ -180,7 +187,7 @@ func (f *draft13Fixture) preAuthorizedRequest(t *testing.T) OID4VCIDraft13Receiv
 	t.Helper()
 	return OID4VCIDraft13ReceiveRequest{
 		CredentialOffer: f.offer(t, map[string]*CredentialOfferGrant{
-			preAuthorizedGrantType: {PreAuthorizedCode: "pre-code-1"},
+			preAuthorizedCodeGrantType: {PreAuthorizedCode: "pre-code-1"},
 		}),
 		Type: receiverTypes.Oid4vci,
 		Key:  f.key,
@@ -225,7 +232,7 @@ func TestReceiveOID4VCIDraft13CredentialPreAuthorizedCode(t *testing.T) {
 	// Section 6.1: the anonymous grant sends no client_id.
 	require.Len(t, fixture.tokenForms, 1)
 	form := fixture.tokenForms[0]
-	require.Equal(t, preAuthorizedGrantType, form.Get("grant_type"))
+	require.Equal(t, preAuthorizedCodeGrantType, form.Get("grant_type"))
 	require.Equal(t, "pre-code-1", form.Get("pre-authorized_code"))
 	require.Equal(t, "4321", form.Get("tx_code"))
 	require.False(t, form.Has("client_id"))
@@ -394,7 +401,20 @@ func TestReceiveOID4VCIDraft13CredentialRefusesCachedMetadataOfAnotherIssuer(t *
 	req.CachedIssuerMetadata = &receiverTypes.CredentialIssuerMetadata{CredentialIssuer: "https://other-issuer.example"}
 
 	_, err := fixture.wallet.ReceiveOID4VCIDraft13Credential(context.Background(), req)
-	require.ErrorContains(t, err, "does not match the credential offer credential_issuer")
+	require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
+	require.Empty(t, fixture.tokenForms)
+}
+
+// RFC 8414 §3.3: the authorization server metadata's issuer MUST be identical
+// to the identifier it was fetched for, on the Draft 13 path as on the Final
+// one, so another server's metadata cannot redirect the token request.
+func TestReceiveOID4VCIDraft13CredentialRefusesForeignAuthorizationServerIssuer(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	fixture.asIssuerOverride = "https://other-as.example"
+	req := fixture.preAuthorizedRequest(t)
+
+	_, err := fixture.wallet.ReceiveOID4VCIDraft13Credential(context.Background(), req)
+	require.ErrorIs(t, err, receiverOid4vci.ErrAuthorizationServerIssuerMismatch)
 	require.Empty(t, fixture.tokenForms)
 }
 
@@ -609,6 +629,32 @@ func TestResumeOID4VCIDraft13AuthorizationRefusesAForeignState(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, ErrorCodes(err), "authorization_state_mismatch")
 	require.Empty(t, fixture.tokenForms)
+}
+
+// The Draft 13 authorization state carries identifiers, not endpoints: one
+// that names another issuer or an authorization server the issuer does not
+// delegate to is refused before the code is redeemed.
+func TestResumeOID4VCIDraft13AuthorizationRefusesTamperedState(t *testing.T) {
+	for name, tamper := range map[string]func(*OID4VCIDraft13Authorization){
+		"foreign credential issuer":        func(a *OID4VCIDraft13Authorization) { a.CredentialIssuer = "https://attacker.example" },
+		"undelegated authorization server": func(a *OID4VCIDraft13Authorization) { a.AuthorizationServer = "https://attacker.example" },
+		"missing code_verifier":            func(a *OID4VCIDraft13Authorization) { a.CodeVerifier = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			req := fixture.authorizationCodeRequest(t)
+			authorization, err := fixture.wallet.BeginOID4VCIDraft13Authorization(context.Background(), req)
+			require.NoError(t, err)
+			var restored OID4VCIDraft13Authorization
+			requireJSONRoundTrip(t, authorization, &restored)
+			tamper(&restored)
+
+			redirect := req.RedirectURI + "?code=code-1&state=" + url.QueryEscape(restored.State)
+			_, err = fixture.wallet.ResumeOID4VCIDraft13Authorization(context.Background(), req, &restored, redirect)
+			require.ErrorIs(t, err, ErrIssuanceStateInvalid)
+			require.Empty(t, fixture.tokenForms)
+		})
+	}
 }
 
 func TestResumeOID4VCIDraft13AuthorizationRequiresAuthorizationDetailsItAskedFor(t *testing.T) {

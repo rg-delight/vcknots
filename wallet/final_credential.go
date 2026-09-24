@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,10 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
+// storeAndNotifyOID4VCIFinalCredentials stores the credentials of a Credential
+// Response and reports the outcome to the §11 Notification Endpoint. A failed
+// notification never undoes the storage: it is returned in
+// result.NotificationError, or joined to the storage error it reports.
 func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	ctx context.Context,
 	flow *oid4vciFinalFlow,
@@ -29,25 +34,25 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 ) (*OID4VCIFinalReceiveResult, error) {
 	issuerMetadata := flow.issuerMetadata
 	result := pendingOID4VCIFinalResult(issuerMetadata, flow.credentialConfigurationID, token, credentialResponse)
+	notify := func(event OID4VCINotificationEvent) *OID4VCINotificationError {
+		if flow.policy.skipNotification {
+			return nil
+		}
+		if err := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, event); err != nil {
+			return &OID4VCINotificationError{Event: event, Err: err}
+		}
+		return nil
+	}
 	savedCredentials, storeErr := w.storeOID4VCIFinalCredentialResponseBatch(ctx, credentialResponse, issuerMetadata, flow.credentialConfigurationID, flow.holderKeys)
 	if storeErr != nil {
-		// §11: a credential that failed verification/storage is reported with
-		// credential_failure (best effort); the original failure is returned.
-		if !flow.policy.skipNotification {
-			if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialFailure); notifyErr != nil {
-				return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
-			}
+		if notifyErr := notify(OID4VCINotificationCredentialFailure); notifyErr != nil {
+			return nil, errors.Join(storeErr, notifyErr)
 		}
 		return nil, storeErr
 	}
 	result.SavedCredentials = savedCredentials
-	// §11: credential_accepted MUST only be sent after the credential was
-	// successfully stored.
-	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil && !flow.policy.skipNotification {
-		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialAccepted); notifyErr != nil {
-			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
-		}
-	}
+	// §11: credential_accepted is sent only after the credentials were stored.
+	result.NotificationError = notify(OID4VCINotificationCredentialAccepted)
 	return result, nil
 }
 
@@ -58,6 +63,7 @@ func oid4vciFinalCredentialRequestBodyFactory(
 	encryptionParams map[string]any,
 ) receiverTypes.CredentialRequestBodyFactory {
 	issuerMetadata := flow.issuerMetadata
+	signingAlgValues := proofSigningAlgValues(flow.credentialConfiguration)
 	return func(cNonce string) ([]byte, string, error) {
 		keyAttestationJWT := ""
 		if flow.keyAttestation != nil {
@@ -93,23 +99,25 @@ func oid4vciFinalCredentialRequestBodyFactory(
 			if err := ValidateKeyAttestation(ctx, attestation, request, flow.keyAttestation.policy); err != nil {
 				return nil, "", err
 			}
+			if err := requireListedProofAlgorithm("key attestation", attestation.JWT, signingAlgValues); err != nil {
+				return nil, "", err
+			}
 			keyAttestationJWT = attestation.JWT
 		}
-		// §8.2.1.1: "the `alg` JWT header of the key proof ... MUST match one
-		// of the values listed in the `proof_signing_alg_values_supported`
-		// metadata parameter", which §12.2.4.1 publishes per Credential
-		// Configuration.
 		proofOptions := receiverTypes.ProofOptions{
 			Audience:         issuerMetadata.CredentialIssuer,
 			Nonce:            cNonce,
 			KeyAttestation:   keyAttestationJWT,
-			SigningAlgValues: proofSigningAlgValues(flow.credentialConfiguration),
+			SigningAlgValues: signingAlgValues,
 		}
 		proofs := make([]string, 0, len(flow.holderKeys))
 		for _, key := range flow.holderKeys {
 			proof, err := flow.signer.CreateCredentialRequestJWTProofWithOptions(key, proofOptions)
 			if err != nil {
 				return nil, "", fmt.Errorf("failed to create credential request proof: %w", err)
+			}
+			if err := requireListedProofAlgorithm("key proof", proof, signingAlgValues); err != nil {
+				return nil, "", err
 			}
 			proofs = append(proofs, proof)
 		}
@@ -133,11 +141,8 @@ func oid4vciFinalCredentialRequestBodyFactory(
 	}
 }
 
-// proofSigningAlgValues reads the "jwt" proof type's
-// proof_signing_alg_values_supported from a Credential Configuration.
-// OpenID4VCI 1.0 §12.2.4.1 makes it "REQUIRED. A non-empty array of algorithm
-// identifiers that the Issuer supports for this proof type. The Wallet uses one
-// of them to sign the proof"; a configuration that publishes none imposes no
+// proofSigningAlgValues reads the jwt proof type's
+// proof_signing_alg_values_supported (§12.2.4). An empty result imposes no
 // constraint.
 func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.SignatureAlgorithm {
 	if config.ProofTypesSupported == nil {
@@ -150,21 +155,62 @@ func proofSigningAlgValues(config receiverTypes.CredentialConfiguration) []jose.
 	return jwtProof.ProofSigningAlgValuesSupported
 }
 
+// requireJWTProofType refuses a Credential Configuration whose
+// proof_types_supported omits jwt, the only key proof this wallet produces.
+// A configuration without proof_types_supported requires no proof (§12.2.4).
+func requireJWTProofType(configurationID string, config receiverTypes.CredentialConfiguration) error {
+	if config.ProofTypesSupported == nil {
+		return nil
+	}
+	if _, ok := (*config.ProofTypesSupported)["jwt"]; ok {
+		return nil
+	}
+	types := make([]string, 0, len(*config.ProofTypesSupported))
+	for name := range *config.ProofTypesSupported {
+		types = append(types, name)
+	}
+	slices.Sort(types)
+	return fmt.Errorf("credential configuration %q lists proof types %v: %w", configurationID, types, ErrProofTypeUnsupported)
+}
+
+// requireListedProofAlgorithm applies Appendix F.1: the alg header of the key
+// proof and of its key_attestation MUST be one of
+// proof_signing_alg_values_supported. It holds a signer that ignored the list
+// to the issuer's metadata before the request is sent.
+func requireListedProofAlgorithm(what string, token string, supported []jose.SignatureAlgorithm) error {
+	if len(supported) == 0 {
+		return nil
+	}
+	header, err := AttestationJOSEHeaderFromJWT(token)
+	if err != nil {
+		return fmt.Errorf("%s is malformed: %w", what, err)
+	}
+	if !slices.Contains(supported, jose.SignatureAlgorithm(header.Algorithm)) {
+		return fmt.Errorf("%s is signed with %q, not one of proof_signing_alg_values_supported %v: %w", what, header.Algorithm, supported, ErrProofAlgorithmNotSupported)
+	}
+	return nil
+}
+
 func oid4vciFinalDpopProofFactory(signer receiverTypes.OID4VCIFinalSigner, clientKey jose.JSONWebKey, endpoint common.URIField, accessToken string) receiverTypes.DPoPProofFactory {
 	return func(nonce string) (string, error) {
 		return signer.CreateDpopProof(clientKey, http.MethodPost, endpoint.String(), nonce, accessToken)
 	}
 }
 
-func decodeOID4VCIFinalCredentialResponse(receiver receiverTypes.OID4VCIFinalTransport, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey, strictShape bool) (*receiverTypes.CredentialResponse, error) {
+// decodeOID4VCIFinalCredentialResponse decodes a Credential or Deferred
+// Credential Response for flow: one credential per key proof, the pre-Final
+// shape only when the caller opted in.
+func decodeOID4VCIFinalCredentialResponse(flow *oid4vciFinalFlow, raw *receiverTypes.CredentialEndpointHTTPResponse, key *jose.JSONWebKey) (*receiverTypes.CredentialResponse, error) {
+	maxCredentials := len(flow.holderKeys)
+	if flow.policy.requireSingleCredential {
+		maxCredentials = 1
+	}
 	response, err := DecodeOID4VCIFinalCredentialResponse(raw.Body, raw.ContentType, CredentialResponseDecodeOptions{
 		DecryptionKey: key,
-		// The high-level wallet path accepts the pre-Final shape and §14.6
-		// batch issuance; RequireSingleCredential narrows that to the one
-		// credential this issuance asked for, without refusing the §9 "still
-		// pending" body the deferred poll has to keep reading.
-		allowLegacyCredentialShape: true,
-		requireSingleCredential:    strictShape,
+		shape: credentialResponseShape{
+			maxCredentials: maxCredentials,
+			allowDraft:     flow.policy.allowDraftCredentialResponse,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode credential response: %w", err)
@@ -352,12 +398,13 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 	}
 	values = append(values, response.Credentials...)
 	if len(values) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: credential response carries no credentials", ErrCredentialResponseShape)
 	}
 	if len(holderKeys) > 0 && len(values) > len(holderKeys) {
 		return nil, fmt.Errorf("credential response returned %d credentials but only %d holder keys were supplied", len(values), len(holderKeys))
 	}
 
+	bindingRequired := credentialBindingRequired(issuerMetadata, credentialConfigurationID)
 	saved := make([]*SavedCredential, 0, len(values))
 	usedKeys := make([]bool, len(holderKeys))
 	for _, value := range values {
@@ -368,7 +415,7 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 		// OpenID4VCI 1.0 §8.3 does not promise that the credentials array
 		// follows the order of the proofs, so each credential is matched to the
 		// holder key its cnf names; every supplied key may be used at most once.
-		holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, usedKeys)
+		holderKey, err := matchBatchHolderKey(raw, flavor, holderKeys, usedKeys, bindingRequired)
 		if err != nil {
 			return nil, err
 		}
@@ -405,17 +452,34 @@ func (w *Wallet) storeOID4VCIFinalCredentialResponseBatch(ctx context.Context, r
 	return saved, nil
 }
 
+// credentialBindingRequired reports whether the Credential Configuration
+// advertises cryptographic_binding_methods_supported, which §12.2.4 makes
+// present exactly when the credential is bound to a key.
+func credentialBindingRequired(issuerMetadata *receiverTypes.CredentialIssuerMetadata, credentialConfigurationID string) bool {
+	if issuerMetadata == nil {
+		return false
+	}
+	config, ok := issuerMetadata.CredentialConfigurationSupported[credentialConfigurationID]
+	return ok && config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0
+}
+
 // matchBatchHolderKey selects the holder key whose RFC 7638 thumbprint equals
-// the credential's cnf.jwk. A credential without cnf takes the first unused key
-// (the acceptance rules then decide whether that is allowed); a cnf that names
-// none of the supplied keys, or a key that was already consumed, is an error.
-func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFlavor, holderKeys []jose.JSONWebKey, usedKeys []bool) (*jose.JSONWebKey, error) {
-	if len(holderKeys) == 0 {
+// the credential's cnf.jwk; every supplied key is used at most once. A
+// credential without cnf is refused when binding is required, and otherwise
+// takes the first unused key for the acceptance rules to judge.
+func matchBatchHolderKey(raw []byte, flavor credential.SupportedSerializationFlavor, holderKeys []jose.JSONWebKey, usedKeys []bool, bindingRequired bool) (*jose.JSONWebKey, error) {
+	if len(holderKeys) == 0 && !bindingRequired {
 		return nil, nil
 	}
 	claimed, err := credentialConfirmationKey(raw, flavor)
 	if err != nil {
 		return nil, err
+	}
+	if claimed == nil && bindingRequired {
+		return nil, fmt.Errorf("the credential configuration requires cryptographic binding: %w", ErrHolderBindingMissing)
+	}
+	if len(holderKeys) == 0 {
+		return nil, nil
 	}
 	if claimed == nil {
 		for index := range holderKeys {

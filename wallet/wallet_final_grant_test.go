@@ -105,8 +105,7 @@ func TestOID4VCIFinalTwoStageAuthorizationSurvivesJSONRoundTrip(t *testing.T) {
 	requireJSONRoundTrip(t, grant, &restoredGrant)
 	require.NotNil(t, restoredGrant.AccessToken)
 	require.Equal(t, "pid", restoredGrant.CredentialConfigurationID)
-	require.NotNil(t, restoredGrant.IssuerMetadata)
-	require.NotNil(t, restoredGrant.AuthorizationServerMetadata)
+	require.Equal(t, fixture.server.URL, restoredGrant.CredentialIssuer)
 	// The fixture issues a DPoP-bound token, so the grant records the key it is
 	// bound to (RFC 9449 §5).
 	require.NotEmpty(t, restoredGrant.DPoPKeyThumbprint)
@@ -252,7 +251,7 @@ func TestRequestOID4VCIFinalCredentialReSignsAfterInvalidNonce(t *testing.T) {
 				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_nonce"})
 				return
 			}
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
@@ -712,4 +711,128 @@ func TestReceiveOID4VCIFinalPreAuthorizedCredentialSendsNoAttestationWithoutProv
 	require.Empty(t, fixture.tokenHeaders.Get("DPoP"))
 	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
 	require.Empty(t, fixture.tokenForms[0].Get("client_id"))
+}
+
+// A resumed authorization state names the issuance it belongs to, and nothing
+// in it can point the token request at another server: it is checked against
+// the request and the metadata is fetched again.
+func TestAuthorizeOID4VCIFinalTokenRefusesStateOfAnotherIssuance(t *testing.T) {
+	for name, tc := range map[string]struct {
+		tamperState   func(*OID4VCIFinalAuthorization)
+		tamperRequest func(*OID4VCIFinalReceiveRequest)
+	}{
+		"foreign credential issuer": {tamperState: func(a *OID4VCIFinalAuthorization) { a.CredentialIssuer = "https://attacker.example" }},
+		"undelegated authorization server": {tamperState: func(a *OID4VCIFinalAuthorization) {
+			a.AuthorizationServer = "https://attacker.example"
+		}},
+		"foreign configuration": {tamperState: func(a *OID4VCIFinalAuthorization) { a.CredentialConfigurationID = "other" }},
+		"missing code_verifier": {tamperState: func(a *OID4VCIFinalAuthorization) { a.CodeVerifier = "" }},
+		"another client_id":     {tamperRequest: func(r *OID4VCIFinalReceiveRequest) { r.ClientID = "client-2" }},
+		"another redirect_uri":  {tamperRequest: func(r *OID4VCIFinalReceiveRequest) { r.RedirectURI = "https://wallet.example/cb" }},
+		"another offered issuer": {tamperRequest: func(r *OID4VCIFinalReceiveRequest) {
+			r.CredentialOffer.CredentialIssuer, _ = url.Parse("https://other.example")
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t)
+			req := fixture.request()
+			authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+			require.NoError(t, err)
+			var restored OID4VCIFinalAuthorization
+			requireJSONRoundTrip(t, authorization, &restored)
+			if tc.tamperState != nil {
+				tc.tamperState(&restored)
+			}
+			resumed := fixture.request()
+			if tc.tamperRequest != nil {
+				tc.tamperRequest(&resumed)
+			}
+
+			redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(restored.State)
+			_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), resumed, &restored, redirect)
+			require.ErrorIs(t, err, ErrIssuanceStateInvalid)
+			require.Equal(t, 0, fixture.tokenCalls)
+		})
+	}
+}
+
+// Resuming reads the metadata the issuer publishes now, not a copy the caller
+// stored.
+func TestAuthorizeOID4VCIFinalTokenRefetchesTheMetadata(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+	require.Equal(t, 1, fixture.issuerMetadataCalls)
+
+	redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(authorization.State)
+	_, err = fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization, redirect)
+	require.NoError(t, err)
+	require.Equal(t, 2, fixture.issuerMetadataCalls)
+}
+
+// A token grant names its Credential Issuer; a request that names another one
+// does not get the access token sent there.
+func TestRequestOID4VCIFinalCredentialRefusesGrantOfAnotherIssuer(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+	redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(authorization.State)
+	grant, err := fixture.wallet.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization, redirect)
+	require.NoError(t, err)
+
+	var restored OID4VCIFinalTokenGrant
+	requireJSONRoundTrip(t, grant, &restored)
+	restored.CredentialIssuer = "https://attacker.example"
+	_, err = fixture.wallet.RequestOID4VCIFinalCredential(context.Background(), req, &restored)
+	require.ErrorIs(t, err, ErrIssuanceStateInvalid)
+	require.Equal(t, 0, fixture.credentialCalls)
+}
+
+// HAIP §4.4.1 applies to the token request a resumed authorization sends, not
+// only to the PAR request Begin sent.
+func TestAuthorizeOID4VCIFinalTokenRequiresHAIPClientAuthenticationOnResume(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t)
+	req := fixture.request()
+	authorization, err := fixture.wallet.BeginOID4VCIFinalAuthorization(context.Background(), req)
+	require.NoError(t, err)
+
+	fixture.clientAuthKey = nil
+	unauthenticated := fixture.freshWallet(t, AttestationTrustPolicy{})
+	redirect := "openid-credential-offer://callback?code=code-1&state=" + url.QueryEscape(authorization.State) +
+		"&iss=" + url.QueryEscape(fixture.server.URL)
+	_, err = unauthenticated.AuthorizeOID4VCIFinalToken(context.Background(), req, authorization, redirect)
+	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
+// HAIP §4 requires a DPoP-bound access token; one read back from a grant or a
+// deferred request is held to that as well.
+func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeDeferredEndpoint = true
+	})
+	bearer := &receiverTypes.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "Bearer"}
+	req := fixture.request()
+
+	_, err := fixture.wallet.RequestOID4VCIFinalCredential(context.Background(), req, &OID4VCIFinalTokenGrant{
+		AccessToken:               bearer,
+		CredentialIssuer:          fixture.server.URL,
+		CredentialConfigurationID: "pid",
+	})
+	require.ErrorIs(t, err, ErrDPoPRequired)
+
+	_, err = fixture.wallet.ResumeOID4VCIFinalDeferredCredentialContext(context.Background(), OID4VCIFinalDeferredRequest{
+		Type:                      receiverTypes.Oid4vci,
+		IssuerURL:                 req.CredentialOffer.CredentialIssuer,
+		CredentialConfigurationID: "pid",
+		AccessToken:               bearer,
+		TransactionID:             "tx-1",
+		HolderKey:                 fixture.holderKey,
+		ClientKey:                 fixture.clientKey,
+	})
+	require.ErrorIs(t, err, ErrDPoPRequired)
+	require.Equal(t, 0, fixture.credentialCalls)
+	require.Equal(t, 0, fixture.deferredCalls)
 }
