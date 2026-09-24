@@ -23,17 +23,29 @@ import (
 func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
 	uriField, err := common.ParseURIField(endpoint.String())
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse URI field: %w", err)
+		return nil, keepMessage(ErrInvalidArgument, fmt.Errorf("failed to parse URI field: %w", err))
 	}
-
-	return w.receiver.FetchIssuerMetadata(*uriField, receivingType)
+	metadata, err := w.receiver.FetchIssuerMetadata(*uriField, receivingType)
+	return metadata, classifyKeepingMessage(err)
 }
 
-// ReceiveCredential orchestrates the credential receiving flow.
+// ReceiveCredential runs a Pre-Authorized Code issuance through the receiver
+// plugin's Receiver methods and stores the credential. Without
+// Config.CredentialAcceptance the credential is parsed but its issuer is not
+// authenticated. It returns ErrProfileForbidsDraft under HAIP; new code uses
+// AuthorizePreAuthorizedIssuance and RequestCredential.
 func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
+	saved, err := w.receiveCredential(req)
+	return saved, classifyKeepingMessage(err)
+}
+
+func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
+	if w.profile.IsHAIP() {
+		return nil, ErrProfileForbidsDraft
+	}
 	preAuthCode, err := w.validateCredentialOffer(req.CredentialOffer)
 	if err != nil {
-		return nil, err
+		return nil, keepMessage(ErrInvalidArgument, err)
 	}
 
 	issuerMetadata, authMetadata, err := w.fetchCredentialMetadata(req)
@@ -63,10 +75,7 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 		holderKey = &publicKey
 	}
 
-	// OpenID4VCI Draft 13 keeps Config.CredentialAcceptance optional, as
-	// SD-JWT VC §3.5 leaves issuer key resolution to ecosystem policy. HAIP is
-	// opt-in, so the policy is mandatory there.
-	return w.storeAndParseCredential(context.Background(), credentialJWT, serializationFlavor, holderKey, w.profile.IsHAIP())
+	return w.storeAndParseCredential(context.Background(), credentialJWT, serializationFlavor, holderKey, false)
 }
 
 // validateCredentialOffer validates the credential offer and extracts pre-authorization code.
@@ -75,7 +84,7 @@ func (w *Wallet) validateCredentialOffer(offer *CredentialOffer) (string, error)
 		return "", fmt.Errorf("credential offer is required")
 	}
 
-	if err := validateCredentialIssuerIdentifier(offer.CredentialIssuer); err != nil {
+	if err := validateCredentialIssuerIdentifier(offer.CredentialIssuer, env.IsHTTPAllowed()); err != nil {
 		return "", err
 	}
 
@@ -191,45 +200,7 @@ func ensureJWTProofSupported(credentialConfiguration *receiverTypes.CredentialCo
 	return fmt.Errorf("unsupported proof type: jwt proof is required")
 }
 func (w *Wallet) validateCredentialConfigurationIDs(offer *CredentialOffer, issuerMetadata *receiverTypes.CredentialIssuerMetadata) error {
-	if offer == nil {
-		return fmt.Errorf("credential offer is required")
-	}
-	if issuerMetadata == nil {
-		return fmt.Errorf("issuer metadata is required")
-	}
-	if len(issuerMetadata.CredentialConfigurationSupported) == 0 {
-		return fmt.Errorf("credential configurations supported are missing in issuer metadata")
-	}
-
-	for _, configID := range offer.CredentialConfigurationIDs {
-		if _, exists := issuerMetadata.CredentialConfigurationSupported[configID]; !exists {
-			return fmt.Errorf("credential configuration %q is not supported by issuer metadata", configID)
-		}
-	}
-
-	return nil
-}
-func validateCredentialIssuerIdentifier(issuer *url.URL) error {
-	if issuer == nil {
-		return fmt.Errorf("credential issuer is not included in the offer")
-	}
-
-	if issuer.Scheme == "" {
-		return fmt.Errorf("credential issuer must include a scheme")
-	}
-	if !strings.EqualFold(issuer.Scheme, "https") {
-		if !env.IsHTTPAllowed() || !strings.EqualFold(issuer.Scheme, "http") {
-			return fmt.Errorf("credential issuer must use https scheme")
-		}
-	}
-	if issuer.Host == "" {
-		return fmt.Errorf("credential issuer must include a host")
-	}
-	if issuer.RawQuery != "" || issuer.ForceQuery || issuer.Fragment != "" || issuer.RawFragment != "" {
-		return fmt.Errorf("credential issuer must not include query or fragment")
-	}
-
-	return nil
+	return validateOfferedConfigurations(offer, issuerMetadata)
 }
 
 // fetchCredentialMetadata fetches issuer and authorization server metadata.

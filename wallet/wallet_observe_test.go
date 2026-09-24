@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // fixtureEndpointByPath is the role each path of the Final issuance fixture
-// plays (wallet_final_issuance_test.go serveHTTP).
+// plays (issuance_fixture_test.go serveHTTP).
 var fixtureEndpointByPath = map[string]observe.Endpoint{
 	"/.well-known/openid-credential-issuer":   observe.EndpointIssuerMetadata,
 	"/.well-known/oauth-authorization-server": observe.EndpointAuthorizationServerMetadata,
@@ -70,13 +71,17 @@ func TestObserveLabelsEveryFinalIssuanceRequest(t *testing.T) {
 		f.requestEncryption = true
 	})
 
-	req := fixture.request()
-	req.CredentialResponseEncryptionKey = &fixture.encryptionKey
-	// The self-driven authorization GET uses the request's client.
-	req.HTTPClient = observedClient(fixture.server.Client(), recorder)
-
-	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	ctx := context.Background()
+	authorization, err := fixture.wallet.BeginIssuance(ctx, fixture.issuanceRequest())
 	require.NoError(t, err)
+	// The authorization GET is the caller's, through its own client.
+	location, err := followAuthorizationRedirect(ctx, observedClient(fixture.server.Client(), recorder), authorization.AuthorizationURL)
+	require.NoError(t, err)
+	grant, err := fixture.wallet.AuthorizeIssuance(ctx, authorization, location)
+	require.NoError(t, err)
+	result, err := fixture.wallet.RequestCredential(ctx, grant, fixture.credentialRequest())
+	require.NoError(t, err)
+	require.NoError(t, fixture.wallet.NotifyIssuer(ctx, result.Notification, NotificationCredentialAccepted, ""))
 
 	exchanges := recorder.Exchanges()
 	labels := requireFixtureEndpointLabels(t, exchanges)
@@ -106,9 +111,8 @@ func TestObserveLabelsEveryFinalIssuanceRequest(t *testing.T) {
 	}
 }
 
-// TestObserveLabelsDeferredCredentialPoll checks that the Credential Endpoint
-// call the deferred poll shares with the first request is labelled by the
-// endpoint it actually addresses.
+// TestObserveLabelsDeferredCredentialPoll checks that the Deferred Credential
+// Request is labelled by the endpoint it addresses.
 func TestObserveLabelsDeferredCredentialPoll(t *testing.T) {
 	recorder := &observetest.Recorder{}
 	fixture := newFinalIssuanceFixture(t, observeFixtureTransport(recorder), func(f *finalIssuanceFixture) {
@@ -120,10 +124,10 @@ func TestObserveLabelsDeferredCredentialPoll(t *testing.T) {
 			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
-	req := fixture.request()
-	req.DeferredPollAttempts = 1
-
-	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	result, err := fixture.receive(fixture.issuanceRequest())
+	require.NoError(t, err)
+	require.NotNil(t, result.Deferred)
+	_, err = fixture.wallet.RequestDeferredCredential(context.Background(), result.Deferred)
 	require.NoError(t, err)
 
 	labels := requireFixtureEndpointLabels(t, recorder.Exchanges())

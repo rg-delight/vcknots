@@ -14,7 +14,6 @@ import (
 	commonx509 "github.com/trustknots/vcknots/wallet/common/x509"
 	oid4vp "github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/profile"
-	oid4vcisign "github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -44,7 +43,11 @@ func codedErrorValues() map[string]error {
 		"acceptance.ErrHAIPX5CRequired":                      acceptance.ErrHAIPX5CRequired,
 		"acceptance.ErrHAIPTrustAnchorInX5C":                 acceptance.ErrHAIPTrustAnchorInX5C,
 		"ErrKeyAttestationRequired":                          ErrKeyAttestationRequired,
-		"ErrKeyAttestationNonceStale":                        ErrKeyAttestationNonceStale,
+		"ErrKeyAttestationNonceRejected":                     ErrKeyAttestationNonceRejected,
+		"ErrIssuanceStateMismatch":                           ErrIssuanceStateMismatch,
+		"ErrIssuanceVersionMismatch":                         ErrIssuanceVersionMismatch,
+		"ErrDPoPKeyRequired":                                 ErrDPoPKeyRequired,
+		"ErrProofAlgorithmNotSupported":                      ErrProofAlgorithmNotSupported,
 		"ErrNonceEndpointRequired":                           ErrNonceEndpointRequired,
 		"ErrPreAuthorizedGrantMissing":                       ErrPreAuthorizedGrantMissing,
 		"ErrTransactionCodeRequired":                         ErrTransactionCodeRequired,
@@ -59,7 +62,6 @@ func codedErrorValues() map[string]error {
 		"ErrAuthorizationIssMismatch":                        ErrAuthorizationIssMismatch,
 		"ErrAuthorizationIssMissing":                         ErrAuthorizationIssMissing,
 		"ErrAuthorizationCodeMissing":                        ErrAuthorizationCodeMissing,
-		"ErrAuthorizationRequestURIExpired":                  ErrAuthorizationRequestURIExpired,
 		"ErrClientAttestationInvalid":                        ErrClientAttestationInvalid,
 		"ErrKeyAttestationInvalid":                           ErrKeyAttestationInvalid,
 
@@ -76,7 +78,6 @@ func codedErrorValues() map[string]error {
 
 		"oid4vci.ErrDPoPRequired":                    receiverOid4vci.ErrDPoPRequired,
 		"oid4vci.ErrHTTPRedirectNotAllowed":          receiverOid4vci.ErrHTTPRedirectNotAllowed,
-		"oid4vcisign.ErrProofAlgorithmNotSupported":  oid4vcisign.ErrProofAlgorithmNotSupported,
 		"oid4vci.ErrIssuerIdentifierMismatch":        receiverOid4vci.ErrIssuerIdentifierMismatch,
 		"oid4vci.ErrIssuerMetadataSignatureInvalid":  receiverOid4vci.ErrIssuerMetadataSignatureInvalid,
 		"oid4vci.ErrIssuerMetadataSubjectMismatch":   receiverOid4vci.ErrIssuerMetadataSubjectMismatch,

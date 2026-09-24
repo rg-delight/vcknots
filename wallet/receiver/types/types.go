@@ -737,26 +737,6 @@ type CredentialEndpointHTTPResponse struct {
 	ContentType string
 }
 
-// ProofOptions carries the inputs of an OpenID4VCI 1.0 Section 8.2.1.1 "jwt"
-// key proof. It lives here, next to the interface that takes it, so a signer
-// outside this repository can implement OID4VCIFinalSigner without depending on
-// the bundled oid4vci plugin.
-type ProofOptions struct {
-	// Audience is the Credential Issuer Identifier the proof is bound to.
-	// Section 8.2.1.1 makes it "REQUIRED. ... the Credential Issuer Identifier".
-	Audience string
-	// Nonce is the c_nonce the issuer supplied, omitted when empty.
-	Nonce string
-	// KeyAttestation is the OpenID4VCI 1.0 Appendix D key attestation JWT,
-	// carried in the key_attestation JOSE header parameter when non-empty.
-	KeyAttestation string
-	// SigningAlgValues is the proof_signing_alg_values_supported list of the
-	// Credential Configuration being requested, that is
-	// CredentialConfigurationSupported[id].ProofTypesSupported["jwt"]. An empty
-	// list means the issuer published no constraint.
-	SigningAlgValues []jose.SignatureAlgorithm
-}
-
 // CredentialOfferFetcher is an optional receiver capability: it dereferences
 // an OpenID4VCI 1.0 Section 4.1.3 credential_offer_uri with the plugin's own
 // HTTP client and transport policy and returns the Credential Offer Object.
@@ -769,35 +749,4 @@ type CredentialOfferFetcher interface {
 // itself applies the same policy.
 type HTTPSchemePolicy interface {
 	HTTPAllowed() bool
-}
-
-// OID4VCIFinalSigner builds the private-key operations of an OpenID4VCI 1.0
-// Final / HAIP issuance: the RFC 9449 DPoP proof, the Section 8.2.1.1 "jwt" key
-// proof and the attestation-based client authentication PoP of
-// draft-ietf-oauth-attestation-based-client-auth Section 4.
-//
-// It is separated from the transport so a wallet can keep its keys in a
-// hardware module or a remote signing service. Wallet.Config selects the
-// implementation; the receiver oid4vcisign package provides the software
-// default.
-//
-// The Client Attestation itself is not built here: it is issued by the
-// attester, not by the wallet, and reaches the wallet through a
-// ClientAttestationProvider.
-type OID4VCIFinalSigner interface {
-	// CreateDpopProof builds the RFC 9449 Section 4.2 DPoP proof for one HTTP
-	// request. An empty nonce omits the nonce claim and an empty accessToken
-	// omits the ath claim.
-	CreateDpopProof(key jose.JSONWebKey, method string, rawURL string, nonce string, accessToken string) (string, error)
-	// CreateCredentialRequestJWTProofWithOptions builds the OpenID4VCI 1.0
-	// Section 8.2.1.1 "jwt" key proof. It honours the Credential
-	// Configuration's proof_signing_alg_values_supported, which Section 8.2.1.1
-	// makes binding: "the `alg` JWT header of the key proof ... MUST match one
-	// of the values listed in the `proof_signing_alg_values_supported` metadata
-	// parameter".
-	CreateCredentialRequestJWTProofWithOptions(key jose.JSONWebKey, opts ProofOptions) (string, error)
-	// CreateClientAttestationPop builds the Client Attestation PoP JWT of
-	// draft-ietf-oauth-attestation-based-client-auth Section 4, bound to the
-	// authorization server and, when the server issued one, to its challenge.
-	CreateClientAttestationPop(clientKey jose.JSONWebKey, clientID string, authorizationServerIssuer string, attestationChallenge string, lifetime time.Duration) (string, error)
 }

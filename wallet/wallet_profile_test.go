@@ -106,10 +106,7 @@ func TestNewWalletWithConfig_ProfilePropagation(t *testing.T) {
 	})
 }
 
-func TestReceiveOID4VCIFinalCredential_HAIPClientAuthentication(t *testing.T) {
-	holderKey := newPrivateJWKForFinalVCITest(t, "holder-key-1")
-	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
-
+func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -118,37 +115,40 @@ func TestReceiveOID4VCIFinalCredential_HAIPClientAuthentication(t *testing.T) {
 	defer server.Close()
 	issuerURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
-
-	request := func() OID4VCIFinalReceiveRequest {
-		return OID4VCIFinalReceiveRequest{
-			CredentialOffer: &CredentialOffer{
-				CredentialIssuer:           issuerURL,
-				CredentialConfigurationIDs: []string{"pid"},
-				Grants: map[string]*CredentialOfferGrant{
-					"authorization_code": {IssuerState: "issuer-state-1"},
-				},
-			},
-			Type:        receiverTypes.Oid4vci,
-			ClientID:    "client-1",
-			RedirectURI: "openid-credential-offer://callback",
-			HolderKey:   holderKey,
-			ClientKey:   clientKey,
-			// The profile checks under test run before the authorization
-			// endpoint, so the browser gate is taken out of the way.
-			AllowSelfDrivenAuthorization: true,
-		}
+	request := IssuanceRequest{CredentialOffer: &CredentialOffer{
+		CredentialIssuer:           issuerURL,
+		CredentialConfigurationIDs: []string{"pid"},
+		Grants:                     map[string]*CredentialOfferGrant{"authorization_code": {IssuerState: "issuer-state-1"}},
+	}}
+	dpopKey, err := newInMemoryECKeyEntry()
+	require.NoError(t, err)
+	newWallet := func(p profile.Profile, plugin *oid4vci.Oid4vciReceiver) *Wallet {
+		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
+		require.NoError(t, err)
+		w, err := NewWalletWithConfig(Config{
+			Profile:              p,
+			CredStore:            newProfileCredStore(t),
+			Receiver:             receiving,
+			CredentialAcceptance: &CredentialAcceptancePolicy{UnverifiedIssuer: true},
+			ClientAuth:           ClientAuthConfig{ClientID: "client-1"},
+			DPoP:                 DPoPConfig{Key: dpopKey},
+			Issuance:             IssuanceConfig{RedirectURI: "openid-credential-offer://callback"},
+		})
+		require.NoError(t, err)
+		return w
 	}
 
 	t.Run("HAIP with no client authentication rejects before any network request", func(t *testing.T) {
-		w := newProfileWallet(t, profile.HAIP, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP}, nil, nil)
-		_, err := w.ReceiveOID4VCIFinalCredential(request())
+		w := newWallet(profile.HAIP, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP})
+		_, err := w.BeginIssuance(t.Context(), request)
 		require.ErrorContains(t, err, "client authentication")
+		require.ErrorIs(t, err, ErrInvalidArgument)
 		require.Equal(t, int32(0), requests.Load())
 	})
 
 	t.Run("Final proceeds to metadata discovery", func(t *testing.T) {
-		w := newProfileWallet(t, profile.Final, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true, Profile: profile.Final}, nil, nil)
-		_, err := w.ReceiveOID4VCIFinalCredential(request())
+		w := newWallet(profile.Final, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true, Profile: profile.Final})
+		_, err := w.BeginIssuance(t.Context(), request)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "client authentication")
 		require.Greater(t, requests.Load(), int32(0))
@@ -369,9 +369,9 @@ func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 	require.Equal(t, 1, acceptanceEntryCount(t, store))
 }
 
-// HAIP is opt-in, so raising strictness there costs no existing integration:
-// a HAIP wallet must authenticate the issuer before it stores anything.
-func TestReceiveCredentialHAIPRequiresAcceptancePolicy(t *testing.T) {
+// ReceiveCredential is a draft entry point, so a HAIP wallet refuses it
+// before anything is sent.
+func TestReceiveCredentialIsRefusedUnderHAIP(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()
 	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holderKey})
@@ -391,6 +391,6 @@ func TestReceiveCredentialHAIPRequiresAcceptancePolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
-	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.ErrorIs(t, err, ErrProfileForbidsDraft)
 	require.Equal(t, 0, acceptanceEntryCount(t, store))
 }

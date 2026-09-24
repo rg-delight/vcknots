@@ -385,7 +385,7 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 			"acceptance-config": {Format: "dc+sd-jwt"},
 		},
 	}
-	_, err := fixture.wallet.storeOID4VCIFinalCredentialResponse(t.Context(), response, metadata, "acceptance-config", &holder)
+	_, err := fixture.wallet.storeCredentialResponse(t.Context(), response, metadata, "acceptance-config", []jose.JSONWebKey{holder})
 	require.Error(t, err)
 	require.Equal(t, 0, fixture.entryCount(t))
 }
@@ -451,27 +451,6 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
 	})
-}
-
-// TestDraft13StoreRequiresAcceptancePolicy pins that the Draft 13 issuance
-// API, like every other exported acceptance entry point, refuses to store a
-// credential when Config.CredentialAcceptance is nil.
-func TestDraft13StoreRequiresAcceptancePolicy(t *testing.T) {
-	fixture := newDraft13Fixture(t)
-	fixture.configuration = map[string]any{
-		"format":                "jwt_vc_json",
-		"credential_definition": map[string]any{"type": []string{"VerifiableCredential", "UniversityDegree"}},
-		"cryptographic_binding_methods_supported": []string{"did:key"},
-	}
-	req := fixture.preAuthorizedRequest(t)
-	req.StoreCredential = true
-
-	_, err := fixture.wallet.ReceiveOID4VCIDraft13Credential(t.Context(), req)
-	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
-	entries, total, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
-	require.NoError(t, err)
-	require.Zero(t, total)
-	require.Empty(t, entries)
 }
 
 func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {

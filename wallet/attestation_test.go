@@ -79,32 +79,15 @@ func clientAttestationClaimsFor(clientKey jose.JSONWebKey) map[string]any {
 		"sub": "client-1",
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(time.Minute).Unix(),
-		"cnf": map[string]any{"jwk": publicHolderJWK(clientKey)},
+		"cnf": map[string]any{"jwk": publicSigningJWK(clientKey)},
 	}
 }
 
-func TestPlanOID4VCIKeyAttestation_HAIPNamesSection(t *testing.T) {
-	metadata := &receiverTypes.CredentialIssuerMetadata{
-		CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
-			"pid": {
-				Format: "dc+sd-jwt",
-				ProofTypesSupported: &map[string]receiverTypes.ProofType{
-					"jwt": {KeyAttestationsRequired: &receiverTypes.KeyAttestationsRequired{}},
-				},
-			},
-		},
-	}
-	w := &Wallet{profile: profile.HAIP}
-	_, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, false)
-	require.ErrorContains(t, err, "§4.5.1")
-
-	// A caller that mints the attestation itself moves the fail-closed point
-	// to the credential request (ErrKeyAttestationRequired).
-	plan, err := w.planOID4VCIKeyAttestation(metadata, "pid", false, true)
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	require.Nil(t, plan.provider)
-	require.True(t, plan.required)
+// publicSigningJWK is the public half of key with alg ES256 and use sig.
+func publicSigningJWK(key jose.JSONWebKey) jose.JSONWebKey {
+	public := key.Public()
+	public.Algorithm, public.Use = string(jose.ES256), "sig"
+	return public
 }
 
 // fixedClientAttestationProvider returns a prebuilt client attestation.
@@ -116,10 +99,10 @@ func (p fixedClientAttestationProvider) ClientAttestation(context.Context, Clien
 	return p.attestation, nil
 }
 
-// The attestation is validated before the receiver is touched: a nil receiver
-// would panic otherwise, so each case proves the rejection precedes any
-// network call.
-func TestCreateOID4VCIAttestationHeaders_RejectsBeforeNetwork(t *testing.T) {
+// The attestation is validated before the transport is touched: a nil
+// transport would panic otherwise, so each case proves the rejection precedes
+// any network call.
+func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
 	otherKey := newPrivateJWKForFinalVCITest(t, "other-client-key-1")
 	attesterKey := newPrivateJWKForFinalVCITest(t, "attester-key-1")
@@ -143,14 +126,19 @@ func TestCreateOID4VCIAttestationHeaders_RejectsBeforeNetwork(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			token := signAttestationJWT(t, attesterKey, tc.typ, tc.claims)
-			w := &Wallet{clientAttestation: fixedClientAttestationProvider{attestation: &ClientAttestation{JWT: token}}}
+			w := &Wallet{
+				clientAuth: ClientAuthConfig{ClientID: "client-1"},
+				attestation: AttestationConfig{
+					Client:    fixedClientAttestationProvider{attestation: &ClientAttestation{JWT: token}},
+					ClientKey: testKeyEntry(t, clientKey),
+				},
+			}
 			if !tc.unsigned {
-				w.attestationTrust = AttestationTrustPolicy{ResolveKey: func(AttestationJOSEHeader) (any, error) {
+				w.attestation.Trust = AttestationTrustPolicy{ResolveKey: func(AttestationJOSEHeader) (any, error) {
 					return attesterKey.Public().Key, nil
 				}}
 			}
-			req := OID4VCIFinalReceiveRequest{ClientID: "client-1", ClientKey: clientKey}
-			_, _, err := w.createOID4VCIAttestationHeaders(t.Context(), nil, req, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
+			_, err := w.clientAttestationFactory(t.Context(), nil, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
 			require.ErrorIs(t, err, ErrClientAttestationInvalid)
 			require.ErrorContains(t, err, tc.wantErr)
 		})
@@ -176,22 +164,21 @@ func TestAttestationPolicyForStaticAttesters(t *testing.T) {
 	require.ErrorContains(t, ValidateClientAttestation(t.Context(), attestation, request, haip.attestationPolicyFor(attester)), "x5c")
 }
 
-// TestAttestationJOSEHeaderFromJWT covers the header decode the key-proof
-// algorithm check uses; it refuses what it cannot read rather than report an
-// empty header.
-func TestAttestationJOSEHeaderFromJWT(t *testing.T) {
+// TestJWSHeaderRefusesWhatItCannotRead covers the unverified header decode the
+// key attestation algorithm check uses.
+func TestJWSHeaderRefusesWhatItCannotRead(t *testing.T) {
 	encode := func(value string) string { return base64.RawURLEncoding.EncodeToString([]byte(value)) }
-	header, err := AttestationJOSEHeaderFromJWT(encode(`{"typ":"key-attestation+jwt","alg":"ES256","kid":"a","x5c":["Zm9v"]}`) + "." + encode(`{}`) + ".sig")
+	header, err := jwsHeader(encode(`{"typ":"key-attestation+jwt","alg":"ES256"}`) + "." + encode(`{}`) + ".sig")
 	require.NoError(t, err)
-	require.Equal(t, AttestationJOSEHeader{Type: "key-attestation+jwt", Algorithm: "ES256", KeyID: "a", X5C: []string{"Zm9v"}}, header)
+	require.Equal(t, "ES256", header["alg"])
 
 	for name, token := range map[string]string{
-		"not three parts":   "header.payload",
+		"not a JWS":         "header",
 		"header not base64": "!!!." + encode(`{}`) + ".sig",
 		"header not JSON":   encode("nope") + "." + encode(`{}`) + ".sig",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := AttestationJOSEHeaderFromJWT(token)
+			_, err := jwsHeader(token)
 			require.Error(t, err)
 		})
 	}
