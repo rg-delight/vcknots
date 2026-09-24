@@ -10,12 +10,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/receiver/types"
-)
-
-var (
-	_ types.CredentialOfferFetcher = (*Oid4vciReceiver)(nil)
-	_ types.HTTPSchemePolicy       = (*Oid4vciReceiver)(nil)
 )
 
 // FetchCredentialOffer dereferences a credential_offer_uri (OpenID4VCI 1.0

@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -228,62 +229,18 @@ func requireKeyEncryptionAlgorithm(key *jose.JSONWebKey, alg string) error {
 	return fmt.Errorf("encryption key %q of type %T cannot be used with %s", key.KeyID, key.Key, alg)
 }
 
-// parseJWEKeyAlgorithm maps a JWE "alg" identifier to the go-jose key algorithm
-// this wallet will encrypt a Credential Request with. The list is an allowlist:
-// RSA1_5 is deliberately absent because RFC 8017 Section 7.2 RSAES-PKCS1-v1_5
-// is the Bleichenbacher-attackable scheme this library must never be talked
-// into using, and so are the RSA-OAEP variants go-jose v4 does not implement
-// (only RSA-OAEP-256 is available; there is no RSA-OAEP-384 or RSA-OAEP-512),
-// as well as RSA-OAEP itself, whose SHA-1 mask generation function is obsolete.
+// parseJWEKeyAlgorithm accepts a JWE "alg" from the oid4vcijwe allowlist.
 func parseJWEKeyAlgorithm(alg string) (jose.KeyAlgorithm, error) {
-	switch alg {
-	case "ECDH-ES":
-		return jose.ECDH_ES, nil
-	case "ECDH-ES+A128KW":
-		return jose.ECDH_ES_A128KW, nil
-	case "ECDH-ES+A192KW":
-		return jose.ECDH_ES_A192KW, nil
-	case "ECDH-ES+A256KW":
-		return jose.ECDH_ES_A256KW, nil
-	case "RSA-OAEP-256":
-		return jose.RSA_OAEP_256, nil
-	default:
-		return "", fmt.Errorf("unsupported encryption algorithm: %s", alg)
+	if keyAlg := jose.KeyAlgorithm(alg); slices.Contains(oid4vcijwe.KeyAlgorithms(), keyAlg) {
+		return keyAlg, nil
 	}
+	return "", fmt.Errorf("unsupported encryption algorithm: %s", alg)
 }
 
+// parseJWEContentEncryption accepts a JWE "enc" from the oid4vcijwe allowlist.
 func parseJWEContentEncryption(enc string) (jose.ContentEncryption, error) {
-	switch enc {
-	case "A128GCM":
-		return jose.A128GCM, nil
-	case "A192GCM":
-		return jose.A192GCM, nil
-	case "A256GCM":
-		return jose.A256GCM, nil
-	case "A128CBC-HS256":
-		return jose.A128CBC_HS256, nil
-	case "A192CBC-HS384":
-		return jose.A192CBC_HS384, nil
-	case "A256CBC-HS512":
-		return jose.A256CBC_HS512, nil
-	default:
-		return "", fmt.Errorf("unsupported encryption encoding: %s", enc)
+	if contentEnc := jose.ContentEncryption(enc); slices.Contains(oid4vcijwe.ContentEncryptions(), contentEnc) {
+		return contentEnc, nil
 	}
-}
-
-// supportedJWEKeyAlgorithms lists the JWE key management algorithms accepted
-// when decrypting an encrypted Credential Response (Section 8.2 / Section 10).
-// The wallet may publish either an EC or an RSA response-encryption key, so
-// both RFC 7518 Section 4.6 ECDH-ES and Section 4.3 RSA-OAEP-256 are accepted;
-// omitting RSA-OAEP-256 would leave an RSA key the wallet itself advertised
-// undecryptable. RSA1_5 is deliberately absent: RFC 8017 Section 7.2
-// RSAES-PKCS1-v1_5 is the Bleichenbacher-attackable scheme this library must
-// never be talked into using. go-jose v4 implements only RSA-OAEP-256 among the
-// OAEP variants.
-func supportedJWEKeyAlgorithms() []jose.KeyAlgorithm {
-	return []jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW, jose.RSA_OAEP_256}
-}
-
-func supportedJWEContentEncryptions() []jose.ContentEncryption {
-	return []jose.ContentEncryption{jose.A128GCM, jose.A192GCM, jose.A256GCM, jose.A128CBC_HS256, jose.A192CBC_HS384, jose.A256CBC_HS512}
+	return "", fmt.Errorf("unsupported encryption encoding: %s", enc)
 }

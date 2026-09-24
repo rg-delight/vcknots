@@ -205,12 +205,12 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 		return nil, nil, err
 	}
 
-	finalReceiver, err := w.receiver.OID4VCIFinalTransport(req.Type)
+	finalReceiver, err := w.receiver.OID4VCITransport(req.Type)
 	if err != nil {
 		return nil, nil, fmt.Errorf("OID4VCI Final receiver capability is not available: %w", err)
 	}
 
-	discovery, err := discoverOID4VCIIssuer(finalReceiver, req.Type, issuerIdentifier, nil, offeredAuthorizationServer(authCodeGrant))
+	discovery, err := discoverOID4VCIIssuer(ctx, finalReceiver, issuerIdentifier, nil, offeredAuthorizationServer(authCodeGrant))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -298,15 +298,13 @@ func (w *Wallet) beginOID4VCIFinalAuthorization(ctx context.Context, req OID4VCI
 		if err != nil {
 			return nil, nil, err
 		}
-		if flow.usePrivateKeyJwt {
-			assertion, err := flow.generateClientAssertion()
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to generate PAR client assertion: %w", err)
-			}
-			parRequest.ClientAssertion = assertion
-			parRequest.ClientAssertionType = receiverTypes.ClientAssertionTypeJWTBearer
+		parAuth := receiverTypes.ClientAuthentication{
+			ClientAttestation: func() (receiverTypes.OAuthClientAttestationHeaders, error) { return attestationHeaders, nil },
 		}
-		parResponse, err := finalReceiver.PushAuthorizationRequest(ctx, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, attestationHeaders)
+		if flow.usePrivateKeyJwt {
+			parAuth.ClientAssertion = flow.generateClientAssertion
+		}
+		parResponse, err := finalReceiver.PushAuthorizationRequest(ctx, *authorizationServerMetadata.PushedAuthorizationRequestEndpoint, parRequest, parAuth)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to push authorization request: %w", err)
 		}

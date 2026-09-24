@@ -208,19 +208,25 @@ func TestReceivingDispatcher_ReceiveCredential(t *testing.T) {
 	})
 }
 
-func TestReceivingDispatcher_FinalCapability(t *testing.T) {
+func TestReceivingDispatcher_TransportCapabilities(t *testing.T) {
 	dispatcher, err := NewReceivingDispatcher(WithDefaultConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalReceiver, err := dispatcher.OID4VCIFinalTransport(types.Oid4vci)
-	if err != nil || finalReceiver == nil {
-		t.Fatalf("built-in OID4VCI Final capability: %v, %v", finalReceiver, err)
+	if transport, err := dispatcher.OID4VCITransport(types.Oid4vci); err != nil || transport == nil {
+		t.Fatalf("built-in OID4VCI transport: %v, %v", transport, err)
+	}
+	if transport, err := dispatcher.Draft13Transport(types.Oid4vci); err != nil || transport == nil {
+		t.Fatalf("built-in Draft 13 transport: %v, %v", transport, err)
 	}
 	for _, protocol := range []types.SupportedReceivingTypes{types.Mock, types.SupportedReceivingTypes(999)} {
-		capability, err := dispatcher.OID4VCIFinalTransport(protocol)
-		if capability != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
-			t.Errorf("protocol %v: expected unsupported capability, got %v, %v", protocol, capability, err)
+		transport, err := dispatcher.OID4VCITransport(protocol)
+		if transport != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
+			t.Errorf("protocol %v: expected no OID4VCI transport, got %v, %v", protocol, transport, err)
+		}
+		draft13, err := dispatcher.Draft13Transport(protocol)
+		if draft13 != nil || !errors.Is(err, types.ErrUnsupportedProtocol) {
+			t.Errorf("protocol %v: expected no Draft 13 transport, got %v, %v", protocol, draft13, err)
 		}
 	}
 }

@@ -473,7 +473,7 @@ func NewWalletWithConfig(config Config) (*Wallet, error) {
 // issuance. Config.OID4VCISigner wins; otherwise the transport plugin itself is
 // used when it also implements the signer, which keeps the bundled plugin's
 // behaviour; otherwise the software default signs.
-func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCIFinalTransport) receiverTypes.OID4VCIFinalSigner {
+func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCITransport) receiverTypes.OID4VCIFinalSigner {
 	if w.oid4vciSigner != nil {
 		return w.oid4vciSigner
 	}
@@ -484,10 +484,10 @@ func (w *Wallet) oid4vciFinalSigner(transport receiverTypes.OID4VCIFinalTranspor
 }
 
 // oid4vciProfileValidator is the optional receiver capability the root uses to
-// apply HAIP constraints to fetched issuer metadata before PAR. It is asserted
-// at runtime instead of widening the exported Final receiver interface.
+// apply HAIP constraints to the selected Credential Configuration before PAR.
+// The transport's DiscoverCredentialIssuer already applies them to the issuer
+// metadata.
 type oid4vciProfileValidator interface {
-	ValidateIssuerMetadataForProfile(*receiverTypes.CredentialIssuerMetadata) error
 	ValidateCredentialConfigurationForProfile(receiverTypes.CredentialConfiguration) error
 }
 

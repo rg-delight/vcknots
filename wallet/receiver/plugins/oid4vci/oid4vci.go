@@ -8,29 +8,25 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
-	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-// Oid4vciReceiver is the bundled OpenID4VCI receiver plugin. It implements the
-// Draft 13 types.Receiver contract, the Final 1.0 / HAIP
-// types.OID4VCIFinalTransport contract and, through the embedded
-// oid4vcisign.Default, the types.OID4VCIFinalSigner contract.
+// Oid4vciReceiver is the bundled OpenID4VCI receiver plugin. It implements
+// the upstream types.Receiver, types.OID4VCITransport for OpenID4VCI 1.0 and
+// HAIP 1.0, and types.Draft13Transport. It performs HTTP only; every signed
+// value reaches it through a factory.
+//
+// Fields must not change once the receiver is registered. A zero
+// Oid4vciReceiver is usable and must not be copied after first use.
 type Oid4vciReceiver struct {
-	// Default supplies the OpenID4VCI 1.0 Final signing primitives (DPoP proof,
-	// jwt key proof, client attestation JWTs) so this plugin satisfies
-	// types.OID4VCIFinalSigner as well as types.OID4VCIFinalTransport. A wallet
-	// that signs elsewhere configures its own signer and uses this plugin only
-	// as a transport.
-	oid4vcisign.Default
-
+	// HTTPClient sends every request; nil means a bounded default client.
+	// Redirects are never followed.
 	HTTPClient *http.Client
 	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
 	AllowHTTP bool
@@ -39,9 +35,8 @@ type Oid4vciReceiver struct {
 	// to an identifier that has a path, when the Section 12.2.2 location
 	// answers 404. It is off by default and never applies under HAIP.
 	AppendedMetadataPathFallback bool
-	// Profile selects the OpenID4VCI Final/HAIP policy. The zero value normalizes
-	// to profile.Final, which applies no HAIP constraints. Set it to profile.HAIP
-	// to enforce HAIP 1.0 on the Final path.
+	// Profile selects the OpenID4VCI 1.0 policy. The zero value normalizes to
+	// profile.Final; profile.HAIP enforces HAIP 1.0.
 	Profile profile.Profile
 	// IssuerMetadataSigning configures OpenID4VCI 1.0 Section 12.2.3 signed
 	// Credential Issuer Metadata. A nil value requests signed metadata under
@@ -49,21 +44,21 @@ type Oid4vciReceiver struct {
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
 
-	// dpopNonceMu guards dpopNonces and dpopNonceClock. A zero Oid4vciReceiver
-	// is usable and, once in use, must not be copied.
+	// dpopNonceMu guards dpopNonces and dpopNonceClock.
 	dpopNonceMu sync.Mutex
 	// dpopNonces holds the latest RFC 9449 Section 8.2 DPoP nonce of each
-	// server, keyed by scheme and authority. It is shared by every flow this
-	// receiver serves and bounded to maxDPoPNonceServers entries, evicting the
-	// least recently used.
+	// server, keyed by scheme and authority, bounded to maxDPoPNonceServers
+	// entries (least recently used evicted).
 	dpopNonces     map[string]dpopNonceEntry
 	dpopNonceClock uint64
 }
 
 var (
-	_ types.OID4VCIFinalTransport = (*Oid4vciReceiver)(nil)
-	_ types.OID4VCIFinalSigner    = (*Oid4vciReceiver)(nil)
-	_ profile.Carrier             = (*Oid4vciReceiver)(nil)
+	_ types.Receiver         = (*Oid4vciReceiver)(nil)
+	_ types.OID4VCITransport = (*Oid4vciReceiver)(nil)
+	_ types.Draft13Transport = (*Oid4vciReceiver)(nil)
+	_ types.HTTPSchemePolicy = (*Oid4vciReceiver)(nil)
+	_ profile.Carrier        = (*Oid4vciReceiver)(nil)
 )
 
 // ProtocolProfile reports the normalized OID4VCI profile this receiver enforces.
@@ -100,30 +95,11 @@ func (o *Oid4vciReceiver) requireHAIPTransport(normalized profile.Profile) error
 	return nil
 }
 
-// ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered with a
-// redirect. No OpenID4VCI endpoint is defined to redirect, and following one is
-// never safe: a 307 or 308 replays the request body together with the
-// Authorization, DPoP and OAuth-Client-Attestation headers against an origin the
-// response chose, and a redirected metadata document substitutes the Credential
-// Issuer's identity for another. The root wallet package cannot be imported from
-// a plugin, so it declares its own alias of this sentinel.
+// ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered with
+// a redirect. No OpenID4VCI endpoint is defined to redirect, and following one
+// would replay the body and the Authorization, DPoP and client attestation
+// headers to an origin the response chose.
 var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
-
-func rejectOID4VCIRedirect(req *http.Request, _ []*http.Request) error {
-	return fmt.Errorf("OID4VCI endpoint redirected to %s: %w", req.URL.Redacted(), ErrHTTPRedirectNotAllowed)
-}
-
-// NoRedirectClient returns a shallow copy of client whose CheckRedirect refuses
-// every 3xx with ErrHTTPRedirectNotAllowed. The caller's *http.Client is not
-// mutated. A nil client yields a client with a 15 second timeout.
-func NoRedirectClient(client *http.Client) *http.Client {
-	if client == nil {
-		return &http.Client{Timeout: 15 * time.Second, CheckRedirect: rejectOID4VCIRedirect}
-	}
-	noRedirect := *client
-	noRedirect.CheckRedirect = rejectOID4VCIRedirect
-	return &noRedirect
-}
 
 // OID4VCICredentialFormatToSerializationFlavor maps OID4VCI credential format
 // identifiers to wallet serialization flavors. SD-JWT VC is "dc+sd-jwt" in

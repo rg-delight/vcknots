@@ -33,7 +33,7 @@ type exchange struct {
 	accessToken *types.CredentialIssuanceAccessToken
 	// dpop builds the DPoP proof for the nonce the receiver holds for the
 	// server. nil, or an empty proof, sends no DPoP header.
-	dpop DPoPProofFactory
+	dpop types.DPoPProofFactory
 	// limit bounds the response body; zero means httpfetch.DefaultBodyLimit.
 	limit int64
 }
@@ -66,7 +66,7 @@ func (r *exchangeResponse) statusError() *httpStatusError {
 //   - it supplied a DPoP-Nonce other than the one the proof carried.
 //
 // No other refusal is resent: invalid_grant, invalid_proof, invalid_nonce
-// (whose c_nonce refresh is postCredentialEndpointWithNonceRetry's job),
+// (whose c_nonce refresh is RequestCredential's job),
 // issuance_pending and the rest reach the caller from the first response.
 func (o *Oid4vciReceiver) do(ctx context.Context, ex exchange) (*exchangeResponse, error) {
 	if err := o.requireEndpointScheme(ex.url); err != nil {

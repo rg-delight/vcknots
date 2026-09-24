@@ -14,10 +14,9 @@ import (
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
-	"github.com/trustknots/vcknots/wallet/receiver/oid4vcisign"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -90,7 +89,7 @@ func TestCredentialEndpointError_NonJSONKeepsStatus(t *testing.T) {
 
 // §8.3.1 / §8.3.1.2: on invalid_nonce the wallet fetches a fresh c_nonce and
 // retries exactly once, rebuilding the proof with the new nonce.
-func TestPostCredentialEndpointWithNonceRetry_Success(t *testing.T) {
+func TestRequestCredentialNonceRetry_Success(t *testing.T) {
 	var credentialCalls int
 	var buildNonces []string
 	nonceCalls := 0
@@ -115,25 +114,22 @@ func TestPostCredentialEndpointWithNonceRetry_Success(t *testing.T) {
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	response, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
-		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
 			buildNonces = append(buildNonces, cNonce)
 			return []byte(`{"proof":"` + cNonce + `"}`), "application/json", nil
 		},
+		&nonceEndpoint,
 		noopProofFactory,
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
+		t.Fatalf("RequestCredential() error = %v", err)
 	}
 	if string(response.Body) != `{"credential":"credential-jwt"}`+"\n" {
 		t.Fatalf("response body = %q", string(response.Body))
-	}
-	if usedNonce != "fresh-nonce" {
-		t.Fatalf("usedNonce = %q, want fresh-nonce", usedNonce)
 	}
 	if nonceCalls != 1 {
 		t.Fatalf("nonce endpoint calls = %d, want 1", nonceCalls)
@@ -146,7 +142,7 @@ func TestPostCredentialEndpointWithNonceRetry_Success(t *testing.T) {
 	}
 }
 
-func TestPostCredentialEndpointWithNonceRetry_SecondInvalidNonceStops(t *testing.T) {
+func TestRequestCredentialNonceRetry_SecondInvalidNonceStops(t *testing.T) {
 	credentialCalls := 0
 	nonceCalls := 0
 	buildCalls := 0
@@ -167,15 +163,15 @@ func TestPostCredentialEndpointWithNonceRetry_SecondInvalidNonceStops(t *testing
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
-		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
 			buildCalls++
 			return []byte("{}"), "application/json", nil
 		},
+		&nonceEndpoint,
 		noopProofFactory,
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
@@ -192,7 +188,7 @@ func TestPostCredentialEndpointWithNonceRetry_SecondInvalidNonceStops(t *testing
 	}
 }
 
-func TestPostCredentialEndpointWithNonceRetry_NoNonceEndpoint(t *testing.T) {
+func TestRequestCredentialNonceRetry_NoNonceEndpoint(t *testing.T) {
 	credentialCalls := 0
 	buildCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -202,15 +198,15 @@ func TestPostCredentialEndpointWithNonceRetry_NoNonceEndpoint(t *testing.T) {
 	defer server.Close()
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
-		nil,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
 			buildCalls++
 			return []byte("{}"), "application/json", nil
 		},
+		nil,
 		noopProofFactory,
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
@@ -218,9 +214,6 @@ func TestPostCredentialEndpointWithNonceRetry_NoNonceEndpoint(t *testing.T) {
 	}
 	if credentialCalls != 1 || buildCalls != 1 {
 		t.Fatalf("credential calls = %d, build calls = %d; want 1 and 1", credentialCalls, buildCalls)
-	}
-	if usedNonce != "initial-nonce" {
-		t.Fatalf("usedNonce = %q, want initial-nonce", usedNonce)
 	}
 }
 
@@ -392,7 +385,7 @@ func TestOid4vciReceiver_DecodeCredentialResponseZip(t *testing.T) {
 	}
 
 	receiver := &Oid4vciReceiver{}
-	decoded, err := receiver.DecodeCredentialResponse([]byte(serialized), "application/jwt", recipient)
+	decoded, err := receiver.DecodeCredentialResponse([]byte(serialized), "application/jwt", recipient, false)
 	if err != nil {
 		t.Fatalf("DecodeCredentialResponse() error = %v (zip must be inflated by go-jose)", err)
 	}
@@ -429,7 +422,7 @@ func TestOid4vciReceiver_DecodeCredentialResponseRSA(t *testing.T) {
 	}
 
 	receiver := &Oid4vciReceiver{}
-	decoded, err := receiver.DecodeCredentialResponse([]byte(serialized), "application/jwt", recipient)
+	decoded, err := receiver.DecodeCredentialResponse([]byte(serialized), "application/jwt", recipient, false)
 	if err != nil {
 		t.Fatalf("DecodeCredentialResponse() error = %v (an RSA response key must be decryptable)", err)
 	}
@@ -437,7 +430,7 @@ func TestOid4vciReceiver_DecodeCredentialResponseRSA(t *testing.T) {
 		t.Fatalf("decoded response = %#v", decoded)
 	}
 
-	for _, alg := range supportedJWEKeyAlgorithms() {
+	for _, alg := range oid4vcijwe.KeyAlgorithms() {
 		if alg == jose.RSA1_5 {
 			t.Fatal("RSA1_5 must never be accepted for response decryption")
 		}
@@ -520,99 +513,11 @@ func TestEncodeCredentialRequestFailsWhenRequestEncryptionUnavailable(t *testing
 
 func decryptCompactJWE(t *testing.T, compact string, key *ecdsa.PrivateKey) ([]byte, error) {
 	t.Helper()
-	jwe, err := jose.ParseEncrypted(compact, supportedJWEKeyAlgorithms(), supportedJWEContentEncryptions())
+	jwe, err := jose.ParseEncrypted(compact, oid4vcijwe.KeyAlgorithms(), oid4vcijwe.ContentEncryptions())
 	if err != nil {
 		return nil, err
 	}
 	return jwe.Decrypt(key)
-}
-
-// §12.2.4.1 makes proof_signing_alg_values_supported "REQUIRED ... The Wallet
-// uses one of them to sign the proof", and §8.2.1.1 requires the proof's alg
-// header to match one of the listed values.
-func TestCredentialProofUsesIssuerAdvertisedAlgorithm(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The key states no alg of its own, which is where the previous ES256
-	// default produced a proof this key cannot even sign.
-	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Use: "sig"}
-
-	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{
-		Audience:         "https://issuer.example",
-		Nonce:            "c-nonce-1",
-		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES384},
-	})
-	if err != nil {
-		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
-	}
-
-	parsed, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES384})
-	if err != nil {
-		t.Fatalf("failed to parse proof: %v", err)
-	}
-	if parsed.Headers[0].Algorithm != string(jose.ES384) {
-		t.Fatalf("proof alg = %q, want ES384", parsed.Headers[0].Algorithm)
-	}
-	if parsed.Headers[0].JSONWebKey == nil || parsed.Headers[0].JSONWebKey.Algorithm != string(jose.ES384) {
-		t.Fatalf("proof jwk header = %#v", parsed.Headers[0].JSONWebKey)
-	}
-	var claims map[string]any
-	if err := parsed.Claims(privateKey.Public(), &claims); err != nil {
-		t.Fatalf("failed to verify proof: %v", err)
-	}
-	if claims["aud"] != "https://issuer.example" || claims["nonce"] != "c-nonce-1" {
-		t.Fatalf("proof claims = %#v", claims)
-	}
-}
-
-func TestCredentialProofFailsWhenNoSharedAlgorithm(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Algorithm: string(jose.ES256), Use: "sig"}
-
-	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{
-		Audience:         "https://issuer.example",
-		SigningAlgValues: []jose.SignatureAlgorithm{jose.ES384, jose.EdDSA},
-	})
-	if err == nil {
-		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() = %q, want an error", proof)
-	}
-	if !errors.Is(err, ErrProofAlgorithmNotSupported) {
-		t.Fatalf("errors.Is(ErrProofAlgorithmNotSupported) = false, err = %v", err)
-	}
-
-	if _, err := oid4vcisign.SelectProofSigningAlgorithm(key, []jose.SignatureAlgorithm{jose.ES256, jose.ES384}); err != nil {
-		t.Fatalf("a listed key algorithm must be kept: %v", err)
-	}
-}
-
-// An issuer that publishes no proof_signing_alg_values_supported states no
-// constraint, and the key's own algorithm is used.
-func TestCredentialProofUnconstrainedWhenIssuerListsNone(t *testing.T) {
-	receiver := &Oid4vciReceiver{}
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := jose.JSONWebKey{Key: privateKey, KeyID: "holder-1", Algorithm: string(jose.ES256), Use: "sig"}
-
-	proof, err := receiver.CreateCredentialRequestJWTProofWithOptions(key, ProofOptions{Audience: "https://issuer.example"})
-	if err != nil {
-		t.Fatalf("CreateCredentialRequestJWTProofWithOptions() error = %v", err)
-	}
-	parsed, err := jwt.ParseSigned(proof, []jose.SignatureAlgorithm{jose.ES256})
-	if err != nil {
-		t.Fatalf("failed to parse proof: %v", err)
-	}
-	if parsed.Headers[0].Algorithm != string(jose.ES256) {
-		t.Fatalf("proof alg = %q, want ES256", parsed.Headers[0].Algorithm)
-	}
 }
 
 // TestEncodeCredentialRequestTakesTheJWEAlgFromTheChosenKey covers Section 10
@@ -682,7 +587,7 @@ func TestEncodeCredentialRequestTakesTheJWEAlgFromTheChosenKey(t *testing.T) {
 			t.Fatalf("JWE kid = %q, want the chosen JWK kid", header.KeyID)
 		}
 		// The issuer must be able to decrypt what the wallet sent.
-		jwe, err := jose.ParseEncrypted(string(body), []jose.KeyAlgorithm{jose.RSA_OAEP_256}, supportedJWEContentEncryptions())
+		jwe, err := jose.ParseEncrypted(string(body), []jose.KeyAlgorithm{jose.RSA_OAEP_256}, oid4vcijwe.ContentEncryptions())
 		if err != nil {
 			t.Fatalf("failed to parse the request JWE: %v", err)
 		}
@@ -810,7 +715,7 @@ func parseCompactJWEHeader(t *testing.T, compact string) jose.Header {
 	jwe, err := jose.ParseEncrypted(
 		compact,
 		[]jose.KeyAlgorithm{jose.ECDH_ES, jose.ECDH_ES_A128KW, jose.ECDH_ES_A192KW, jose.ECDH_ES_A256KW, jose.RSA_OAEP_256},
-		supportedJWEContentEncryptions(),
+		oid4vcijwe.ContentEncryptions(),
 	)
 	if err != nil {
 		t.Fatalf("failed to parse the request JWE: %v", err)
@@ -886,13 +791,12 @@ func TestBearerTokenDPoPChallengeFailsClosed(t *testing.T) {
 			defer server.Close()
 
 			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-			_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(
-				t.Context(),
+			_, err := receiver.RequestCredential(t.Context(),
 				mustURIField(t, server.URL+"/credential"),
 				types.CredentialIssuanceAccessToken{Token: "bearer-access-1", TokenType: "Bearer"},
-				nil,
 				"initial-nonce",
 				func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
+				nil,
 				noopProofFactory,
 			)
 			if !errors.Is(err, ErrDPoPRequired) {
@@ -940,22 +844,19 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, usedNonce, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
-		&nonceEndpoint,
 		"initial-nonce",
 		func(cNonce string) ([]byte, string, error) {
 			buildNonces = append(buildNonces, cNonce)
 			return []byte("{}"), "application/json", nil
 		},
+		&nonceEndpoint,
 		noopProofFactory,
 	)
 	if err != nil {
-		t.Fatalf("PostCredentialEndpointWithNonceRetryForToken() error = %v", err)
-	}
-	if usedNonce != "fresh-nonce" {
-		t.Fatalf("usedNonce = %q, want fresh-nonce", usedNonce)
+		t.Fatalf("RequestCredential() error = %v", err)
 	}
 	if nonceCalls != 1 {
 		t.Fatalf("nonce endpoint calls = %d, want 1", nonceCalls)
@@ -990,12 +891,12 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
-	_, _, err := receiver.PostCredentialEndpointWithNonceRetryForToken(t.Context(),
+	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
-		&nonceEndpoint,
 		"initial-nonce",
 		func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
+		&nonceEndpoint,
 		noopProofFactory,
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
@@ -1009,56 +910,6 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 	}
 }
 
-// ExportDPoPNonces must hand out a copy: a caller carrying the nonces across an
-// interruption cannot mutate the receiver's own store.
-func TestExportDPoPNoncesReturnsCopy(t *testing.T) {
-	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
-	if _, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce")); err != nil {
-		t.Fatalf("FetchNonceResponse() error = %v", err)
-	}
-
-	exported := receiver.ExportDPoPNonces()
-	if len(exported) == 0 {
-		t.Fatal("ExportDPoPNonces() returned no server entries")
-	}
-	for key := range exported {
-		exported[key] = "tampered"
-	}
-	for key, nonce := range receiver.ExportDPoPNonces() {
-		if nonce == "tampered" {
-			t.Fatalf("mutating the exported map changed the receiver store (key %q)", key)
-		}
-	}
-}
-
-// Export then Import carries the RFC 9449 §8.2 nonce store across the process
-// interruption the receiver's in-memory map cannot survive, so the first proof
-// after the resume is already seeded instead of paying a wasted challenge round
-// trip.
-func TestExportImportDPoPNoncesSeedsRetryAfterInterruption(t *testing.T) {
-	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	exporter := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
-	key := newDPoPNonceTestKey(t)
-
-	if _, err := exporter.FetchNonceResponse(t.Context(), mustURIField(t, fixture.server.URL+"/nonce")); err != nil {
-		t.Fatalf("FetchNonceResponse() error = %v", err)
-	}
-	receiver.ImportDPoPNonces(exporter.ExportDPoPNonces())
-
-	postOneCredentialRequest(t, receiver, key, fixture.server.URL+"/credential")
-
-	proofs := fixture.proofs()
-	if len(proofs) != 1 {
-		t.Fatalf("credential requests = %d, want exactly one", len(proofs))
-	}
-	claims := dpopProofClaims(t, proofs[0])
-	if claims["nonce"] != "server-dpop-nonce-1" {
-		t.Fatalf("first proof after import nonce = %#v, want server-dpop-nonce-1", claims["nonce"])
-	}
-}
-
 // ---------------------------------------------------------------------------
 // P2-E G5: the Nonce Response c_nonce is REQUIRED.
 // ---------------------------------------------------------------------------
@@ -1066,7 +917,7 @@ func TestExportImportDPoPNoncesSeedsRetryAfterInterruption(t *testing.T) {
 // OpenID4VCI 1.0 §7.2: "c_nonce: REQUIRED. String containing a challenge to be
 // used when creating a proof of possession of the key." A 2xx Nonce Response
 // that omits it, or returns it empty, fails closed as ErrNonceResponseInvalid.
-func TestFetchNonceResponseRejectsEmptyCNonce(t *testing.T) {
+func TestRequestNonceRejectsEmptyCNonce(t *testing.T) {
 	bodies := map[string]map[string]any{
 		"empty c_nonce":   {"c_nonce": ""},
 		"missing c_nonce": {},
@@ -1079,7 +930,7 @@ func TestFetchNonceResponseRejectsEmptyCNonce(t *testing.T) {
 			defer server.Close()
 
 			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
-			response, err := receiver.FetchNonceResponse(t.Context(), mustURIField(t, server.URL+"/nonce"))
+			response, err := receiver.RequestNonce(t.Context(), mustURIField(t, server.URL+"/nonce"))
 			if !errors.Is(err, types.ErrNonceResponseInvalid) {
 				t.Fatalf("error = %v, want ErrNonceResponseInvalid", err)
 			}

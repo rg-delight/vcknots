@@ -1,13 +1,10 @@
 package wallet
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/go-jose/go-jose/v4"
-	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
+	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -21,12 +18,6 @@ type CredentialResponseDecodeOptions struct {
 	// application/jwt response, and its presence makes a plaintext response an
 	// error: a requested encryption is never downgraded (§8.2).
 	DecryptionKey *jose.JSONWebKey
-	// AllowedKeyAlgorithms restricts the JWE "alg" values accepted while
-	// decrypting. Empty accepts the ECDH-ES family and RSA-OAEP-256.
-	AllowedKeyAlgorithms []jose.KeyAlgorithm
-	// AllowedContentEncryptions restricts the JWE "enc" values accepted while
-	// decrypting. Empty accepts the AES-GCM and AES-CBC-HMAC families.
-	AllowedContentEncryptions []jose.ContentEncryption
 
 	shape credentialResponseShape
 }
@@ -98,46 +89,28 @@ func validateOID4VCIFinalCredentialResponse(r *receiverTypes.CredentialResponse,
 }
 
 // DecodeOID4VCIFinalCredentialResponse decodes an OpenID4VCI 1.0 Credential
-// Response body and validates it as ValidateOID4VCIFinalCredentialResponse
-// does. An application/jwt body is a §10 JWE decrypted with opts.DecryptionKey;
-// anything else is read as plaintext JSON, which is refused when encryption was
-// required or requested.
+// Response body with the receiver plugin's decoder and validates it as
+// ValidateOID4VCIFinalCredentialResponse does.
 //
 // Rejections wrap ErrCredentialResponsePlaintext, ErrCredentialResponseDecrypt,
 // ErrCredentialResponseShape or ErrCredentialResponseMultipleCredentials.
 func DecodeOID4VCIFinalCredentialResponse(body []byte, contentType string, opts CredentialResponseDecodeOptions) (*receiverTypes.CredentialResponse, error) {
-	payload := body
-	encrypted := httpfetch.MediaTypeIs(http.Header{"Content-Type": {contentType}}, "application/jwt")
-	if !encrypted && (opts.RequireEncryption || opts.DecryptionKey != nil) {
-		return nil, fmt.Errorf("%w: issuer returned an unencrypted credential response although response encryption was required", ErrCredentialResponsePlaintext)
+	return decodeCredentialResponse(&receiverOid4vci.Oid4vciReceiver{}, body, contentType, opts)
+}
+
+// decodeCredentialResponse decodes with transport's decoder and applies the
+// shape rules of opts.
+func decodeCredentialResponse(transport receiverTypes.CredentialTransport, body []byte, contentType string, opts CredentialResponseDecodeOptions) (*receiverTypes.CredentialResponse, error) {
+	var decryptionKey any
+	if opts.DecryptionKey != nil {
+		decryptionKey = opts.DecryptionKey.Key
 	}
-	if encrypted {
-		if opts.DecryptionKey == nil {
-			return nil, fmt.Errorf("%w: decryption key is required for encrypted credential response", ErrCredentialResponseDecrypt)
-		}
-		keyAlgorithms := opts.AllowedKeyAlgorithms
-		if len(keyAlgorithms) == 0 {
-			keyAlgorithms = oid4vcijwe.KeyAlgorithms()
-		}
-		contentEncryptions := opts.AllowedContentEncryptions
-		if len(contentEncryptions) == 0 {
-			contentEncryptions = oid4vcijwe.ContentEncryptions()
-		}
-		jwe, err := jose.ParseEncrypted(string(body), keyAlgorithms, contentEncryptions)
-		if err != nil {
-			return nil, fmt.Errorf("%w: failed to parse credential response JWE: %w", ErrCredentialResponseDecrypt, err)
-		}
-		payload, err = jwe.Decrypt(opts.DecryptionKey.Key)
-		if err != nil {
-			return nil, fmt.Errorf("%w: failed to decrypt credential response JWE: %w", ErrCredentialResponseDecrypt, err)
-		}
-	}
-	var response receiverTypes.CredentialResponse
-	if err := json.Unmarshal(payload, &response); err != nil {
-		return nil, fmt.Errorf("%w: failed to parse credential response JSON: %w", ErrCredentialResponseShape, err)
-	}
-	if err := validateOID4VCIFinalCredentialResponse(&response, opts.shape); err != nil {
+	response, err := transport.DecodeCredentialResponse(body, contentType, decryptionKey, opts.RequireEncryption)
+	if err != nil {
 		return nil, err
 	}
-	return &response, nil
+	if err := validateOID4VCIFinalCredentialResponse(response, opts.shape); err != nil {
+		return nil, err
+	}
+	return response, nil
 }

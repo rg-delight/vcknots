@@ -57,37 +57,6 @@ func (o *Oid4vciReceiver) dpopNonceFor(endpointURL url.URL) string {
 	return entry.nonce
 }
 
-// ExportDPoPNonces returns a copy of the per-server DPoP nonces, keyed by
-// scheme and authority, so a caller can carry them across an interruption.
-func (o *Oid4vciReceiver) ExportDPoPNonces() map[string]string {
-	o.dpopNonceMu.Lock()
-	defer o.dpopNonceMu.Unlock()
-	exported := make(map[string]string, len(o.dpopNonces))
-	for server, entry := range o.dpopNonces {
-		exported[server] = entry.nonce
-	}
-	return exported
-}
-
-// ImportDPoPNonces restores nonces ExportDPoPNonces produced. A server the
-// receiver already holds a nonce for keeps it: that nonce was observed by this
-// receiver, while an imported one may be stale or come from another flow.
-// Blank values are ignored.
-func (o *Oid4vciReceiver) ImportDPoPNonces(nonces map[string]string) {
-	o.dpopNonceMu.Lock()
-	defer o.dpopNonceMu.Unlock()
-	for server, nonce := range nonces {
-		nonce = strings.TrimSpace(nonce)
-		if nonce == "" {
-			continue
-		}
-		if _, known := o.dpopNonces[server]; known {
-			continue
-		}
-		o.storeDPoPNonceLocked(server, nonce)
-	}
-}
-
 // storeDPoPNonceLocked stores a nonce as the most recently used entry and
 // evicts the least recently used one beyond maxDPoPNonceServers.
 func (o *Oid4vciReceiver) storeDPoPNonceLocked(server, nonce string) {
@@ -108,12 +77,8 @@ func (o *Oid4vciReceiver) storeDPoPNonceLocked(server, nonce string) {
 	delete(o.dpopNonces, oldest)
 }
 
-// requireDPoPTokenType enforces HAIP §4 "Sender-constrained access token: MUST
-// support DPoP" on a parsed token response. A token_type other than DPoP
-// (case-insensitive) cannot bind the access token to the wallet's key, so it is
-// reported as ErrDPoPRequired: under HAIP a plain RFC 6750 Bearer token is not
-// a weaker token the wallet may still present, it is the absence of the
-// sender-constraint the profile requires.
+// requireDPoPTokenType applies HAIP Section 4 (sender-constrained access
+// tokens): under HAIP a token_type other than DPoP is ErrDPoPRequired.
 func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
 	if normalized.IsHAIP() && !strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
 		return fmt.Errorf(
@@ -123,14 +88,9 @@ func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
 	return nil
 }
 
-// RequireBearerTokenType enforces the Final 1.0 default for the anonymous
-// Pre-Authorized Code path: the token response must carry a plain Bearer access
-// token. OpenID4VCI 1.0 §6.1 makes token_type REQUIRED ("The type of the access
-// token"), and RFC 6749 §7.1 defines it as case insensitive, so "Bearer",
-// "bearer" and "BEARER" are the same value. A DPoP-bound token (RFC 9449 §7.1)
-// is refused with ErrDPoPRequired because an anonymous client holds no key to
-// build the proof that scheme requires; any other value is an unsupported
-// token_type rather than a silent fallback to Bearer.
+// RequireBearerTokenType accepts only a Bearer token_type (compared case
+// insensitively, RFC 6749 Section 7.1). A DPoP token is ErrDPoPRequired: a
+// client without a DPoP key cannot present it.
 func RequireBearerTokenType(t *types.CredentialIssuanceAccessToken) error {
 	if t == nil {
 		return fmt.Errorf("token response is required")
@@ -145,27 +105,18 @@ func RequireBearerTokenType(t *types.CredentialIssuanceAccessToken) error {
 	}
 }
 
-type DPoPProofFactory = types.DPoPProofFactory
-
-// ErrDPoPRequired reports that a Credential, Deferred Credential or Notification
-// response demanded a DPoP proof (an RFC 9449 §8 DPoP-Nonce header, or a
-// WWW-Authenticate challenge naming the DPoP scheme of §7.1) while the access
-// token was presented with a scheme that has no key-bound proof to offer. It is
-// the fail-closed answer for a client that holds no DPoP key: continuing would
-// either replay the request without the proof the resource server asked for or
-// invent one the wallet cannot sign.
+// ErrDPoPRequired reports that a DPoP proof is required (RFC 9449) and the
+// wallet cannot send one: a Bearer-token request answered with a DPoP
+// challenge, a DPoP-bound token without a proof factory, or a non-DPoP token
+// under HAIP.
 var ErrDPoPRequired = common.NewCodedError("dpop_required", "credential endpoint requires DPoP")
 
 // dpopAuthorizationScheme is the RFC 9449 Section 7.1 authentication scheme for
 // a DPoP-bound access token.
 const dpopAuthorizationScheme = "DPoP"
 
-// authorizationScheme maps a token response's token_type to the authentication
-// scheme its access token is sent with. token_type is compared case
-// insensitively, as RFC 6749 Section 7.1 defines it. Anything that is not DPoP
-// takes the Bearer scheme of RFC 6750 Section 2.1: those are the only two
-// schemes this wallet holds credentials for, so echoing back an unrecognised
-// token_type would only build a header no issuer could act on.
+// authorizationScheme returns the Authorization scheme for token_type: DPoP
+// (RFC 9449 Section 7.1) for a DPoP token, Bearer (RFC 6750) otherwise.
 func authorizationScheme(tokenType string) string {
 	if strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
 		return dpopAuthorizationScheme

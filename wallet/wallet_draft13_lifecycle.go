@@ -24,7 +24,7 @@ import (
 // draft13DeferredPoll is one deferred polling run: the endpoint, what to
 // present to it, and how long to keep asking.
 type draft13DeferredPoll struct {
-	transport     OID4VCIDraft13Transport
+	transport     receiverTypes.Draft13Transport
 	endpoint      common.URIField
 	accessToken   receiverTypes.CredentialIssuanceAccessToken
 	transactionID string
@@ -62,7 +62,7 @@ func pollDraft13Deferred(ctx context.Context, poll draft13DeferredPoll) (*receiv
 		if err := requireOID4VCIContext(ctx, "the deferred credential request"); err != nil {
 			return nil, err
 		}
-		response, err := poll.transport.RequestOID4VCIDraft13DeferredCredential(ctx, poll.endpoint, poll.accessToken, poll.transactionID, poll.proofFactory)
+		response, err := poll.transport.RequestDraft13DeferredCredential(ctx, poll.endpoint, poll.accessToken, poll.transactionID, poll.proofFactory)
 		if err == nil {
 			return response, nil
 		}
@@ -223,7 +223,7 @@ func (w *Wallet) NotifyOID4VCIDraft13Credential(ctx context.Context, req OID4VCI
 	if err != nil {
 		return err
 	}
-	return transport.SendOID4VCIDraft13Notification(ctx, endpoint, *req.AccessToken, receiverOid4vci.Draft13NotificationRequest{
+	return transport.SendDraft13Notification(ctx, endpoint, *req.AccessToken, receiverOid4vci.Draft13NotificationRequest{
 		NotificationID:   req.NotificationID,
 		Event:            req.Event,
 		EventDescription: req.EventDescription,

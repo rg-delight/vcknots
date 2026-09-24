@@ -127,26 +127,12 @@ var (
 // from the acceptance sentinels above because they describe the transport and
 // shape of the §8.2 Credential Response, before any credential is parsed.
 var (
-	// ErrCredentialResponsePlaintext reports that the Credential Endpoint
-	// answered with an application/json body while the wallet had required or
-	// requested an encrypted response. §8.2: "Credential Request encryption
-	// MUST be used if the credential_response_encryption parameter is
-	// included, to prevent it being substituted by an attacker." The response
-	// is refused rather than downgraded.
-	ErrCredentialResponsePlaintext = common.NewCodedError("credential_response_plaintext", "credential response was not encrypted")
-	// ErrCredentialResponseDecrypt reports that the Credential Response
-	// carried an application/jwt JWE (§8.2 / §10) the wallet could not turn
-	// back into plaintext: the JWE did not parse under the accepted algorithms,
-	// the configured DecryptionKey was missing, or decryption itself failed.
-	ErrCredentialResponseDecrypt = common.NewCodedError("credential_response_decrypt_failed", "credential response JWE could not be decrypted")
-	// ErrCredentialResponseShape reports that a decoded Credential Response
-	// does not match the OpenID4VCI 1.0 Final shape: it is nil, carries the
-	// removed draft singular credential member, has a credentials element that
-	// is not an object, carries transaction_id together with credential
-	// content, carries more than one credential, or carries neither
-	// credentials nor a transaction_id. §8.2 requires the credentials array to
-	// hold objects and forbids it alongside transaction_id.
-	ErrCredentialResponseShape = common.NewCodedError("credential_response_shape_invalid", "credential response has an invalid shape")
+	// ErrCredentialResponsePlaintext, ErrCredentialResponseDecrypt and
+	// ErrCredentialResponseShape are the receiver's Credential Response
+	// decoding errors.
+	ErrCredentialResponsePlaintext = receiverTypes.ErrCredentialResponsePlaintext
+	ErrCredentialResponseDecrypt   = receiverTypes.ErrCredentialResponseDecrypt
+	ErrCredentialResponseShape     = receiverTypes.ErrCredentialResponseShape
 	// ErrCredentialResponseMultipleCredentials reports a §8.2 Credential
 	// Response carrying more than one credential to an issuance that asked for
 	// one. It is separate from ErrCredentialResponseShape because the response

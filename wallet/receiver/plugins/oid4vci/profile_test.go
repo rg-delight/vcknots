@@ -53,32 +53,27 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 
 	t.Run("authorization code exchange", func(t *testing.T) {
 		bearer := newTokenServer(t, "Bearer")
-		request := types.AuthorizationCodeTokenRequest{
-			Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
+		request := types.TokenRequest{
+			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
 		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
-		_, err := final.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), bearer, request, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("proof"))
+		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
 		require.NoError(t, err)
 
 		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
-		_, err = haip.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(), bearer, request, fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), fixedProof("proof"))
+		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
 	t.Run("authorization code DPoP retry exchange", func(t *testing.T) {
 		bearer := newTokenServer(t, "Bearer")
-		request := types.AuthorizationCodeTokenRequest{
-			Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
+		request := types.TokenRequest{
+			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
 		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
-		_, err := haip.ExchangeAuthorizationCodeWithDpopAndAttestationRetry(t.Context(),
-			bearer,
-			request,
-			func() (types.OAuthClientAttestationHeaders, error) {
-				return types.OAuthClientAttestationHeaders{}, nil
-			},
-			func(string) (string, error) { return "proof", nil },
-		)
+		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+			return types.OAuthClientAttestationHeaders{}, nil
+		}, DPoP: func(string) (string, error) { return "proof", nil }})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
@@ -124,9 +119,10 @@ func TestOid4vciReceiver_ProfileCredentialConfiguration(t *testing.T) {
 	})
 }
 
-// TestOid4vciReceiver_ProfileIssuerMetadataNonce covers HAIP §4.1
-// (nonce_endpoint when cryptographic_binding_methods_supported is advertised).
-func TestOid4vciReceiver_ProfileIssuerMetadataNonce(t *testing.T) {
+// TestDiscoverCredentialIssuerAppliesHAIPNonceEndpointRule covers HAIP
+// Section 4.1: issuer metadata that advertises
+// cryptographic_binding_methods_supported must name a nonce_endpoint.
+func TestDiscoverCredentialIssuerAppliesHAIPNonceEndpointRule(t *testing.T) {
 	bindingMethods := []string{"jwk", "cose_key"}
 	withBinding := types.CredentialConfiguration{
 		Format:                               "dc+sd-jwt",
@@ -135,35 +131,37 @@ func TestOid4vciReceiver_ProfileIssuerMetadataNonce(t *testing.T) {
 	}
 	withoutBinding := types.CredentialConfiguration{Format: "dc+sd-jwt", Scope: "pid"}
 
+	discover := func(t *testing.T, p profile.Profile, config types.CredentialConfiguration, withNonceEndpoint bool) error {
+		t.Helper()
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			base := "https://" + r.Host
+			metadata := map[string]any{
+				"credential_issuer":                   base,
+				"credential_endpoint":                 base + "/credential",
+				"credential_configurations_supported": map[string]any{"pid": config},
+			}
+			if withNonceEndpoint {
+				metadata["nonce_endpoint"] = base + "/nonce"
+			}
+			mockserver.JSONResponse(w, http.StatusOK, metadata)
+		}))
+		t.Cleanup(server.Close)
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Profile: p}
+		_, err := receiver.DiscoverCredentialIssuer(t.Context(), common.URIField(*mustParseURL(t, server.URL)))
+		return err
+	}
+
 	t.Run("Final accepts metadata without nonce_endpoint", func(t *testing.T) {
-		final := &Oid4vciReceiver{Profile: profile.Final}
-		require.NoError(t, final.ValidateIssuerMetadataForProfile(&types.CredentialIssuerMetadata{
-			CredentialConfigurationSupported: map[string]types.CredentialConfiguration{"pid": withBinding},
-		}))
+		require.NoError(t, discover(t, profile.Final, withBinding, false))
 	})
-
-	t.Run("HAIP rejects when a binding method has no nonce endpoint", func(t *testing.T) {
-		haip := &Oid4vciReceiver{Profile: profile.HAIP}
-		err := haip.ValidateIssuerMetadataForProfile(&types.CredentialIssuerMetadata{
-			CredentialConfigurationSupported: map[string]types.CredentialConfiguration{"pid": withBinding},
-		})
-		require.ErrorContains(t, err, "requires nonce_endpoint")
+	t.Run("HAIP rejects a binding method without nonce_endpoint", func(t *testing.T) {
+		require.ErrorContains(t, discover(t, profile.HAIP, withBinding, false), "requires nonce_endpoint")
 	})
-
 	t.Run("HAIP accepts once nonce_endpoint is present", func(t *testing.T) {
-		nonce := common.URIField(*mustParseURL(t, "https://issuer.example/nonce"))
-		haip := &Oid4vciReceiver{Profile: profile.HAIP}
-		require.NoError(t, haip.ValidateIssuerMetadataForProfile(&types.CredentialIssuerMetadata{
-			NonceEndpoint:                    &nonce,
-			CredentialConfigurationSupported: map[string]types.CredentialConfiguration{"pid": withBinding},
-		}))
+		require.NoError(t, discover(t, profile.HAIP, withBinding, true))
 	})
-
 	t.Run("HAIP accepts configurations without binding methods", func(t *testing.T) {
-		haip := &Oid4vciReceiver{Profile: profile.HAIP}
-		require.NoError(t, haip.ValidateIssuerMetadataForProfile(&types.CredentialIssuerMetadata{
-			CredentialConfigurationSupported: map[string]types.CredentialConfiguration{"pid": withoutBinding},
-		}))
+		require.NoError(t, discover(t, profile.HAIP, withoutBinding, false))
 	})
 }
 

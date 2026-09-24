@@ -83,18 +83,28 @@ func (d *ReceivingDispatcher) Plugins() []types.Receiver {
 	return plugins
 }
 
-// OID4VCIFinalTransport returns the optional Final 1.0 / HAIP transport
-// capability of a receiver plugin. A plugin that only speaks HTTP satisfies it;
-// the signing primitives are supplied separately through the wallet
-// configuration.
-func (d *ReceivingDispatcher) OID4VCIFinalTransport(receivingType types.SupportedReceivingTypes) (types.OID4VCIFinalTransport, error) {
+// OID4VCITransport returns the OpenID4VCI 1.0 transport of the plugin
+// registered for receivingType.
+func (d *ReceivingDispatcher) OID4VCITransport(receivingType types.SupportedReceivingTypes) (types.OID4VCITransport, error) {
+	return capability[types.OID4VCITransport](d, receivingType, "get_oid4vci_transport")
+}
+
+// Draft13Transport returns the OpenID4VCI Draft 13 transport of the plugin
+// registered for receivingType.
+func (d *ReceivingDispatcher) Draft13Transport(receivingType types.SupportedReceivingTypes) (types.Draft13Transport, error) {
+	return capability[types.Draft13Transport](d, receivingType, "get_draft13_transport")
+}
+
+// capability asserts the plugin registered for receivingType to T.
+func capability[T any](d *ReceivingDispatcher, receivingType types.SupportedReceivingTypes, op string) (T, error) {
+	var zero T
 	plugin, err := d.getPlugin(receivingType)
 	if err != nil {
-		return nil, err
+		return zero, err
 	}
-	transport, ok := plugin.(types.OID4VCIFinalTransport)
+	transport, ok := plugin.(T)
 	if !ok {
-		return nil, types.NewReceiverError(receivingType, "", "get_oid4vci_final_transport", types.ErrUnsupportedProtocol)
+		return zero, types.NewReceiverError(receivingType, "", op, types.ErrUnsupportedProtocol)
 	}
 	return transport, nil
 }

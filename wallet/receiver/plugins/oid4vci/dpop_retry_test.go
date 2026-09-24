@@ -65,8 +65,7 @@ func TestTokenErrorWithDPoPNonceIsNotResent(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	proof := &countingProof{}
 
-	_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL+"/token"),
-		types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1", TxCode: "1234"}, nil, proof.factory)
+	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1", TxCode: "1234"}, types.ClientAuthentication{DPoP: proof.factory})
 
 	requireEndpointError(t, err, StageToken, http.StatusBadRequest, "invalid_grant")
 	if server.count() != 1 {
@@ -114,7 +113,7 @@ func TestDraft13CredentialErrorWithDPoPNonceIsNotResent(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	proof := &countingProof{}
 
-	_, err := receiver.RequestOID4VCIDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
+	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
 
 	var endpointError *Draft13CredentialEndpointError
 	if !errors.As(err, &endpointError) || endpointError.Code != "invalid_request" {
@@ -136,8 +135,7 @@ func TestUseDPoPNonceIsResentOnceWithTheFreshNonce(t *testing.T) {
 		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 		proof := &countingProof{}
 
-		_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL+"/token"),
-			types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, nil, proof.factory)
+		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{DPoP: proof.factory})
 
 		requireEndpointError(t, err, StageToken, http.StatusBadRequest, "use_dpop_nonce")
 		if server.count() != 2 || strings.Join(proof.nonces, ",") != ",as-nonce" {
@@ -175,8 +173,7 @@ func TestUseDPoPNonceIsNotResentWhenNothingWouldChange(t *testing.T) {
 		})
 		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 
-		_, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), mustURIField(t, server.URL+"/token"),
-			types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, nil, nil)
+		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{})
 
 		requireEndpointError(t, err, StageToken, http.StatusBadRequest, "use_dpop_nonce")
 		if server.count() != 1 {
@@ -216,7 +213,7 @@ func TestTokenEndpointIsUsedVerbatim(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
 	endpoint := mustURIField(t, server.URL+"/token/")
 
-	if _, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, nil, nil); err != nil {
+	if _, err := receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "pre-1", ""); err != nil {
@@ -224,8 +221,5 @@ func TestTokenEndpointIsUsedVerbatim(t *testing.T) {
 	}
 	if strings.Join(paths, ",") != "/token/,/token/" {
 		t.Fatalf("requested paths = %q, want the published /token/", paths)
-	}
-	if got := types.ResolveTokenEndpointURL(endpoint); got != server.URL+"/token/" {
-		t.Fatalf("ResolveTokenEndpointURL() = %q, want the published URL", got)
 	}
 }

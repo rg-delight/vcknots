@@ -154,7 +154,7 @@ func requireOfferedCredentialConfiguration(issuerMetadata *receiverTypes.Credent
 // the §5 authorization stage, which signs nothing with a holder key.
 func (w *Wallet) newOID4VCIFinalFlow(
 	req OID4VCIFinalReceiveRequest,
-	finalReceiver receiverTypes.OID4VCIFinalTransport,
+	finalReceiver receiverTypes.OID4VCITransport,
 	discovery *oid4vciDiscovery,
 	credentialConfigurationID string,
 	holderKeysRequired bool,
@@ -186,7 +186,7 @@ func (w *Wallet) newOID4VCIFinalFlow(
 		if _, ok := resolveClientAuthMethod(w.clientAuth, authorizationServerMetadata); !ok {
 			return nil, errNoUsableClientAuthMethod
 		}
-		tokenEndpointURL := receiverTypes.ResolveTokenEndpointURL(*authorizationServerMetadata.TokenEndpoint)
+		tokenEndpointURL := authorizationServerMetadata.TokenEndpoint.String()
 		clientAssertionAudience := resolveClientAssertionAudience(w.clientAuth, authorizationServerMetadata, tokenEndpointURL)
 		flow.usePrivateKeyJwt = true
 		flow.generateClientAssertion = func() (string, error) {
