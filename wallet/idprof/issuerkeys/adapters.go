@@ -17,7 +17,7 @@ import (
 
 // This file adapts the ladder to the two hooks the rest of the library asks an
 // integrator for: the credential acceptor's issuer key resolution
-// (wallet.CredentialAcceptancePolicy.ResolveIssuerKeys) and the Token Status
+// (acceptance.Policy.ResolveIssuerKeys) and the Token Status
 // List checker's (statuslist.Checker.ResolveIssuerKeys). Both hooks receive the
 // issuer and the protected header of a JWT that has not been verified yet, and
 // both want the candidate public keys back; neither has room for the
@@ -53,7 +53,7 @@ type KeyLookup struct {
 // CallerVerifiesX5C tells the lookup that the caller walks an x5c chain itself
 // - the credential acceptor does, against IssuerX509 - and asks for keys only
 // when the credential carries none or its chain reached no configured anchor
-// (CredentialAcceptancePolicy.ResolveIssuerKeysWhenX5CUntrusted). A resolution
+// (acceptance.Policy.ResolveIssuerKeysWhenX5CUntrusted). A resolution
 // for a credential that carries x5c then reports the x5c rung as "certificate
 // chain is not trusted" instead of claiming the chain as usable. It returns l
 // for chaining.
@@ -72,7 +72,7 @@ func (r *Resolver) NewKeyLookup(ctx context.Context, template Request) *KeyLooku
 }
 
 // Keys resolves the candidate public keys of a credential signed by issuer
-// under header. Its signature is wallet.CredentialAcceptancePolicy's
+// under header. Its signature is acceptance.Policy's
 // ResolveIssuerKeys, so a caller passes the method value lookup.Keys.
 func (l *KeyLookup) Keys(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
 	return l.KeysFromClaims(issuer, header, l.template.Payload)

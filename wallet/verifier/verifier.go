@@ -50,7 +50,7 @@ func NewVerificationDispatcher(options ...func(*VerificationDispatcher) error) (
 //
 // Registering a plugin makes an algorithm verifiable, not acceptable. The
 // credential acceptance path and Wallet.VerifyCredential apply their own
-// algorithm policy (CredentialAcceptancePolicy.SigningAlgorithms, ES256 by
+// algorithm policy (acceptance.Policy.SigningAlgorithms, ES256 by
 // default); a caller of VerificationDispatcher.Verify gets every registered
 // algorithm.
 func WithDefaultConfig() func(*VerificationDispatcher) error {
