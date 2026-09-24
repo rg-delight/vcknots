@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1293,32 +1294,48 @@ func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 
 // x509_san_dns branch tests
 func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFailures(t *testing.T) {
-	// Generate a self-signed certificate with SAN DNS name
+	// A CA-issued leaf certificate with the SAN DNS name; the CA is the anchor.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate CA key: %v", err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test Verifier CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("failed to create CA certificate: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("failed to parse CA certificate: %v", err)
+	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		DNSNames:              []string{"verifier.example.org"},
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "verifier.example.org"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		DNSNames:     []string{"verifier.example.org"},
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &priv.PublicKey, caKey)
 	if err != nil {
 		t.Fatalf("failed to create certificate: %v", err)
 	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("failed to parse certificate: %v", err)
-	}
 
-	// Trust pool containing our self-signed cert
 	pool := x509.NewCertPool()
-	pool.AddCert(cert)
+	pool.AddCert(caCert)
 
 	// Build JWT with x5c header and claims for x509_san_dns
 	claims := map[string]any{

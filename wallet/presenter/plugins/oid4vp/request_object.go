@@ -193,9 +193,10 @@ func (b *requestBuilder) withRequestObject(obj string) *requestBuilder {
 // requestObjectValidationOptions resolves the effective trust, time and
 // signing policy from the builder's explicit validation options and the legacy
 // X509TrustChainRoots, rejecting a configuration that specifies trust roots in
-// both places.
+// both places. X509TrustChainRoots alone keeps its upstream revocation meaning:
+// a certificate that advertises no revocation mechanism is accepted.
 func (b *requestBuilder) requestObjectValidationOptions() (RequestObjectValidationOptions, error) {
-	options := RequestObjectValidationOptions{RootCAs: b.x509TrustChainRoots}
+	options := RequestObjectValidationOptions{RootCAs: b.x509TrustChainRoots, AllowUnadvertisedRevocation: true}
 	if b.requestObjectValidation != nil {
 		options = *b.requestObjectValidation
 		if b.x509TrustChainRoots != nil && (options.RootCAs != nil || len(options.TrustAnchors) != 0) {

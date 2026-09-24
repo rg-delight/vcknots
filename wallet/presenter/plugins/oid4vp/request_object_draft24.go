@@ -13,9 +13,8 @@ import (
 )
 
 // withDraft24RequestObject authenticates a Draft24 Request Object and loads
-// its claims. X.509 Request Objects go through authenticateX509RequestObject,
-// except x509_san_dns with only X509TrustChainRoots configured and the
-// InsecureSkipX509Verify test escape.
+// its claims. X.509 Request Objects go through authenticateX509RequestObject
+// unless InsecureSkipX509Verify is set.
 func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 	if b.errValidation != nil {
 		return b
@@ -87,11 +86,10 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// The shared X.509 path applies when the caller configured
-	// RequestObjectValidationOptions, and always to x509_hash, whose thumbprint
-	// names a certificate without saying it is trusted. Only x509_san_dns
-	// without options keeps the X509TrustChainRoots check below.
-	useShared := b.requestObjectValidation != nil || (clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509Hash)
+	// Every X.509 Client Identifier is authenticated by the shared X.509 path
+	// (chain, revocation, SAN or thumbprint binding) unless the caller set
+	// InsecureSkipX509Verify.
+	useShared := b.requestObjectValidation != nil || isX509ClientID
 	if isX509ClientID && useShared && !b.insecureSkipX509Verify {
 		if err := b.authenticateX509RequestObject(obj, parsedJWT, options); err != nil {
 			b.errValidation = err
@@ -122,44 +120,17 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 		return b
 	}
 
-	// x509_san_dns, legacy configuration: the chain is verified against the
-	// X509TrustChainRoots pool with the legacy revocation check.
+	// x509_san_dns under InsecureSkipX509Verify: the signature and the SAN and
+	// endpoint bindings are checked, the chain is not.
 	if clientIDErr == nil && clientID.prefix == OID4VPClientIDPrefixX509SanDNS {
 		var certificates []*x509.Certificate
 
-		if b.insecureSkipX509Verify {
-			// For testing: parse the certificates from x5c WITHOUT calling
-			// x509.Verify(), which in Go 1.20+ performs strict standards
-			// compliance checks that reject non-compliant certificates (for
-			// example "OIDF Test" from conformance test suites).
-			certificates, err = commonX509.DecodeX5CFromJWTHeader(obj)
-			if err != nil {
-				b.errValidation = err
-				return b
-			}
-		} else {
-			// Production: verify certificate chain
-			certificateChains, err := parsedJWT.Headers[0].Certificates(x509.VerifyOptions{
-				Roots: b.x509TrustChainRoots,
-			})
-			if err != nil {
-				b.errValidation = err
-				return b
-			}
-
-			for _, chain := range certificateChains {
-				err = commonX509.CheckIfCertsRevoked(chain)
-				if err == nil {
-					b.errValidation = nil
-					certificates = chain
-					break
-				} else {
-					b.errValidation = err
-				}
-			}
-			if certificates == nil {
-				return b
-			}
+		// Reached only under InsecureSkipX509Verify: the certificates are
+		// decoded without path validation.
+		certificates, err := commonX509.DecodeX5CFromJWTHeader(obj)
+		if err != nil {
+			b.errValidation = err
+			return b
 		}
 
 		// Request object must be verified with the leaf certificate in the x5c array (RFC 7515).
