@@ -880,7 +880,7 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 	env.SetHTTPAllowed(false)
 	controller := createTestControllerWithDefaults(t)
 
-	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 	// VP §5.9.3: with response_mode direct_post the redirect_uri: Client
 	// Identifier is the Response URI, so the two must be the same value.
 	uri := fmt.Sprintf(
@@ -899,7 +899,7 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 	env.SetHTTPAllowed(true)
 	controller := createTestControllerWithDefaults(t)
 
-	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 	uri := fmt.Sprintf(
 		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
 		dcqlQuery,
@@ -913,7 +913,7 @@ func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenVali
 
 func TestController_parseAuthorizationRequest_DirectPostJWTUsesResponseURI(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
-	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}]}`)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`)
 	// direct_post.jwt is refused while parsing when the Verifier leaves no key
 	// to encrypt the response to, so the request carries one.
 	encryptionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -4363,7 +4363,7 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 	defer responseServer.Close()
 
 	// Step 2: Present the credential and verify redirect handler execution
-	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`
+	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`
 	clientID := "redirect_uri:" + responseServer.URL
 	presentationURI := fmt.Sprintf(
 		"openid4vp://present?dcql_query=%s&client_id=%s&response_type=vp_token&response_mode=direct_post&response_uri=%s&nonce=test-nonce-123&state=test-state-456",
@@ -5163,7 +5163,7 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 				params.Set("scope", "openid")
 				params.Set("presentation_definition", `{"id":"definition","input_descriptors":[{"id":"identity","format":{"jwt_vp_json":{"alg":["ES256"]}}}]}`)
 			} else {
-				params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"jwt_vc_json","meta":{}}]}`)
+				params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 			}
 			uri := "openid4vp://present?" + params.Encode()
 			if draft {

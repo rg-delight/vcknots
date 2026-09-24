@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -322,6 +324,47 @@ func TestWallet_DCQLUnsatisfiableIsAccessDenied(t *testing.T) {
 	var authzErr *oid4vp.AuthorizationRequestError
 	require.ErrorAs(t, err, &authzErr)
 	require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
+}
+
+// OID4VP 1.0 Appendix B.1.1: a jwt_vc_json credential is presented only when
+// its types cover one type_values alternative.
+func TestWallet_DCQLMatchesJWTVCTypeValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, typeValues string
+		wantPresented    bool
+	}{
+		{name: "expanded base type", typeValues: `[["https://www.w3.org/2018/credentials#VerifiableCredential"]]`, wantPresented: true},
+		{name: "type the credential lacks", typeValues: `[["VerifiableCredential","IDCredential"]]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, key := receiveCredentialForPresentationTest(t)
+			posted := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ParseForm() == nil && r.PostForm.Get("vp_token") != "" {
+					posted = true
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(server.Close)
+			query := `{"credentials":[{"id":"vc","format":"jwt_vc_json","meta":{"type_values":` + tc.typeValues + `}}]}`
+			uri := "openid4vp://present?" + url.Values{
+				"client_id": {"redirect_uri:" + server.URL}, "response_uri": {server.URL}, "response_type": {"vp_token"},
+				"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
+			}.Encode()
+
+			_, err := controller.PresentCredential(uri, key, nil)
+			if tc.wantPresented {
+				require.NoError(t, err)
+				require.True(t, posted)
+				return
+			}
+			var authzErr *oid4vp.AuthorizationRequestError
+			require.ErrorAs(t, err, &authzErr)
+			require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
+			require.False(t, posted)
+		})
+	}
 }
 
 func TestWallet_ConfigPropagatesTransactionDataTypes(t *testing.T) {

@@ -25,9 +25,9 @@ import (
 )
 
 // testDcqlQueryParam is the URL-encoded form of
-// {"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}
+// {"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}
 // for use in query-parameter style presentation request URIs.
-const testDcqlQueryParam = "%7B%22credentials%22%3A%5B%7B%22id%22%3A%22cred1%22%2C%22format%22%3A%22jwt_vc_json%22%2C%22meta%22%3A%7B%7D%7D%5D%7D"
+const testDcqlQueryParam = "%7B%22credentials%22%3A%5B%7B%22id%22%3A%22cred1%22%2C%22format%22%3A%22jwt_vc_json%22%2C%22meta%22%3A%7B%22type_values%22%3A%5B%5B%22VerifiableCredential%22%5D%5D%7D%7D%5D%7D"
 
 func TestOid4vpPresenter_Present(t *testing.T) {
 	testPresentation := []byte("a.valid.jwt")
@@ -369,7 +369,7 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 		"state":         "test-state",
 		"dcql_query": map[string]any{
 			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
 		"response_uri":    "https://example.com/response",
@@ -501,7 +501,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 		"state":         "test-state",
 		"dcql_query": map[string]any{
 			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
 		"response_uri":    "https://example.com/response",
@@ -607,7 +607,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T)
 		"state":         "test-state",
 		"dcql_query": map[string]any{
 			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
 		"response_uri":    "https://example.com/response",
@@ -668,7 +668,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			"state":         "test-state",
 			"dcql_query": map[string]any{
 				"credentials": []any{
-					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 				},
 			},
 			"response_uri":    "https://example.com/response",
@@ -763,7 +763,7 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *t
 			"state":         "test-state",
 			"dcql_query": map[string]any{
 				"credentials": []any{
-					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 				},
 			},
 			"response_uri":    "https://example.com/response",
@@ -1239,7 +1239,7 @@ func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 		"state":         "test-state",
 		"dcql_query": map[string]any{
 			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
 		"response_uri":    "https://example.com/response",
@@ -1302,7 +1302,7 @@ func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFail
 		"state":         "s",
 		"dcql_query": map[string]any{
 			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{}},
+				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
 		"response_uri": "https://verifier.example.org/response",

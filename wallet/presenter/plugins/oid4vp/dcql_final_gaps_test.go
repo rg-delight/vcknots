@@ -51,7 +51,7 @@ func TestAuthorityKeyIdentifiersFromCredential(t *testing.T) {
 }
 
 func TestParseDcqlTrustedAuthorities(t *testing.T) {
-	valid := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"trusted_authorities":[{"type":"aki","values":["abc","def"]}]}]}`
+	valid := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"trusted_authorities":[{"type":"aki","values":["abc","def"]}]}]}`
 	query, err := parseDcqlQuery(valid)
 	require.NoError(t, err)
 	require.Len(t, query.Credentials[0].TrustedAuthorities, 1)
@@ -69,7 +69,7 @@ func TestParseDcqlTrustedAuthorities(t *testing.T) {
 		{"non-string value", `"trusted_authorities":[{"type":"aki","values":[1]}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},` + tc.raw + `}]}`)
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` + tc.raw + `}]}`)
 			assertAuthzErrorCode(t, err, InvalidRequestError)
 		})
 	}

@@ -33,7 +33,7 @@ type TrustedAuthority struct {
 type CredentialQuery struct {
 	ID     string         `json:"id"`     // required, alphanumeric, underscore and hyphen only
 	Format string         `json:"format"` // required, Credential Format Identifier
-	Meta   map[string]any `json:"meta"`   // required, an empty object means no additional constraints
+	Meta   map[string]any `json:"meta"`   // required; Appendix B defines the members each format requires
 	// Multiple indicates whether multiple Credentials can be returned for this
 	// Credential Query. Defaults to false when omitted.
 	Multiple  bool             `json:"multiple,omitempty"`
@@ -356,31 +356,44 @@ func validateTrustedAuthorities(index int, raw any) error {
 	return nil
 }
 
-// validateCredentialQueryMeta enforces the format-specific constraints on the
-// Credential Query meta object (OID4VP 1.0 §6.1, Appendix B.2.3 and B.3.5).
-// Meta keys of other formats stay unconstrained beyond being a JSON object.
+// validateCredentialQueryMeta enforces the format-specific members of the
+// Credential Query meta object that OID4VP 1.0 Appendix B makes REQUIRED:
+// type_values for W3C VCs (B.1.1), doctype_value for mdoc (B.2.3) and
+// vct_values for SD-JWT VC (B.3.5). Meta keys of other formats stay
+// unconstrained beyond being a JSON object.
 func validateCredentialQueryMeta(index int, format string, meta map[string]any) error {
 	switch format {
 	case "dc+sd-jwt":
-		if rawVct, exists := meta["vct_values"]; exists {
-			values, ok := rawVct.([]any)
-			if !ok || len(values) == 0 {
-				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.vct_values must be a non-empty array of strings", index)
-			}
-			for _, rawValue := range values {
-				if value, ok := rawValue.(string); !ok || value == "" {
-					return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.vct_values must contain only non-empty strings", index)
-				}
+		values, ok := meta["vct_values"].([]any)
+		if !ok || len(values) == 0 || !allNonEmptyStrings(values) {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.vct_values must be a non-empty array of non-empty strings", index)
+		}
+	case "jwt_vc_json", "ldp_vc":
+		alternatives, ok := meta["type_values"].([]any)
+		if !ok || len(alternatives) == 0 {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.type_values must be a non-empty array of string arrays", index)
+		}
+		for _, rawAlternative := range alternatives {
+			types, ok := rawAlternative.([]any)
+			if !ok || len(types) == 0 || !allNonEmptyStrings(types) {
+				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.type_values must contain only non-empty arrays of non-empty strings", index)
 			}
 		}
 	case "mso_mdoc":
-		if rawDoctype, exists := meta["doctype_value"]; exists {
-			if _, ok := rawDoctype.(string); !ok {
-				return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.doctype_value must be a string", index)
-			}
+		if doctype, ok := meta["doctype_value"].(string); !ok || doctype == "" {
+			return newAuthorizationRequestError(InvalidRequestError, "dcql_query.credentials[%d].meta.doctype_value must be a non-empty string", index)
 		}
 	}
 	return nil
+}
+
+func allNonEmptyStrings(values []any) bool {
+	for _, value := range values {
+		if text, ok := value.(string); !ok || text == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func validateDCQLClaimQueries(query map[string]any) error {

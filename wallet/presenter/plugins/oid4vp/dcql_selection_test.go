@@ -74,7 +74,7 @@ func TestResolveSatisfiableDCQLCredentials_CredentialSets(t *testing.T) {
 		},
 	}
 	candidates := []DCQLCredentialCandidate{
-		{ID: "wallet-pid", Format: "dc+sd-jwt", Claims: []string{"given_name"}},
+		{ID: "wallet-pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"given_name"}},
 	}
 
 	selections, err := ResolveSatisfiableDCQLCredentials(query, candidates)
@@ -101,7 +101,7 @@ func TestResolveSatisfiableDCQLCredentials_RequiredCredentialSetFailure(t *testi
 	}
 
 	_, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{
-		{ID: "wallet-pid", Format: "dc+sd-jwt", Claims: []string{"family_name"}},
+		{ID: "wallet-pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"family_name"}},
 	})
 	if err == nil {
 		t.Fatal("expected required credential_set failure")
@@ -109,7 +109,7 @@ func TestResolveSatisfiableDCQLCredentials_RequiredCredentialSetFailure(t *testi
 }
 
 func TestResolveDCQLClaimSetPreference(t *testing.T) {
-	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"id":"age","path":["age_over_18"],"values":[true]},{"id":"birth","path":["birthdate"]}],"claim_sets":[["age"],["birth"]]}]}`)
+	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"id":"age","path":["age_over_18"],"values":[true]},{"id":"birth","path":["birthdate"]}],"claim_sets":[["age"],["birth"]]}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,10 +118,10 @@ func TestResolveDCQLClaimSetPreference(t *testing.T) {
 		candidates        []DCQLCredentialCandidate
 		wantID, wantClaim string
 	}{
-		{"first available option discloses only age", []DCQLCredentialCandidate{{ID: "both", Format: "dc+sd-jwt", Claims: []string{"age_over_18", "birthdate"}, ClaimValues: map[string]any{"age_over_18": true}}}, "both", "age_over_18"},
-		{"fallback after value mismatch", []DCQLCredentialCandidate{{ID: "both", Format: "dc+sd-jwt", Claims: []string{"age_over_18", "birthdate"}, ClaimValues: map[string]any{"age_over_18": false}}}, "both", "birthdate"},
-		{"fallback after missing claim", []DCQLCredentialCandidate{{ID: "birth", Format: "dc+sd-jwt", Claims: []string{"birthdate"}}}, "birth", "birthdate"},
-		{"preferred option across candidates", []DCQLCredentialCandidate{{ID: "birth", Format: "dc+sd-jwt", Claims: []string{"birthdate"}}, {ID: "age", Format: "dc+sd-jwt", Claims: []string{"age_over_18"}, ClaimValues: map[string]any{"age_over_18": true}}}, "age", "age_over_18"},
+		{"first available option discloses only age", []DCQLCredentialCandidate{{ID: "both", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"age_over_18", "birthdate"}, ClaimValues: map[string]any{"age_over_18": true}}}, "both", "age_over_18"},
+		{"fallback after value mismatch", []DCQLCredentialCandidate{{ID: "both", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"age_over_18", "birthdate"}, ClaimValues: map[string]any{"age_over_18": false}}}, "both", "birthdate"},
+		{"fallback after missing claim", []DCQLCredentialCandidate{{ID: "birth", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"birthdate"}}}, "birth", "birthdate"},
+		{"preferred option across candidates", []DCQLCredentialCandidate{{ID: "birth", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"birthdate"}}, {ID: "age", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"age_over_18"}, ClaimValues: map[string]any{"age_over_18": true}}}, "age", "age_over_18"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			selected, err := ResolveSatisfiableDCQLCredentials(query, tc.candidates)
@@ -133,7 +133,7 @@ func TestResolveDCQLClaimSetPreference(t *testing.T) {
 			}
 		})
 	}
-	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"age_over_18"}, ClaimValues: map[string]any{"age_over_18": false}}})
+	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"age_over_18"}, ClaimValues: map[string]any{"age_over_18": false}}})
 	if err == nil || len(selected) != 0 {
 		t.Fatalf("unsatisfied claim sets returned a credential: %#v, %v", selected, err)
 	}
@@ -145,7 +145,7 @@ func TestResolveDCQLEmptyClaimSetFallback(t *testing.T) {
 		Claims:    []DCQLClaimQuery{{ID: "age", Path: []any{"age_over_18"}, Values: []any{true}}},
 		ClaimSets: [][]string{{"age"}, {}},
 	}}}
-	parsed, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"id":"age","path":["age_over_18"],"values":[true]}],"claim_sets":[["age"],[]]}]}`)
+	parsed, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"id":"age","path":["age_over_18"],"values":[true]}],"claim_sets":[["age"],[]]}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestResolveDCQLEmptyClaimSetFallback(t *testing.T) {
 			}
 			t.Run(source.name+"/"+name, func(t *testing.T) {
 				selected, err := ResolveSatisfiableDCQLCredentials(source.query, []DCQLCredentialCandidate{{
-					ID: "identity", Format: "dc+sd-jwt", Claims: []string{"age_over_18", "birthdate"},
+					ID: "identity", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"age_over_18", "birthdate"},
 					ClaimValues: map[string]any{"age_over_18": ageOver18, "birthdate": "2000-01-01"},
 				}})
 				if err != nil || len(selected) != 1 {
@@ -211,7 +211,7 @@ func TestResolveDCQLValuesRequireExactPrimitiveMatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"value"}, Values: []any{tc.expected}}}}}}
-			candidates := []DCQLCredentialCandidate{{ID: "value", Format: "dc+sd-jwt", Claims: []string{"value"}, ClaimValues: map[string]any{"value": tc.actual}}}
+			candidates := []DCQLCredentialCandidate{{ID: "value", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"value"}, ClaimValues: map[string]any{"value": tc.actual}}}
 			selected, err := ResolveSatisfiableDCQLCredentials(query, candidates)
 			if tc.match {
 				if err != nil || len(selected) != 1 {
@@ -226,7 +226,7 @@ func TestResolveDCQLValuesRequireExactPrimitiveMatch(t *testing.T) {
 
 func TestResolveDCQLMissingValueFailsClosed(t *testing.T) {
 	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}, Values: []any{"Alice", "Bob"}}}}}}
-	candidate := DCQLCredentialCandidate{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name"}}
+	candidate := DCQLCredentialCandidate{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"name"}}
 	if selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{candidate}); err == nil || len(selected) != 0 {
 		t.Fatalf("claim name alone satisfied value restriction: %#v, %v", selected, err)
 	}
@@ -267,7 +267,7 @@ func TestResolveDCQLValidatesDirectCallerConstraints(t *testing.T) {
 		{"unknown optional credential reference", DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt"}}, CredentialSets: []DCQLCredentialSet{{Required: &optional, Options: [][]string{{"unknown"}}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			selected, err := ResolveSatisfiableDCQLCredentials(&tc.query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name"}}})
+			selected, err := ResolveSatisfiableDCQLCredentials(&tc.query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"name"}}})
 			if err == nil || len(selected) != 0 {
 				t.Fatalf("invalid constraints returned credentials: %#v, %v", selected, err)
 			}
@@ -276,11 +276,11 @@ func TestResolveDCQLValidatesDirectCallerConstraints(t *testing.T) {
 }
 
 func TestResolveDCQLNestedClaimDoesNotBecomeRootClaim(t *testing.T) {
-	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"path":["address","name"]}]}]}`)
+	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["address","name"]}]}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name", "address"}}})
+	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"name", "address"}}})
 	if err == nil || len(selected) != 0 {
 		t.Fatalf("unsupported path returned credentials: %#v, %v", selected, err)
 	}
@@ -288,7 +288,7 @@ func TestResolveDCQLNestedClaimDoesNotBecomeRootClaim(t *testing.T) {
 
 func TestResolveDCQLRepeatedClaimPathDisclosesOnce(t *testing.T) {
 	query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{{Path: []any{"name"}}, {Path: []any{"name"}}}}}}
-	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", Claims: []string{"name"}}})
+	selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"name"}}})
 	if err != nil || len(selected) != 1 || !reflect.DeepEqual(selected[0].RequestedClaims, []string{"name"}) {
 		t.Fatalf("duplicate claim paths were not deduplicated: %#v, %v", selected, err)
 	}
@@ -389,17 +389,17 @@ func TestValidateDCQLCredentialSelections(t *testing.T) {
 // trusted_authorities).
 func TestValidateDCQLCredentialSelections_PerQueryConstraints(t *testing.T) {
 	query, err := parseDcqlQuery(`{"credentials":[` +
-		`{"id":"multi","format":"dc+sd-jwt","meta":{},"multiple":true,"claims":[{"path":["given_name"]}],` +
+		`{"id":"multi","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"multiple":true,"claims":[{"path":["given_name"]}],` +
 		`"trusted_authorities":[{"type":"aki","values":["authority-a"]}]},` +
-		`{"id":"single","format":"dc+sd-jwt","meta":{},"claims":[{"path":["given_name"]}]}],` +
+		`{"id":"single","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}],` +
 		`"credential_sets":[{"options":[["multi"]],"required":false},{"options":[["single"]],"required":false}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	candidates := []DCQLCredentialCandidate{
-		{ID: "a1", Format: "dc+sd-jwt", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-a"}},
-		{ID: "a2", Format: "dc+sd-jwt", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-a"}},
-		{ID: "b1", Format: "dc+sd-jwt", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-b"}},
+		{ID: "a1", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-a"}},
+		{ID: "a2", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-a"}},
+		{ID: "b1", Format: "dc+sd-jwt", VCT: "urn:test:identity", Claims: []string{"given_name"}, AuthorityKeyIDs: []string{"authority-b"}},
 	}
 	for _, tc := range []struct {
 		name            string
@@ -458,6 +458,48 @@ func TestValidateDCQLCredentialSelections_MalformedQuery(t *testing.T) {
 			}
 			if errors.Is(err, ErrDCQLSelectionUnsatisfied) {
 				t.Fatalf("malformed request reported as an unsatisfied selection: %v", err)
+			}
+		})
+	}
+}
+
+// OID4VP 1.0 Appendix B.1.1: every type of one type_values alternative must be
+// among the credential's types, and Section 6.4.2 treats a credential that does
+// not match as absent. The W3C base context term VerifiableCredential expands
+// to its IRI; other terms are compared as written.
+func TestResolveDCQLTypeValues(t *testing.T) {
+	query, err := parseDcqlQuery(`{"credentials":[{"id":"id","format":"jwt_vc_json",` +
+		`"meta":{"type_values":[["https://www.w3.org/2018/credentials#VerifiableCredential","IDCredential"],["AlumniCredential"]]}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		types     []string
+		wantMatch bool
+	}{
+		{name: "every type of the first alternative", types: []string{"VerifiableCredential", "IDCredential"}, wantMatch: true},
+		{name: "second alternative with extra types", types: []string{"VerifiableCredential", "AlumniCredential", "Other"}, wantMatch: true},
+		{name: "part of an alternative", types: []string{"IDCredential"}},
+		{name: "no listed type", types: []string{"VerifiableCredential", "OtherCredential"}},
+		{name: "no types at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := DCQLCredentialCandidate{ID: "vc", Format: "jwt_vc_json", Types: tc.types}
+			selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{candidate})
+			validateErr := ValidateDCQLCredentialSelections(query, []DCQLCredentialCandidate{candidate},
+				[]DCQLCredentialSelection{{QueryID: "id", CandidateID: "vc", RequestedClaims: []string{}}})
+			if tc.wantMatch {
+				if err != nil || len(selected) != 1 || validateErr != nil {
+					t.Fatalf("selection = %#v, %v; validation = %v", selected, err, validateErr)
+				}
+				return
+			}
+			if !errors.Is(err, ErrDCQLSelectionUnsatisfied) || len(selected) != 0 {
+				t.Fatalf("non-matching types returned a credential: %#v, %v", selected, err)
+			}
+			if !errors.Is(validateErr, ErrDCQLSelectionUnsatisfied) {
+				t.Fatalf("validation error = %v, want ErrDCQLSelectionUnsatisfied", validateErr)
 			}
 		})
 	}

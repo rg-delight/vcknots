@@ -125,7 +125,7 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 				if tc.wrongKey {
 					key = newMockKeyEntry()
 				}
-				query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{}}
+				query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:test:identity"}}}
 				if tc.requestValue != nil {
 					query["require_cryptographic_holder_binding"] = tc.requestValue
 				}
@@ -201,7 +201,7 @@ func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
 
 func TestWallet_FinalBindingRequirementsArePerQuery(t *testing.T) {
 	controller, key, baseURL, _ := receiveSDJWTForHolderBinding(t, true)
-	query := `{"credentials":[{"id":"unbound","format":"dc+sd-jwt","meta":{},"require_cryptographic_holder_binding":false},{"id":"bound","format":"dc+sd-jwt","meta":{}}]}`
+	query := `{"credentials":[{"id":"unbound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"require_cryptographic_holder_binding":false},{"id":"bound","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]}}]}`
 	uri := "openid4vp://present?" + url.Values{
 		"client_id": {"redirect_uri:" + baseURL + "/response"}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
 		"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},

@@ -85,7 +85,7 @@ func TestParseDcqlQuery_Valid(t *testing.T) {
 				map[string]any{
 					"id":     "my_credential",
 					"format": "dc+sd-jwt",
-					"meta":   map[string]any{},
+					"meta":   map[string]any{"vct_values": []any{"urn:test:identity"}},
 				},
 			},
 		}
@@ -98,18 +98,8 @@ func TestParseDcqlQuery_Valid(t *testing.T) {
 		}
 	})
 
-	t.Run("empty meta object means no additional constraints", func(t *testing.T) {
-		query, err := parseDcqlQuery(`{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}]}`)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(query.Credentials[0].Meta) != 0 {
-			t.Fatalf("expected empty meta, got %+v", query.Credentials[0].Meta)
-		}
-	})
-
 	t.Run("multiple=true is preserved", func(t *testing.T) {
-		query, err := parseDcqlQuery(`{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{},"multiple":true}]}`)
+		query, err := parseDcqlQuery(`{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]},"multiple":true}]}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -120,7 +110,7 @@ func TestParseDcqlQuery_Valid(t *testing.T) {
 
 	t.Run("credential_sets non-empty array is accepted", func(t *testing.T) {
 		query, err := parseDcqlQuery(`{
-			"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}],
+			"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}],
 			"credential_sets":[{"options":[["c1"]]}]
 		}`)
 		if err != nil {
@@ -132,7 +122,7 @@ func TestParseDcqlQuery_Valid(t *testing.T) {
 	})
 
 	t.Run("id allows alphanumeric, underscore and hyphen", func(t *testing.T) {
-		_, err := parseDcqlQuery(`{"credentials":[{"id":"Cred_01-a","format":"jwt_vc_json","meta":{}}]}`)
+		_, err := parseDcqlQuery(`{"credentials":[{"id":"Cred_01-a","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -152,25 +142,35 @@ func TestParseDcqlQuery_InvalidRequest(t *testing.T) {
 		{name: "credentials not an array", raw: `{"credentials":{}}`},
 		{name: "credentials empty array", raw: `{"credentials":[]}`},
 		{name: "credential query not an object", raw: `{"credentials":["not-an-object"]}`},
-		{name: "missing id", raw: `{"credentials":[{"format":"jwt_vc_json","meta":{}}]}`},
-		{name: "id empty string", raw: `{"credentials":[{"id":"","format":"jwt_vc_json","meta":{}}]}`},
-		{name: "id not a string", raw: `{"credentials":[{"id":1,"format":"jwt_vc_json","meta":{}}]}`},
-		{name: "id with invalid characters", raw: `{"credentials":[{"id":"my credential!","format":"jwt_vc_json","meta":{}}]}`},
+		{name: "missing id", raw: `{"credentials":[{"format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`},
+		{name: "id empty string", raw: `{"credentials":[{"id":"","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`},
+		{name: "id not a string", raw: `{"credentials":[{"id":1,"format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`},
+		{name: "id with invalid characters", raw: `{"credentials":[{"id":"my credential!","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`},
 		{
 			name: "duplicated ids",
 			raw: `{"credentials":[
-				{"id":"dup","format":"jwt_vc_json","meta":{}},
-				{"id":"dup","format":"dc+sd-jwt","meta":{}}
+				{"id":"dup","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}},
+				{"id":"dup","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]}}
 			]}`,
 		},
 		{name: "missing format", raw: `{"credentials":[{"id":"c1","meta":{}}]}`},
 		{name: "format not a string", raw: `{"credentials":[{"id":"c1","format":1,"meta":{}}]}`},
 		{name: "missing meta", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json"}]}`},
 		{name: "meta not an object", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":"x"}]}`},
-		{name: "multiple not a boolean", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{},"multiple":"yes"}]}`},
-		{name: "credential_sets not an array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}],"credential_sets":{}}`},
-		{name: "credential_sets empty array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}],"credential_sets":[]}`},
-		{name: "credential_sets element not an object", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}],"credential_sets":["x"]}`},
+		// OID4VP 1.0 Appendix B.1.1 and B.3.5 make these meta members REQUIRED.
+		{name: "jwt_vc_json meta without type_values", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{}}]}`},
+		{name: "type_values not an array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":"IDCredential"}}]}`},
+		{name: "type_values empty", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[]}}]}`},
+		{name: "type_values alternative empty", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[[]]}}]}`},
+		{name: "type_values alternative not an array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":["IDCredential"]}}]}`},
+		{name: "type_values non-string type", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[[1]]}}]}`},
+		{name: "dc+sd-jwt meta without vct_values", raw: `{"credentials":[{"id":"c1","format":"dc+sd-jwt","meta":{}}]}`},
+		{name: "vct_values empty", raw: `{"credentials":[{"id":"c1","format":"dc+sd-jwt","meta":{"vct_values":[]}}]}`},
+		{name: "vct_values non-string", raw: `{"credentials":[{"id":"c1","format":"dc+sd-jwt","meta":{"vct_values":[1]}}]}`},
+		{name: "multiple not a boolean", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]},"multiple":"yes"}]}`},
+		{name: "credential_sets not an array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}],"credential_sets":{}}`},
+		{name: "credential_sets empty array", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}],"credential_sets":[]}`},
+		{name: "credential_sets element not an object", raw: `{"credentials":[{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}],"credential_sets":["x"]}`},
 	}
 
 	for _, tt := range tests {
@@ -190,7 +190,7 @@ func TestParseDcqlQuery_UnsupportedFormat(t *testing.T) {
 		{
 			name: "supported and unsupported formats mixed",
 			raw: `{"credentials":[
-				{"id":"c1","format":"jwt_vc_json","meta":{}},
+				{"id":"c1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}},
 				{"id":"c2","format":"ldp_vc","meta":{}}
 			]}`,
 		},
@@ -219,7 +219,7 @@ func TestParseDcqlQuery_HolderBindingRequirement(t *testing.T) {
 		{name: "array", value: []any{false}, present: true, invalid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}}
+			raw := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []any{"urn:test:identity"}}}
 			if tc.present {
 				raw["require_cryptographic_holder_binding"] = tc.value
 			}
@@ -253,7 +253,7 @@ func TestParseDraft24DcqlQuery_IgnoresFinalHolderBindingField(t *testing.T) {
 }
 
 func TestParseDCQLClaimSetsPreservesClaimIDsAndValues(t *testing.T) {
-	const raw = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},
+	const raw = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},
 		"claims":[{"id":"age","path":["age_over_18"],"values":[true]},
 		{"id":"number","path":["number"],"values":[9007199254740993,"18",false,-3,1.0]}],
 		"claim_sets":[["age"],["number"]]}]}`
@@ -318,7 +318,7 @@ func TestParseDCQLInvalidClaimConstraints(t *testing.T) {
 		{"fractional value", `"claims":[{"path":["age"],"values":[18.5]}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},` + tc.fields + `}]}`)
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},` + tc.fields + `}]}`)
 			assertAuthzErrorCode(t, err, InvalidRequestError)
 		})
 	}
@@ -333,14 +333,14 @@ func TestParseDCQLInvalidCredentialSetConstraints(t *testing.T) {
 		`{"options":[["pid"]],"required":"false"}`,
 	} {
 		t.Run(set, func(t *testing.T) {
-			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{}}],"credential_sets":[` + set + `]}`)
+			_, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]}}],"credential_sets":[` + set + `]}`)
 			assertAuthzErrorCode(t, err, InvalidRequestError)
 		})
 	}
 }
 
 func TestParseDCQLPreservesEmptyClaimSetOption(t *testing.T) {
-	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"claims":[{"id":"age","path":["age_over_18"]}],"claim_sets":[["age"],[]]}]}`)
+	query, err := parseDcqlQuery(`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"id":"age","path":["age_over_18"]}],"claim_sets":[["age"],[]]}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestParseDCQLPreservesEmptyClaimSetOption(t *testing.T) {
 }
 
 func TestParseDCQLIgnoresUnknownExtensions(t *testing.T) {
-	query, err := parseDcqlQuery(`{"extension":true,"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},"extension":true,"claims":[{"id":"n","path":["name"],"extension":true}],"claim_sets":[["n"]]}],"credential_sets":[{"options":[["pid"]],"extension":true}]}`)
+	query, err := parseDcqlQuery(`{"extension":true,"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"extension":true,"claims":[{"id":"n","path":["name"],"extension":true}],"claim_sets":[["n"]]}],"credential_sets":[{"options":[["pid"]],"extension":true}]}`)
 	if err != nil || len(query.Credentials) != 1 {
 		t.Fatalf("unknown extensions must be ignored: %#v, %v", query, err)
 	}

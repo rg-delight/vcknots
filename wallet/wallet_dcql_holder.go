@@ -212,14 +212,17 @@ func dcqlCandidateFromSavedCredential(saved *SavedCredential) (oid4vp.DCQLCreden
 		}
 	}
 	vct := ""
+	var types []string
 	if saved.Credential != nil && len(saved.Credential.Types) > 0 {
 		vct = saved.Credential.Types[0]
+		types = saved.Credential.Types
 	}
 	holderBound := credentialHasHolderBinding(flavor, saved)
 	return oid4vp.DCQLCredentialCandidate{
 		ID:              saved.Entry.Id,
 		Format:          vcFormat,
 		VCT:             vct,
+		Types:           types,
 		Claims:          claimNames,
 		ClaimValues:     claimValues,
 		ClaimObject:     claimObject,

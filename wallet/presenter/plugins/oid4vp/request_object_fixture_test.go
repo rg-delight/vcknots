@@ -224,6 +224,9 @@ func (f *requestObjectFixture) parseRequest(t *testing.T, claims map[string]any,
 		query := claims["dcql_query"].(map[string]any)
 		credentials := query["credentials"].([]any)
 		credentials[0].(map[string]any)["format"] = opts.DCQLFormat
+		if opts.DCQLFormat == "jwt_vc_json" {
+			credentials[0].(map[string]any)["meta"] = map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}
+		}
 	}
 	clientID, _ := claims["client_id"].(string)
 
