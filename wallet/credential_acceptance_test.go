@@ -1215,6 +1215,17 @@ func TestVerifyCredentialWithPolicy(t *testing.T) {
 	})
 }
 
+// TestCredentialValidityRejectsOutOfRangeNumericDate pins that an exp beyond
+// any representable date is a malformed claim, not a credential that never
+// expires.
+func TestCredentialValidityRejectsOutOfRangeNumericDate(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	w, _ := newAcceptanceWallet(t, profile.Final, nil)
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: newTestECKey(t), cnf: &holder, exp: time.Unix(9e15, 0)})
+	_, _, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, &CredentialAcceptancePolicy{UnverifiedIssuer: true})
+	require.ErrorIs(t, err, ErrCredentialParse)
+}
+
 func ptr[T any](value T) *T {
 	return &value
 }

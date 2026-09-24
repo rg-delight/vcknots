@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
@@ -589,40 +590,20 @@ func (a *CredentialAcceptor) verifyIssuerSignatureWithCandidates(
 	return nil
 }
 
+// verifyCredentialValidity applies the exp and nbf claims (RFC 7519 Sections
+// 4.1.4 and 4.1.5) at now, tolerating skew.
 func verifyCredentialValidity(payload map[string]any, now time.Time, skew time.Duration) error {
-	nowUnix := float64(now.Unix()) + float64(now.Nanosecond())/1e9
-	if exp, present, err := numericDateClaim(payload, "exp"); err != nil {
-		return err
-	} else if present && exp <= nowUnix-skew.Seconds() {
+	if exp, present, err := joseutil.NumericDateClaim(payload, "exp"); err != nil {
+		return fmt.Errorf("%w: %w", ErrCredentialParse, err)
+	} else if present && !exp.After(now.Add(-skew)) {
 		return ErrCredentialExpired
 	}
-	if nbf, present, err := numericDateClaim(payload, "nbf"); err != nil {
-		return err
-	} else if present && nbf > nowUnix+skew.Seconds() {
+	if nbf, present, err := joseutil.NumericDateClaim(payload, "nbf"); err != nil {
+		return fmt.Errorf("%w: %w", ErrCredentialParse, err)
+	} else if present && nbf.After(now.Add(skew)) {
 		return ErrCredentialNotYetValid
 	}
 	return nil
-}
-
-func numericDateClaim(payload map[string]any, name string) (float64, bool, error) {
-	raw, present := payload[name]
-	if !present {
-		return 0, false, nil
-	}
-	switch value := raw.(type) {
-	case json.Number:
-		parsed, err := value.Float64()
-		if err != nil {
-			return 0, false, fmt.Errorf("%w: %s claim is not a numeric date: %w", ErrCredentialParse, name, err)
-		}
-		return parsed, true, nil
-	case float64:
-		return value, true, nil
-	case string:
-		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date, not a string", ErrCredentialParse, name)
-	default:
-		return 0, false, fmt.Errorf("%w: %s claim must be a numeric date", ErrCredentialParse, name)
-	}
 }
 
 func jsonWebKeyFromValue(value any) (jose.JSONWebKey, error) {
