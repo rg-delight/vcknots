@@ -76,8 +76,6 @@ type Wallet struct {
 	testHooks   *TestHooks
 
 	credentialAcceptance *CredentialAcceptancePolicy
-
-	testHooks *TestHooks
 }
 
 // Config specifies the dispatcher components used by a Wallet.
@@ -379,8 +377,6 @@ func newWallet(config Config) (*Wallet, error) {
 		testHooks:   config.TestHooks,
 
 		credentialAcceptance: config.CredentialAcceptance,
-
-		testHooks: config.TestHooks,
 	}, nil
 }
 
