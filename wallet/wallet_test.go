@@ -476,10 +476,10 @@ func TestController_ReceiveCredential_EmptyConfigurationIDs_Integration(t *testi
 }
 
 func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -513,10 +513,10 @@ func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
 }
 
 func TestController_ReceiveCredential_TxCodeProvided_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -737,10 +737,10 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 }
 
 func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
@@ -754,10 +754,10 @@ func TestController_parseAuthorizationRequest_RejectsNonHTTPSResponseURI(t *test
 }
 
 func TestController_parseAuthorizationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{}}]}`)
 	uri := fmt.Sprintf(
@@ -2338,10 +2338,10 @@ func TestController_fetchCredentialNonce_ReturnsNilWhenNoNonceSource(t *testing.
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://127.0.0.1:1/nonce")
 	require.NoError(t, err)
@@ -2357,10 +2357,10 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(
 }
 
 func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(false)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://example.com/nonce")
 	require.NoError(t, err)
@@ -2375,10 +2375,10 @@ func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing
 }
 
 func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	nonceValue := "nonce-from-endpoint"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2404,10 +2404,10 @@ func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t 
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFallback(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary failure", http.StatusInternalServerError)
@@ -2427,10 +2427,10 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFal
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLarge(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2453,10 +2453,10 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLar
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithoutFallback(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2478,10 +2478,10 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithout
 }
 
 func TestController_fetchDPoPNonce_ReturnsHeaderValue(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
@@ -2509,10 +2509,10 @@ func TestController_fetchDPoPNonce_ReturnsErrorWhenEndpointMissing(t *testing.T)
 }
 
 func TestController_fetchDPoPNonce_ReturnsErrorWhenHeaderMissing(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2529,10 +2529,10 @@ func TestController_fetchDPoPNonce_ReturnsErrorWhenHeaderMissing(t *testing.T) {
 }
 
 func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -2650,10 +2650,10 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 }
 
 func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
@@ -2722,10 +2722,10 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 }
 
 func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -2829,10 +2829,10 @@ func TestController_requestCredential_DPoPNonceChallengeUsesNonceEndpoint(t *tes
 }
 
 func TestController_requestCredential_DPoPNonceError_NoNonceEndpoint(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -3250,10 +3250,10 @@ func newCredentialIssuanceMockServer(t *testing.T, opts credentialIssuanceMockSe
 }
 
 func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	sdJwtCredential := createWalletTestSDJWT()
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
@@ -3341,10 +3341,10 @@ func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *
 }
 
 func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMethodsSupported(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -3397,10 +3397,10 @@ func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMetho
 }
 
 func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNilKey(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -3453,7 +3453,6 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
 
 	// Parse server URL
 	serverURL, err := url.Parse(server.URL())
@@ -3480,6 +3479,7 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(http_allowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Fatalf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -3509,13 +3509,13 @@ func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
 
 	serverURL, _ := url.Parse(server.URL())
 
 	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(http_allowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	metadata, err := controller.FetchCredentialIssuerMetadata(serverURL, receiverTypes.Oid4vci)
 	if err != nil {
 		t.Errorf("FetchCredentialIssuerMetadata failed: %v", err)
@@ -3533,7 +3533,6 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
 
 	serverURL, err := url.Parse(server.URL())
 	require.NoError(t, err)
@@ -3541,6 +3540,7 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 	httpAllowed := env.IsHTTPAllowed()
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 
 	req := ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
@@ -3571,7 +3571,6 @@ func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
 	vpServer := createMockOID4VPServer()
 	defer vpServer.Close()
 
-	controller := createTestControllerWithDefaults(t)
 
 	vciServerURL, _ := url.Parse(vciServer.URL())
 	vpEndpointURL, _ := url.Parse(vpServer.URL() + "/present")
@@ -3594,6 +3593,7 @@ func TestController_PresentCredential_WithMockServer_Integration(t *testing.T) {
 	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(http_allowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	savedCredential, err := controller.ReceiveCredential(receiveReq)
 	if err != nil {
 		t.Logf("Failed to receive credential for presentation test: %v", err)
@@ -3630,7 +3630,6 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 	}))
 	defer responseServer.Close()
 
-	controller := createTestControllerWithDefaults(t)
 
 	vciServerURL, _ := url.Parse(vciServer.URL())
 
@@ -3652,6 +3651,7 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 	defer env.SetHTTPAllowed(httpAllowed)
 	env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 	_, err := controller.ReceiveCredential(receiveReq)
 	if err != nil {
 		t.Skipf("ReceiveCredential failed with mock server, skipping redirect handler test: %v", err)
@@ -3686,7 +3686,6 @@ func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
 }
 
 func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
 
 	tests := []struct {
 		name         string
@@ -3727,6 +3726,7 @@ func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *test
 			http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
 			defer env.SetHTTPAllowed(http_allowed)
 			env.SetHTTPAllowed(true)
+	controller := createTestControllerWithDefaults(t)
 			serverURL := tt.setupURL()
 			_, err := controller.FetchCredentialIssuerMetadata(serverURL, tt.receiverType)
 
