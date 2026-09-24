@@ -59,7 +59,10 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 		return nil, fmt.Errorf("failed to fetch nonce: %w", err)
 	}
 	if !response.ok() {
-		return nil, fmt.Errorf("nonce endpoint returned status %d: %s", response.statusCode, string(response.body))
+		if code := response.statusError().oauthError; code != "" {
+			return nil, fmt.Errorf("nonce endpoint returned status %d, error: %s", response.statusCode, code)
+		}
+		return nil, fmt.Errorf("nonce endpoint returned status %d", response.statusCode)
 	}
 	if len(response.body) == 0 {
 		return nil, fmt.Errorf("nonce endpoint returned empty response")
@@ -362,8 +365,8 @@ func newCredentialEndpointError(statusCode int, contentType string, body []byte,
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return credentialErr
 	}
-	credentialErr.Code = payload.Error
-	credentialErr.Description = payload.Description
+	credentialErr.Code = sanitizeErrorText(payload.Error, maxErrorCodeLength)
+	credentialErr.Description = sanitizeErrorText(payload.Description, maxErrorDescriptionLength)
 	credentialErr.Interval = payload.Interval
 	return credentialErr
 }

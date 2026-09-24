@@ -50,8 +50,8 @@ func (r *exchangeResponse) ok() bool {
 }
 
 // statusError reports a non-2xx response by its status and OAuth error code.
-func (r *exchangeResponse) statusError() error {
-	return &httpStatusError{statusCode: r.statusCode, body: string(r.body)}
+func (r *exchangeResponse) statusError() *httpStatusError {
+	return &httpStatusError{statusCode: r.statusCode, oauthError: sanitizeErrorText(oauthErrorCode(r.body), maxErrorCodeLength)}
 }
 
 // do performs ex and returns the response of the last attempt, whatever its

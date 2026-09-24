@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Stage names the endpoint an OpenID4VCI 1.0 issuance was talking to when it
@@ -38,10 +39,9 @@ const (
 // Section 8.3.1.2 error code the wallet acts on — a fresh c_nonce, a retry, a
 // terminal failure — so they arrive as *types.CredentialEndpointError instead.
 //
-// The issuer's response body is deliberately not kept: it is attacker-influenced
-// text of unbounded size, and a wallet that logs or renders a failure must be
-// able to do so from the fields of this error alone. Err keeps the underlying
-// cause, so errors.Is still finds the sentinels of this package (for example
+// The response body is not kept, neither in the fields nor in the message: it
+// is attacker-influenced text. Err keeps the underlying cause, so errors.Is
+// still finds the sentinels of this package (for example
 // ErrHTTPRedirectNotAllowed or ErrIssuerIdentifierMismatch) and the transport
 // errors underneath them.
 type EndpointError struct {
@@ -121,21 +121,49 @@ func stageError(stage Stage, err error) error {
 	var statusError *httpStatusError
 	if errors.As(err, &statusError) {
 		endpointError.StatusCode = statusError.statusCode
-		endpointError.OAuthError = oauthErrorCode([]byte(statusError.body))
+		endpointError.OAuthError = statusError.oauthError
 	}
 	return endpointError
 }
 
 // httpStatusError is the unexpected HTTP status of a request this package made,
-// kept typed so the public methods can report the status code and the RFC 6749
-// `error` code structurally instead of only in their message.
+// with the RFC 6749 Section 5.2 `error` code of the body when it had one.
 type httpStatusError struct {
 	statusCode int
-	body       string
+	oauthError string
 }
 
 func (e *httpStatusError) Error() string {
-	return fmt.Sprintf("unexpected status code: %d, body: %s", e.statusCode, e.body)
+	if e.oauthError != "" {
+		return fmt.Sprintf("unexpected status code: %d, error: %s", e.statusCode, e.oauthError)
+	}
+	return fmt.Sprintf("unexpected status code: %d", e.statusCode)
+}
+
+const (
+	// maxErrorCodeLength bounds an `error` code taken from a response.
+	maxErrorCodeLength = 64
+	// maxErrorDescriptionLength bounds an `error_description` taken from a
+	// response.
+	maxErrorDescriptionLength = 256
+)
+
+// sanitizeErrorText reduces text from a response to the characters RFC 6749
+// Section 5.2 allows in `error` and `error_description` (printable ASCII
+// without `"` and `\`), replacing any other with "?", and truncates it to max
+// bytes. The result is safe to log and render.
+func sanitizeErrorText(text string, max int) string {
+	var sanitized strings.Builder
+	for _, r := range text {
+		if sanitized.Len() >= max {
+			break
+		}
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			r = '?'
+		}
+		sanitized.WriteRune(r)
+	}
+	return sanitized.String()
 }
 
 // isNotFound reports the one status the issuer metadata discovery fallback

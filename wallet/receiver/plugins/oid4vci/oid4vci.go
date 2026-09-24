@@ -204,14 +204,13 @@ func (o *Oid4vciReceiver) ReceiveCredential(
 	if response.statusCode != http.StatusOK {
 		if isUseDPoPNonce(response) {
 			return nil, fmt.Errorf(
-				"%w; status: %d; endpoint: %s; response: %s",
+				"%w; status: %d; endpoint: %s",
 				types.NewDPoPNonceError(response.header.Get("DPoP-Nonce"), types.ErrUseDPoPNonce),
 				response.statusCode,
 				endpointURL.String(),
-				string(bodyBytes),
 			)
 		}
-		return nil, fmt.Errorf("failed to receive credential; status: %d; endpoint: %s; response: %s", response.statusCode, endpointURL.String(), string(bodyBytes))
+		return nil, fmt.Errorf("failed to receive credential from %s: %w", endpointURL.String(), response.statusError())
 	}
 
 	if len(bodyBytes) == 0 {

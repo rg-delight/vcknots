@@ -90,22 +90,11 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 		if isUseDPoPNonce(response) {
 			return nil, types.NewDPoPNonceError(response.header.Get("DPoP-Nonce"), types.ErrTokenRequestFailed)
 		}
-		if response.statusCode == http.StatusBadRequest {
-			if errorCode := oauthErrorCode(response.body); errorCode != "" {
-				return nil, fmt.Errorf(
-					"token request failed: %s; status: %d; response: %s: %w",
-					errorCode,
-					response.statusCode,
-					string(response.body),
-					types.ErrTokenRequestFailed,
-				)
-			}
+		statusError := response.statusError()
+		if response.statusCode == http.StatusBadRequest && statusError.oauthError != "" {
+			return nil, fmt.Errorf("token request failed: %w: %w", statusError, types.ErrTokenRequestFailed)
 		}
-		return nil, fmt.Errorf(
-			"unexpected status code: %d response: %s",
-			response.statusCode,
-			string(response.body),
-		)
+		return nil, statusError
 	}
 
 	var accessToken types.CredentialIssuanceAccessToken

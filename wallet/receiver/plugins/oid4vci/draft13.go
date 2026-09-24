@@ -284,8 +284,8 @@ func newDraft13CredentialEndpointError(statusCode int, contentType string, body 
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return endpointError
 	}
-	endpointError.Code = payload.Error
-	endpointError.Description = payload.Description
+	endpointError.Code = sanitizeErrorText(payload.Error, maxErrorCodeLength)
+	endpointError.Description = sanitizeErrorText(payload.Description, maxErrorDescriptionLength)
 	endpointError.CNonce = payload.CNonce
 	endpointError.CNonceExpiresIn = payload.CNonceExpiresIn
 	endpointError.Interval = payload.Interval

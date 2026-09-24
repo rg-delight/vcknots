@@ -91,6 +91,90 @@ func TestEndpointErrorReportsTheOAuthErrorWithoutTheBody(t *testing.T) {
 	if strings.Contains(report, secret) {
 		t.Errorf("the endpoint error fields must not carry the response body: %s", report)
 	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("the error message must not carry the response body: %s", err)
+	}
+}
+
+// Every error string built from a refused response carries the status and the
+// OAuth error code, never the raw response body.
+func TestErrorStringsDoNotCarryTheResponseBody(t *testing.T) {
+	const secret = "attacker-controlled-body-text"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/plain") {
+			http.Error(w, secret, http.StatusBadRequest)
+			return
+		}
+		_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "secret": secret})
+	}))
+	defer server.Close()
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	proof := "proof"
+	calls := map[string]func(path string) error{
+		"FetchAccessToken": func(path string) error {
+			_, err := receiver.FetchAccessToken(types.Oid4vci, mustURIField(t, server.URL+path), "code", "")
+			return err
+		},
+		"FetchNonce": func(path string) error {
+			_, err := receiver.FetchNonce(types.Oid4vci, mustURIField(t, server.URL+path))
+			return err
+		},
+		"ReceiveCredential": func(path string) error {
+			_, err := receiver.ReceiveCredential(types.Oid4vci, mustURIField(t, server.URL+path), "cfg", nil, dpopAccessToken("access-1"), nil, nil, &types.CredentialRequestOptions{DPoPProofJWT: &proof})
+			return err
+		},
+		"FetchIssuerMetadata": func(path string) error {
+			_, err := receiver.FetchIssuerMetadata(mustURIField(t, server.URL+path), types.Oid4vci)
+			return err
+		},
+		"PushAuthorizationRequest": func(path string) error {
+			_, err := receiver.PushAuthorizationRequest(t.Context(), mustURIField(t, server.URL+path), types.PushedAuthorizationRequest{}, types.OAuthClientAttestationHeaders{})
+			return err
+		},
+	}
+	for name, call := range calls {
+		for _, path := range []string{"/json", "/plain"} {
+			err := call(path)
+			if err == nil {
+				t.Fatalf("%s %s: expected an error", name, path)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s %s: error carries the response body: %s", name, path, err)
+			}
+		}
+	}
+}
+
+// The error_description a refusal carries is kept, bounded and reduced to the
+// RFC 6749 Section 5.2 character set, so it is safe to log and render.
+func TestCredentialErrorDescriptionIsBoundedAndSanitized(t *testing.T) {
+	// JSON escapes for a newline and an ANSI escape sequence.
+	description := `line one\nline two \u001b[31m` + strings.Repeat("x", 4096)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"error":"invalid_proof","error_description":"%s"}`, description)
+	}))
+	defer server.Close()
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+
+	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte(`{}`), "application/json", fixedProof("proof"))
+	var endpointError *types.CredentialEndpointError
+	if !errors.As(err, &endpointError) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(endpointError.Description) > maxErrorDescriptionLength {
+		t.Errorf("description length = %d, want at most %d", len(endpointError.Description), maxErrorDescriptionLength)
+	}
+	if strings.ContainsAny(endpointError.Description, "\n\x1b") || !strings.HasPrefix(endpointError.Description, "line one") {
+		t.Errorf("description = %q", endpointError.Description)
+	}
+
+	_, err = receiver.RequestOID4VCIDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
+	var draft13Error *Draft13CredentialEndpointError
+	if !errors.As(err, &draft13Error) || len(draft13Error.Description) > maxErrorDescriptionLength || strings.Contains(draft13Error.Description, "\x1b") {
+		t.Errorf("draft13 error = %#v", draft13Error)
+	}
 }
 
 // A failure with no HTTP response of its own still names its stage, and the
