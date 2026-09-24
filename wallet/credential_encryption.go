@@ -31,16 +31,9 @@ const (
 )
 
 // CredentialEncryptionPolicy is the Holder's policy for the OpenID4VCI 1.0 §8.1
-// Credential Request and §8.2 Credential Response encryption.
-//
-// The specification gives the Holder no say: both encryptions follow the
-// Credential Issuer Metadata, so a wallet whose owner demands an encrypted
-// exchange, or refuses one, has nothing to state it with. This policy is that
-// statement, and it never downgrades silently — an issuance that cannot honour
-// it is refused before any Credential Request is sent.
-//
-// The zero value is CredentialEncryptionFollowIssuer for both members, which is
-// exactly the behaviour of a wallet that names no policy.
+// Credential Request and §8.2 Credential Response encryption. An issuance that
+// cannot honour it is refused before any Credential Request is sent; it is
+// never downgraded. The zero value follows the Credential Issuer Metadata.
 type CredentialEncryptionPolicy struct {
 	// Request is the policy for §8.1 credential_request_encryption.
 	Request CredentialEncryptionRule
@@ -59,15 +52,10 @@ func (p CredentialEncryptionPolicy) disablesEncryption() bool {
 	return p.Request == CredentialEncryptionDisabled || p.Response == CredentialEncryptionDisabled
 }
 
-// resolveCredentialResponseEncryptionKey applies the policy to the Credential
-// Issuer Metadata this issuance resolved, and returns the ephemeral §8.2
-// response encryption key the Credential Response is addressed to — nil when
-// this issuance asks for none, because the issuer advertises no
-// credential_response_encryption or the Holder disabled it.
-//
-// supplied is a key the caller generated itself; it is returned unchanged
-// whenever the policy permits response encryption at all, so a wallet that
-// keeps its own key material stays in control of it.
+// resolveCredentialResponseEncryptionKey returns the §8.2 key the Credential
+// Response is to be encrypted to, or nil when this issuance asks for no
+// response encryption. A supplied key is used as is; otherwise an ephemeral one
+// is generated.
 func (p CredentialEncryptionPolicy) resolveCredentialResponseEncryptionKey(
 	metadata *receiverTypes.CredentialIssuerMetadata,
 	supplied *jose.JSONWebKey,
@@ -79,6 +67,12 @@ func (p CredentialEncryptionPolicy) resolveCredentialResponseEncryptionKey(
 		return nil, nil
 	}
 	if metadata == nil || metadata.CredentialResponseEncryption == nil {
+		return nil, nil
+	}
+	// §8.2: the response key travels only inside an encrypted Credential
+	// Request. Validate refused the cases that require encryption, so an
+	// issuer without credential_request_encryption is served plaintext.
+	if metadata.CredentialRequestEncryption == nil {
 		return nil, nil
 	}
 	if supplied != nil {
@@ -111,6 +105,13 @@ func (p CredentialEncryptionPolicy) Validate(metadata *receiverTypes.CredentialI
 	if p.disablesEncryption() && issuerRequiresResponseEncryption {
 		return fmt.Errorf("%w: the credential issuer requires credential response encryption",
 			ErrCredentialEncryptionDisallowed)
+	}
+	if issuerRequiresResponseEncryption && requestEncryption == nil {
+		// §8.2: "Credential Request encryption MUST be used if the
+		// credential_response_encryption parameter is included", so the
+		// issuer's own metadata leaves no conformant request.
+		return fmt.Errorf("%w: the credential issuer requires credential response encryption but advertises no credential_request_encryption",
+			ErrCredentialEncryptionUnavailable)
 	}
 	if p.Request == CredentialEncryptionDisabled && requestEncryption != nil {
 		// §8.1 leaves the wallet no way to opt out of an advertised

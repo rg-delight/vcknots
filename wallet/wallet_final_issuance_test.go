@@ -942,14 +942,50 @@ func TestReceiveOID4VCIFinalCredential_EncryptionRequiredWithoutKey(t *testing.T
 func TestReceiveOID4VCIFinalCredential_RequestedEncryptionPlaintextResponseFailsClosed(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.responseEncryption = true
+		f.requestEncryption = true
 		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
-			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": f.issuedCredential})
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
 		}
 	})
 	req := fixture.request()
 	req.CredentialResponseEncryptionKey = &fixture.encryptionKey
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
-	require.ErrorContains(t, err, "encryption was requested")
+	require.ErrorIs(t, err, ErrCredentialResponsePlaintext)
+	require.Equal(t, 1, fixture.credentialCalls)
+	require.NotNil(t, fixture.lastCredentialBody["credential_response_encryption"])
+}
+
+// §8.2 lets the wallet send credential_response_encryption only inside an
+// encrypted Credential Request. An issuer that offers response encryption
+// without requiring it, and offers no request encryption, is served plaintext.
+func TestReceiveOID4VCIFinalCredential_OptionalResponseEncryptionWithoutRequestEncryption(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.responseEncryption = true
+		f.encryptionRequired = false
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credentials": []any{map[string]any{"credential": f.issuedCredential}}})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	_, requested := fixture.lastCredentialBody["credential_response_encryption"]
+	require.False(t, requested)
+}
+
+// An issuer that requires response encryption but offers no request encryption
+// cannot be served under §8.2; the issuance stops before the Credential
+// Request.
+func TestReceiveOID4VCIFinalCredential_RequiredResponseEncryptionWithoutRequestEncryption(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.responseEncryption = true
+		f.encryptionRequired = true
+	})
+	req := fixture.request()
+	req.CredentialResponseEncryptionKey = &fixture.encryptionKey
+	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
+	require.ErrorIs(t, err, ErrCredentialEncryptionUnavailable)
+	require.Equal(t, 0, fixture.credentialCalls)
 }
 
 func TestReceiveOID4VCIFinalCredential_BatchWithTwoKeys(t *testing.T) {
