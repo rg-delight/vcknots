@@ -13,13 +13,9 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
-)
 
-// maxNumericDateSeconds bounds a NumericDate (RFC 7519 Section 2) this package
-// turns into a time.Time: 8.64e12 seconds (about 273,790 years) either side of
-// the epoch. A value beyond it is not a date any issuer means and is refused
-// rather than wrapped.
-const maxNumericDateSeconds = 8.64e12
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
+)
 
 // tokenClaims is the verified payload of a Status List Token, reduced to the
 // members draft-ietf-oauth-status-list Section 5.1 defines and this package
@@ -334,17 +330,11 @@ func parseTokenClaims(payload []byte, expectedSubject string) (*tokenClaims, err
 	}, nil
 }
 
-// numericDateClaim reads an optional NumericDate claim (RFC 7519 Section 2):
-// a JSON number of seconds since the epoch, possibly fractional.
+// numericDateClaim reads an optional NumericDate claim (RFC 7519 Section 2).
 func numericDateClaim(claims map[string]any, name string) (time.Time, bool, error) {
-	raw, present := claims[name]
-	if !present {
-		return time.Time{}, false, nil
+	at, present, err := commonjose.NumericDateClaim(claims, name)
+	if err != nil {
+		return time.Time{}, true, fmt.Errorf("%w: %w", ErrStatusListTokenInvalid, err)
 	}
-	seconds, isNumber := finiteNumber(raw)
-	if !isNumber || math.Abs(seconds) > maxNumericDateSeconds {
-		return time.Time{}, true, fmt.Errorf("%w: %s must be a NumericDate, got %v", ErrStatusListTokenInvalid, name, raw)
-	}
-	whole, fraction := math.Modf(seconds)
-	return time.Unix(int64(whole), int64(math.Round(fraction*1e9))).UTC(), true, nil
+	return at, present, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -172,43 +171,15 @@ func decodeJWTSegment(segment string) (map[string]any, error) {
 // neither is timeless, which the specification allows; one that carries either
 // as something other than a NumericDate is not valid.
 func withinJWTValidity(claims map[string]any, now time.Time) bool {
-	if raw, present := claims["exp"]; present {
-		expiry, ok := numericDate(raw)
-		if !ok || !now.Before(expiry) {
-			return false
-		}
+	expiry, present, err := commonjose.NumericDateClaim(claims, "exp")
+	if err != nil || (present && !now.Before(expiry)) {
+		return false
 	}
-	if raw, present := claims["nbf"]; present {
-		notBefore, ok := numericDate(raw)
-		if !ok || now.Before(notBefore) {
-			return false
-		}
+	notBefore, present, err := commonjose.NumericDateClaim(claims, "nbf")
+	if err != nil || (present && now.Before(notBefore)) {
+		return false
 	}
 	return true
-}
-
-// numericDate reads a JWT NumericDate (RFC 7519 section 2): a finite JSON
-// number of seconds since the epoch, fractions truncated.
-func numericDate(value any) (time.Time, bool) {
-	var seconds float64
-	switch typed := value.(type) {
-	case float64:
-		seconds = typed
-	case json.Number:
-		parsed, err := typed.Float64()
-		if err != nil {
-			return time.Time{}, false
-		}
-		seconds = parsed
-	default:
-		return time.Time{}, false
-	}
-	// Beyond ±2^53 seconds a float64 no longer holds whole seconds and the
-	// value is meaningless as a date.
-	if math.IsNaN(seconds) || math.Abs(seconds) > 1<<53 {
-		return time.Time{}, false
-	}
-	return time.Unix(int64(seconds), 0), true
 }
 
 // domainLinkageClaimsMatch reports whether the credential inside a verified
