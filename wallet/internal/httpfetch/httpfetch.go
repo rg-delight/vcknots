@@ -7,7 +7,6 @@
 package httpfetch
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -15,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/trustknots/vcknots/wallet/common"
 )
 
 const (
@@ -30,7 +31,7 @@ const (
 
 // ErrBodyTooLarge is returned when a response declares or delivers more bytes
 // than the caller's limit.
-var ErrBodyTooLarge = errors.New("response body exceeds the size limit")
+var ErrBodyTooLarge = common.NewCodedError("response_body_too_large", "response body exceeds the size limit")
 
 // NewClient returns a client with DefaultTimeout that does not follow
 // redirects.
