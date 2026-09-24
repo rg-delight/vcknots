@@ -20,6 +20,10 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
+// storeAndNotifyOID4VCIFinalCredentials stores the credentials of a Credential
+// Response and reports the outcome to the §11 Notification Endpoint. A failed
+// notification never undoes the storage: it is returned in
+// result.NotificationError, or joined to the storage error it reports.
 func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 	ctx context.Context,
 	flow *oid4vciFinalFlow,
@@ -29,25 +33,25 @@ func (w *Wallet) storeAndNotifyOID4VCIFinalCredentials(
 ) (*OID4VCIFinalReceiveResult, error) {
 	issuerMetadata := flow.issuerMetadata
 	result := pendingOID4VCIFinalResult(issuerMetadata, flow.credentialConfigurationID, token, credentialResponse)
+	notify := func(event OID4VCINotificationEvent) *OID4VCINotificationError {
+		if flow.policy.skipNotification {
+			return nil
+		}
+		if err := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, event); err != nil {
+			return &OID4VCINotificationError{Event: event, Err: err}
+		}
+		return nil
+	}
 	savedCredentials, storeErr := w.storeOID4VCIFinalCredentialResponseBatch(ctx, credentialResponse, issuerMetadata, flow.credentialConfigurationID, flow.holderKeys)
 	if storeErr != nil {
-		// §11: a credential that failed verification/storage is reported with
-		// credential_failure (best effort); the original failure is returned.
-		if !flow.policy.skipNotification {
-			if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialFailure); notifyErr != nil {
-				return nil, errors.Join(storeErr, fmt.Errorf("failed to send credential_failure notification: %w", notifyErr))
-			}
+		if notifyErr := notify(OID4VCINotificationCredentialFailure); notifyErr != nil {
+			return nil, errors.Join(storeErr, notifyErr)
 		}
 		return nil, storeErr
 	}
 	result.SavedCredentials = savedCredentials
-	// §11: credential_accepted MUST only be sent after the credential was
-	// successfully stored.
-	if result.NotificationID != "" && issuerMetadata.NotificationEndpoint != nil && !flow.policy.skipNotification {
-		if notifyErr := notifyOID4VCIFinalCredential(ctx, flow.receiver, flow.signer, issuerMetadata, token, clientKey, result.NotificationID, OID4VCINotificationCredentialAccepted); notifyErr != nil {
-			return nil, fmt.Errorf("failed to send credential_accepted notification: %w", notifyErr)
-		}
-	}
+	// §11: credential_accepted is sent only after the credentials were stored.
+	result.NotificationError = notify(OID4VCINotificationCredentialAccepted)
 	return result, nil
 }
 

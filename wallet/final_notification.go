@@ -34,6 +34,25 @@ const (
 	OID4VCINotificationCredentialDeleted OID4VCINotificationEvent = "credential_deleted"
 )
 
+// OID4VCINotificationError reports that a §11 Notification Request the
+// issuance sent on its own failed. Notifications are best effort (§11), so the
+// outcome they report stands: a stored credential stays stored.
+type OID4VCINotificationError struct {
+	// Event is the event the notification carried.
+	Event OID4VCINotificationEvent
+	// Err is the failure, typically a *receiverTypes.CredentialEndpointError.
+	Err error
+}
+
+// ErrorCode names the outcome for CodedError callers.
+func (e *OID4VCINotificationError) ErrorCode() string { return "notification_failed" }
+
+func (e *OID4VCINotificationError) Error() string {
+	return fmt.Sprintf("failed to send %s notification: %v", e.Event, e.Err)
+}
+
+func (e *OID4VCINotificationError) Unwrap() error { return e.Err }
+
 // OID4VCIFinalNotificationRequest is one OpenID4VCI 1.0 §11.1 Notification
 // Request.
 type OID4VCIFinalNotificationRequest struct {

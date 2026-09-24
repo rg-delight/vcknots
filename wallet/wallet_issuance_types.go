@@ -160,6 +160,8 @@ type OID4VCIFinalReceiveRequest struct {
 	// browser, and hands the redirect to ResumeOID4VCIFinalAuthorization.
 	AllowSelfDrivenAuthorization bool
 }
+
+// OID4VCIFinalReceiveResult is the outcome of an OpenID4VCI 1.0 issuance.
 type OID4VCIFinalReceiveResult struct {
 	CredentialResponse *receiverTypes.CredentialResponse
 	SavedCredentials   []*SavedCredential
@@ -170,6 +172,10 @@ type OID4VCIFinalReceiveResult struct {
 	NotificationID            string
 	IssuerMetadata            *receiverTypes.CredentialIssuerMetadata
 	CredentialConfigurationID string
+	// NotificationError is set when the credential_accepted notification the
+	// issuance sent failed. The credentials were stored regardless; a caller
+	// may retry with NotifyOID4VCIFinalCredential.
+	NotificationError *OID4VCINotificationError
 }
 
 func ParseCredentialOfferURL(rawURL string) (*CredentialOffer, error) {

@@ -191,3 +191,52 @@ func TestNotifyOID4VCIFinalCredentialDeletedFixesTheEvent(t *testing.T) {
 	require.NoError(t, fixture.wallet.NotifyOID4VCIFinalCredentialDeleted(req))
 	require.Equal(t, []string{"credential_deleted"}, fixture.notificationEvents)
 }
+
+// §11 notifications are best effort: a credential_accepted the issuer refuses
+// does not undo the credential the wallet already stored.
+func TestReceiveOID4VCIFinalCredentialKeepsTheStoredCredentialWhenNotificationFails(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNotification = true
+		f.notificationHandler = func(w http.ResponseWriter, _ *http.Request) {
+			mockserver.JSONResponse(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.NoError(t, err)
+	require.Len(t, result.SavedCredentials, 1)
+	require.Equal(t, []string{"credential_accepted"}, fixture.notificationEvents)
+
+	require.NotNil(t, result.NotificationError)
+	require.Equal(t, OID4VCINotificationCredentialAccepted, result.NotificationError.Event)
+	var endpointError *receiverTypes.CredentialEndpointError
+	require.ErrorAs(t, result.NotificationError, &endpointError)
+
+	entries, _, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+}
+
+// A failed credential_failure notification is reported next to the storage
+// failure it was about, which stays the error the caller branches on.
+func TestReceiveOID4VCIFinalCredentialReportsAFailedFailureNotification(t *testing.T) {
+	otherKey := newPrivateJWKForFinalVCITest(t, "other-holder-key")
+	badCredential := buildTestSDJWTVC(t, otherKey, map[string]string{"given_name": "Taro"})
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNotification = true
+		f.credentialHandler = func(w http.ResponseWriter, r *http.Request) {
+			mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+				"credentials":     []any{map[string]any{"credential": badCredential}},
+				"notification_id": "notification-1",
+			})
+		}
+		f.notificationHandler = func(w http.ResponseWriter, _ *http.Request) {
+			mockserver.JSONResponse(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		}
+	})
+	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "not part of the request")
+	var notificationError *OID4VCINotificationError
+	require.ErrorAs(t, err, &notificationError)
+	require.Equal(t, OID4VCINotificationCredentialFailure, notificationError.Event)
+}
