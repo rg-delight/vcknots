@@ -210,6 +210,28 @@ func TestDIDWebPluginResolveRejects(t *testing.T) {
 			want: ErrDIDWebDocumentInvalid,
 		},
 		{
+			name: "a media type that only contains a DID document type",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/jsonx")
+				_, _ = writer.Write([]byte(`{"id":"did:web:issuer.example.test"}`))
+			},
+			want: ErrDIDWebDocumentFetchFailed,
+		},
+		{
+			name: "a document without an id",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writeDIDDocument(t, writer, map[string]any{"assertionMethod": []any{verificationMethod(t, identifier+"#sign", key)}})
+			},
+			want: ErrDIDWebDocumentInvalid,
+		},
+		{
+			name: "a document whose id is not a string",
+			handler: func(writer http.ResponseWriter, _ *http.Request) {
+				writeDIDDocument(t, writer, map[string]any{"id": 7, "assertionMethod": []any{verificationMethod(t, identifier+"#sign", key)}})
+			},
+			want: ErrDIDWebDocumentInvalid,
+		},
+		{
 			name: "a document that names another DID",
 			handler: func(writer http.ResponseWriter, _ *http.Request) {
 				writeDIDDocument(t, writer, map[string]any{"id": "did:web:other.example.test"})
@@ -332,14 +354,60 @@ func TestDIDWebPluginValidate(t *testing.T) {
 	}
 }
 
-func TestNewDIDPluginRegistersWebAndJWK(t *testing.T) {
+func TestNewDIDPluginRegistersOnlyOfflineMethods(t *testing.T) {
 	t.Parallel()
 
 	plugin := NewDIDPlugin()
-	for _, method := range []string{"key", "jwk", "web"} {
+	for _, method := range []string{"key", "jwk"} {
 		if _, err := plugin.getMethodPlugin(method); err != nil {
 			t.Fatalf("method %q is not registered: %v", method, err)
 		}
+	}
+	if _, err := plugin.Resolve("did:web:issuer.example.test"); err == nil || !strings.Contains(err.Error(), "unsupported DID method") {
+		t.Fatalf("did:web resolved by the default plugin: %v", err)
+	}
+	if _, err := NewDIDPluginWithWeb(nil).getMethodPlugin("web"); err != nil {
+		t.Fatalf("NewDIDPluginWithWeb did not register did:web: %v", err)
+	}
+}
+
+func TestDIDWebPluginResolvesRelativeVerificationMethodIDs(t *testing.T) {
+	t.Parallel()
+
+	embedded, referenced := testPublicJWK(t), testPublicJWK(t)
+	const identifier = "did:web:issuer.example.test"
+	plugin, _ := newDIDWebTestPlugin(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writeDIDDocument(t, writer, map[string]any{
+			"id":                 identifier,
+			"assertionMethod":    []any{verificationMethod(t, "#embedded", embedded), "#referenced", "relative/path"},
+			"verificationMethod": []any{verificationMethod(t, "#referenced", referenced), verificationMethod(t, "#", testPublicJWK(t))},
+		})
+	})
+
+	profile, err := plugin.Resolve(identifier)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	var ids []string
+	for _, key := range profile.Keys.Keys {
+		ids = append(ids, key.KeyID)
+	}
+	if want := []string{identifier + "#embedded", identifier + "#referenced"}; strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("key ids = %v, want %v", ids, want)
+	}
+}
+
+func TestDIDPluginResolveContextPassesTheContextToDIDWeb(t *testing.T) {
+	t.Parallel()
+
+	web, _ := newDIDWebTestPlugin(t, func(writer http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewDIDPluginWithWeb(web).ResolveContext(ctx, "did:web:issuer.example.test")
+	if !errors.Is(err, ErrDIDWebDocumentFetchFailed) {
+		t.Fatalf("ResolveContext error = %v, want a fetch failure from the cancelled context", err)
 	}
 }
 
