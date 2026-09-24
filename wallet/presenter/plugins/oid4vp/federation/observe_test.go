@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
 
 // TestObserveLabelsTrustChainFetches: a Trust Chain resolution labels each
@@ -13,7 +14,7 @@ import (
 func TestObserveLabelsTrustChainFetches(t *testing.T) {
 	f := newDirectFederation(t, directOptions{})
 	resolver := f.resolver()
-	recorder := observe.NewRecorder(8)
+	recorder := &observetest.Recorder{}
 	client := *resolver.HTTPClient
 	client.Transport = observe.Transport(client.Transport, recorder)
 	resolver.HTTPClient = &client
@@ -35,9 +36,9 @@ func TestObserveLabelsTrustChainFetches(t *testing.T) {
 		t.Fatalf("recorded %d exchanges, want %d: %+v", len(exchanges), len(want), exchanges)
 	}
 	for i, exchange := range exchanges {
-		if exchange.URL.Path != want[i].path || exchange.Endpoint != want[i].endpoint || exchange.Method != http.MethodGet {
+		if exchange.Request.URL.Path != want[i].path || exchange.Endpoint != want[i].endpoint || exchange.Request.Method != http.MethodGet {
 			t.Errorf("exchange %d = %s %s labelled %q, want GET %s labelled %q",
-				i, exchange.Method, exchange.URL.Path, exchange.Endpoint, want[i].path, want[i].endpoint)
+				i, exchange.Request.Method, exchange.Request.URL.Path, exchange.Endpoint, want[i].path, want[i].endpoint)
 		}
 	}
 }

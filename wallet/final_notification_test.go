@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -178,7 +179,7 @@ func TestNotifyOID4VCIFinalCredentialRefusesARedirect(t *testing.T) {
 }
 
 func TestNotifyOID4VCIFinalCredentialLabelsTheRequestForAnObserver(t *testing.T) {
-	recorder := observe.NewRecorder(8)
+	recorder := &observetest.Recorder{}
 	fixture := newFinalIssuanceFixture(t, observeFixtureTransport(recorder))
 	require.NoError(t, fixture.wallet.NotifyOID4VCIFinalCredential(context.Background(), fixture.finalNotificationRequest(OID4VCINotificationCredentialAccepted)))
 

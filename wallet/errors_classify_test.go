@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/url"
 	"testing"
+
+	"github.com/trustknots/vcknots/wallet/acceptance"
 )
 
 func TestClassifyGivesEveryErrorACode(t *testing.T) {
 	uncoded := errors.New("boom")
-	coded := fmt.Errorf("wrapped: %w", ErrCredentialExpired)
+	coded := fmt.Errorf("wrapped: %w", acceptance.ErrCredentialExpired)
 	tests := []struct {
 		name  string
 		err   error
@@ -19,7 +21,7 @@ func TestClassifyGivesEveryErrorACode(t *testing.T) {
 		is    []error
 		keeps bool // the input is returned unchanged
 	}{
-		{"coded error is kept", coded, "credential_expired", []error{ErrCredentialExpired}, true},
+		{"coded error is kept", coded, "credential_expired", []error{acceptance.ErrCredentialExpired}, true},
 		{"canceled", fmt.Errorf("send: %w", context.Canceled), "canceled", []error{ErrCanceled, context.Canceled}, false},
 		{"deadline", &url.Error{Op: "Post", URL: "https://x", Err: context.DeadlineExceeded}, "deadline_exceeded", []error{ErrDeadlineExceeded, context.DeadlineExceeded}, false},
 		{"network", &url.Error{Op: "Get", URL: "https://x", Err: &net.OpError{Op: "dial", Err: uncoded}}, "network_error", []error{ErrNetwork, uncoded}, false},

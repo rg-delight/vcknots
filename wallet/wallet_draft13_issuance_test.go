@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -685,7 +686,7 @@ func TestObserveLabelsEveryDraft13IssuanceRequest(t *testing.T) {
 	fixture.credentialResponse = func(int, map[string]any) (int, any) {
 		return http.StatusAccepted, map[string]any{"transaction_id": "transaction-1"}
 	}
-	recorder := observe.NewRecorder(32)
+	recorder := &observetest.Recorder{}
 	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: observedClient(fixture.server.Client(), recorder), AllowHTTP: true})
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)

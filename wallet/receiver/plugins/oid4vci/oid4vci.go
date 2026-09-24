@@ -70,12 +70,6 @@ func (o *Oid4vciReceiver) ProtocolProfile() profile.Profile {
 	return normalized
 }
 
-// SetProtocolProfile is used by the wallet root to propagate its profile to the
-// default receiver plugin it constructs itself.
-func (o *Oid4vciReceiver) SetProtocolProfile(p profile.Profile) {
-	o.Profile = p
-}
-
 // normalizedProfile normalizes the configured profile once. Unknown values fail
 // closed before any network access so every checkpoint reads a validated value.
 func (o *Oid4vciReceiver) normalizedProfile() (profile.Profile, error) {

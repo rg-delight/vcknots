@@ -90,7 +90,7 @@ func newLdpPresentationFixture(t *testing.T) ldpPresentationFixture {
 	})
 	presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{HTTPClient: server.Client()}))
 	require.NoError(t, err)
-	controller, err := NewWalletWithoutStore(Config{Presenter: presenting})
+	controller, err := NewWalletWithConfig(Config{Presenter: presenting, Storeless: true})
 	require.NoError(t, err)
 	vectors := loadLdpPresentationVectors(t)
 	endpoint, err := url.Parse(server.URL + "/response")
