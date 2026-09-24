@@ -169,7 +169,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			return b
 		}
 
-		// ClientID should contain DNS name which is same as the SAN of the leaf certificate in the x5c array (OID4VP x509_san_dns). #106
+		// ClientID should contain DNS name which is same as the SAN of the leaf certificate in the x5c array (OID4VP x509_san_dns).
 		matched := false
 		for _, n := range certificates[0].DNSNames {
 			if clientID.original == n {
@@ -182,7 +182,7 @@ func (b *requestBuilder) withDraft24RequestObject(obj string) *requestBuilder {
 			return b
 		}
 
-		// response_uri / redirect_uri check #107
+		// The response endpoint host must be the DNS name.
 		var uri *url.URL
 		if b.req.ResponseMode == "direct_post" {
 			uri, err = url.Parse(b.req.ResponseURI)

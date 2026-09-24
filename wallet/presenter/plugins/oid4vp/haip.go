@@ -8,13 +8,8 @@ import (
 // once the Final Authorization Request parameters have been assembled. It is
 // deliberately inert on the Draft24 path and for the Final profile.
 func (b *requestBuilder) enforceHAIPProfile() error {
-	// Record how this process observed the Request Object and whether the
-	// caller's DeliveredByReference attestation was accepted. A caller
-	// attestation lets an application that fetched the signed Request Object
-	// through request_uri at admission time and re-submits the stored JWT with
-	// request= satisfy HAIP §5.1 although this process cannot observe the
-	// original delivery. It is scoped to the HAIP delivery check only; the
-	// wallet_nonce echo stays bound to an actual request_uri POST.
+	// Record the observed delivery and whether the caller's
+	// DeliveredByReference statement stood in for request_uri (HAIP §5.1).
 	deliveryAttested := b.profile.IsHAIP() && b.requestSource == sourceValue &&
 		b.requestObjectValidation != nil && b.requestObjectValidation.DeliveredByReference
 	if b.req.RequestObjectVerification != nil {

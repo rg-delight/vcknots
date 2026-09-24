@@ -142,20 +142,13 @@ type CredentialPresentationRequest struct {
 	// that accepts the parameter resolves it after admitting the request.
 	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
 	// VerifierFederation is the Trust Chain that authenticated an
-	// openid_federation Verifier, whether its request was signed (then it is
-	// also RequestObjectVerification.Federation) or carried in plain
-	// parameters. Like RequestObjectVerification it is produced by this
-	// library and never read from request data. It is nil for every other
-	// Client Identifier Prefix.
+	// openid_federation Verifier, signed or (when allowed) unsigned. It is
+	// produced by this library, never read from request data.
 	VerifierFederation     *FederationEvidence     `json:"-"`
 	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
-	// RawPresentationDefinition is the presentation_definition parameter of a
-	// Draft 24 Authorization Request exactly as it arrived, before this library
-	// reduced it to the id it uses. Presentation Exchange is not modelled here,
-	// so a caller that has to show or forward the Verifier's own definition
-	// reads it from this value. It is nil on the Final path, which refuses
-	// presentation_definition outright, and it is never serialized back into an
-	// authorization request.
+	// RawPresentationDefinition is the Draft24 presentation_definition
+	// exactly as it arrived; PresentationDefinition keeps only its id. It is
+	// nil on the Final path.
 	RawPresentationDefinition json.RawMessage   `json:"-"`
 	DcqlQuery                 *DcqlQuery        `json:"dcql_query"`                            // required
 	ClientMetadata            *VerifierMetadata `json:"client_metadata,omitempty"`             // optional

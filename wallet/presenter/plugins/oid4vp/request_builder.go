@@ -255,15 +255,9 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		singleParams[key] = values[0]
 	}
 
-	// OID4VP 1.0 §5.9.3: an "x509_san_dns" or "x509_hash" Client Identifier is
-	// authenticated by the certificate that signed the Request Object, so the
-	// same identifier delivered in plain query parameters authenticates
-	// nothing. The Draft24 wire contract names the same two prefixes and has no
-	// other way to authenticate them either, so both parse entry points refuse
-	// the unsigned form rather than returning a request a caller could consent
-	// to. It is decided before any other parameter is read, so the refusal is
-	// never answered to the Verifier: the response_uri of an unauthenticated
-	// request must not receive an outbound POST.
+	// A Client Identifier authenticated only by a signed Request Object is
+	// refused in plain parameters before anything else is read (OID4VP 1.0
+	// §5.9.3).
 	if value, isString := singleParams["client_id"].(string); isString {
 		clientID, err := b.parseClientID(strings.TrimSpace(value))
 		if err == nil && clientID.RequiresRequestObjectSignature() {

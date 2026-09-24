@@ -41,30 +41,20 @@ type RequestObjectValidationOptions struct {
 	// SigningAlgorithms defaults to ES256 and RS256. This is independent of
 	// encryption keys and algorithms carried in client_metadata.
 	SigningAlgorithms []jose.SignatureAlgorithm
-	// DeliveredByReference is a caller attestation: the application obtained
-	// this Request Object through request_uri (OpenID4VP 1.0 §5.10) and
-	// re-submits it by value, so HAIP §5.1's delivery-by-reference requirement
-	// is already satisfied. Set it only when that is recorded by the
-	// application's own admission path. It is honoured for the HAIP delivery
-	// check only and never for the wallet_nonce echo, which stays bound to an
-	// actual request_uri POST in this process.
+	// DeliveredByReference states that the application fetched this Request
+	// Object through request_uri and now passes it by value, which satisfies
+	// the HAIP §5.1 delivery rule. It affects that check only.
 	DeliveredByReference bool
-	// RequireExpiry rejects a Request Object that carries no exp claim.
-	// OpenID4VP 1.0 states no exp rule for the Authorization Request Object
-	// itself and leaves it to JAR (RFC 9101), and HAIP 1.0 adds none, so this
-	// is relying-party hardening policy rather than a specification
-	// requirement. It is off by default in every profile; the official
-	// conformance verifiers sign Request Objects without exp.
+	// RequireExpiry rejects a Request Object without exp. Neither OpenID4VP
+	// 1.0 nor HAIP requires exp, so it is off by default in every profile.
 	RequireExpiry bool
 	// MaxAge bounds the lifetime of a Request Object, measured as exp - iat,
 	// or as exp - now when iat is absent. Zero means unbounded. The HAIP
 	// profile substitutes haipRequestObjectMaxAge when the caller left it
 	// zero, and honours a caller-supplied value as given.
 	MaxAge time.Duration
-	// Context scopes the revocation fetches performed while authenticating one
-	// Request Object. These options describe a single parse operation rather
-	// than long-lived configuration, which is why the context belongs here; a
-	// nil Context means context.Background().
+	// Context scopes the outbound requests of one parse (request_uri,
+	// revocation, federation). Nil means context.Background().
 	Context context.Context
 	// VerifierAttestationIssuers are the parties this Wallet trusts for issuing
 	// Verifier Attestation JWTs (OID4VP 1.0 §5.9.3). An empty list refuses
@@ -75,17 +65,10 @@ type RequestObjectValidationOptions struct {
 	// openid_federation Client Identifier. A nil value refuses every such
 	// Client Identifier.
 	Federation *FederationTrustOptions
-	// WalletNonce is a caller attestation, the by-value counterpart of the
-	// nonce this library sends itself: the application fetched this Request
-	// Object with its own request_uri POST, sent this wallet_nonce with it,
-	// and now hands the Request Object over by value (ParseRequestObject).
-	// OpenID4VP 1.0 Section 5.10.1: "if the Wallet passed a wallet_nonce in
-	// the POST request, the Wallet MUST validate whether the request object
-	// contains the respective nonce value in a wallet_nonce claim. If it does
-	// not, the Wallet MUST terminate request processing." Every Client
-	// Identifier Prefix applies that rule to this value exactly as it applies
-	// it to a nonce this library sent. Empty means no nonce was sent, and it
-	// is ignored when this library performed the request_uri POST itself.
+	// WalletNonce is the wallet_nonce the application sent with its own
+	// request_uri POST before passing the Request Object by value. The
+	// Request Object must echo it (OID4VP 1.0 §5.10.1). It is ignored when
+	// this library fetched the Request Object itself.
 	WalletNonce string
 }
 
@@ -383,18 +366,10 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	return b.authenticateRequestObjectByClientIdentifier(obj, parsed, options)
 }
 
-// authenticateX509RequestObject is the one X.509 Request Object authentication
-// path. Final reaches it through WithRequestObject and Draft24 through
-// withDraft24RequestObject, so both wire contracts authenticate a signed
-// Request Object against the same RequestObjectValidationOptions: the same
-// chain and revocation policy, the same Client Identifier binding and the same
-// registered-claim policy. Only the differences the two contracts actually have
-// are resolved per profile, in requestObjectClaimPolicy and
-// haipRequestObjectPolicy.
-//
-// The Authorization Request parameters must already be set on b.req: the
-// Client Identifier binding reads the response endpoint from them, and the
-// claims verified here are the ones that set them.
+// authenticateX509RequestObject authenticates an x509_san_dns or x509_hash
+// Request Object for both wire contracts: chain and revocation, the Client
+// Identifier binding to the leaf and the response endpoint, and the claim
+// policy. b.req must already hold the request parameters.
 func (b *requestBuilder) authenticateX509RequestObject(obj string, parsed *jwt.JSONWebToken, options RequestObjectValidationOptions) error {
 	clientID, err := parseOID4VPClientID(b.req.ClientID)
 	if err != nil {
@@ -478,15 +453,8 @@ func describeRequestObjectCertificate(leaf *x509.Certificate) *RequestObjectCert
 }
 
 // bindX509ClientID binds an x509_hash or x509_san_dns Client Identifier to the
-// leaf certificate that signed the Request Object, and then to the response
-// endpoint the request names.
-//
-// The DNS match is exact, never wildcard (commonX509.RequireLeafDNSName is
-// called with wildcard=false): OID4VP 1.0 Section 5.9.3 requires that the
-// original Client Identifier "MUST be a DNS name and match a `dNSName` Subject
-// Alternative Name (SAN) [@!RFC5280] entry in the leaf certificate passed with
-// the request", so a wildcard SAN such as *.example.com must not let one
-// certificate speak for every subdomain of a Verifier.
+// signing leaf and, for x509_san_dns, the response endpoint's host to the
+// DNS name. The SAN match is exact, never wildcard (OID4VP 1.0 §5.9.3).
 func bindX509ClientID(clientID *OID4VPClientID, leaf *x509.Certificate, request *CredentialPresentationRequest) error {
 	if clientID.prefix == OID4VPClientIDPrefixX509Hash {
 		// Final 5.9.3 and HAIP 5: x509_hash does not imply a DNS binding.
