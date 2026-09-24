@@ -358,43 +358,56 @@ func resolveDCQLCredentialQuery(query DCQLCredentialQuery, claimOptions [][]DCQL
 	return nil
 }
 
+// matchDCQLClaims resolves one claim set against candidate and returns the
+// encoded claims path pointers to disclose. A claim with values discloses only
+// the elements whose value matches (OID4VP 1.0 Section 6.4.1 treats the others
+// as absent), so a null component is replaced by the index of each match.
 func matchDCQLClaims(claimQueries []DCQLClaimQuery, candidate DCQLCredentialCandidate) ([]string, bool) {
 	claims := make([]string, 0, len(claimQueries))
+	add := func(path []any) {
+		encoded := encodeDCQLClaimPath(path)
+		if !containsString(claims, encoded) {
+			claims = append(claims, encoded)
+		}
+	}
 	for _, claim := range claimQueries {
 		elements, satisfied := candidate.selectDCQLClaimElements(claim.Path)
 		if !satisfied {
 			return nil, false
 		}
-		if claim.Values != nil {
-			matches := false
-			for _, value := range elements {
-				for _, expected := range claim.Values {
-					if dcqlClaimValuesEqual(value, expected) {
-						matches = true
-						break
-					}
-				}
-				if matches {
+		if claim.Values == nil {
+			add(claim.Path)
+			continue
+		}
+		matched := false
+		for _, element := range elements {
+			for _, expected := range claim.Values {
+				if dcqlClaimValuesEqual(element.value, expected) {
+					matched = true
+					add(element.path)
 					break
 				}
 			}
-			if !matches {
-				return nil, false
-			}
 		}
-		encoded := encodeDCQLClaimPath(claim.Path)
-		if !containsString(claims, encoded) {
-			claims = append(claims, encoded)
+		if !matched {
+			return nil, false
 		}
 	}
 	return claims, true
 }
 
+// dcqlClaimElement is one element a claims path pointer selected, with the
+// pointer that addresses it alone: every null component replaced by an index.
+type dcqlClaimElement struct {
+	path  []any
+	value any
+}
+
 // selectDCQLClaimElements applies a claims path pointer (OID4VP 1.0 Section 7.1.1)
 // to the candidate. With a decoded ClaimObject the full nested path semantics
-// apply; the legacy Claims/ClaimValues representation supports one-segment
-// string paths only.
-func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]any, bool) {
+// apply; the Claims/ClaimValues representation supports one-segment string
+// paths only.
+func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]dcqlClaimElement, bool) {
 	if candidate.ClaimObject != nil {
 		return evaluateDCQLClaimPath(candidate.ClaimObject, path)
 	}
@@ -406,40 +419,47 @@ func (candidate DCQLCredentialCandidate) selectDCQLClaimElements(path []any) ([]
 		return nil, false
 	}
 	if candidate.ClaimValues == nil {
-		return []any{}, true
+		return []dcqlClaimElement{}, true
 	}
 	value, exists := candidate.ClaimValues[name]
 	if !exists {
-		return []any{}, true
+		return []dcqlClaimElement{}, true
 	}
-	return []any{value}, true
+	return []dcqlClaimElement{{path: path, value: value}}, true
 }
 
 // evaluateDCQLClaimPath processes a claims path pointer from left to right over
 // a decoded JSON credential root. It returns the selected elements and reports
 // whether any element was selected.
-func evaluateDCQLClaimPath(root map[string]any, path []any) ([]any, bool) {
-	current := []any{root}
+func evaluateDCQLClaimPath(root map[string]any, path []any) ([]dcqlClaimElement, bool) {
+	current := []dcqlClaimElement{{path: []any{}, value: root}}
 	for _, component := range path {
-		next := []any{}
+		next := []dcqlClaimElement{}
+		extend := func(element dcqlClaimElement, step any, value any) {
+			concrete := make([]any, len(element.path), len(element.path)+1)
+			copy(concrete, element.path)
+			next = append(next, dcqlClaimElement{path: append(concrete, step), value: value})
+		}
 		switch value := component.(type) {
 		case string:
 			for _, element := range current {
-				object, ok := element.(map[string]any)
+				object, ok := element.value.(map[string]any)
 				if !ok {
 					continue
 				}
 				if selected, exists := object[value]; exists {
-					next = append(next, selected)
+					extend(element, value, selected)
 				}
 			}
 		case nil:
 			for _, element := range current {
-				array, ok := element.([]any)
+				array, ok := element.value.([]any)
 				if !ok {
 					continue
 				}
-				next = append(next, array...)
+				for index, item := range array {
+					extend(element, index, item)
+				}
 			}
 		default:
 			index, ok := dcqlPathIndex(value)
@@ -447,12 +467,12 @@ func evaluateDCQLClaimPath(root map[string]any, path []any) ([]any, bool) {
 				return nil, false
 			}
 			for _, element := range current {
-				array, ok := element.([]any)
+				array, ok := element.value.([]any)
 				if !ok {
 					continue
 				}
 				if index < int64(len(array)) {
-					next = append(next, array[index])
+					extend(element, component, array[index])
 				}
 			}
 		}

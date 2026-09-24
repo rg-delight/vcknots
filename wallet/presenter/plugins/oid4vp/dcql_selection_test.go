@@ -504,3 +504,34 @@ func TestResolveDCQLTypeValues(t *testing.T) {
 		})
 	}
 }
+
+// OID4VP 1.0 Section 6.4.1: an element whose value does not match values is
+// treated as absent, so a null component resolves to the index of each match
+// instead of disclosing every element.
+func TestResolveDCQLValuesNarrowWildcards(t *testing.T) {
+	candidate := DCQLCredentialCandidate{ID: "pid", Format: "dc+sd-jwt", VCT: "urn:test:identity", ClaimObject: map[string]any{
+		"nationalities": []any{"JP", "DE", "FR"},
+		"degrees":       []any{map[string]any{"type": "Master"}, map[string]any{"type": "Bachelor"}},
+	}}
+	for _, tc := range []struct {
+		name  string
+		claim DCQLClaimQuery
+		want  []string
+	}{
+		{name: "one match", claim: DCQLClaimQuery{Path: []any{"nationalities", nil}, Values: []any{"DE"}}, want: []string{`["nationalities",1]`}},
+		{name: "several matches", claim: DCQLClaimQuery{Path: []any{"nationalities", nil}, Values: []any{"FR", "JP"}}, want: []string{`["nationalities",0]`, `["nationalities",2]`}},
+		{name: "nested wildcard", claim: DCQLClaimQuery{Path: []any{"degrees", nil, "type"}, Values: []any{"Bachelor"}}, want: []string{`["degrees",1,"type"]`}},
+		{name: "no values keeps the wildcard", claim: DCQLClaimQuery{Path: []any{"nationalities", nil}}, want: []string{`["nationalities",null]`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := &DCQLQuery{Credentials: []DCQLCredentialQuery{{ID: "pid", Format: "dc+sd-jwt", Claims: []DCQLClaimQuery{tc.claim}}}}
+			selected, err := ResolveSatisfiableDCQLCredentials(query, []DCQLCredentialCandidate{candidate})
+			if err != nil || len(selected) != 1 {
+				t.Fatalf("selection = %#v, %v", selected, err)
+			}
+			if !reflect.DeepEqual(selected[0].RequestedClaims, tc.want) {
+				t.Fatalf("requested claims = %q, want %q", selected[0].RequestedClaims, tc.want)
+			}
+		})
+	}
+}

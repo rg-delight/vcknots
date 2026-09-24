@@ -183,3 +183,39 @@ func TestReconstructClaimsObjectAppliesNestedDisclosures(t *testing.T) {
 	require.Equal(t, "BSc", object["degrees"].([]any)[0].(map[string]any)["type"])
 	require.Equal(t, "Cherry", object["fruits"].([]any)[1])
 }
+
+// A claims path pointer selects each element as a whole (OID4VP 1.0 Section
+// 7), so the selectively disclosable members of a selected object or array
+// element are disclosed with it, while a sibling claim is not.
+func TestSelectedDisclosuresIncludeMembersOfSelectedElements(t *testing.T) {
+	encode := func(parts ...any) (string, string) {
+		raw, err := json.Marshal(parts)
+		require.NoError(t, err)
+		encoded := base64.RawURLEncoding.EncodeToString(raw)
+		digest := sha256.Sum256([]byte(encoded))
+		return encoded, base64.RawURLEncoding.EncodeToString(digest[:])
+	}
+	street, streetHash := encode("s1", "street", "1 Main St")
+	city, cityHash := encode("s2", "city", "Milliways")
+	address, addressHash := encode("s3", "address", map[string]any{"_sd": []any{streetHash, cityHash, "decoy-digest"}})
+	degreeType, degreeTypeHash := encode("s4", "type", "Bachelor")
+	degree, degreeHash := encode("s5", map[string]any{"_sd": []any{degreeTypeHash}})
+	given, givenHash := encode("s6", "given_name", "Taro")
+	payload := map[string]any{
+		"_sd":     []any{addressHash, givenHash},
+		"degrees": []any{map[string]any{"...": degreeHash}},
+	}
+	disclosures := []string{street, city, address, degreeType, degree, given}
+
+	got, err := selectTopLevelDisclosures(payload, disclosures, "sha-256", []string{"address"})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{address, street, city}, got)
+
+	got, err = selectTopLevelDisclosures(payload, disclosures, "sha-256", []string{`["degrees",null]`})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{degree, degreeType}, got)
+
+	got, err = selectTopLevelDisclosures(payload, disclosures, "sha-256", []string{`["address","city"]`})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{address, city}, got)
+}
