@@ -101,6 +101,40 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 	})
 }
 
+// TestCredentialAcceptorIgnoresKeysNotForThisSignature pins that a resolved
+// key whose JWK use is not "sig", or whose alg names another algorithm, is not
+// a signature candidate even when it holds the signing key.
+func TestCredentialAcceptorIgnoresKeysNotForThisSignature(t *testing.T) {
+	acceptor := newTestCredentialAcceptor(t)
+	signer := newTestECKey(t)
+	wire := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: signer}))
+	resolving := func(keys ...jose.JSONWebKey) CredentialAcceptancePolicy {
+		return CredentialAcceptancePolicy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
+			return keys, nil
+		}}
+	}
+
+	for name, key := range map[string]jose.JSONWebKey{
+		"encryption key":          {Key: &signer.PublicKey, Use: "enc"},
+		"key for another alg":     {Key: &signer.PublicKey, Algorithm: string(jose.ES384)},
+		"key for a key agreement": {Key: &signer.PublicKey, Algorithm: "ECDH-ES"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := acceptor.Verify(t.Context(), wire, resolving(key))
+			require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+		})
+	}
+
+	t.Run("a signing key alongside is still used", func(t *testing.T) {
+		verification, err := acceptor.Verify(t.Context(), wire, resolving(
+			jose.JSONWebKey{Key: &signer.PublicKey, Use: "enc", KeyID: "enc"},
+			jose.JSONWebKey{Key: &signer.PublicKey, Use: "sig", Algorithm: string(jose.ES256), KeyID: "sig"},
+		))
+		require.NoError(t, err)
+		require.Equal(t, "sig", verification.IssuerKeyID)
+	})
+}
+
 func TestResolveIssuerKeyCandidatesOrdersByKid(t *testing.T) {
 	keys := []jose.JSONWebKey{{KeyID: "a"}, {KeyID: "b"}, {KeyID: "c"}, {KeyID: "b"}}
 	policy := &CredentialAcceptancePolicy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {

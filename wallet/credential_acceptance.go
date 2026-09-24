@@ -513,11 +513,12 @@ func (a *CredentialAcceptor) resolveAndVerifyIssuerKey(ctx context.Context, pars
 	return a.verifyIssuerSignatureWithCandidates(parsedCredential, candidateKeys, verification)
 }
 
-// resolveIssuerKeyCandidates asks the caller's ResolveIssuerKeys hook for the
-// issuer's keys and tries the ones the header's kid names first. The kid is a
-// hint, not a filter: the header is unauthenticated until a key verifies it,
-// and an issuer that rotated a key without renaming it must not be refused
-// because a stale identifier matched first.
+// resolveIssuerKeyCandidates asks the caller's resolution hook for the issuer's
+// keys, drops those whose JWK use or alg rules out verifying this signature
+// (RFC 7517 Sections 4.2 and 4.4), and tries the ones the header's kid names
+// first. The kid is a hint, not a filter: the header is unauthenticated until a
+// key verifies it, and an issuer that rotated a key without renaming it must
+// not be refused because a stale identifier matched first.
 func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error) {
 	var keys []jose.JSONWebKey
 	var err error
@@ -531,6 +532,13 @@ func resolveIssuerKeyCandidates(policy *CredentialAcceptancePolicy, issuer strin
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("%w: no issuer key could be resolved", ErrIssuerKeyUnresolved)
+	}
+	algorithm, _ := header["alg"].(string)
+	keys = slices.DeleteFunc(slices.Clone(keys), func(key jose.JSONWebKey) bool {
+		return (key.Use != "" && key.Use != "sig") || (key.Algorithm != "" && key.Algorithm != algorithm)
+	})
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%w: no resolved issuer key is usable for signature algorithm %q", ErrIssuerKeyUnresolved, algorithm)
 	}
 	headerKeyID, _ := header["kid"].(string)
 	if headerKeyID == "" {
