@@ -1058,7 +1058,7 @@ wallet 自身の以前の解析がその取得を記録したときだけ設定�
 | --- | --- |
 | `x509_san_dns`、`x509_hash` | 署名付き Request Object が必須です。`x5c` チェーンは `RequestObjectValidation.TrustAnchors` / `RootCAs`（または `X509TrustChainRoots`）に届かなければならず、CRL で失効を確認します。`x509_san_dns` は DNS SAN と応答エンドポイントを、`x509_hash` は leaf 証明書のハッシュを束縛します。HAIP は `x509_hash` を要求します。 |
 | `redirect_uri` | 署名なしのみです。応答エンドポイントを識別子に束縛しますが、誰も認証しません。 |
-| なし（pre-registered） | client は `PreRegisteredClients` にあるか、`ResolvePreRegisteredClient` で見つからなければなりません（`ErrPreRegisteredClientUnknown`）。登録された `Metadata` が要求のメタデータに代わり、その `Metadata.RedirectURIs` だけが応答エンドポイントとして受け入れられます。これがない登録はどの要求も受け入れません。署名付き Request Object は登録された `JWKS` で検証し、`RequireSignedRequestObject` は署名なしの要求を拒否します。 |
+| なし（pre-registered） | client は `PreRegisteredClients` にあるか、`ResolvePreRegisteredClient` で見つからなければなりません（`oid4vp.ErrPreRegisteredClientUnknown`）。登録された `Metadata` が要求のメタデータに代わり、その `Metadata.RedirectURIs` だけが応答エンドポイントとして受け入れられます。これがない登録はどの要求も受け入れません。署名付き Request Object は登録された `JWKS` で検証し、`RequireSignedRequestObject` は署名なしの要求を拒否します。 |
 | `verifier_attestation` | 署名付き Request Object が必須です。Verifier Attestation JWT は `RequestObjectValidation.VerifierAttestationIssuers` のいずれかが発行したものでなければならず、Request Object はその `cnf` 鍵で署名されていなければなりません。 |
 | `openid_federation` | `RequestObjectValidation.Federation.TrustAnchors` への Trust Chain で認証し、Request Object はチェーンの鍵で検証します。署名なしの要求は、`FederationTrustOptions.AllowUnsignedRequests` を設定しない限り拒否します。 |
 | `decentralized_identifier` | 拒否します。 |
@@ -1256,6 +1256,7 @@ type CodedError interface {
 パッケージ `wallet` のメソッドが返す nil でないエラーには、必ずコードがあります。
 より具体的なコードがないエラーは、`invalid_argument`（`ErrInvalidArgument`、I/O の前に拒否した入力）、`canceled`、`deadline_exceeded`（それぞれ `context.Canceled` / `context.DeadlineExceeded` にも一致します）、`network_error`、`unclassified`（ライブラリ側のコードの欠落）のいずれかです。
 plugin のメソッドを直接呼んだ場合は、依存ライブラリのコードのないエラーが返ることがあります。
+presenter の解析メソッドは、より具体的なコードのない拒否に `oid4vp_request_invalid`（`oid4vp.ErrAuthorizationRequestInvalid`）を付けます。
 
 ```go
 import (
@@ -1344,7 +1345,7 @@ observer は応答ヘッダーが届いた後に呼ばれます。
 
 **パッケージ `wallet`**
 
-* `Config` と `Wallet` は `==` で比較できなくなりました。
+* `Config` は `==` で比較できなくなりました。
 * `Config` に新しいフィールド `Profile`、`Storeless`、`CredentialAcceptance`、`SupportedTransactionDataTypes`、`Issuance`、`Attestation`、`TestHooks` があります。`CredentialOfferGrant` に `IssuerState` と `AuthorizationServer` が、`SavedCredential` に `Verification` があります。
 * `NewWalletWithConfig` は、未知の `Profile`、wallet と異なる profile の plugin、HAIP では `profile.Carrier` を実装しない plugin と `TestHooks` を拒否します。`CredStore` を伴う `Storeless` と、注入した `Presenter` を伴う `SupportedTransactionDataTypes` も拒否します。エラーにはコードがあります。
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
@@ -1356,7 +1357,7 @@ observer は応答ヘッダーが届いた後に呼ばれます。
 
 **plugin とサブパッケージ**
 
-* `oid4vci.Oid4vciReceiver` と `oid4vp.Oid4vpPresenter` は比較できなくなりました。新しいフィールド（`HTTPClient`、`AllowHTTP`、`Profile` など）とメソッドがあります。ゼロ値は `VCKNOTS_WALLET_HTTP_ALLOWED` の値にかかわらず HTTPS を要求します。`receiver.WithDefaultConfig`、`presenter.WithDefaultConfig`、`NewWallet` は plugin を構築するときにこの変数を読みます。
+* `oid4vp.Oid4vpPresenter` は `==` で比較できなくなりました。`oid4vci.Oid4vciReceiver` と `oid4vp.Oid4vpPresenter` には新しいフィールド（`HTTPClient`、`AllowHTTP`、`Profile` など）とメソッドがあります。ゼロ値は `VCKNOTS_WALLET_HTTP_ALLOWED` の値にかかわらず HTTPS を要求します。`receiver.WithDefaultConfig`、`presenter.WithDefaultConfig`、`NewWallet` は plugin を構築するときにこの変数を読みます。
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
 * `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`InsecureSkipX509Verify` を設定すると OpenID4VP 1.0 の経路は署名付き Request Object を拒否し、この設定は Draft 24 の入口に適用されます。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
 * presenter は解析に失敗しても、エラー応答を送らなくなりました。求める場合は `SendParseErrorResponses` または `AuthorizationRequestError.SendErrorResponse` が送ります。`request_uri` の取得と応答の POST（`Present`）はリダイレクトに従わず、`Present` への 2xx 以外の応答は `*oid4vp.VerifierResponseError` になります。

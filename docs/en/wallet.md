@@ -959,7 +959,7 @@ A request in plain parameters has no Request Object (`RequestObject()` is empty)
 | --- | --- |
 | `x509_san_dns`, `x509_hash` | Signed Request Object required. The `x5c` chain must reach `RequestObjectValidation.TrustAnchors` / `RootCAs` (or `X509TrustChainRoots`), with CRL revocation checks. `x509_san_dns` binds a DNS SAN and the response endpoint; `x509_hash` binds the leaf certificate hash. HAIP requires `x509_hash`. |
 | `redirect_uri` | Unsigned only; binds the response endpoint to the identifier. It authenticates nobody. |
-| none (pre-registered) | The client must be in `PreRegisteredClients` or found by `ResolvePreRegisteredClient` (`ErrPreRegisteredClientUnknown`). Its `Metadata` replaces the request's metadata, and its `Metadata.RedirectURIs` are the only response endpoints accepted; a registration without them accepts no request. A signed Request Object is verified with the registered `JWKS`; `RequireSignedRequestObject` refuses an unsigned one. |
+| none (pre-registered) | The client must be in `PreRegisteredClients` or found by `ResolvePreRegisteredClient` (`oid4vp.ErrPreRegisteredClientUnknown`). Its `Metadata` replaces the request's metadata, and its `Metadata.RedirectURIs` are the only response endpoints accepted; a registration without them accepts no request. A signed Request Object is verified with the registered `JWKS`; `RequireSignedRequestObject` refuses an unsigned one. |
 | `verifier_attestation` | Signed Request Object required; the Verifier Attestation JWT must be issued by one of `RequestObjectValidation.VerifierAttestationIssuers`, and the Request Object signed with its `cnf` key. |
 | `openid_federation` | A Trust Chain to `RequestObjectValidation.Federation.TrustAnchors`; the Request Object is verified with the chain's keys. Unsigned requests are refused unless `FederationTrustOptions.AllowUnsignedRequests` is set. |
 | `decentralized_identifier` | Refused. |
@@ -1110,7 +1110,7 @@ type CodedError interface {
 }
 ```
 
-`wallet.ErrorCode(err)` returns the code of the outermost `CodedError` in the chain and whether one was found; `wallet.ErrorCodes(err)` returns every code, most specific first. `("", false)` means the error did not come from this library. Every non-nil error returned by a method of package `wallet` has a code. An error without a more specific code is `invalid_argument` (`ErrInvalidArgument`, input refused before any I/O), `canceled`, `deadline_exceeded` (these also match `context.Canceled` / `context.DeadlineExceeded`), `network_error` or `unclassified` (a missing code in the library). A plugin method called directly may return an uncoded error from a dependency.
+`wallet.ErrorCode(err)` returns the code of the outermost `CodedError` in the chain and whether one was found; `wallet.ErrorCodes(err)` returns every code, most specific first. `("", false)` means the error did not come from this library. Every non-nil error returned by a method of package `wallet` has a code. An error without a more specific code is `invalid_argument` (`ErrInvalidArgument`, input refused before any I/O), `canceled`, `deadline_exceeded` (these also match `context.Canceled` / `context.DeadlineExceeded`), `network_error` or `unclassified` (a missing code in the library). A plugin method called directly may return an uncoded error from a dependency. The presenter's parse methods give a refusal without a more specific code `oid4vp_request_invalid` (`oid4vp.ErrAuthorizationRequestInvalid`).
 
 ```go
 import (
@@ -1187,7 +1187,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 
 **Package `wallet`**
 
-* `Config` and `Wallet` are no longer comparable with `==`.
+* `Config` is no longer comparable with `==`.
 * `Config` has new fields: `Profile`, `Storeless`, `CredentialAcceptance`, `SupportedTransactionDataTypes`, `Issuance`, `Attestation`, `TestHooks`. `CredentialOfferGrant` has `IssuerState` and `AuthorizationServer`; `SavedCredential` has `Verification`.
 * `NewWalletWithConfig` refuses an unknown `Profile`, a plugin whose profile differs from the wallet's, and under HAIP a plugin that does not implement `profile.Carrier` and any `TestHooks`. It refuses `Storeless` with a `CredStore`, and `SupportedTransactionDataTypes` with an injected `Presenter`. Its errors carry codes.
 * `SetReceiver` is deprecated. It checks the dispatcher's plugins as `NewWalletWithConfig` does; a refused dispatcher is not installed, and every method that needs the receiver returns the refusal.
@@ -1199,7 +1199,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 
 **Plugins and sub-packages**
 
-* `oid4vci.Oid4vciReceiver` and `oid4vp.Oid4vpPresenter` are no longer comparable. They have new fields (`HTTPClient`, `AllowHTTP`, `Profile` and others) and new methods. Their zero values require HTTPS whatever `VCKNOTS_WALLET_HTTP_ALLOWED` says; `receiver.WithDefaultConfig`, `presenter.WithDefaultConfig` and `NewWallet` read the variable when they build the plugins.
+* `oid4vp.Oid4vpPresenter` is no longer comparable with `==`. `oid4vci.Oid4vciReceiver` and `oid4vp.Oid4vpPresenter` have new fields (`HTTPClient`, `AllowHTTP`, `Profile` and others) and new methods. Their zero values require HTTPS whatever `VCKNOTS_WALLET_HTTP_ALLOWED` says; `receiver.WithDefaultConfig`, `presenter.WithDefaultConfig` and `NewWallet` read the variable when they build the plugins.
 * The receiver plugin refuses every HTTP redirect (`ErrHTTPRedirectNotAllowed`), bounds response bodies, and refuses Credential Issuer Metadata whose `credential_issuer` is not the requested identifier and authorization server metadata whose `issuer` is not the requested one.
 * `Oid4vpPresenter.ParsePresentationRequest` authenticates the verifier as described in [Verifier authentication](#verifier-authentication): signed Request Objects are verified by the prefix's own mechanism and never with keys from `client_metadata`, `x509_*` prefixes require a signed Request Object, a colon-less `client_id` is a pre-registered client that must be registered, and a future `iat` is refused. `InsecureSkipX509Verify` makes the OpenID4VP 1.0 path refuse signed Request Objects; it applies to the Draft 24 entry points. `X509TrustChainRoots` keeps accepting certificates without revocation information.
 * The presenter no longer posts an error response when parsing fails; `SendParseErrorResponses` or `AuthorizationRequestError.SendErrorResponse` does it on request. The `request_uri` fetch and the response POST (`Present`) do not follow redirects, and a non-2xx response to `Present` is an `*oid4vp.VerifierResponseError`.
