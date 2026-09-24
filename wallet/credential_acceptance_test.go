@@ -621,6 +621,27 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	})
 }
 
+// TestDraft13StoreRequiresAcceptancePolicy pins that the Draft 13 issuance
+// API, like every other exported acceptance entry point, refuses to store a
+// credential when Config.CredentialAcceptance is nil.
+func TestDraft13StoreRequiresAcceptancePolicy(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	fixture.configuration = map[string]any{
+		"format":                "jwt_vc_json",
+		"credential_definition": map[string]any{"type": []string{"VerifiableCredential", "UniversityDegree"}},
+		"cryptographic_binding_methods_supported": []string{"did:key"},
+	}
+	req := fixture.preAuthorizedRequest(t)
+	req.StoreCredential = true
+
+	_, err := fixture.wallet.ReceiveOID4VCIDraft13Credential(t.Context(), req)
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	entries, total, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.Empty(t, entries)
+}
+
 func TestUnverifiedIssuerOptOutAcceptsUnauthenticatedX5C(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
@@ -1116,8 +1137,7 @@ func TestVerifyCredentialForAcceptance_TypedFailures(t *testing.T) {
 }
 
 // TestVerifyCredentialWithPolicy covers the per-call form: the same wallet
-// judges one credential under two policies, and a nil policy runs the minimum
-// rules without authenticating an issuer.
+// judges one credential under several policies, and a nil policy is refused.
 func TestVerifyCredentialWithPolicy(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	otherHolder := newMockKeyEntry().PublicKey()
@@ -1147,13 +1167,20 @@ func TestVerifyCredentialWithPolicy(t *testing.T) {
 	_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, expiring)
 	require.ErrorIs(t, err, ErrCredentialExpired)
 
-	t.Run("a nil policy authenticates no issuer and still binds the holder", func(t *testing.T) {
-		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, nil)
+	t.Run("a nil policy is refused", func(t *testing.T) {
+		_, _, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, nil)
+		require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	})
+
+	t.Run("UnverifiedIssuer authenticates no issuer and still binds the holder", func(t *testing.T) {
+		permissive := &CredentialAcceptancePolicy{UnverifiedIssuer: true}
+		_, verification, err := w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &holder, permissive)
 		require.NoError(t, err)
 		require.Empty(t, verification.IssuerKeyID)
+		require.Nil(t, verification.IssuerKey)
 		require.True(t, verification.HolderBound)
 
-		_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &otherHolder, nil)
+		_, _, err = w.VerifyCredentialWithPolicy(t.Context(), []byte(wire), credential.SDJwtVC, &otherHolder, permissive)
 		require.ErrorIs(t, err, ErrHolderBindingMismatch)
 	})
 }

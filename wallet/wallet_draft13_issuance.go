@@ -505,10 +505,7 @@ func (w *Wallet) storeDraft13Credential(
 		holderKey = &publicKey
 	}
 	raw := result.RawCredential
-	// Draft 13 leaves issuer key resolution to ecosystem policy, exactly as the
-	// long-standing ReceiveCredential does, so the acceptance policy stays
-	// optional here.
-	saved, err := w.storeAndParseCredential(ctx, &raw, credential.SupportedSerializationFlavor(flavor), holderKey, false)
+	saved, err := w.storeAndParseCredential(ctx, &raw, credential.SupportedSerializationFlavor(flavor), holderKey, true)
 	if err != nil {
 		return err
 	}

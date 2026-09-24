@@ -27,8 +27,9 @@ import (
 )
 
 // CredentialAcceptancePolicy decides whether a received credential may be stored.
-// A nil policy keeps the minimum rules: the credential must parse, and a cnf that
-// does not match the holder key used for the credential request is rejected.
+// Every exported acceptance entry point requires one and refuses a nil policy
+// with ErrCredentialAcceptancePolicyRequired. A deployment that accepts
+// unauthenticated issuers says so with UnverifiedIssuer.
 type CredentialAcceptancePolicy struct {
 	// IssuerX509 authenticates the issuer key from the credential's x5c JOSE header.
 	IssuerX509 *IssuerX509TrustOptions
@@ -62,14 +63,10 @@ type CredentialAcceptancePolicy struct {
 	// ErrHolderBindingMissing rather than stored with an unproven binding.
 	RequireHolderBinding bool
 	// UnverifiedIssuer stores credentials without authenticating the issuer
-	// key, which is what a nil policy does implicitly. It only takes effect
-	// when neither IssuerX509 nor ResolveIssuerKeys is configured: with either
-	// of them present the issuer signature is still verified. Everything else
-	// the policy checks — holder binding, exp/nbf and SD-JWT disclosure
-	// integrity — keeps applying, so this opts out of issuer authentication
-	// alone. It exists so that a deployment which accepts unauthenticated
-	// issuers says so in one greppable place instead of expressing it as an
-	// absent policy.
+	// key. It only takes effect when neither IssuerX509 nor ResolveIssuerKeys
+	// is configured: with either of them present the issuer signature is still
+	// verified. Everything else the policy checks (holder binding, exp/nbf and
+	// SD-JWT disclosure integrity) keeps applying.
 	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS "alg" values an issuer may sign a
 	// credential with. An empty list means DefaultCredentialSigningAlgorithms.
@@ -228,19 +225,16 @@ type CredentialVerification struct {
 	IssuerKey *jose.JSONWebKey
 }
 
-// verifyCredentialForAcceptanceContext authenticates a raw credential before it
-// is persisted. Any returned error means nothing may be stored.
+// verifyCredentialForAcceptanceContext authenticates a raw credential under
+// Config.CredentialAcceptance before it is persisted. Any returned error means
+// nothing may be stored.
 //
-// requirePolicy makes Config.CredentialAcceptance mandatory: with it set, a nil
-// policy is a fail-closed error rather than the permissive parse the Draft-13
-// entrypoints keep. The OpenID4VCI Final and HAIP issuance paths pass true,
-// because a credential arriving there has an issuer identity that the flow can
-// and must check. Draft-13 passes false: Config.CredentialAcceptance is
-// optional by design there, and SD-JWT VC Section 3.5 leaves issuer key
-// resolution to ecosystem policy.
+// requirePolicy false lets a nil Config.CredentialAcceptance through with the
+// minimum rules only (the credential parses and a cnf matches holderKey). Only
+// ReceiveCredential passes false, outside the HAIP profile, because it stored
+// credentials without an acceptance policy before the policy existed.
 //
-// ctx bounds the network work the policy performs, which today is CRL retrieval
-// while the issuer certificate chain is verified.
+// ctx bounds the network work the policy performs (CRL retrieval).
 func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
 	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, w.credentialAcceptance, requirePolicy)
 }
@@ -266,20 +260,10 @@ func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, raw []byte, 
 }
 
 // VerifyCredentialWithPolicy is VerifyCredentialForAcceptance with the policy
-// supplied per call instead of taken from the wallet configuration, for an
-// integrator that decides the trust rules per credential — a different trust
-// anchor set, a different issuer key resolution, a different clock — without
-// building a wallet for each. Nothing is written to the wallet's credential
-// store on this path, by either entrypoint.
-//
-// A nil policy runs the minimum rules only: the credential must parse, its typ
-// and alg must be acceptable, and a cnf that does not match holderKey is
-// rejected. No issuer is authenticated and no validity period is checked, which
-// is what the Draft-13 entrypoints do when Config.CredentialAcceptance is
-// absent. Pass a policy, or use VerifyCredentialForAcceptance, to fail closed
-// instead.
+// supplied per call instead of taken from the wallet configuration. It stores
+// nothing. A nil policy is refused with ErrCredentialAcceptancePolicyRequired.
 func (w *Wallet) VerifyCredentialWithPolicy(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy) (*credential.Credential, *CredentialVerification, error) {
-	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, policy, false)
+	return w.verifyCredentialForAcceptanceWithPolicy(ctx, raw, flavor, holderKey, policy, true)
 }
 
 // verifyCredentialForAcceptanceWithPolicy is the acceptance check itself, run
@@ -296,7 +280,7 @@ func (w *Wallet) verifyCredentialForAcceptanceWithPolicy(ctx context.Context, ra
 // the exported CredentialAcceptor.Verify.
 func (a *CredentialAcceptor) verify(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, policy *CredentialAcceptancePolicy, requirePolicy bool) (*credential.Credential, *CredentialVerification, error) {
 	if requirePolicy && policy == nil {
-		return nil, nil, fmt.Errorf("issuer verification is not configured for the Final issuance path: %w", ErrCredentialAcceptancePolicyRequired)
+		return nil, nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 
 	header, err := IssuerSignedJOSEHeader(flavor, raw)
