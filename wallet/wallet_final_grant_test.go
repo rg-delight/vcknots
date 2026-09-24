@@ -59,7 +59,7 @@ func requireJSONRoundTrip(t *testing.T, value any, target any) {
 // for, with the c_nonce and audience it named.
 func staticKeyAttestationFor(t *testing.T, attesterKey jose.JSONWebKey, keys []jose.JSONWebKey, nonce, audience string) *KeyAttestation {
 	t.Helper()
-	attestation, err := (&StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}).KeyAttestation(
+	attestation, err := (&StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}).KeyAttestation(
 		context.Background(),
 		KeyAttestationRequest{Keys: keys, Nonce: nonce, Audience: audience},
 	)
@@ -628,7 +628,7 @@ func haipPreAuthorizedAttestationFixture(t *testing.T, opts ...func(*finalIssuan
 	fixture := newHAIPIssuanceFixture(t, opts...)
 	// private_key_jwt is removed so the attestation is the only mechanism left.
 	fixture.wallet.clientAuth = ClientAuthConfig{}
-	fixture.wallet.clientAttestation = &StaticClientAttester{Key: attesterKey, Issuer: "https://attester.example"}
+	fixture.wallet.clientAttestation = &StaticClientAttester{Key: testKeyEntry(t, attesterKey), Chain: attesterKey.Certificates, Issuer: "https://attester.example"}
 	return fixture, attesterKey
 }
 

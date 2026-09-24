@@ -217,27 +217,6 @@ var (
 	ErrAuthorizationRequestURIExpired = common.NewCodedError("authorization_request_uri_expired", "pushed authorization request_uri has expired")
 )
 
-// Sentinel errors the attestation validation of HAIP §4.4 wraps. The wallet
-// authenticates every attestation an attester hands it before a request
-// carrying it leaves the process, and there is no opt-out, so these are the two
-// conditions that stop an otherwise well-formed issuance for a reason the
-// issuer never sees. The reason stays in the chain: the error they wrap names
-// the claim, signature or chain check that failed.
-var (
-	// ErrClientAttestationInvalid reports that the Appendix E Client
-	// Attestation the provider returned is not usable as this wallet's client
-	// credential: it is empty or malformed, its signature could not be
-	// authenticated against the configured trust material, or its typ, sub,
-	// cnf.jwk, aud or exp does not match the wallet instance and the
-	// authorization server the request is for.
-	ErrClientAttestationInvalid = common.NewCodedError("client_attestation_invalid", "client attestation is not valid for this wallet instance")
-	// ErrKeyAttestationInvalid reports the same for an Appendix D key
-	// attestation: empty, malformed, unauthenticated, or not attesting the
-	// holder keys, the c_nonce, the audience or a future exp the Credential
-	// Request needs.
-	ErrKeyAttestationInvalid = common.NewCodedError("key_attestation_invalid", "key attestation is not valid for this credential request")
-)
-
 // Sentinel errors NotifyOID4VCIFinalCredential and NotifyOID4VCIDraft13Credential
 // return before a Notification Request is sent (OpenID4VCI 1.0 §11.1, Draft 13
 // §10.1). Each is a request the wallet itself got wrong, so repeating it cannot

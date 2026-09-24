@@ -1037,7 +1037,7 @@ func TestReceiveOID4VCIFinalCredential_KeyAttestationRequiredWithProvider(t *tes
 		f.keyAttestationsRequired = true
 	})
 	keyAttesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
-	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: keyAttesterKey, Issuer: "https://key-attester.example"}
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: testKeyEntry(t, keyAttesterKey), Issuer: "https://key-attester.example"}
 
 	result, err := fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
 	require.NoError(t, err)
@@ -1072,7 +1072,7 @@ func TestReceiveOID4VCIFinalCredential_KeyAttestationProviderMissingHolderKey(t 
 	})
 	otherKey := newPrivateJWKForFinalVCITest(t, "other-holder-key-1")
 	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
-	attestation, err := (&StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}).KeyAttestation(
+	attestation, err := (&StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}).KeyAttestation(
 		context.Background(),
 		KeyAttestationRequest{Keys: []jose.JSONWebKey{otherKey}, Nonce: "credential-nonce-1"},
 	)
@@ -1099,7 +1099,7 @@ func TestReceiveOID4VCIFinalCredential_KeyAttestationUnauthenticatable(t *testin
 		f.keyAttestationsRequired = true
 	})
 	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
-	attestation, err := (&StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}).KeyAttestation(
+	attestation, err := (&StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}).KeyAttestation(
 		context.Background(),
 		KeyAttestationRequest{Keys: []jose.JSONWebKey{fixture.holderKey}, Nonce: "credential-nonce-1"},
 	)
@@ -1113,7 +1113,7 @@ func TestReceiveOID4VCIFinalCredential_KeyAttestationUnauthenticatable(t *testin
 func TestReceiveOID4VCIFinalCredential_IncludeKeyAttestationWhenNotRequired(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t)
 	keyAttesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-1")
-	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: keyAttesterKey, Issuer: "https://key-attester.example"}
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: testKeyEntry(t, keyAttesterKey), Issuer: "https://key-attester.example"}
 
 	req := fixture.request()
 	req.IncludeKeyAttestation = true
@@ -1464,7 +1464,7 @@ func TestReceiveOID4VCIFinalCredential_AttestationSupersedesPrivateKeyJwt(t *tes
 	})
 	keyEntry, _ := newClientAuthKeyEntry(t, "client-key-1")
 	fixture.wallet.clientAuth = ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: "client-1", Key: keyEntry}
-	fixture.wallet.clientAttestation = &StaticClientAttester{Key: attesterKey, Issuer: "https://attester.example"}
+	fixture.wallet.clientAttestation = &StaticClientAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://attester.example"}
 	req := fixture.request()
 	_, err := fixture.wallet.ReceiveOID4VCIFinalCredential(req)
 	require.NoError(t, err)
@@ -2241,7 +2241,7 @@ func TestReceiveOID4VCIFinalCredential_RefusesKeyAttestationWithUnlistedAlgorith
 	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
 	attesterKey := jose.JSONWebKey{Key: privateKey, KeyID: "key-attester-p384", Algorithm: string(jose.ES384), Use: "sig"}
-	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example"}
+	fixture.wallet.keyAttestation = &StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example"}
 
 	_, err = fixture.wallet.ReceiveOID4VCIFinalCredential(fixture.request())
 	require.ErrorIs(t, err, ErrProofAlgorithmNotSupported)

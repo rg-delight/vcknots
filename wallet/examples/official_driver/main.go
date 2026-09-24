@@ -391,7 +391,11 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		if err != nil {
 			return nil, err
 		}
-		clientAttestation = &wallet.StaticClientAttester{Key: key, Issuer: config.AttesterIssuer}
+		entry, err := keystore.NewKeyEntryFromJWK(key)
+		if err != nil {
+			return nil, err
+		}
+		clientAttestation = &wallet.StaticClientAttester{Key: entry, Chain: key.Certificates, Issuer: config.AttesterIssuer}
 	}
 	var keyAttestation wallet.KeyAttestationProvider
 	if config.KeyAttesterKeyFile != "" {
@@ -399,7 +403,11 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		if err != nil {
 			return nil, err
 		}
-		keyAttestation = &wallet.StaticKeyAttester{Key: key, Issuer: config.KeyAttesterIssuer}
+		entry, err := keystore.NewKeyEntryFromJWK(key)
+		if err != nil {
+			return nil, err
+		}
+		keyAttestation = &wallet.StaticKeyAttester{Key: entry, Chain: key.Certificates, Issuer: config.KeyAttesterIssuer}
 	}
 
 	return wallet.NewWalletWithConfig(wallet.Config{

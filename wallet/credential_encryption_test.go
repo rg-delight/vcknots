@@ -250,7 +250,7 @@ func TestClampDeferredIntervalSeconds(t *testing.T) {
 func TestKeyAttestationExpiresAtBindsTheAttestersLifetime(t *testing.T) {
 	attesterKey := newPrivateJWKForFinalVCITest(t, "key-attester-expiry")
 	holderKey := newPrivateJWKForFinalVCITest(t, "holder-expiry")
-	attester := &StaticKeyAttester{Key: attesterKey, Issuer: "https://key-attester.example", Lifetime: time.Hour}
+	attester := &StaticKeyAttester{Key: testKeyEntry(t, attesterKey), Issuer: "https://key-attester.example", Lifetime: time.Hour}
 	request := KeyAttestationRequest{Keys: []jose.JSONWebKey{holderKey}, Audience: "https://issuer.example"}
 	attestation, err := attester.KeyAttestation(t.Context(), request)
 	require.NoError(t, err)
