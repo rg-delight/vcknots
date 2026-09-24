@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -586,6 +587,23 @@ func TestVerifyCredential_ValidAndWrongKey(t *testing.T) {
 
 	wrongKey := newTestECKey(t)
 	require.False(t, fixture.wallet.VerifyCredential(saved.Credential, jose.JSONWebKey{Key: &wrongKey.PublicKey, Algorithm: "ES256"}))
+}
+
+// TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy pins that a valid
+// signature under an algorithm the dispatcher implements but the default
+// policy does not accept is not reported as verified.
+func TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy(t *testing.T) {
+	w, _ := newAcceptanceWallet(t, profile.Final, nil)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	payload := []byte("header.payload")
+	digest := sha256.Sum256(payload)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, digest[:])
+	require.NoError(t, err)
+	signed := &credential.Credential{Proof: &credential.CredentialProof{Algorithm: jose.RS256, Signature: signature, Payload: payload}}
+
+	require.False(t, w.VerifyCredential(signed, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
+	require.False(t, w.VerifyCredential(nil, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
 }
 
 func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {

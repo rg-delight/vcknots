@@ -1,13 +1,20 @@
 package wallet
 
 import (
+	"slices"
+
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/credential"
 )
 
-// VerifyCredential verifies a credential with a public key.
+// VerifyCredential reports whether the credential's proof verifies under
+// pubKey. Only DefaultCredentialSigningAlgorithms() are accepted, whatever
+// plugins the verification dispatcher has registered.
 func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose.JSONWebKey) bool {
-	if credential.Proof == nil {
+	if credential == nil || credential.Proof == nil {
+		return false
+	}
+	if !slices.Contains(DefaultCredentialSigningAlgorithms(), credential.Proof.Algorithm) {
 		return false
 	}
 
