@@ -74,6 +74,9 @@ func (s CredentialSetQuery) IsRequired() bool {
 type AuthorizationRequestError struct {
 	Code OAuthAuthzError
 	Err  error
+	// response is set when the refused request names a Response URI the
+	// Wallet may answer (see ResponseURI in errors.go).
+	response *errorResponseTarget
 }
 
 func (e *AuthorizationRequestError) Error() string {

@@ -93,16 +93,11 @@ type requestBuilder struct {
 	sentWalletNonce string
 	errValidation   error
 	requestSource   requestSource
-	// errorResponseAllowed marks that a refusal of this request may be
-	// answered with an error authorization response. It holds only for plain
-	// query parameters whose Client Identifier carries the redirect_uri prefix,
-	// the one delivery whose response endpoint is bound to the Client
-	// Identifier without any further evidence (OID4VP 1.0 §5.9.3). Validation
-	// failures on the Request Object paths occur before the object's
-	// signature is verified, and every other unsigned Client Identifier names
-	// its response endpoint in parameters nothing has authenticated, so none
-	// of them receives an error authorization response (unauthenticated
-	// outbound POST / SSRF primitive).
+	// errorResponseAllowed marks a request whose Response URI a refusal may
+	// name: plain query parameters with a redirect_uri Client Identifier,
+	// which binds the Response URI (OID4VP 1.0 §5.9.3). A Request Object
+	// fails validation before its signature is verified, and every other
+	// unsigned Client Identifier names an endpoint nothing authenticated.
 	errorResponseAllowed bool
 }
 
@@ -298,15 +293,8 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRequestObjectSignatureRequired)
 			return b
 		}
-		// OID4VP 1.0 §5.9.3: with the redirect_uri prefix "the original Client
-		// Identifier part ... is the Verifier's Redirect URI (or Response URI
-		// when Response Mode direct_post is used)", and setParamsWithAnyMap
-		// answers a refused response_uri at that URI, never at the one the
-		// request chose. No other unsigned Client Identifier binds its response
-		// endpoint: an openid_federation request names it in parameters
-		// nothing has authenticated until the Trust Chain has been resolved, a
-		// pre-registered registration carries no response endpoint, and a
-		// missing or unparsable client_id binds nothing at all.
+		// Only the redirect_uri prefix binds the Response URI before the
+		// request is authenticated (OID4VP 1.0 §5.9.3).
 		b.errorResponseAllowed = err == nil && clientID.prefix == OID4VPClientIDPrefixRedirectURI
 	}
 

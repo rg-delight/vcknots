@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -893,7 +894,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 }
 
 func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
-	p := &Oid4vpPresenter{AllowHTTP: true}
+	p := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
 
 	newErrorCapturingServer := func(t *testing.T) (*httptest.Server, *url.Values) {
 		t.Helper()
@@ -1038,7 +1039,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 			server, captured := newErrorCapturingServer(t)
 			defer server.Close()
 
-			presenter := &Oid4vpPresenter{AllowHTTP: true}
+			presenter := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
 			if unbound.register {
 				presenter.PreRegisteredClients = map[string]PreRegisteredClient{unbound.clientID: {}}
 			}
@@ -1064,11 +1065,11 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		})
 	}
 
-	t.Run("no error response when the caller disables parse error responses", func(t *testing.T) {
+	t.Run("no error response unless the caller opts in; the refusal can be sent later", func(t *testing.T) {
 		server, captured := newErrorCapturingServer(t)
 		defer server.Close()
 
-		presenter := &Oid4vpPresenter{AllowHTTP: true, DisableParseErrorResponses: true}
+		presenter := &Oid4vpPresenter{AllowHTTP: true}
 		_, err := presenter.ParsePresentationRequest(baseURI(server.URL, "&dcql_query=%7B%22credentials%22%3A%5B%5D%7D"))
 		var authzErr *AuthorizationRequestError
 		if !errors.As(err, &authzErr) || authzErr.Code != InvalidRequestError {
@@ -1076,6 +1077,33 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		}
 		if len(*captured) != 0 {
 			t.Fatalf("expected no error response to be sent, got %v", *captured)
+		}
+		if authzErr.ResponseURI() != server.URL {
+			t.Fatalf("ResponseURI = %q, want %q", authzErr.ResponseURI(), server.URL)
+		}
+		if err := authzErr.SendErrorResponse(context.Background(), server.Client()); err != nil {
+			t.Fatal(err)
+		}
+		if captured.Get("error") != "invalid_request" || captured.Get("state") != "err-state" {
+			t.Fatalf("unexpected error response %v", *captured)
+		}
+	})
+
+	t.Run("an unbound refusal has no Response URI to send to", func(t *testing.T) {
+		query := url.Values{
+			"client_id": {"decentralized_identifier:did:example:123"}, "response_type": {"vp_token"},
+			"response_mode": {"direct_post"}, "response_uri": {"https://verifier.example/cb"},
+			"dcql_query": {`{"credentials":[]}`}, "nonce": {"n"},
+		}
+		_, err := (&Oid4vpPresenter{}).ParsePresentationRequest("openid4vp://present?" + query.Encode())
+		var authzErr *AuthorizationRequestError
+		if errors.As(err, &authzErr) {
+			if authzErr.ResponseURI() != "" {
+				t.Fatalf("ResponseURI = %q, want none", authzErr.ResponseURI())
+			}
+			if !errors.Is(authzErr.SendErrorResponse(context.Background(), nil), ErrErrorResponseEndpointUnbound) {
+				t.Fatal("SendErrorResponse must refuse an unbound refusal")
+			}
 		}
 	})
 

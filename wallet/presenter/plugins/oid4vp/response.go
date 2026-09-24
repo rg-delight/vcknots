@@ -4,72 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
-
-// sendAuthorizationErrorResponse posts the OAuth 2.0 error authorization
-// response (error, error_description and state) to the Verifier's
-// response_uri. For response_mode=direct_post.jwt the error is encrypted into
-// the "response" JWE member when the verifier's encryption metadata is usable;
-// OID4VP 1.0 §8.3.1 permits plaintext when the Wallet is unable to generate an
-// encrypted response. It is a no-op when the partially parsed request has no
-// usable response_uri. Callers must have established that the request was
-// authenticated before allowing an outbound POST (see errorResponseAllowed).
-func (p *Oid4vpPresenter) sendAuthorizationErrorResponse(req *CredentialPresentationRequest, authzErr *AuthorizationRequestError) error {
-	if req == nil || req.ResponseURI == "" {
-		return nil
-	}
-	encrypted := req.ResponseMode == OAuthAuthzReqResponseModeDirectPostJWT
-	if req.ResponseMode != OAuthAuthzReqResponseModeDirectPost && !encrypted {
-		return nil
-	}
-
-	responseURI, err := parseResponseURI(req.ResponseURI, p.AllowHTTP)
-	if err != nil {
-		return err
-	}
-
-	formData := url.Values{}
-	if encrypted {
-		errorValues := map[string]any{"error": string(authzErr.Code)}
-		if authzErr.Err != nil {
-			errorValues["error_description"] = authzErr.Err.Error()
-		}
-		if req.State != "" {
-			errorValues["state"] = req.State
-		}
-		metadata := req.ClientMetadata
-		if payload, marshalErr := json.Marshal(errorValues); marshalErr == nil {
-			if token, encErr := p.encryptAuthorizationResponseJWE(payload, metadata); encErr == nil {
-				formData.Set("response", token)
-			}
-		}
-	}
-
-	// Plaintext error response, used for direct_post and, per §8.3.1, as the
-	// fallback when an encrypted response cannot be generated.
-	if formData.Get("response") == "" {
-		formData.Set("error", string(authzErr.Code))
-		if authzErr.Err != nil {
-			formData.Set("error_description", authzErr.Err.Error())
-		}
-		if req.State != "" {
-			formData.Set("state", req.State)
-		}
-	}
-
-	if _, err := p.postAuthorizationResponse(responseURI.String(), formData); err != nil {
-		return fmt.Errorf("failed to send error authorization response: %w", err)
-	}
-
-	return nil
-}
 
 // parseResponseURI parses a response_uri and enforces what OID4VP 1.0 requires
 // of the Response Endpoint: an absolute URL whose scheme is https, unless http
@@ -97,26 +39,35 @@ func parseResponseURI(responseURI string, allowHTTP bool) (*url.URL, error) {
 	return parsed, nil
 }
 
-// maxVerifierResponseBodySize bounds how much of a verifier response body the
-// wallet reads; the endpoint is derived from request input.
-const maxVerifierResponseBodySize = 1 << 20 // 1 MiB
 // postAuthorizationResponse form-POSTs an authorization response (or error
-// response) to the verifier and returns the response body on HTTP 200.
+// response) to the Verifier with the presenter's client and returns the
+// response body of a 2xx answer.
 func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData url.Values) ([]byte, error) {
-	// A JWE travels in the "response" member (OpenID4VP 1.0 Section 8.3); the
-	// form itself looks the same either way, so the fact is stated for an
-	// observer rather than left to be inferred from the wire.
+	return postAuthorizationResponse(context.Background(), p.httpClient(), endpoint, formData)
+}
+
+// postAuthorizationResponse form-POSTs to the Verifier's Response Endpoint
+// without following redirects: a redirect could move the response to another
+// host or to plain http. The response body is read up to
+// httpfetch.DefaultBodyLimit; a non-200 status keeps only the OAuth error code,
+// because the body is under the Verifier's control.
+func postAuthorizationResponse(ctx context.Context, client *http.Client, endpoint string, formData url.Values) ([]byte, error) {
+	// A JWE travels in the "response" member (OID4VP 1.0 §8.3).
 	encrypted := formData.Get("response") != ""
-	resp, err := p.postResponseForm(endpoint, formData, encrypted)
+	ctx = observe.WithResponseEncryption(observe.WithEndpoint(ctx, observe.EndpointResponse), encrypted)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := httpfetch.NoRedirect(client).Do(request)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxVerifierResponseBodySize))
-	if resp.StatusCode != http.StatusOK {
-		// The response body is controlled by the Verifier and may echo state or
-		// secrets; retain only the OAuth error code.
+	body, readErr := httpfetch.ReadLimited(resp, httpfetch.DefaultBodyLimit)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &VerifierResponseError{
 			StatusCode: resp.StatusCode,
 			OAuthError: oauthErrorCodeFromResponseBody(body),
@@ -126,19 +77,6 @@ func (p *Oid4vpPresenter) postAuthorizationResponse(endpoint string, formData ur
 		return nil, fmt.Errorf("failed to read verifier response: %w", readErr)
 	}
 	return body, nil
-}
-
-// postResponseForm sends one form to the verifier's Response Endpoint, labelled
-// for an observe.Transport with the endpoint role and whether it carries an
-// encrypted Authorization Response.
-func (p *Oid4vpPresenter) postResponseForm(endpoint string, formData url.Values, encrypted bool) (*http.Response, error) {
-	ctx := observe.WithResponseEncryption(observe.WithEndpoint(context.Background(), observe.EndpointResponse), encrypted)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return p.httpClient().Do(request)
 }
 
 // Present sends the presentation to the verifier.

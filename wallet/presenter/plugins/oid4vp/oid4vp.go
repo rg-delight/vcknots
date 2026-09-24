@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -54,14 +55,12 @@ type Oid4vpPresenter struct {
 	// database instead of a map. A nil resolver means the map is the whole
 	// registry.
 	ResolvePreRegisteredClient PreRegisteredClientResolver
-	// DisableParseErrorResponses keeps every parse-time refusal inside the
-	// Wallet: no error authorization response is posted, even for the plain
-	// redirect_uri request whose Response URI the Client Identifier binds
-	// (see requestBuilder.errorResponseAllowed). A redirect_uri Client
-	// Identifier binds the endpoint but authenticates nobody, so a Wallet whose
-	// policy is to post nothing before the holder consents to a Verifier it has
-	// not authenticated sets it. The refusal is still returned to the caller.
-	DisableParseErrorResponses bool
+	// SendParseErrorResponses posts the error authorization response of a
+	// parse-time refusal whose AuthorizationRequestError names a ResponseURI,
+	// with this presenter's client. The zero value posts nothing: the endpoint
+	// is chosen by an unauthenticated request, and a caller that wants to
+	// answer it calls AuthorizationRequestError.SendErrorResponse itself.
+	SendParseErrorResponses bool
 	// RequireClientMetadataJWKKeyIDs refuses, while the request is parsed, an
 	// Authorization Request whose client_metadata parameter carries a jwks
 	// member without a kid (ErrClientMetadataJWKKeyIDMissing) or two members
@@ -303,24 +302,17 @@ func (p *Oid4vpPresenter) newParseBuilder(draft24 bool) (*requestBuilder, error)
 	return builder, nil
 }
 
-// buildParsedRequest finalizes one parse operation: it builds the
-// CredentialPresentationRequest and, where the parameters were obtained from a
-// delivery whose response endpoint is trustworthy, delivers the OAuth error
-// authorization response a refusal calls for.
+// buildParsedRequest finalizes one parse operation. A refusal records where an
+// error authorization response may go, and is posted there only when the
+// presenter opted in with SendParseErrorResponses.
 func (p *Oid4vpPresenter) buildParsedRequest(builder *requestBuilder) (*CredentialPresentationRequest, error) {
 	req, err := builder.Build()
 	if err != nil {
-		// OID4VP: when the Authorization Request is rejected with an OAuth
-		// error code and response_mode=direct_post, deliver the error
-		// authorization response to the Verifier's response_uri. Only a
-		// plain redirect_uri-prefixed request qualifies: Request Objects fail
-		// validation before their signature is verified, and no other unsigned
-		// Client Identifier binds its response_uri, so neither endpoint is
-		// trustworthy (see requestBuilder.errorResponseAllowed).
+		builder.attachErrorResponseTarget(err)
 		var authzErr *AuthorizationRequestError
-		if errors.As(err, &authzErr) && builder.errorResponseAllowed && !p.DisableParseErrorResponses {
-			if sendErr := p.sendAuthorizationErrorResponse(builder.req, authzErr); sendErr != nil {
-				return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w (also failed to send error authorization response: %v)", err, sendErr)
+		if p.SendParseErrorResponses && errors.As(err, &authzErr) && authzErr.ResponseURI() != "" {
+			if sendErr := authzErr.SendErrorResponse(context.Background(), p.httpClient()); sendErr != nil {
+				return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w (also %v)", err, sendErr)
 			}
 		}
 		return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w", err)

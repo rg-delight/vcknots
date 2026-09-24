@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -319,7 +320,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 	t.Run("encrypted", func(t *testing.T) {
 		server, captured := newServer(t)
 		defer server.Close()
-		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client()}
+		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client(), SendParseErrorResponses: true}
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, metadata()))
 		require.Error(t, err)
 		token := captured.Get("response")
@@ -334,7 +335,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 		defer server.Close()
 		md := metadata()
 		md.Jwks = jose.JSONWebKeySet{}
-		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client()}
+		p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client(), SendParseErrorResponses: true}
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, md))
 		require.Error(t, err)
 		require.Empty(t, captured.Get("response"))
@@ -351,26 +352,25 @@ func TestFinalErrorCodesRegistered(t *testing.T) {
 	}
 }
 
-// Fix 9: SubmitEncryptedAuthorizationResponse bounds the verifier body.
+// SubmitEncryptedAuthorizationResponse bounds the Verifier's response body.
 func TestSubmitEncryptedAuthorizationResponseBoundedBody(t *testing.T) {
 	recipient := newP256Recipient(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(bytes.Repeat([]byte("a"), maxVerifierResponseBodySize+512))
+		_, _ = w.Write(bytes.Repeat([]byte("a"), int(httpfetch.DefaultBodyLimit)+512))
 	}))
 	defer server.Close()
 	endpoint, err := url.Parse(server.URL)
 	require.NoError(t, err)
 	p := &Oid4vpPresenter{}
-	body, err := p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
+	_, err = p.SubmitEncryptedAuthorizationResponse(*endpoint, map[string]any{
 		"vp_token": map[string]any{"pid": []string{"presented"}},
 	}, &VerifierMetadata{
 		Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 			Key: &recipient.PublicKey, KeyID: "enc", Use: "enc", Algorithm: "ECDH-ES",
 		}}},
 	})
-	require.NoError(t, err)
-	require.Len(t, body, maxVerifierResponseBodySize)
+	require.ErrorIs(t, err, httpfetch.ErrBodyTooLarge)
 }
 
 // Fix 10: OID4VP 1.0 §8.3 requires alg on JWKs used for encryption.
@@ -446,7 +446,7 @@ func TestRedirectURIClientIDRejectsForeignResponseURI(t *testing.T) {
 		"nonce":         {"n"},
 		"dcql_query":    {finalDcqlParam},
 	})
-	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}
 	_, err := p.ParsePresentationRequest(uri)
 	assertAuthzErrorCode(t, err, InvalidRequestError)
 	require.ErrorContains(t, err, "response_uri does not match the redirect_uri Client Identifier")
@@ -563,4 +563,22 @@ func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
 	_, err := p.ParseDraft24PresentationRequest(uri)
 	require.ErrorContains(t, err, "invalid client_id format")
 	require.NotErrorIs(t, err, ErrPreRegisteredClientUnknown)
+}
+
+// An Authorization Request URI without an authority ("openid4vp:?...") is
+// parsed like any other. OID4VP 1.0 §5.9.3 binds the Response URI of a
+// direct_post request to the redirect_uri Client Identifier, so the request is
+// accepted only when both name the same URI.
+func TestFinalQueryParametersWithoutAuthority(t *testing.T) {
+	uri := func(responseURI string) string {
+		return "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=n&dcql_query=" +
+			testDcqlQueryParam + "&response_mode=direct_post&response_uri=" + responseURI
+	}
+	p := &Oid4vpPresenter{}
+	req, err := p.ParsePresentationRequest(uri("https://example.com/response"))
+	require.NoError(t, err)
+	require.Equal(t, "https://example.com/response", req.ResponseURI)
+
+	_, err = p.ParsePresentationRequest(uri("https://example.com/elsewhere"))
+	require.ErrorIs(t, err, ErrResponseURIClientIDMismatch)
 }
