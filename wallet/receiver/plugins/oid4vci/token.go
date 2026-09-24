@@ -60,12 +60,9 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	if strings.TrimSpace(requestConfig.ClientID) != "" {
 		formData.Set("client_id", requestConfig.ClientID)
 	}
-	endpointURL, err := url.Parse(types.ResolveTokenEndpointURL(endpoint))
-	if err != nil {
-		return nil, fmt.Errorf("invalid token endpoint URL: %w", err)
-	}
+	endpointURL := url.URL(endpoint)
 	if requestConfig.ClientAssertion != "" {
-		if err := requireSecureClientAssertionTransport(*endpointURL); err != nil {
+		if err := requireSecureClientAssertionTransport(endpointURL); err != nil {
 			return nil, err
 		}
 	}
@@ -73,7 +70,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	body := []byte(formData.Encode())
 	response, err := o.do(ctx, exchange{
 		method:      http.MethodPost,
-		url:         *endpointURL,
+		url:         endpointURL,
 		contentType: "application/x-www-form-urlencoded",
 		body:        func() ([]byte, error) { return body, nil },
 		header: func(header http.Header) error {
@@ -220,12 +217,7 @@ func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(c
 	if strings.TrimSpace(request.PreAuthorizedCode) == "" {
 		return nil, fmt.Errorf("pre-authorized_code is required")
 	}
-	// Metadata token_endpoint values are complete URLs; resolving here keeps
-	// the transport guards and the request itself on the same normalized URL.
-	resolvedURL, err := url.Parse(types.ResolveTokenEndpointURL(endpoint))
-	if err != nil {
-		return nil, fmt.Errorf("invalid token endpoint URL: %w", err)
-	}
+	endpointURL := url.URL(endpoint)
 	if request.ClientAssertion != "" || request.ClientAssertionFactory != nil {
 		// private_key_jwt identifies the client by client_id, and an empty one
 		// would only be rejected at the authorization server, where the cause
@@ -233,7 +225,7 @@ func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(c
 		if strings.TrimSpace(request.ClientID) == "" {
 			return nil, fmt.Errorf("client_id is required when a client assertion is sent")
 		}
-		if err := requireSecureClientAssertionTransport(*resolvedURL); err != nil {
+		if err := requireSecureClientAssertionTransport(endpointURL); err != nil {
 			return nil, err
 		}
 	}
@@ -264,7 +256,7 @@ func (o *Oid4vciReceiver) ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(c
 		return []byte(formData.Encode()), nil
 	}
 	var response types.CredentialIssuanceAccessToken
-	if err := o.postTokenRequest(ctx, *resolvedURL, buildBody, headersFactory, proofFactory, &response); err != nil {
+	if err := o.postTokenRequest(ctx, endpointURL, buildBody, headersFactory, proofFactory, &response); err != nil {
 		return nil, stageError(StageToken, fmt.Errorf("failed to exchange the pre-authorized code: %w", err))
 	}
 	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {

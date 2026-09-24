@@ -204,3 +204,28 @@ func TestUseDPoPNonceIsNotResentWhenNothingWouldChange(t *testing.T) {
 		}
 	})
 }
+
+// RFC 8414 Section 2 metadata endpoints are used as published: a token
+// endpoint with a trailing slash is requested at that URL.
+func TestTokenEndpointIsUsedVerbatim(t *testing.T) {
+	var paths []string
+	server := newRecordingServer(t, func(_ int, w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "Bearer"})
+	})
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	endpoint := mustURIField(t, server.URL+"/token/")
+
+	if _, err := receiver.ExchangePreAuthorizedCodeWithDpopAndAttestationRetry(t.Context(), endpoint, types.PreAuthorizedCodeTokenRequest{PreAuthorizedCode: "pre-1"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "pre-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "/token/,/token/" {
+		t.Fatalf("requested paths = %q, want the published /token/", paths)
+	}
+	if got := types.ResolveTokenEndpointURL(endpoint); got != server.URL+"/token/" {
+		t.Fatalf("ResolveTokenEndpointURL() = %q, want the published URL", got)
+	}
+}

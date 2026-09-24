@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -584,13 +583,11 @@ func WithClientID(clientID string) TokenRequestOption {
 	}
 }
 
-// ResolveTokenEndpointURL returns the canonical token endpoint URL string.
-// Metadata token_endpoint values are complete endpoint URLs, so this only
-// normalizes trailing slashes and does not append "/token".
+// ResolveTokenEndpointURL returns the token endpoint exactly as the
+// authorization server metadata published it (RFC 8414 Section 2), so the
+// request and the DPoP htu claim name the same URL.
 func ResolveTokenEndpointURL(endpoint common.URIField) string {
-	endpointURL := url.URL(endpoint)
-	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/")
-	return endpointURL.String()
+	return endpoint.String()
 }
 
 // PreAuthorizedCodeTokenRequest is the OpenID4VCI 1.0 §6.1 Token Request of the
