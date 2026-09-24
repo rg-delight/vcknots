@@ -6,19 +6,12 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 )
 
-// authenticateUnsignedFederationRequest authenticates an openid_federation
-// Verifier whose Authorization Request arrived in plain parameters. OpenID4VP
-// 1.0 Section 5.9.3: "The Authorization Request MAY also contain a
-// `trust_chain` parameter. The final Verifier metadata is obtained from the
-// Trust Chain after applying the policies ... The `client_metadata` parameter,
-// if present in the Authorization Request, MUST be ignored when this Client
-// Identifier Prefix is used."
-//
-// Nothing signs such a request, so what the Trust Chain authenticates is the
-// Verifier's metadata and, through its redirect_uris, the only endpoints the
-// response may reach. The request is accepted only when its response endpoint
-// is one of them, which is what keeps an unsigned request from sending a
-// presentation anywhere but to the Verifier it names.
+// authenticateUnsignedFederationRequest handles an openid_federation request
+// in plain parameters. It is refused unless the Wallet opted in with
+// FederationTrustOptions.AllowUnsignedRequests; then the Trust Chain supplies
+// the Verifier metadata (OID4VP 1.0 §5.9.3) and the response endpoint must be
+// one of its redirect_uris. Nothing authenticates the request parameters
+// themselves.
 func (b *requestBuilder) authenticateUnsignedFederationRequest(params map[string]any) error {
 	clientID, err := b.parseClientID(b.req.ClientID)
 	if err != nil || clientID.prefix != OID4VPClientIDPrefixOIDFederation {
@@ -30,6 +23,9 @@ func (b *requestBuilder) authenticateUnsignedFederationRequest(params map[string
 	}
 	if options.Federation == nil || len(options.Federation.TrustAnchors) == 0 {
 		return fmt.Errorf("%w: no OpenID Federation trust anchor is configured", federation.ErrTrustAnchorNotConfigured)
+	}
+	if !options.Federation.AllowUnsignedRequests {
+		return newAuthorizationRequestError(InvalidRequestError, "%w: openid_federation", ErrRequestObjectSignatureRequired)
 	}
 	var carried []string
 	if raw, present := params["trust_chain"]; present && raw != nil && raw != "" {

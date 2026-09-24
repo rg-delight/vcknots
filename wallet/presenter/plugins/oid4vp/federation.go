@@ -45,6 +45,13 @@ type FederationTrustOptions struct {
 	// SigningAlgorithms bounds the Request Object signature algorithms of a
 	// federation Verifier. Empty means DefaultFederationRequestObjectAlgorithms.
 	SigningAlgorithms []jose.SignatureAlgorithm
+	// AllowUnsignedRequests accepts an openid_federation request in plain
+	// parameters when its response endpoint is one of the redirect_uris the
+	// Trust Chain registers. OpenID Federation authenticates a Relying Party
+	// by its signed Request Object, so the zero value refuses unsigned
+	// requests with ErrRequestObjectSignatureRequired before resolving any
+	// Trust Chain.
+	AllowUnsignedRequests bool
 }
 
 // DefaultFederationRequestObjectAlgorithms is the Request Object signature

@@ -60,10 +60,12 @@ var (
 	// the platform-authenticated Origin of an unsigned Digital Credentials API
 	// request (Appendix A.2).
 	ErrClientIDPrefixReserved = common.NewCodedError("client_id_prefix_reserved", "client_id prefix is reserved for the wallet and is not accepted in requests")
-	// ErrRequestObjectSignatureRequired reports an Authorization Request whose
-	// Client Identifier Prefix is authenticated by the certificate that signed
-	// a Request Object ("x509_san_dns", "x509_hash"), delivered in plain query
-	// parameters with no Request Object to authenticate it (OID4VP 1.0 §5.9.3).
+	// ErrRequestObjectSignatureRequired reports an Authorization Request in
+	// plain parameters from a Verifier that can only be authenticated by a
+	// signed Request Object: the x509_san_dns, x509_hash and
+	// verifier_attestation prefixes (OID4VP 1.0 §5.9.3), openid_federation
+	// unless FederationTrustOptions.AllowUnsignedRequests is set, and a
+	// pre-registered client with RequireSignedRequestObject.
 	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "this client identifier requires a signed Request Object")
 )
 
