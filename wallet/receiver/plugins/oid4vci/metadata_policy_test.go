@@ -583,6 +583,34 @@ func TestFetchIssuerMetadataHAIPAcceptsUnsignedByDefault(t *testing.T) {
 	}
 }
 
+// Review of 2026-09-25 (finding 8): an explicit IssuerMetadataSigning replaced
+// the profile's default wholesale, so Request: false on a HAIP receiver
+// switched off HAIP's RequestSignedIssuerMetadata. The profile option now
+// holds whatever the caller's options say.
+func TestFetchIssuerMetadataHAIPRequestCannotBeSwitchedOff(t *testing.T) {
+	fixture := newSignedMetadataFixture(t)
+	serverURL, client, acceptHeader := serveIssuerMetadata(t, true, func(identifier string) (string, string) {
+		return "application/json", `{"credential_issuer":"` + identifier + `","credential_endpoint":"` + identifier + `/credential"}`
+	})
+	signing := &IssuerMetadataSigningOptions{Request: false, TrustAnchors: []*x509.Certificate{fixture.caCert}, AllowUnadvertisedRevocation: true}
+
+	haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP(), IssuerMetadataSigning: signing}
+	if _, err := haip.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci); err != nil {
+		t.Fatalf("FetchIssuerMetadata() error = %v", err)
+	}
+	if !strings.Contains(acceptHeader(), "application/jwt") {
+		t.Fatalf("HAIP Accept = %q, want signed metadata to be requested", acceptHeader())
+	}
+
+	final := &Oid4vciReceiver{HTTPClient: client, Profile: profile.Final(), IssuerMetadataSigning: signing}
+	if _, err := final.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci); err != nil {
+		t.Fatalf("FetchIssuerMetadata() error = %v", err)
+	}
+	if strings.Contains(acceptHeader(), "application/jwt") {
+		t.Fatalf("Final Accept = %q, want the caller's Request: false to hold", acceptHeader())
+	}
+}
+
 // signedMetadataReceiver builds a wallet that accepts fixture's anchor for
 // signed Credential Issuer Metadata, with the caller's extra signing policy.
 func signedMetadataReceiver(client *http.Client, fixture signedMetadataFixture, adjust func(*IssuerMetadataSigningOptions)) *Oid4vciReceiver {

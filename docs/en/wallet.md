@@ -836,7 +836,7 @@ The library never holds an attester's private key. Before an attestation is sent
 
 ### Signed issuer metadata
 
-`oid4vci.Oid4vciReceiver.IssuerMetadataSigning` configures OpenID4VCI 1.0 §12.2.3 signed Credential Issuer Metadata. `Request` sends the signed-metadata `Accept` header and has no effect without trust material; `Require` rejects an unsigned document. The signer is authenticated from the `x5c` header against `TrustAnchors` or `RootCAs`, and `sub` and `credential_issuer` must both be the requested identifier. `RequireIssuerDNSBinding` and `ExpectedLeafDNSName` add a DNS binding of the leaf certificate. Every re-discovery applies this policy.
+`oid4vci.Oid4vciReceiver.IssuerMetadataSigning` configures OpenID4VCI 1.0 §12.2.3 signed Credential Issuer Metadata. `Request` sends the signed-metadata `Accept` header and has no effect without trust material; under HAIP (`Options.RequestSignedIssuerMetadata`) it is on whatever `IssuerMetadataSigning` says. `Require` rejects an unsigned document. The signer is authenticated from the `x5c` header against `TrustAnchors` or `RootCAs`, and `sub` and `credential_issuer` must both be the requested identifier. `RequireIssuerDNSBinding` and `ExpectedLeafDNSName` add a DNS binding of the leaf certificate. Every re-discovery applies this policy.
 
 Every rejection of a signed document satisfies `errors.Is(err, ErrIssuerMetadataSignatureInvalid)`; `ErrIssuerMetadataSubjectMismatch`, `ErrIssuerMetadataLeafDNSMismatch` and `ErrIssuerMetadataExpired` wrap it. `ErrIssuerMetadataSignatureRequired` is the `Require` outcome. `CredentialIssuerMetadata.MetadataSignature` records the accepted signer, and `RawDocument` keeps the accepted document.
 

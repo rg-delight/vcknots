@@ -188,16 +188,18 @@ func draft13IssuerMetadataURL(identifier url.URL) url.URL {
 // fetch. HAIP Section 4.1 requires signed Credential Issuer Metadata to be
 // supported "When Ecosystem policies require Issuer Authentication to a higher
 // level than possible with TLS alone", which makes the capability mandatory and
-// its use conditional: an unconfigured HAIP receiver therefore asks for signed
-// metadata but still accepts the unsigned application/json document every
-// Credential Issuer MUST publish (Section 12.2.2). That default follows
-// Options.RequestSignedIssuerMetadata. A caller that supplies options keeps
-// them verbatim, so opting out of the request is possible.
+// its use conditional: a HAIP receiver therefore asks for signed metadata but
+// still accepts the unsigned application/json document every Credential Issuer
+// MUST publish (Section 12.2.2). Options.RequestSignedIssuerMetadata sets
+// Request whatever IssuerMetadataSigning says: the caller's options add trust
+// material and stricter rules, and never switch off a profile's option.
 func (o *Oid4vciReceiver) issuerMetadataSigningOptions(options profile.Options) IssuerMetadataSigningOptions {
+	var signing IssuerMetadataSigningOptions
 	if o.IssuerMetadataSigning != nil {
-		return *o.IssuerMetadataSigning
+		signing = *o.IssuerMetadataSigning
 	}
-	return IssuerMetadataSigningOptions{Request: options.RequestSignedIssuerMetadata}
+	signing.Request = signing.Request || options.RequestSignedIssuerMetadata
+	return signing
 }
 
 // credentialIssuerIdentifier recovers the Credential Issuer Identifier from the
@@ -242,7 +244,8 @@ func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(ctx context.Context, endpoint
 type IssuerMetadataSigningOptions struct {
 	// Request sends "Accept: application/jwt, application/json;q=0.9". It has no
 	// effect unless trust material is configured, because metadata whose signer
-	// cannot be authenticated must be rejected rather than requested.
+	// cannot be authenticated must be rejected rather than requested. A profile
+	// with Options.RequestSignedIssuerMetadata (HAIP) sets it regardless.
 	Request bool
 	// Require rejects an unsigned application/json response. It defaults to
 	// false in every profile, HAIP included: HAIP Section 4.1 makes signed

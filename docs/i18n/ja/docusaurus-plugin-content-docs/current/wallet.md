@@ -933,6 +933,7 @@ HAIP では、attestation は自己署名でない `x5c` leaf を持ち、トラ
 
 `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` は、OpenID4VCI 1.0 §12.2.3 の署名付き Credential Issuer Metadata を設定します。
 `Request` は署名付きメタデータを求める `Accept` ヘッダーを送り、トラスト情報がなければ効果がありません。
+HAIP（`Options.RequestSignedIssuerMetadata`）では、`IssuerMetadataSigning` の設定にかかわらず `Request` は有効です。
 `Require` は署名のない文書を拒否します。
 署名者は `x5c` ヘッダーから `TrustAnchors` または `RootCAs` に照らして認証し、`sub` と `credential_issuer` はどちらも要求した識別子でなければなりません。
 `RequireIssuerDNSBinding` と `ExpectedLeafDNSName` は leaf 証明書の DNS 束縛を加えます。
