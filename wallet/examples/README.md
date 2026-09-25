@@ -367,27 +367,15 @@ VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 
 ### Wallet Runtime Environment Variables
 
-In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by environment variables defined in `wallet/env/env.go`.
+In addition to `VCKNOTS_CERT_PATH`, the wallet reads the environment variables defined in `wallet/env/env.go`.
 
 | Variable | Default | Description |
 | :---- | :---- | :---- |
-| `VCKNOTS_WALLET_HTTP_ALLOWED` | `false` (unset/empty) | When set to `true`, HTTP endpoints are allowed for wallet HTTP calls (for local development/testing). A client assertion is the exception: it is sent over plain HTTP only to a loopback host, so `private_key_jwt` against a remote `http://` endpoint is refused even with this set. |
 | `VCKNOTS_WALLET_DEBUG` | `false` (unset/empty) | Enables debug logging only. It does not relax the HTTPS requirement. |
 
-Behavior summary:
-- `IsHTTPAllowed()` becomes `true` only when `VCKNOTS_WALLET_HTTP_ALLOWED=true`.
-- The variable is read when the default dispatchers and plugins are built. A plugin constructed directly uses its own `AllowHTTP` field.
-- The local server integration test mode samples call `env.SetHTTPAllowed(true)` in their own process before they build the wallet, so the variable need not be set for them.
-- `VCKNOTS_WALLET_DEBUG=true` does not enable HTTP allowance; to use a local `http://` endpoint, set `VCKNOTS_WALLET_HTTP_ALLOWED=true` as well.
-- If `VCKNOTS_WALLET_HTTP_ALLOWED` is unset (or not equal to `true`), `IsHTTPAllowed()` is `false`, and HTTPS-only validation remains active.
+No environment variable allows plain HTTP. The local server integration test mode samples build their wallet with `common.NewOID4VPRuntime(certPath, true)`, which sets `experimental.Transport{AllowHTTP: true}` on the OpenID4VCI receiver and `AllowHTTP` on the OpenID4VP presenter. The package `github.com/trustknots/vcknots/wallet/experimental` holds every such test-only departure from the specifications. A client assertion is still sent over plain HTTP only to a loopback host.
 
-Example (local development only):
-
-```bash
-export VCKNOTS_WALLET_HTTP_ALLOWED=true
-```
-
-> ⚠️ **Security warning**: Do not enable `VCKNOTS_WALLET_HTTP_ALLOWED` in production. Keep HTTPS-only validation enabled.
+> ⚠️ **Security warning**: Do not allow plain HTTP in production. HAIP refuses it.
 
 ---
 

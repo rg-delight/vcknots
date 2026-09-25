@@ -368,27 +368,18 @@ VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 
 ### Wallet 実行時の環境変数
 
-`VCKNOTS_CERT_PATH` に加えて、wallet の実行時挙動は `wallet/env/env.go` で定義された環境変数で制御されます。
+`VCKNOTS_CERT_PATH` に加えて、wallet は `wallet/env/env.go` で定義された環境変数を読みます。
 
 | 環境変数 | 既定値 | 説明 |
 | :---- | :---- | :---- |
-| `VCKNOTS_WALLET_HTTP_ALLOWED` | `false`（未設定/空） | `true` を設定すると、Wallet の HTTP 通信で HTTP エンドポイントを許可します（ローカル開発/テスト用途）。ただし client assertion だけは例外で、平文 HTTP で送るのはループバックホスト宛てに限られます。リモートの `http://` エンドポイントへの `private_key_jwt` は、この設定を有効にしても拒否されます。 |
 | `VCKNOTS_WALLET_DEBUG` | `false`（未設定/空） | デバッグログのみを有効化します。HTTPS 必須要件は緩和されません。 |
 
-挙動の要点:
-- `IsHTTPAllowed()` が `true` になるのは `VCKNOTS_WALLET_HTTP_ALLOWED=true` の場合だけです。
-- この変数は既定のディスパッチャと plugin を構築するときに読み取られます。直接構築した plugin は自身の `AllowHTTP` フィールドに従います。
-- ローカルサーバー統合テストモードのサンプルは、wallet を構築する前に自プロセスで `env.SetHTTPAllowed(true)` を呼ぶため、この変数を設定する必要はありません。
-- `VCKNOTS_WALLET_DEBUG=true` だけでは HTTP 許可は有効になりません。ローカルの `http://` エンドポイントを使うには `VCKNOTS_WALLET_HTTP_ALLOWED=true` も設定してください。
-- `VCKNOTS_WALLET_HTTP_ALLOWED` が未設定（または `true` 以外）の場合、`IsHTTPAllowed()` は `false` となり、HTTPS 必須の検証が有効のままになります。
+平文 HTTP を許可する環境変数はありません。
+ローカルサーバー統合テストモードのサンプルは `common.NewOID4VPRuntime(certPath, true)` で wallet を構築し、OpenID4VCI の receiver に `experimental.Transport{AllowHTTP: true}` を、OpenID4VP の presenter に `AllowHTTP` を設定します。
+パッケージ `github.com/trustknots/vcknots/wallet/experimental` は、こうした規格から外れる試験専用の設定をすべて持ちます。
+client assertion を平文 HTTP で送るのは、引き続きループバックホスト宛てに限られます。
 
-設定例（ローカル開発のみ）:
-
-```bash
-export VCKNOTS_WALLET_HTTP_ALLOWED=true
-```
-
-> ⚠️ **セキュリティ警告**: 本番環境では `VCKNOTS_WALLET_HTTP_ALLOWED` を有効化しないでください。HTTPS 必須検証を維持してください。
+> ⚠️ **セキュリティ警告**: 本番環境では平文 HTTP を許可しないでください。HAIP は拒否します。
 
 ---
 

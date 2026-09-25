@@ -530,8 +530,8 @@ func TestOid4vciReceiver_FetchAccessToken_RefusesClientAssertionOverPlainHTTP(t 
 func TestOid4vciReceiver_FetchAccessToken_PlainHTTPStaysAllowedWithoutAssertion(t *testing.T) {
 	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-	// Without a client assertion the existing VCKNOTS_WALLET_HTTP_ALLOWED
-	// behaviour is unchanged, so the restriction stays scoped to the assertion.
+	// Without a client assertion the experimental plain-HTTP allowance
+	// applies, so the loopback restriction stays scoped to the assertion.
 	counter := withCountedTokenTransport(t, receiver)
 
 	tokenURL, err := url.Parse("http://as.example.com/token")
