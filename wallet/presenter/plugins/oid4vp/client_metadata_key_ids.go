@@ -16,8 +16,9 @@ import (
 // that is not an object, or whose kid is absent, empty or not a string, has no
 // kid. Metadata without jwks carries no key the rule applies to.
 //
-// The check runs only when the presenter sets RequireClientMetadataJWKKeyIDs;
-// see that field for why it is not always on.
+// The OpenID4VP 1.0 entry points always run it, unless the caller relaxed it
+// with ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID; the Draft 24
+// entry points never do, since Draft 24 has no such rule.
 func validateClientMetadataJWKKeyIDs(rawMetadata []byte) error {
 	var metadata struct {
 		Jwks *struct {

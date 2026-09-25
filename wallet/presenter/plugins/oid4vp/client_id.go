@@ -40,12 +40,12 @@ const (
 
 // ParseOID4VPClientID parses a client_id with the OID4VP 1.0 §5.9.2 syntax
 // every entry point of this package applies. A Client Identifier with no ":"
-// reports OID4VPClientIDPrefixPreRegistered. The Wallet-only prefixes "origin"
-// (§5.9.3) and "web-origin" (Appendix A.2) are refused with
-// ErrClientIDPrefixReserved, and unknown prefixes as a syntax error. Parsing
-// a prefix does not mean the parse entry points can authenticate it.
+// reports OID4VPClientIDPrefixPreRegistered. The reserved prefix "origin"
+// (§5.9.3) is refused with ErrClientIDPrefixReserved, and unknown prefixes as
+// a syntax error. Parsing a prefix does not mean the parse entry points can
+// authenticate it.
 func ParseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
-	return parseOID4VPClientIDAllowingWebOrigin(clientID, false)
+	return parseOID4VPClientID(clientID)
 }
 
 // Prefix reports the Client Identifier Prefix this Client Identifier carries,
@@ -62,31 +62,26 @@ func (c *OID4VPClientID) Original() string {
 
 // RequiresRequestObjectSignature reports whether the prefix itself can only be
 // authenticated by a signed Request Object: x509_san_dns, x509_hash and
-// verifier_attestation (OID4VP 1.0 §5.9.3). The parse entry points refuse
-// such a request in plain parameters with ErrRequestObjectSignatureRequired.
+// verifier_attestation (OID4VP 1.0 §5.9.3), and openid_federation, whose
+// Relying Party "MUST demonstrate that the requesting Entity controls the
+// Entity's RP keys" by signing the request (OpenID Federation 1.0 §12.1.1).
+// The parse entry points refuse such a request in plain parameters with
+// ErrRequestObjectSignatureRequired.
 func (c *OID4VPClientID) RequiresRequestObjectSignature() bool {
 	return c.prefix == OID4VPClientIDPrefixX509SanDNS ||
 		c.prefix == OID4VPClientIDPrefixX509Hash ||
-		c.prefix == OID4VPClientIDPrefixVerifierAttestation
+		c.prefix == OID4VPClientIDPrefixVerifierAttestation ||
+		c.prefix == OID4VPClientIDPrefixOIDFederation
 }
 
-// parseOID4VPClientID is the package-internal spelling of ParseOID4VPClientID.
-func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
-	return ParseOID4VPClientID(clientID)
-}
-
-// parseClientID parses a client_id for the delivery this builder processes.
-// Only an unsigned DC API request accepts "web-origin:<origin>", which
-// parseDCAPIUnsigned synthesised itself after discarding the request's
-// client_id (OID4VP 1.0 Appendix A.2).
+// parseClientID parses a client_id with the OpenID4VP 1.0 syntax.
 func (b *requestBuilder) parseClientID(clientID string) (*OID4VPClientID, error) {
-	return parseOID4VPClientIDAllowingWebOrigin(clientID, b.requestSource == sourceDCAPIUnsigned)
+	return parseOID4VPClientID(clientID)
 }
 
-// parseOID4VPClientIDAllowingWebOrigin implements the OID4VP 1.0 Section 5.9.2
-// Client Identifier syntax. allowWebOrigin is true only on the one internal
-// path that synthesises the identifier itself; see parseClientID.
-func parseOID4VPClientIDAllowingWebOrigin(clientID string, allowWebOrigin bool) (*OID4VPClientID, error) {
+// parseOID4VPClientID implements the OID4VP 1.0 Section 5.9.2 Client
+// Identifier syntax.
+func parseOID4VPClientID(clientID string) (*OID4VPClientID, error) {
 	// Syntax: <client_id_prefix>:<orig_client_id>
 
 	// Trim whitespace from client_id
@@ -121,22 +116,6 @@ func parseOID4VPClientIDAllowingWebOrigin(clientID string, allowWebOrigin bool) 
 		return &OID4VPClientID{
 			original: origin,
 			prefix:   OID4VPClientIDPrefix(prefix),
-		}, nil
-	case OID4VPClientIDPrefixWebOrigin:
-		// OID4VP 1.0 Appendix A.2: "The `client_id` parameter MUST be omitted
-		// in unsigned requests defined in (#unsigned_request). The Wallet MUST
-		// ignore any `client_id` parameter that is present in an unsigned
-		// request." web-origin is the effective identifier the Wallet derives
-		// from the platform-authenticated Origin, so accepting it from a
-		// request would let a Verifier name itself and derive no response
-		// endpoint binding, which is what Section 5.9.3 forbids for the
-		// companion "origin" prefix.
-		if !allowWebOrigin {
-			return nil, fmt.Errorf("client_id prefix 'web-origin' is reserved for the Wallet's own unsigned Digital Credentials API identifier and is not allowed in requests: %w", ErrClientIDPrefixReserved)
-		}
-		return &OID4VPClientID{
-			original: origin,
-			prefix:   OID4VPClientIDPrefixWebOrigin,
 		}, nil
 	case OID4VPClientIDPrefixOriginal:
 		// OID4VP 1.0 Section 5.9.3: "This reserved Client Identifier Prefix is

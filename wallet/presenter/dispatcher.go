@@ -34,12 +34,11 @@ func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (
 	return d, nil
 }
 
-// WithDefaultConfig registers a zero oid4vp.Oid4vpPresenter for types.Oid4vp,
-// which requires https endpoints.
+// WithDefaultConfig registers an oid4vp.Oid4vpPresenter for types.Oid4vp,
+// which requires https for every Verifier endpoint.
 func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
-		oid4vpReceiver := &oid4vp.Oid4vpPresenter{}
-		return d.registerPlugin(types.Oid4vp, oid4vpReceiver)
+		return d.registerPlugin(types.Oid4vp, &oid4vp.Oid4vpPresenter{})
 	}
 }
 

@@ -1,11 +1,8 @@
 package oid4vp
 
 import (
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
@@ -19,9 +16,6 @@ type requestBuilder struct {
 	// policy is the presenter configuration of this parse. It is a pointer
 	// so that requestBuilder stays comparable; nil is the zero policy.
 	policy *builderPolicy
-	// preRegisteredClient is the registry entry of this request's
-	// pre-registered Client Identifier, nil for every other prefix.
-	preRegisteredClient *PreRegisteredClient
 }
 
 // builderPolicy is the part of the presenter configuration a requestBuilder
@@ -32,10 +26,6 @@ type builderPolicy struct {
 	// supportedTransactionDataTypes lists the transaction_data types the
 	// wallet processes (OID4VP 1.0 §5.1).
 	supportedTransactionDataTypes []string
-	// preRegisteredClients and resolvePreRegisteredClient are the registry a
-	// pre-registered Client Identifier is resolved against (OID4VP 1.0 §5.9.2).
-	preRegisteredClients       map[string]PreRegisteredClient
-	resolvePreRegisteredClient PreRegisteredClientResolver
 }
 
 // settings returns the builder's policy, or the zero policy.
@@ -49,7 +39,11 @@ func (b *requestBuilder) settings() builderPolicy {
 // NewRequestBuilder creates a builder for OpenID4VP 1.0 Authorization
 // Requests under profile.Final(). WithProfile selects another profile.
 func NewRequestBuilder() *requestBuilder {
-	return &requestBuilder{requestCore: newRequestCore()}
+	core := newRequestCore()
+	// OID4VP 1.0 §5.1 requires a unique kid on every client_metadata.jwks
+	// member.
+	core.requireClientMetadataJWKKeyIDs = true
+	return &requestBuilder{requestCore: core}
 }
 
 // WithProfile selects the OpenID4VP 1.0 profile whose Options the builder
@@ -61,12 +55,6 @@ func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
 		return b
 	}
 	b.options = p.Options()
-	return b
-}
-
-// WithHTTPAllowed enables HTTP response endpoints for local tests only.
-func (b *requestBuilder) WithHTTPAllowed(allow bool) *requestBuilder {
-	b.allowHTTP = allow
 	return b
 }
 
@@ -86,7 +74,7 @@ func (b *requestBuilder) validate() error {
 		// presents vp_token only and rejects the others as invalid_request.
 		return newAuthorizationRequestError(InvalidRequestError, "response_type must be vp_token, got %q", b.req.ResponseType)
 	}
-	if b.req.ClientID == "" {
+	if b.req.ClientID == "" && b.requestSource != sourceDCAPIUnsigned {
 		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 
@@ -150,10 +138,6 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		b.errValidation = err
 		return b
 	}
-	if err := b.authenticateUnsignedFederationRequest(b.parseClientID, singleParams); err != nil {
-		b.errValidation = err
-		return b
-	}
 
 	return b
 }
@@ -166,51 +150,12 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	if b.errValidation != nil {
 		return b
 	}
-	form := url.Values{}
-	if method == RequestURIMethodPOST {
-		// OID4VP 1.0 §5.10: the POST always carries a fresh wallet_nonce and
-		// includes wallet_metadata only when the Wallet has metadata to convey.
-		nonce, err := b.newRequestURINonce()
-		if err != nil {
-			b.errValidation = fmt.Errorf("failed to generate wallet_nonce: %w", err)
-			return b
-		}
-		b.sentWalletNonce = nonce
-		form.Set("wallet_nonce", nonce)
-		if b.settings().walletMetadata != nil {
-			metadataJSON, err := json.Marshal(b.settings().walletMetadata)
-			if err != nil {
-				b.errValidation = fmt.Errorf("failed to marshal wallet_metadata: %w", err)
-				return b
-			}
-			form.Set("wallet_metadata", string(metadataJSON))
-		}
-	}
-	body, err := b.fetchRequestObject(uri, method, form, "application/oauth-authz-req+jwt")
+	body, err := b.fetchRequestObjectByReference(uri, method, b.settings().walletMetadata, b.settings().requestURINonce, "application/oauth-authz-req+jwt")
 	if err != nil {
 		b.errValidation = err
 		return b
 	}
-	b.requestSource = sourceReference
 	return b.withRequestObject(string(body))
-}
-
-// newRequestURINonce returns the wallet_nonce for a request_uri POST: the
-// presenter's generator when set, otherwise 32 random bytes, base64url-encoded
-// without padding (OID4VP 1.0 §5.10).
-func (b *requestBuilder) newRequestURINonce() (string, error) {
-	if b.settings().requestURINonce != nil {
-		return b.settings().requestURINonce()
-	}
-	return defaultRequestURINonce()
-}
-
-func defaultRequestURINonce() (string, error) {
-	buffer := make([]byte, 32)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
 // AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority

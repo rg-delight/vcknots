@@ -128,6 +128,22 @@ func TestController_ParsePresentationRequest_RejectsNonHTTPSResponseURI(t *testi
 	assert.ErrorContains(t, err, "response_uri must use https scheme")
 }
 
+// TestController_DefaultPresenterIgnoresTheHTTPEnvironment: plain http is an
+// experimental relaxation a caller opts into in code (package experimental);
+// the removed VCKNOTS_WALLET_HTTP_ALLOWED variable no longer relaxes the
+// default presenter.
+func TestController_DefaultPresenterIgnoresTheHTTPEnvironment(t *testing.T) {
+	t.Setenv("VCKNOTS_WALLET_HTTP_ALLOWED", "true")
+	controller := createTestControllerWithDefaults(t)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		dcqlQuery,
+	)
+	_, err := controller.ParsePresentationRequest(t.Context(), uri)
+	assert.ErrorContains(t, err, "response_uri must use https scheme")
+}
+
 func TestController_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	controller := createTestControllerAllowingHTTP(t)
 

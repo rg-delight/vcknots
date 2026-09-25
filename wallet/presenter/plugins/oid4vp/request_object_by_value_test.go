@@ -1,12 +1,10 @@
 package oid4vp
 
 import (
-	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"net/url"
 	"reflect"
 	"strings"
@@ -51,22 +49,20 @@ func TestParseRequestObjectMatchesTheURIDelivery(t *testing.T) {
 // for the Presentation Exchange wire contract, whose by-value entry point
 // authenticates an X.509 Request Object through the same shared path.
 func TestParseDraft24RequestObjectMatchesTheURIDelivery(t *testing.T) {
-	f := newRequestObjectFixture(t)
-	claims := f.claims()
+	f := newRequestObjectFixture(t, "verifier.example")
+	claims := f.draft24Claims()
 	claims["response_mode"] = "direct_post"
-	delete(claims, "dcql_query")
-	claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
 	requestObject := f.sign(t, claims, nil)
 
 	uri := "openid4vp://authorize?" + url.Values{
-		"client_id": {f.clientID()},
+		"client_id": {draft24X509ClientID},
 		"request":   {requestObject},
 	}.Encode()
 	fromURI, err := parseDraft24ForTest(f.presenter(), uri)
 	if err != nil {
 		t.Fatalf("the Draft24 URI delivery must be accepted: %v", err)
 	}
-	fromValue, err := parseDraft24RequestObjectForTest(f.presenter(), requestObject, f.clientID())
+	fromValue, err := parseDraft24RequestObjectForTest(f.presenter(), requestObject, draft24X509ClientID)
 	if err != nil {
 		t.Fatalf("the Draft24 by-value delivery must be accepted: %v", err)
 	}
@@ -139,28 +135,20 @@ func TestParseRequestObjectRefusesUnsignedRequests(t *testing.T) {
 		!strings.Contains(err.Error(), "bounded compact signed JWT") {
 		t.Fatalf("want a non-JWT request refused, got %v", err)
 	}
-	if _, err := parseDraft24RequestObjectForTest(f.presenter(), unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
+	if _, err := parseDraft24RequestObjectForTest(f.presenter(), unsigned, ""); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
 		t.Fatalf("want the Draft24 entry point to refuse an alg=none request object, got %v", err)
 	}
 }
 
 // TestParseRequestObjectHAIPDeliveryPolicy keeps the HAIP Section 5.1 delivery
 // rule on the by-value entry point: a Request Object the library did not fetch
-// through request_uri is refused unless the caller attests the fetch with
-// RequestObjectSource.DeliveredByReference.
+// through request_uri is refused, whatever the caller knows about it.
 func TestParseRequestObjectHAIPDeliveryPolicy(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	requestObject := f.sign(t, f.claims(), nil)
 
 	if _, err := parseRequestObjectForTest(f.haipPresenter(), requestObject, f.clientID()); !errors.Is(err, ErrHAIPRequestURIRequired) {
-		t.Fatalf("want ErrHAIPRequestURIRequired without a delivery attestation, got %v", err)
-	}
-	request, err := parseRequestObjectWithSourceForTest(f.haipPresenter(), requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
-	if err != nil {
-		t.Fatalf("an attested delivery must be accepted under HAIP: %v", err)
-	}
-	if proof := request.RequestObjectVerification; proof == nil || !proof.DeliveryAttested || proof.Delivery != "value" {
-		t.Fatalf("the attested delivery must be recorded: %+v", proof)
+		t.Fatalf("want ErrHAIPRequestURIRequired for a Request Object passed by value, got %v", err)
 	}
 }
 
@@ -176,7 +164,7 @@ func TestParseRequestObjectIsNotTheDCAPIEntryPoint(t *testing.T) {
 	delete(claims, "response_uri")
 	requestObject := f.sign(t, claims, nil)
 
-	_, valueErr := parseRequestObjectWithSourceForTest(f.haipPresenter(), requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
+	_, valueErr := parseRequestObjectForTest(f.presenter(), requestObject, f.clientID())
 	if valueErr == nil || !strings.Contains(valueErr.Error(), "only valid over the Digital Credentials API") {
 		t.Fatalf("want a DC API response mode refused by value, got %v", valueErr)
 	}
@@ -184,7 +172,7 @@ func TestParseRequestObjectIsNotTheDCAPIEntryPoint(t *testing.T) {
 		"client_id": {f.clientID()},
 		"request":   {requestObject},
 	}.Encode()
-	_, uriErr := f.haipPresenter().ParsePresentationRequest(uri)
+	_, uriErr := f.presenter().ParsePresentationRequest(uri)
 	if uriErr == nil || uriErr.Error() != valueErr.Error() {
 		t.Fatalf("the two deliveries must refuse a DC API response mode alike: %v vs %v", valueErr, uriErr)
 	}
@@ -200,62 +188,5 @@ func (f *requestObjectFixture) haipPresenter() *Oid4vpPresenter {
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &validation,
 		Profile:                 profile.HAIP(),
-	}
-}
-
-// TestParseRequestObjectAttestsCallerWalletNonce: an application that fetched
-// the Request Object with its own request_uri POST names the wallet_nonce it
-// sent (RequestObjectSource.WalletNonce), and the by-value entry
-// point holds the Request Object to it exactly as it would hold one this
-// library fetched (OpenID4VP 1.0 Section 5.10.1).
-func TestParseRequestObjectAttestsCallerWalletNonce(t *testing.T) {
-	const sent = "caller-wallet-nonce"
-	cases := []struct {
-		name        string
-		walletNonce string
-		claim       any
-		wantErr     bool
-	}{
-		{name: "echoed", walletNonce: sent, claim: sent},
-		{name: "different", walletNonce: sent, claim: "other-nonce", wantErr: true},
-		{name: "missing", walletNonce: sent, wantErr: true},
-		{name: "not a string", walletNonce: sent, claim: 42, wantErr: true},
-		{name: "no nonce attested ignores the claim", claim: "unsolicited"},
-	}
-	for _, draft24 := range []bool{false, true} {
-		for _, tc := range cases {
-			name := tc.name
-			if draft24 {
-				name = "draft24/" + name
-			}
-			t.Run(name, func(t *testing.T) {
-				f := newRequestObjectFixture(t)
-				claims := f.claims()
-				if tc.claim != nil {
-					claims["wallet_nonce"] = tc.claim
-				}
-				p := f.presenter()
-				parse := p.ParseRequestObject
-				if draft24 {
-					claims["response_mode"] = "direct_post"
-					delete(claims, "dcql_query")
-					claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
-					parse = p.ParseDraft24RequestObject
-				}
-				request, err := admittedRequest(parse(context.Background(), f.sign(t, claims, nil), types.RequestObjectSource{ClientID: f.clientID(), WalletNonce: tc.walletNonce}))
-				if tc.wantErr {
-					if !errors.Is(err, ErrRequestObjectWalletNonceMismatch) {
-						t.Fatalf("want ErrRequestObjectWalletNonceMismatch, got %v", err)
-					}
-					return
-				}
-				if err != nil {
-					t.Fatalf("want the Request Object accepted, got %v", err)
-				}
-				if got := request.RequestObjectVerification.WalletNonce; got != tc.walletNonce {
-					t.Fatalf("RequestObjectVerification.WalletNonce = %q, want %q", got, tc.walletNonce)
-				}
-			})
-		}
 	}
 }

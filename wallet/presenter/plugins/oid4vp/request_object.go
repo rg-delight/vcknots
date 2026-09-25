@@ -54,6 +54,20 @@ type RequestObjectValidationOptions struct {
 	// openid_federation Client Identifier. A nil value refuses every such
 	// Client Identifier.
 	Federation *FederationTrustOptions
+	// RequestURIPolicy decides whether requestURI belongs to the Verifier
+	// named by clientID, the outer client_id of the Authorization Request
+	// (empty when it carries none). OpenID4VP 1.0, "Establishing Trust in the
+	// Request URI": a Wallet operating within a trust framework "SHOULD
+	// validate that the Request URI is properly associated with the Client
+	// Identifier"; "Authorization Requests with Request URI": "If the link
+	// cannot be established in those cases, the Wallet MUST refuse the
+	// request". It runs before request_uri
+	// is fetched, and a non-nil error refuses the request with
+	// ErrRequestURINotAssociated. The Request Object's own client_id must
+	// then equal clientID and is authenticated as usual, so the association
+	// holds for the authenticated Verifier. A nil policy accepts every
+	// request_uri.
+	RequestURIPolicy func(clientID, requestURI string) error
 }
 
 // RequestObjectVerification records the authentication performed by this
@@ -63,20 +77,16 @@ type RequestObjectVerification struct {
 	CertificateSHA256      []string
 	RevocationChecked      int
 	RevocationUnadvertised int
-	// WalletNonce is the wallet_nonce sent with a Final request_uri POST and
-	// echoed by the authenticated Request Object. It is empty for GET and when
-	// no nonce was sent (OID4VP 1.0 §5.10.1).
+	// WalletNonce is the wallet_nonce this library sent with a request_uri
+	// POST and the authenticated Request Object echoed (OID4VP 1.0 §5.10.1,
+	// Draft 24 §5.11.1). It is empty for GET and for a Request Object passed
+	// by value.
 	WalletNonce string
 	// Delivery records how this library observed the Request Object arrive:
-	// "reference" (request_uri), "value" (request=), or "query" (plain query
-	// parameters). It is empty when the library did not observe one of those
-	// paths.
+	// "reference" when it fetched request_uri itself, and "value" for a
+	// Request Object passed in the request parameter or to
+	// ParseRequestObject. It is empty for a Digital Credentials API request.
 	Delivery string
-	// DeliveryAttested is true when the caller's
-	// RequestObjectSource.DeliveredByReference was accepted for the HAIP
-	// delivery check, letting a Request Object passed by value satisfy the
-	// request_uri requirement.
-	DeliveryAttested bool
 	// ExpiresAt is the exp claim of the authenticated Request Object, in UTC.
 	// It is the zero value when the Request Object carried no exp, which the
 	// RequireExpiry policy decides whether to accept. A Wallet that has to show
@@ -199,10 +209,13 @@ type requestObjectClaimPolicy struct {
 	Audiences []string
 	// AudienceOptional skips the aud check (the Draft 24 contract).
 	AudienceOptional bool
-	Now              time.Time
-	ClockSkew        time.Duration
-	RequireExpiry    bool
-	MaxAge           time.Duration
+	// AudienceIfPresent accepts a Request Object without aud and checks an
+	// aud that is present (the Digital Credentials API).
+	AudienceIfPresent bool
+	Now               time.Time
+	ClockSkew         time.Duration
+	RequireExpiry     bool
+	MaxAge            time.Duration
 }
 
 // authenticateFinalRequestObject authenticates an OpenID4VP 1.0 Request
@@ -215,7 +228,6 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err != nil {
 		return err
 	}
-	b.adoptCallerWalletNonce()
 	parsed, claims, err := decodeRequestObject(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
 		return err
@@ -308,6 +320,9 @@ func validateRequestObjectAudience(claims commonJOSE.Claims, policy requestObjec
 			return nil
 		}
 		audiences = []string{"https://self-issued.me/v2"}
+	}
+	if _, present := claims["aud"]; !present && policy.AudienceIfPresent {
+		return nil
 	}
 	var actual []string
 	switch aud := claims["aud"].(type) {

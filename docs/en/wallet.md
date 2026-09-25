@@ -32,7 +32,7 @@ The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. `Config.Profiles
 | Credential acceptance before storage | `Config.CredentialAcceptance` or `CredentialRequest.Acceptance` (`acceptance.Policy`), `VerifyCredentialForAcceptance` | Required before any credential is requested. The issuer key is established by the mechanism its `iss` and `x5c` select (SD-JWT VC -19 §2.5). |
 | OpenID4VP 1.0 over `direct_post` / `direct_post.jwt` | `ParsePresentationRequest`, `ParsePresentationRequestObject`, `SelectCredentials`, `SubmitPresentation`, `DeclinePresentation`; `PresentCredential` | Requests are answered through an `*oid4vp.AdmittedRequest` handle. |
 | Verifier authentication | `oid4vp.Oid4vpPresenter` (`RequestObjectValidation`, `PreRegisteredClients`) | `x509_san_dns`, `x509_hash`, `redirect_uri`, pre-registered clients, `verifier_attestation`, `openid_federation`. See [Verifier authentication](#verifier-authentication). |
-| `request_uri` GET / POST with `wallet_nonce` | `ParsePresentationRequest` | A POST always sends a fresh `wallet_nonce` and, when configured, `wallet_metadata`. |
+| `request_uri` GET / POST with `wallet_nonce` | `ParsePresentationRequest`, `Draft24().ParsePresentationRequest` | The library fetches `request_uri` itself. A POST always sends a fresh `wallet_nonce` and, when `Oid4vpPresenter.WalletMetadata` is set, `wallet_metadata`. `RequestObjectValidationOptions.RequestURIPolicy` can tie the `request_uri` to the `client_id` before it is fetched. |
 | DCQL | `SelectCredentials`, `oid4vp.ResolveSatisfiableDCQLCredentials`, `oid4vp.ValidateDCQLMatches` | `credential_sets`, `claims`, `claim_sets`, `values`, nested and array claim paths, `multiple`, `trusted_authorities` of type `aki` and `openid_federation`. |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | `dc+sd-jwt` presentations with key binding only. |
 | W3C Digital Credentials API (`dc_api`, `dc_api.jwt`; unsigned, signed, multi-signed) | `ParseDCAPIRequest` + `SubmitPresentation` | Protocol handling only; the caller supplies the platform-authenticated origin. |
@@ -113,7 +113,7 @@ The server exposes the endpoints used in this tutorial:
 * `POST /callback` — the verifier's response endpoint
 * `GET /.well-known/openid-credential-issuer`, `GET /.well-known/oauth-authorization-server` — metadata endpoints
 
-* **Allowing HTTP for local testing:** The wallet rejects non-HTTPS issuer and verifier endpoints, as OpenID4VCI 1.0 §12.2 and OpenID4VP 1.0 require. Because the local sample server runs on plain HTTP, allow HTTP explicitly in the code that builds the wallet for the test. Plain HTTP departs from the specifications, so it is reachable only through the [`experimental`](#experimental) package: `Config.Experimental.Transport` for the plugins the wallet builds, or `Oid4vciReceiver.Experimental` on a receiver you construct. The OpenID4VP presenter still takes its own `AllowHTTP` field. No environment variable relaxes it.
+* **Allowing HTTP for local testing:** The wallet rejects non-HTTPS issuer and verifier endpoints, as OpenID4VCI 1.0 §12.2 and OpenID4VP 1.0 require. Because the local sample server runs on plain HTTP, allow HTTP explicitly in the code that builds the wallet for the test. Plain HTTP departs from the specifications, so it is reachable only through the [`experimental`](#experimental) package: `Config.Experimental.Transport` for the plugins the wallet builds, or `Oid4vciReceiver.Experimental` on a receiver you construct. An OpenID4VP presenter you construct accepts it only after `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})`. No environment variable relaxes it.
 
 > ⚠️ **Security warning:** Do not allow HTTP in production. HAIP refuses it.
 
@@ -214,9 +214,11 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 	}
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           allowHTTP, // local sample server only
 		X509TrustChainRoots: certPool,
 	}
+	// The local sample server speaks plain HTTP, which OpenID4VP does not
+	// allow; opt in explicitly, and never in production.
+	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: allowHTTP})
 	presenterDisp, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)
@@ -903,8 +905,8 @@ A presentation request is parsed and admitted once, then answered through the ha
 
 | Method | Purpose |
 | --- | --- |
-| `ParsePresentationRequest(ctx, uri)` | Parse and admit an Authorization Request URI, dereferencing `request_uri`. |
-| `ParsePresentationRequestObject(ctx, requestObject, src)` | Authenticate a Request Object the caller already holds. |
+| `ParsePresentationRequest(ctx, uri)` | Parse and admit an Authorization Request URI, fetching `request_uri` itself. |
+| `ParsePresentationRequestObject(ctx, requestObject, src)` | Authenticate a Request Object the caller already holds, as one passed by value. HAIP refuses it (`ErrHAIPRequestURIRequired`). |
 | `ParseDCAPIRequest(ctx, invocation)` | Admit a Digital Credentials API request. |
 | `SelectCredentials(ctx, h)` | The library's own choice of stored credentials. |
 | `SubmitPresentation(ctx, h, Presentation)` | Check, serialize and send the response. |
@@ -945,32 +947,20 @@ func presentWithConsent(ctx context.Context, w *wallet.Wallet, uri string, holde
 
 ### Parsing now and presenting later
 
-The handle is not serializable. A wallet that shows a consent screen in one request and presents in another keeps the Request Object and parses it again; the second parse authenticates the Request Object again, including its `exp`.
+The handle is not serializable. A wallet that shows a consent screen in one request and presents in another keeps the Request Object (`h.RequestObject()`) and parses it again; the second parse authenticates the Request Object again, including its `exp`.
 
 ```go
 import (
 	"context"
 
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
-// requestSource records how the admitted Request Object reached the wallet.
-func requestSource(request *oid4vp.AdmittedRequest) presenterTypes.RequestObjectSource {
-	parsed := request.Request()
-	source := presenterTypes.RequestObjectSource{ClientID: parsed.ClientID}
-	if verification := parsed.RequestObjectVerification; verification != nil {
-		source.DeliveredByReference = verification.Delivery == "reference"
-		source.WalletNonce = verification.WalletNonce
-	}
-	return source
-}
-
 // presentLater answers a request admitted earlier from its kept Request Object.
-func presentLater(ctx context.Context, w *wallet.Wallet, requestObject string, source presenterTypes.RequestObjectSource,
+func presentLater(ctx context.Context, w *wallet.Wallet, requestObject, clientID string,
 	p wallet.Presentation) (*presenterTypes.SubmitResult, error) {
-	request, err := w.ParsePresentationRequestObject(ctx, requestObject, source)
+	request, err := w.ParsePresentationRequestObject(ctx, requestObject, presenterTypes.RequestObjectSource{ClientID: clientID})
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +968,7 @@ func presentLater(ctx context.Context, w *wallet.Wallet, requestObject string, s
 }
 ```
 
-A request in plain parameters has no Request Object (`RequestObject()` is empty); parse its URI again instead. `RequestObjectSource.DeliveredByReference` states that the Request Object was fetched from `request_uri`, which satisfies the HAIP §5.1 delivery rule for a Request Object passed by value; set it only when the wallet's own earlier parse recorded the fetch.
+A request in plain parameters has no Request Object (`RequestObject()` is empty); parse its URI again instead. `RequestObjectSource` carries only the outer `client_id`: how a Request Object reached the wallet is something the library observes, never something a caller states. `RequestObjectVerification.Delivery` is `"reference"` only when the library fetched `request_uri` itself, and `WalletNonce` is set only for the `wallet_nonce` it sent in that POST; a Request Object passed by value is always delivered by value. Under HAIP (`Options.RequireSignedRequestByReference`, HAIP §5.1) `ParsePresentationRequestObject` and the `request` parameter are therefore refused with `ErrHAIPRequestURIRequired` before any network access. A HAIP wallet that answers later from a kept Request Object parses it with a presenter and wallet whose profile leaves out `RequireSignedRequestByReference`, having checked `Delivery == "reference"` on the first parse itself.
 
 ### Verifier authentication {#verifier-authentication}
 
@@ -990,15 +980,17 @@ A request in plain parameters has no Request Object (`RequestObject()` is empty)
 | `redirect_uri` | Unsigned only; binds the response endpoint to the identifier. It authenticates nobody. |
 | none (pre-registered) | The client must be in `PreRegisteredClients` or found by `ResolvePreRegisteredClient` (`oid4vp.ErrPreRegisteredClientUnknown`). Its `Metadata` replaces the request's metadata, and its `Metadata.RedirectURIs` are the only response endpoints accepted; a registration without them accepts no request. A signed Request Object is verified with the registered `JWKS`; `RequireSignedRequestObject` refuses an unsigned one. |
 | `verifier_attestation` | Signed Request Object required; the Verifier Attestation JWT must be issued by one of `RequestObjectValidation.VerifierAttestationIssuers`, and the Request Object signed with its `cnf` key. |
-| `openid_federation` | A Trust Chain to `RequestObjectValidation.Federation.TrustAnchors`; the Request Object is verified with the chain's keys. Unsigned requests are refused unless `FederationTrustOptions.AllowUnsignedRequests` is set. |
+| `openid_federation` | Signed Request Object required (OpenID Federation 1.0 §12.1.1). A Trust Chain to `RequestObjectValidation.Federation.TrustAnchors`; the Request Object is verified with the keys the derived `openid_credential_verifier` metadata publishes in `jwks`, `signed_jwks_uri` (signed with a Federation Entity Key of the Verifier) or `jwks_uri`, never with the Federation Entity Keys themselves (§12.1.1.1.2, §5.2.1; `federation.ErrVerifierKeysUnavailable`). |
 | `decentralized_identifier` | Refused. |
-| `origin`, `web-origin` | Refused (`ErrClientIDPrefixReserved`). |
+| `origin` | Refused (`ErrClientIDPrefixReserved`). |
 
 A prefix that requires a signature is refused in plain parameters with `ErrRequestObjectSignatureRequired`. `RequestObjectVerification` on the parsed request records what was authenticated (certificate fingerprints and a `Certificate` summary, revocation counters, the echoed `WalletNonce`, `Delivery`, `ExpiresAt`, and the `VerifierAttestation` or `Federation` evidence); no request parameter can populate it.
 
+Every `client_metadata.jwks` member must carry a `kid` that no other member repeats (OpenID4VP 1.0 §5.1; `ErrClientMetadataJWKKeyIDMissing`, `ErrClientMetadataJWKKeyIDDuplicate`). `RequestObjectValidationOptions.RequestURIPolicy(clientID, requestURI)` lets a wallet in a trust framework tie a `request_uri` to its `client_id`; it runs before the fetch, and a refusal is `ErrRequestURINotAssociated`.
+
 `RequestObjectValidationOptions` holds the relying-party policy: `TrustAnchors` or `RootCAs`, `CRL`, `AllowUnadvertisedRevocation`, `CertificateKeyUsages`, `WalletAudience`, `SigningAlgorithms` (default ES256 and RS256), `RequireExpiry`, `MaxAge` (zero is unbounded in every profile), `Now` and `ClockSkew`. A Request Object whose `iat` lies in the future is refused, so set `ClockSkew` to the clock difference the verifiers you accept may have. `X509TrustChainRoots` alone accepts certificates that publish no revocation information; it cannot be combined with anchors in `RequestObjectValidation`.
 
-`InsecureSkipX509Verify` applies to the Draft 24 entry points only. With it set, the OpenID4VP 1.0 path refuses every signed Request Object, and HAIP refuses the presenter.
+`Oid4vpPresenter.SetExperimentalOptions` applies `oid4vp.ExperimentalOptions`, relaxations no specification allows, for local verifiers and experiments only: `AllowHTTP` (plain HTTP verifier endpoints), `InsecureSkipX509Verify` (a Draft 24 `x509_san_dns` Request Object checked by binding and signature only, admitted without `RequestObjectVerification`; the OpenID4VP 1.0 path then refuses every signed Request Object) and `AcceptClientMetadataJWKsWithoutKeyID`. They cannot be set in a struct literal, and HAIP refuses the first two.
 
 ### DCQL
 
@@ -1012,7 +1004,7 @@ A wallet whose holder chooses among candidates uses `oid4vp.ResolveDCQLClaimSets
 
 ### Response modes and encryption
 
-A request URI or Request Object uses `direct_post` or `direct_post.jwt`; a DC API request uses `dc_api` or `dc_api.jwt`, and each path refuses the other's modes. HAIP requires `direct_post.jwt` and, for the DC API, `dc_api.jwt`. `direct_post.jwt` and `dc_api.jwt` require encryption keys in `client_metadata.jwks` (`ErrResponseEncryptionKeyMissing`); the response is an ECDH-ES JWE with A128GCM or A256GCM, preferring A256GCM, and under HAIP the verifier must list both (`ErrResponseEncryptionEncMissing`). These checks run at parse time, before consent.
+A request URI or Request Object uses `direct_post` or `direct_post.jwt`; a DC API request uses `dc_api` or `dc_api.jwt`, and each path refuses the other's modes. HAIP requires `direct_post.jwt` and, for the DC API, `dc_api.jwt`. `direct_post.jwt` and `dc_api.jwt` require encryption keys in `client_metadata.jwks` (`ErrResponseEncryptionKeyMissing`). The key must name its `alg`, which is the JWE `alg` (OpenID4VP 1.0 §8.3); `authorization_encrypted_response_alg` never stands in for it. The response is an ECDH-ES family JWE with the `encrypted_response_enc_values_supported` value the wallet prefers (A256GCM first; A128GCM when the list is absent), and under HAIP the key must be ECDH-ES on P-256 and the verifier must list both A128GCM and A256GCM (`ErrResponseEncryptionEncMissing`). These checks run at parse time, before consent.
 
 The response POST and the `request_uri` fetch do not follow redirects. A non-2xx response is an `*oid4vp.VerifierResponseError`.
 
@@ -1022,7 +1014,7 @@ The response POST and the `request_uri` fetch do not follow redirects. A non-2xx
 
 ### Digital Credentials API
 
-`ParseDCAPIRequest` admits a W3C Digital Credentials API invocation: `openid4vp-v1-unsigned`, `openid4vp-v1-signed` or `openid4vp-v1-multisigned`. The caller supplies the platform-authenticated origin, which is never read from the request. `SubmitPresentation` makes no HTTP call and returns the object to hand back to the platform: `{"vp_token": {...}}` for `dc_api`, or `{"response": <JWE>}` for `dc_api.jwt`. The Key Binding JWT `aud` is `origin:<origin>` (OpenID4VP 1.0 Appendix A.4).
+`ParseDCAPIRequest` admits a W3C Digital Credentials API invocation: `openid4vp-v1-unsigned`, `openid4vp-v1-signed` or `openid4vp-v1-multisigned`. The caller supplies the platform-authenticated origin, which is never read from the request; the admitted request carries it as `Request().Origin`. An unsigned request has no Client Identifier: its `client_id` and `expected_origins` are ignored and `ClientID` stays empty (Appendix A.2). A signed request is authenticated with the `x5c` chain of an `x509_san_dns` or `x509_hash` Client Identifier; `expected_origins` must contain the origin exactly, `aud` may be absent (an `aud` that is present must identify the wallet), and every signature of a multi-signed request must be typed `oauth-authz-req+jwt`. `SubmitPresentation` makes no HTTP call and returns the object to hand back to the platform: `{"vp_token": {...}}` for `dc_api`, or `{"response": <JWE>}` for `dc_api.jwt`. The Key Binding JWT `aud` is `origin:<origin>` (OpenID4VP 1.0 Appendix A.4).
 
 ```go
 import (
@@ -1056,7 +1048,13 @@ func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data js
 
 ### Draft 24
 
-`w.Draft24().ParsePresentationRequest` and `ParsePresentationRequestObject` admit OpenID4VP Draft 24 requests carrying a Presentation Exchange `presentation_definition`. The handle is answered with `SubmitPresentation` (a `vp_token` and `presentation_submission`) and `DeclinePresentation`. `SelectCredentials` picks the newest credential for every input descriptor, and `QueryIDs` name input descriptor ids. On an SD-JWT VC, key binding is always required and a non-nil `DisclosedClaims` limits disclosure. The Draft 24 path refuses pre-registered clients, and `Config.Experimental.Hooks.PresentationExchangeResponse` rewrites the response for testing.
+`w.Draft24().ParsePresentationRequest` and `ParsePresentationRequestObject` admit OpenID4VP Draft 24 requests carrying a Presentation Exchange `presentation_definition`. The handle is answered with `SubmitPresentation` (a `vp_token` and `presentation_submission`) and `DeclinePresentation`. `SelectCredentials` picks the newest credential for every input descriptor, and `QueryIDs` name input descriptor ids. On an SD-JWT VC, key binding is always required and a non-nil `DisclosedClaims` limits disclosure. `Config.Experimental.Hooks.PresentationExchangeResponse` rewrites the response for testing.
+
+The Draft 24 entry points apply the Draft 24 rules, not the 1.0 ones:
+
+* **Client Identifier Schemes** (Draft 24 §5.10.4): `redirect_uri` (unsigned only; the Response URI is the Client Identifier, or defaults to it when omitted), an `https` OpenID Federation Entity Identifier, `verifier_attestation`, `x509_san_dns`, and a colon-less pre-registered client resolved in `PreRegisteredClients` / `ResolvePreRegisteredClient`, whose registered metadata takes precedence over `client_metadata` (§5.1). `did` and `x509_san_uri` are refused as unsupported (`ErrRequestObjectClientAuthUnsupported`), `web-origin` is reserved to the DC API (`ErrClientIDPrefixReserved`), and the 1.0 prefixes `x509_hash`, `decentralized_identifier`, `openid_federation` and `origin` are not Draft 24 schemes. A Request Object is never verified with a `client_metadata` key, and a pre-Draft 22 `client_id_scheme` parameter is ignored.
+* **`request_uri`**: a POST sends a fresh `wallet_nonce`, which the Request Object must echo, and `WalletMetadata` when set (§5.11); `request_uri_method` is case-sensitive.
+* **Responses**: only `direct_post` and `direct_post.jwt` are answered. `direct_post.jwt` is an encrypted JARM response (§8.3): the JWE `alg` is `authorization_encrypted_response_alg` (required), the `enc` is `authorization_encrypted_response_enc` (A128CBC-HS256 when absent), and the key is a `client_metadata.jwks` key whose `use` is `enc` or absent and whose `alg`, if any, matches. `client_metadata.jwks` needs no `kid`, and HAIP never applies.
 
 ```go
 import (
@@ -1127,7 +1125,7 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 * `Attestation.ClientKeyFromDPoP` without a DPoP key or together with `Attestation.ClientKey` is refused (`ErrInvalidArgument`).
 * `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
-`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `Experimental.Transport` (on the wallet and on the receiver) and the presenter's `AllowHTTP` and `InsecureSkipX509Verify` are refused.
+`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `Experimental.Transport` (on the wallet and on the receiver) and the presenter's experimental `AllowHTTP` and `InsecureSkipX509Verify` (`oid4vp.ExperimentalOptions`) are refused.
 
 ## Error codes {#error-codes}
 
@@ -1243,10 +1241,14 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 
 **Plugins and sub-packages**
 
-* `oid4vp.Oid4vpPresenter` is no longer comparable with `==`. `oid4vci.Oid4vciReceiver` and `oid4vp.Oid4vpPresenter` have new fields (`HTTPClient`, `Experimental` on the receiver, `AllowHTTP` on the presenter, `Profile` and others) and new methods. `receiver.WithDefaultConfig`, `presenter.WithDefaultConfig` and `NewWallet` build plugins that require HTTPS; no environment variable changes that.
+* `oid4vp.Oid4vpPresenter` is no longer comparable with `==`. `oid4vci.Oid4vciReceiver` and `oid4vp.Oid4vpPresenter` have new fields (`HTTPClient`, `Experimental` on the receiver, `Profile` and others) and new methods. `receiver.WithDefaultConfig`, `presenter.WithDefaultConfig` and `NewWallet` build plugins that require HTTPS; no environment variable changes that.
 * `oid4vci.OID4VCICredentialFormatToSerializationFlavor` is deprecated in favor of `oid4vci.CredentialFormatFlavor`. It accepts exactly `jwt_vc_json`, `ldp_vc`, `dc+sd-jwt` and `vc+sd-jwt`, compared exactly; `jwt_vc`, serialization flavor names and unknown values are refused with `oid4vci.ErrCredentialFormatUnsupported`. `ReceiveCredential` no longer stores an unknown format as JWT VC.
 * The receiver plugin refuses every HTTP redirect (`ErrHTTPRedirectNotAllowed`), bounds response bodies, and refuses Credential Issuer Metadata whose `credential_issuer` is not the requested identifier and authorization server metadata whose `issuer` is not the requested one.
-* `Oid4vpPresenter.ParsePresentationRequest` authenticates the verifier as described in [Verifier authentication](#verifier-authentication): signed Request Objects are verified by the prefix's own mechanism and never with keys from `client_metadata`, `x509_*` prefixes require a signed Request Object, a colon-less `client_id` is a pre-registered client that must be registered, and a future `iat` is refused. `InsecureSkipX509Verify` makes the OpenID4VP 1.0 path refuse signed Request Objects; it applies to the Draft 24 entry points. `X509TrustChainRoots` keeps accepting certificates without revocation information.
+* `Oid4vpPresenter.ParsePresentationRequest` authenticates the verifier as described in [Verifier authentication](#verifier-authentication): signed Request Objects are verified by the prefix's own mechanism and never with keys from `client_metadata`, `x509_*` prefixes require a signed Request Object, a colon-less `client_id` is a pre-registered client that must be registered, and a future `iat` is refused. `X509TrustChainRoots` keeps accepting certificates without revocation information.
+* `Oid4vpPresenter.AllowHTTP` and `InsecureSkipX509Verify` were removed; `SetExperimentalOptions(oid4vp.ExperimentalOptions{...})` applies them explicitly. The presenter `NewWallet` and `presenter.WithDefaultConfig` build no longer reads `VCKNOTS_WALLET_HTTP_ALLOWED`. `Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` was removed: the OpenID4VP 1.0 entry points always require a unique `kid` unless `ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID` is set. `requestBuilder.WithHTTPAllowed` was removed.
+* `presenterTypes.RequestObjectSource.DeliveredByReference`, `RequestObjectSource.WalletNonce` and `oid4vp.RequestObjectVerification.DeliveryAttested` were removed: the library records the delivery and the `wallet_nonce` it observed itself, and HAIP refuses a Request Object passed by value.
+* `oid4vp.FederationTrustOptions.AllowUnsignedRequests` was removed; an unsigned `openid_federation` request is always refused. A federation Request Object is verified with the `openid_credential_verifier` metadata keys, not the Federation Entity Keys.
+* `oid4vp.OID4VPClientIDPrefixWebOrigin` was removed. An unsigned DC API request keeps an empty `ClientID`, and `CredentialPresentationRequest.Origin` carries the platform Origin. `profile.ResponseEncryptionRules.RequireJWKAlg` was removed, since OpenID4VP 1.0 always requires the JWK `alg`.
 * The presenter no longer posts an error response when parsing fails; `SendParseErrorResponses` or `AuthorizationRequestError.SendErrorResponse` does it on request. The `request_uri` fetch and the response POST (`Present`) do not follow redirects, and a non-2xx response to `Present` is an `*oid4vp.VerifierResponseError`.
 * `NewRequestBuilder` builds OpenID4VP 1.0 requests under `profile.Final()`; `WithProfile` selects another 1.0 profile.
 * The SD-JWT VC serializer refuses an `_sd_alg` that is not a string or names a hash it does not implement, where it used to read it as `sha-256` (RFC 9901 §4.1.1, §7.1), and refuses a Disclosure of `iss`, `nbf`, `exp`, `cnf`, `vct`, `vct#integrity`, `aka_vcts` or `status`, or of one of their sub-claims (`serializerTypes.ErrRegisteredClaimDisclosed`, SD-JWT VC -19 §2.2.2.3).
@@ -1267,13 +1269,13 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
     - `credstore.WithDefaultConfig()` persists credentials to `<user config dir>/vcknots/wallet/.local_credstore.db`. The process must be able to create and write this directory.
 
 4. **HTTPS enforcement:**
-    - The wallet requires HTTPS for issuer and verifier endpoints. [`experimental.Transport`](#experimental) (or the presenter's `AllowHTTP`) relaxes it for local development only.
+    - The wallet requires HTTPS for issuer and verifier endpoints. [`experimental.Transport`](#experimental) relaxes it for the issuer, and `oid4vp.ExperimentalOptions.AllowHTTP` for the verifier, for local development only.
 
 5. **Strict validation of OpenID4VP `client_id`:**
     - The wallet validates `client_id` strictly. Duplicate prefixes (for example `x509_san_dns:x509_san_dns:...`), malformed values and the wallet-only prefixes are rejected.
     - For `x509_san_dns`, the certificate is taken from the `x5c` header of the Request Object and one of its DNS Subject Alternative Names must equal the `client_id` value.
 
-6. **`InsecureSkipX509Verify`:**
+6. **`oid4vp.ExperimentalOptions.InsecureSkipX509Verify`:**
     - It skips certificate chain validation on the Draft 24 entry points, where only the binding and the signature are checked. The OpenID4VP 1.0 path refuses signed Request Objects while it is set, and HAIP refuses it.
     - ⚠️ Use it only for conformance testing or local development.
 
@@ -1286,7 +1288,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
   * **A:** The Issuer/Verifier server is not running. Start it with `pnpm -F @trustknots/server start` and confirm that http://localhost:8080 responds.
 
 * **Q: Receiving fails with `credential issuer must use https scheme`.**
-  * **A:** The wallet requires HTTPS. For the local HTTP sample server, set `Config.Experimental.Transport.AllowHTTP`, or `Experimental` on the receiver you construct and `AllowHTTP` on the presenter (see [experimental](#experimental)).
+  * **A:** The wallet requires HTTPS. For the local HTTP sample server, set `Config.Experimental.Transport.AllowHTTP`, or `Experimental` on the receiver you construct and `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` on the presenter (see [experimental](#experimental)).
 
 * **Q: Receiving fails with `issuer_metadata_fetch_failed`.**
   * **A:** Run `curl http://localhost:8080/.well-known/openid-credential-issuer` and confirm that JSON metadata is returned, and that its `credential_issuer` equals the identifier in the offer. For an identifier with a path, a 1.0 issuance reads `/.well-known/openid-credential-issuer/<path>` and a Draft 13 issuance `<path>/.well-known/openid-credential-issuer`; no other location is tried.

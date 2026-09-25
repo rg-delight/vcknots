@@ -54,9 +54,9 @@ func TestResolveVerifierTrustFromACarriedChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	encodedFormats, _ := json.Marshal(testVPFormats)
-	requireJSON(t, trust.Metadata, `{"redirect_uris": ["`+testRedirectURI+`"], "vp_formats_supported": `+string(encodedFormats)+`, "vp_formats": `+string(encodedFormats)+`}`)
-	if !reflect.DeepEqual(trust.RequestObjectJWKS.Keys[0].Key, f.verifierKey.jwks.Keys[0].Key) || trust.RequestObjectJWKS.Keys[0].KeyID != f.verifierKey.kid {
-		t.Fatalf("request object keys are not the subject's: %+v", trust.RequestObjectJWKS)
+	requireJSON(t, withoutJWKS(trust.Metadata), `{"redirect_uris": ["`+testRedirectURI+`"], "vp_formats_supported": `+string(encodedFormats)+`, "vp_formats": `+string(encodedFormats)+`}`)
+	if len(trust.RequestObjectJWKS.Keys) != 1 || !reflect.DeepEqual(trust.RequestObjectJWKS.Keys[0].Key, f.requestKey.jwks.Keys[0].Key) || trust.RequestObjectJWKS.Keys[0].KeyID != f.requestKey.kid {
+		t.Fatalf("request object keys are not the verifier metadata's: %+v", trust.RequestObjectJWKS)
 	}
 	if got := TrustPathEntityIDs(trust.TrustChain); !reflect.DeepEqual(got, []string{f.verifier, f.anchor}) {
 		t.Fatalf("trust path = %v", got)

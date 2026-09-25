@@ -82,7 +82,7 @@ func TestObserveLabelsAuthorizationResponse(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			recorder := &observetest.Recorder{}
-			p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: server.Client()}
+			p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client()}, ExperimentalOptions{AllowHTTP: true})
 			observePresenterClient(p, recorder)
 			request, err := p.ParseRequest(context.Background(), "openid4vp://authorize?"+url.Values{
 				"client_id":       {"redirect_uri:" + server.URL + "/response"},

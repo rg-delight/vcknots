@@ -36,7 +36,7 @@ wallet は **OpenID4VCI 1.0** と **OpenID4VP 1.0** を実装しています。
 | 保存前の Credential 受理判定 | `Config.CredentialAcceptance` または `CredentialRequest.Acceptance`（`acceptance.Policy`）、`VerifyCredentialForAcceptance` | Credential を要求する前に必須です。Issuer の鍵は、`iss` と `x5c` が選ぶ方式で確立します（SD-JWT VC -19 §2.5）。 |
 | `direct_post` / `direct_post.jwt` 上の OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation`、`PresentCredential` | 要求には `*oid4vp.AdmittedRequest` ハンドルを通じて応答します。 |
 | Verifier の認証 | `oid4vp.Oid4vpPresenter`（`RequestObjectValidation`、`PreRegisteredClients`） | `x509_san_dns`、`x509_hash`、`redirect_uri`、pre-registered client、`verifier_attestation`、`openid_federation` に対応します。[Verifier の認証](#verifier-authentication)を参照してください。 |
-| `request_uri` の GET / POST と `wallet_nonce` | `ParsePresentationRequest` | POST では毎回新しい `wallet_nonce` と、設定があれば `wallet_metadata` を送ります。 |
+| `request_uri` の GET / POST と `wallet_nonce` | `ParsePresentationRequest`、`Draft24().ParsePresentationRequest` | `request_uri` はライブラリ自身が取得します。POST では毎回新しい `wallet_nonce` と、`Oid4vpPresenter.WalletMetadata` があれば `wallet_metadata` を送ります。`RequestObjectValidationOptions.RequestURIPolicy` で、取得の前に `request_uri` と `client_id` の関連を確かめられます。 |
 | DCQL | `SelectCredentials`、`oid4vp.ResolveSatisfiableDCQLCredentials`、`oid4vp.ValidateDCQLMatches` | `credential_sets`、`claims`、`claim_sets`、`values`、nested / array の claim path、`multiple`、`aki` と `openid_federation` 種別の `trusted_authorities` に対応します。 |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | key binding つきの `dc+sd-jwt` 提示に限ります。 |
 | W3C Digital Credentials API（`dc_api`、`dc_api.jwt`、unsigned / signed / multi-signed） | `ParseDCAPIRequest` + `SubmitPresentation` | プロトコル処理のみです。platform が認証した origin は呼出し側が渡します。 |
@@ -125,7 +125,7 @@ pnpm -F @trustknots/server start
 ローカルのサンプルサーバーは HTTP で動作するため、テスト用の wallet を構築するコードで明示的に HTTP を許可してください。
 平文 HTTP は規格から外れるので、[`experimental`](#experimental) パッケージを通してだけ設定できます。
 wallet が構築する plugin には `Config.Experimental.Transport` を、自分で構築する receiver には `Oid4vciReceiver.Experimental` を使います。
-OpenID4VP の presenter は引き続き自身の `AllowHTTP` フィールドに従います。
+自分で構築する OpenID4VP の presenter は、`SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` を呼んだときだけ受け入れます。
 環境変数で緩和することはできません。
 
 > ⚠️ **セキュリティ警告**: 本番環境では HTTP を許可しないでください。HAIP は拒否します。
@@ -230,9 +230,11 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 	}
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           allowHTTP, // local sample server only
 		X509TrustChainRoots: certPool,
 	}
+	// The local sample server speaks plain HTTP, which OpenID4VP does not
+	// allow; opt in explicitly, and never in production.
+	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: allowHTTP})
 	presenterDisp, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)
@@ -1022,8 +1024,8 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 
 | メソッド | 目的 |
 | --- | --- |
-| `ParsePresentationRequest(ctx, uri)` | Authorization Request URI を解析して受け付けます。`request_uri` は参照先を取得します。 |
-| `ParsePresentationRequestObject(ctx, requestObject, src)` | 呼出し側が既に持つ Request Object を認証します。 |
+| `ParsePresentationRequest(ctx, uri)` | Authorization Request URI を解析して受け付けます。`request_uri` はライブラリ自身が取得します。 |
+| `ParsePresentationRequestObject(ctx, requestObject, src)` | 呼出し側が既に持つ Request Object を、値で渡されたものとして認証します。HAIP は拒否します（`ErrHAIPRequestURIRequired`）。 |
 | `ParseDCAPIRequest(ctx, invocation)` | Digital Credentials API の要求を受け付けます。 |
 | `SelectCredentials(ctx, h)` | ライブラリ自身が選ぶ保存済み Credential です。 |
 | `SubmitPresentation(ctx, h, Presentation)` | 検査、シリアライズ、応答の送信を行います。 |
@@ -1068,7 +1070,7 @@ func presentWithConsent(ctx context.Context, w *wallet.Wallet, uri string, holde
 ### 解析と提示を分けるとき
 
 ハンドルはシリアライズできません。
-同意画面と提示を別のリクエストで行う wallet は、Request Object を保持しておき、もう一度解析します。
+同意画面と提示を別のリクエストで行う wallet は、Request Object（`h.RequestObject()`）を保持しておき、もう一度解析します。
 2 回目の解析では Request Object を `exp` も含めて再び認証します。
 
 ```go
@@ -1076,25 +1078,13 @@ import (
 	"context"
 
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
-// requestSource records how the admitted Request Object reached the wallet.
-func requestSource(request *oid4vp.AdmittedRequest) presenterTypes.RequestObjectSource {
-	parsed := request.Request()
-	source := presenterTypes.RequestObjectSource{ClientID: parsed.ClientID}
-	if verification := parsed.RequestObjectVerification; verification != nil {
-		source.DeliveredByReference = verification.Delivery == "reference"
-		source.WalletNonce = verification.WalletNonce
-	}
-	return source
-}
-
 // presentLater answers a request admitted earlier from its kept Request Object.
-func presentLater(ctx context.Context, w *wallet.Wallet, requestObject string, source presenterTypes.RequestObjectSource,
+func presentLater(ctx context.Context, w *wallet.Wallet, requestObject, clientID string,
 	p wallet.Presentation) (*presenterTypes.SubmitResult, error) {
-	request, err := w.ParsePresentationRequestObject(ctx, requestObject, source)
+	request, err := w.ParsePresentationRequestObject(ctx, requestObject, presenterTypes.RequestObjectSource{ClientID: clientID})
 	if err != nil {
 		return nil, err
 	}
@@ -1103,8 +1093,12 @@ func presentLater(ctx context.Context, w *wallet.Wallet, requestObject string, s
 ```
 
 プレーンなパラメータの要求には Request Object がない（`RequestObject()` が空）ので、その URI をもう一度解析します。
-`RequestObjectSource.DeliveredByReference` は Request Object を `request_uri` から取得したことを表し、値で渡された Request Object でも HAIP §5.1 の配送規則を満たせるようにします。
-wallet 自身の以前の解析がその取得を記録したときだけ設定してください。
+`RequestObjectSource` が持つのは外側の `client_id` だけです。
+Request Object がどう届いたかはライブラリが観測するもので、呼出し側が申告するものではありません。
+`RequestObjectVerification.Delivery` が `"reference"` になるのはライブラリ自身が `request_uri` を取得したときだけで、`WalletNonce` もその POST でライブラリが送った `wallet_nonce` だけを記録します。
+値で渡された Request Object は、常に値で届いたものとして扱います。
+そのため HAIP（`Options.RequireSignedRequestByReference`、HAIP §5.1）では、`ParsePresentationRequestObject` と `request` パラメータを、通信の前に `ErrHAIPRequestURIRequired` で拒否します。
+保持した Request Object から後で応答する HAIP の wallet は、最初の解析で `Delivery == "reference"` を自ら確かめたうえで、`RequireSignedRequestByReference` を外したプロファイルの presenter と wallet で解析し直します。
 
 ### Verifier の認証 {#verifier-authentication}
 
@@ -1116,21 +1110,29 @@ wallet 自身の以前の解析がその取得を記録したときだけ設定�
 | `redirect_uri` | 署名なしのみです。応答エンドポイントを識別子に束縛しますが、誰も認証しません。 |
 | なし（pre-registered） | client は `PreRegisteredClients` にあるか、`ResolvePreRegisteredClient` で見つからなければなりません（`oid4vp.ErrPreRegisteredClientUnknown`）。登録された `Metadata` が要求のメタデータに代わり、その `Metadata.RedirectURIs` だけが応答エンドポイントとして受け入れられます。これがない登録はどの要求も受け入れません。署名付き Request Object は登録された `JWKS` で検証し、`RequireSignedRequestObject` は署名なしの要求を拒否します。 |
 | `verifier_attestation` | 署名付き Request Object が必須です。Verifier Attestation JWT は `RequestObjectValidation.VerifierAttestationIssuers` のいずれかが発行したものでなければならず、Request Object はその `cnf` 鍵で署名されていなければなりません。 |
-| `openid_federation` | `RequestObjectValidation.Federation.TrustAnchors` への Trust Chain で認証し、Request Object はチェーンの鍵で検証します。署名なしの要求は、`FederationTrustOptions.AllowUnsignedRequests` を設定しない限り拒否します。 |
+| `openid_federation` | 署名付き Request Object が必須です（OpenID Federation 1.0 §12.1.1）。`RequestObjectValidation.Federation.TrustAnchors` への Trust Chain で認証し、Request Object は、導出した `openid_credential_verifier` メタデータが `jwks`、`signed_jwks_uri`（Verifier の Federation Entity Key で署名されたもの）、`jwks_uri` で公開する鍵で検証します。Federation Entity Key そのものでは検証しません（§12.1.1.1.2、§5.2.1。`federation.ErrVerifierKeysUnavailable`）。 |
 | `decentralized_identifier` | 拒否します。 |
-| `origin`、`web-origin` | 拒否します（`ErrClientIDPrefixReserved`）。 |
+| `origin` | 拒否します（`ErrClientIDPrefixReserved`）。 |
 
 署名を要求する prefix の要求がプレーンなパラメータで届いた場合は、`ErrRequestObjectSignatureRequired` で拒否します。
 解析済み要求の `RequestObjectVerification` は、認証した内容（証明書のフィンガープリントと `Certificate` の要約、失効確認の件数、echo された `WalletNonce`、`Delivery`、`ExpiresAt`、`VerifierAttestation` または `Federation` の証跡）を記録します。
 要求のパラメータからこの値を設定することはできません。
+
+`client_metadata.jwks` のすべての要素は、他の要素と重ならない `kid` を持たなければなりません（OpenID4VP 1.0 §5.1。`ErrClientMetadataJWKKeyIDMissing`、`ErrClientMetadataJWKKeyIDDuplicate`）。
+`RequestObjectValidationOptions.RequestURIPolicy(clientID, requestURI)` を使うと、trust framework の中の wallet は `request_uri` を `client_id` に結び付けられます。
+これは取得の前に呼ばれ、拒否は `ErrRequestURINotAssociated` になります。
 
 `RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロはどのプロファイルでも無制限です）、`Now`、`ClockSkew` を持ちます。
 `iat` が未来の Request Object は拒否するので、受け入れる Verifier の時計のずれに合わせて `ClockSkew` を設定してください。
 `X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。
 `RequestObjectValidation` のアンカーと併用はできません。
 
-`InsecureSkipX509Verify` が適用されるのは Draft 24 の入口だけです。
-これを設定すると OpenID4VP 1.0 の経路はすべての署名付き Request Object を拒否し、HAIP はその presenter を拒否します。
+`Oid4vpPresenter.SetExperimentalOptions` は、どの仕様も認めない緩和である `oid4vp.ExperimentalOptions` を適用します。
+ローカルの Verifier や実験のためだけのものです。
+`AllowHTTP` は平文 HTTP の Verifier エンドポイントを受け入れます。
+`InsecureSkipX509Verify` は Draft 24 の `x509_san_dns` の Request Object を束縛と署名だけで確かめ、`RequestObjectVerification` なしで受け付けます。これを設定している間、OpenID4VP 1.0 の経路はすべての署名付き Request Object を拒否します。
+`AcceptClientMetadataJWKsWithoutKeyID` は `kid` の規則を緩めます。
+これらは struct literal では設定できず、HAIP は前の 2 つを拒否します。
 
 ### DCQL
 
@@ -1160,8 +1162,10 @@ Draft 24 の要求も同じ規則に従います。
 それぞれの経路は他方のモードを拒否します。
 HAIP は `direct_post.jwt` を、DC API では `dc_api.jwt` を要求します。
 `direct_post.jwt` と `dc_api.jwt` には `client_metadata.jwks` の暗号化鍵が必要です（`ErrResponseEncryptionKeyMissing`）。
-応答は A128GCM または A256GCM の ECDH-ES JWE で、A256GCM を優先します。
-HAIP では Verifier が両方を列挙していなければなりません（`ErrResponseEncryptionEncMissing`）。
+鍵は `alg` を持たなければならず、それが JWE の `alg` になります（OpenID4VP 1.0 §8.3）。
+`authorization_encrypted_response_alg` がその代わりになることはありません。
+応答は ECDH-ES 系の JWE で、`enc` は `encrypted_response_enc_values_supported` から wallet の優先順（A256GCM が先。一覧がなければ A128GCM）で選びます。
+HAIP では鍵が P-256 の ECDH-ES でなければならず、Verifier は A128GCM と A256GCM の両方を列挙していなければなりません（`ErrResponseEncryptionEncMissing`）。
 これらの検査は同意の前、解析時に行います。
 
 応答の POST と `request_uri` の取得はリダイレクトに従いません。
@@ -1179,6 +1183,13 @@ HAIP では Verifier が両方を列挙していなければなりません（`E
 
 `ParseDCAPIRequest` は W3C Digital Credentials API の呼出し（`openid4vp-v1-unsigned`、`openid4vp-v1-signed`、`openid4vp-v1-multisigned`）を受け付けます。
 platform が認証した origin は呼出し側が渡し、要求の中から読むことはありません。
+受け付けた要求は、それを `Request().Origin` として持ちます。
+署名なしの要求には Client Identifier がありません。
+その `client_id` と `expected_origins` は無視し、`ClientID` は空のままです（Appendix A.2）。
+署名付きの要求は、`x509_san_dns` または `x509_hash` の Client Identifier の `x5c` チェーンで認証します。
+`expected_origins` は origin を完全一致で含まなければなりません。
+`aud` はなくてもよく、ある場合は wallet を指していなければなりません。
+multi-signed の要求では、すべての署名が `oauth-authz-req+jwt` で型付けされていなければなりません。
 `SubmitPresentation` は HTTP 呼出しを行わず、platform に返すオブジェクトを返します。
 `dc_api` では `{"vp_token": {...}}`、`dc_api.jwt` では `{"response": <JWE>}` です。
 Key Binding JWT の `aud` は `origin:<origin>` です（OpenID4VP 1.0 Appendix A.4）。
@@ -1219,7 +1230,13 @@ func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data js
 ハンドルには `SubmitPresentation`（`vp_token` と `presentation_submission`）と `DeclinePresentation` で応答します。
 `SelectCredentials` は input descriptor ごとに最も新しい Credential を選び、`QueryIDs` は input descriptor の id を指定します。
 SD-JWT VC では key binding が常に必須で、nil でない `DisclosedClaims` が開示を制限します。
-Draft 24 の経路は pre-registered client を拒否し、`Config.Experimental.Hooks.PresentationExchangeResponse` はテストのために応答を書き換えます。
+`Config.Experimental.Hooks.PresentationExchangeResponse` はテストのために応答を書き換えます。
+
+Draft 24 の入口は、1.0 ではなく Draft 24 の規則を適用します。
+
+* **Client Identifier Scheme**（Draft 24 §5.10.4）: `redirect_uri`（署名なしのみ。Response URI は Client Identifier と一致しなければならず、省略時は Client Identifier になります）、`https` の OpenID Federation の Entity Identifier、`verifier_attestation`、`x509_san_dns`、コロンのない pre-registered client を受け付けます。pre-registered client は `PreRegisteredClients` / `ResolvePreRegisteredClient` で解決し、登録されたメタデータを `client_metadata` より優先します（§5.1）。`did` と `x509_san_uri` は未対応として拒否し（`ErrRequestObjectClientAuthUnsupported`）、`web-origin` は DC API 専用として拒否します（`ErrClientIDPrefixReserved`）。1.0 の prefix である `x509_hash`、`decentralized_identifier`、`openid_federation`、`origin` は Draft 24 の scheme ではありません。Request Object を `client_metadata` の鍵で検証することはなく、Draft 22 より前の `client_id_scheme` パラメータは無視します。
+* **`request_uri`**: POST では毎回新しい `wallet_nonce` を送り、Request Object はそれを echo しなければなりません。`WalletMetadata` があればそれも送ります（§5.11）。`request_uri_method` は大文字と小文字を区別します。
+* **応答**: 応答するのは `direct_post` と `direct_post.jwt` だけです。`direct_post.jwt` は暗号化した JARM の応答です（§8.3）。JWE の `alg` は `authorization_encrypted_response_alg`（必須）、`enc` は `authorization_encrypted_response_enc`（なければ A128CBC-HS256）で、鍵は `use` が `enc` かなしで、`alg` があればそれが一致する `client_metadata.jwks` の鍵です。`client_metadata.jwks` に `kid` は要らず、HAIP は適用しません。
 
 ```go
 import (
@@ -1296,7 +1313,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 `SetReceiver` も同じ plugin の確認を行います。
 plugin のフィールドは登録後に変更してはなりません。
 HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
-`Experimental.Transport`（wallet と receiver の両方）と、presenter の `AllowHTTP`、`InsecureSkipX509Verify` は拒否します。
+`Experimental.Transport`（wallet と receiver の両方）と、presenter の実験用の `AllowHTTP`、`InsecureSkipX509Verify`（`oid4vp.ExperimentalOptions`）は拒否します。
 
 ## エラーコード {#error-codes}
 
@@ -1437,10 +1454,14 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 **plugin とサブパッケージ**
 
-* `oid4vp.Oid4vpPresenter` は `==` で比較できなくなりました。`oid4vci.Oid4vciReceiver` と `oid4vp.Oid4vpPresenter` には新しいフィールド（`HTTPClient`、receiver の `Experimental`、presenter の `AllowHTTP`、`Profile` など）とメソッドがあります。`receiver.WithDefaultConfig`、`presenter.WithDefaultConfig`、`NewWallet` が構築する plugin は HTTPS を要求し、環境変数でこれを変えることはできません。
+* `oid4vp.Oid4vpPresenter` は `==` で比較できなくなりました。`oid4vci.Oid4vciReceiver` と `oid4vp.Oid4vpPresenter` には新しいフィールド（`HTTPClient`、receiver の `Experimental`、`Profile` など）とメソッドがあります。`receiver.WithDefaultConfig`、`presenter.WithDefaultConfig`、`NewWallet` が構築する plugin は HTTPS を要求し、環境変数でこれを変えることはできません。
 * `oid4vci.OID4VCICredentialFormatToSerializationFlavor` は非推奨になり、`oid4vci.CredentialFormatFlavor` に置き換わりました。受け付けるのは `jwt_vc_json`、`ldp_vc`、`dc+sd-jwt`、`vc+sd-jwt` の完全一致だけで、`jwt_vc`、シリアライゼーション flavor の名前、未知の値は `oid4vci.ErrCredentialFormatUnsupported` で拒否します。`ReceiveCredential` は未知の形式を JWT VC として保存しなくなりました。
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
-* `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`InsecureSkipX509Verify` を設定すると OpenID4VP 1.0 の経路は署名付き Request Object を拒否し、この設定は Draft 24 の入口に適用されます。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
+* `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
+* `Oid4vpPresenter.AllowHTTP` と `InsecureSkipX509Verify` を削除しました。`SetExperimentalOptions(oid4vp.ExperimentalOptions{...})` で明示的に適用します。`NewWallet` と `presenter.WithDefaultConfig` が構築する presenter は `VCKNOTS_WALLET_HTTP_ALLOWED` を読まなくなりました。`Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` を削除しました。OpenID4VP 1.0 の入口は、`ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID` を設定しない限り、重複のない `kid` を常に要求します。`requestBuilder.WithHTTPAllowed` を削除しました。
+* `presenterTypes.RequestObjectSource.DeliveredByReference`、`RequestObjectSource.WalletNonce`、`oid4vp.RequestObjectVerification.DeliveryAttested` を削除しました。ライブラリは自ら観測した配送と自ら送った `wallet_nonce` を記録し、HAIP は値で渡された Request Object を拒否します。
+* `oid4vp.FederationTrustOptions.AllowUnsignedRequests` を削除しました。署名なしの `openid_federation` の要求は常に拒否します。federation の Request Object は、Federation Entity Key ではなく `openid_credential_verifier` メタデータの鍵で検証します。
+* `oid4vp.OID4VPClientIDPrefixWebOrigin` を削除しました。署名なしの DC API の要求は `ClientID` が空のままで、platform の Origin は `CredentialPresentationRequest.Origin` が持ちます。OpenID4VP 1.0 は JWK の `alg` を常に要求するので、`profile.ResponseEncryptionRules.RequireJWKAlg` を削除しました。
 * presenter は解析に失敗しても、エラー応答を送らなくなりました。求める場合は `SendParseErrorResponses` または `AuthorizationRequestError.SendErrorResponse` が送ります。`request_uri` の取得と応答の POST（`Present`）はリダイレクトに従わず、`Present` への 2xx 以外の応答は `*oid4vp.VerifierResponseError` になります。
 * `NewRequestBuilder` は `profile.Final()` の下で OpenID4VP 1.0 の要求を構築します。`WithProfile` で別の 1.0 プロファイルを選べます。
 * SD-JWT VC の serializer は、文字列でない `_sd_alg` や実装していないハッシュを名指す `_sd_alg` を拒否します。以前は `sha-256` として扱っていました（RFC 9901 §4.1.1、§7.1）。また、`iss`、`nbf`、`exp`、`cnf`、`vct`、`vct#integrity`、`aka_vcts`、`status` とその sub-claim の Disclosure を拒否します（`serializerTypes.ErrRegisteredClaimDisclosed`、SD-JWT VC -19 §2.2.2.3）。
@@ -1461,13 +1482,13 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
     - `credstore.WithDefaultConfig()` は `<ユーザー設定ディレクトリ>/vcknots/wallet/.local_credstore.db` に Credential を永続化します。プロセスがこのディレクトリを作成し、書き込めるようにしてください。
 
 4. **HTTPS の強制:**
-    - wallet は Issuer と Verifier のエンドポイントに HTTPS を要求します。[`experimental.Transport`](#experimental)（または presenter の `AllowHTTP`）による緩和は、ローカル開発に限ってください。
+    - wallet は Issuer と Verifier のエンドポイントに HTTPS を要求します。Issuer への [`experimental.Transport`](#experimental)、Verifier への `oid4vp.ExperimentalOptions.AllowHTTP` による緩和は、ローカル開発に限ってください。
 
 5. **OpenID4VP `client_id` の厳格な検証:**
     - wallet は `client_id` を厳格に検証します。重複した prefix（例: `x509_san_dns:x509_san_dns:...`）、不正な形式、wallet 専用の prefix は拒否します。
     - `x509_san_dns` では、Request Object の `x5c` ヘッダーから証明書を取り出し、その DNS Subject Alternative Name のいずれかが `client_id` の値と一致しなければなりません。
 
-6. **`InsecureSkipX509Verify`:**
+6. **`oid4vp.ExperimentalOptions.InsecureSkipX509Verify`:**
     - Draft 24 の入口で証明書チェーンの検証を省略し、束縛と署名だけを確認します。これを設定している間、OpenID4VP 1.0 の経路は署名付き Request Object を拒否し、HAIP はこの設定を拒否します。
     - ⚠️ コンフォーマンステストかローカル開発でのみ使ってください。
 
@@ -1480,7 +1501,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
   * **A:** Issuer/Verifier サーバーが起動していません。`pnpm -F @trustknots/server start` で起動し、http://localhost:8080 が応答することを確認してください。
 
 * **Q: 受領が `credential issuer must use https scheme` で失敗する。**
-  * **A:** wallet は HTTPS を要求します。HTTP のローカルサンプルサーバーに対しては、`Config.Experimental.Transport.AllowHTTP` を設定するか、自分で構築する receiver に `Experimental` を、presenter に `AllowHTTP` を設定してください（[experimental](#experimental) を参照）。
+  * **A:** wallet は HTTPS を要求します。HTTP のローカルサンプルサーバーに対しては、`Config.Experimental.Transport.AllowHTTP` を設定するか、自分で構築する receiver に `Experimental` を設定し、presenter で `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` を呼んでください（[experimental](#experimental) を参照）。
 
 * **Q: 受領が `issuer_metadata_fetch_failed` で失敗する。**
   * **A:** `curl http://localhost:8080/.well-known/openid-credential-issuer` を実行して JSON メタデータが返ること、その `credential_issuer` が Offer の識別子と一致することを確認してください。識別子がパスを持つとき、1.0 の発行は `/.well-known/openid-credential-issuer/<パス>` を、Draft 13 の発行は `<パス>/.well-known/openid-credential-issuer` を読み、ほかの位置は試しません。

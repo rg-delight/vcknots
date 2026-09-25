@@ -53,11 +53,11 @@ func TestDirectPostJWTRefusedAtParseWithoutUsableEncryption(t *testing.T) {
 	}{
 		{name: "no client_metadata", want: ErrResponseEncryptionKeyMissing},
 		{name: "empty jwks", metadata: encryptionMetadataWith(nil, []string{"A128GCM"}), want: ErrResponseEncryptionKeyMissing},
-		{name: "signing key only", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p256.PublicKey, Use: "sig", Algorithm: "ECDH-ES"}}, nil), want: ErrResponseEncryptionKeyUnusable},
-		{name: "RSA key", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &rsaKey.PublicKey, Use: "enc", Algorithm: "RSA-OAEP-256"}}, nil), want: ErrResponseEncryptionKeyUnusable},
-		{name: "key without alg", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p256.PublicKey, Use: "enc"}}, nil), want: ErrResponseEncryptionKeyUnusable},
+		{name: "signing key only", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p256.PublicKey, KeyID: "sig", Use: "sig", Algorithm: "ECDH-ES"}}, nil), want: ErrResponseEncryptionKeyUnusable},
+		{name: "RSA key", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &rsaKey.PublicKey, KeyID: "rsa", Use: "enc", Algorithm: "RSA-OAEP-256"}}, nil), want: ErrResponseEncryptionKeyUnusable},
+		{name: "key without alg", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p256.PublicKey, KeyID: "no-alg", Use: "enc"}}, nil), want: ErrResponseEncryptionKeyUnusable},
 		{name: "no supported enc", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"XC20P"}), want: ErrResponseEncryptionEncUnsupported},
-		{name: "P-384 key is usable under Final", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p384.PublicKey, Use: "enc", Algorithm: "ECDH-ES"}}, nil)},
+		{name: "P-384 key is usable under Final", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p384.PublicKey, KeyID: "p384", Use: "enc", Algorithm: "ECDH-ES"}}, nil)},
 		{name: "A128GCM alone is enough under Final", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"})},
 		{name: "absent enc list defaults to A128GCM", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, nil)},
 	}
@@ -78,7 +78,7 @@ func TestDirectPostJWTRefusedAtParseWithoutUsableEncryption(t *testing.T) {
 				require.NoError(t, err)
 				values.Set("client_metadata", string(encoded))
 			}
-			p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+			p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{AllowHTTP: true})
 			req, err := p.ParsePresentationRequest(finalQueryURI(values))
 			if tt.want == nil {
 				require.NoError(t, err)
@@ -99,12 +99,19 @@ func TestDraft24DirectPostJWTRefusedAtParseWithoutEncryptionKey(t *testing.T) {
 	responseURI := verifier.server.URL + "/response"
 	values := draft24RedirectURIValues(responseURI, responseURI)
 	values.Set("response_mode", "direct_post.jwt")
-	p := &Oid4vpPresenter{AllowHTTP: true, HTTPClient: verifier.server.Client()}
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{AllowHTTP: true})
 	_, err := parseDraft24ForTest(p, finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseEncryptionKeyMissing), "want ErrResponseEncryptionKeyMissing, got %v", err)
 	require.Equal(t, int32(0), verifier.calls.Load(), "a response encryption refusal must not be POSTed")
 
+	// Draft 24 §8.3 encrypts with JARM, whose alg is the Verifier's
+	// authorization_encrypted_response_alg; the OpenID4VP 1.0 metadata alone
+	// names none.
 	values.Set("client_metadata", responseEncryptionClientMetadataParam())
+	_, err = parseDraft24ForTest(p, finalQueryURI(values))
+	require.True(t, errors.Is(err, ErrResponseEncryptionKeyUnusable), "want ErrResponseEncryptionKeyUnusable, got %v", err)
+
+	values.Set("client_metadata", draft24JARMClientMetadataParam())
 	_, err = parseDraft24ForTest(p, finalQueryURI(values))
 	require.NoError(t, err)
 }
@@ -127,8 +134,8 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 		{name: "A256GCM only", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A256GCM"}), want: ErrResponseEncryptionEncMissing},
 		{name: "enc list absent", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, nil), want: ErrResponseEncryptionEncMissing},
 		{name: "only CBC values", metadata: encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A256CBC-HS512"}), want: ErrResponseEncryptionEncUnsupported},
-		{name: "P-384 key", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p384.PublicKey, Use: "enc", Algorithm: "ECDH-ES"}}, []string{"A128GCM", "A256GCM"}), want: ErrResponseEncryptionKeyUnusable},
-		{name: "key wrapping alg", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: usable.Key, Use: "enc", Algorithm: "ECDH-ES+A128KW"}}, []string{"A128GCM", "A256GCM"}), want: ErrResponseEncryptionKeyUnusable},
+		{name: "P-384 key", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: &p384.PublicKey, KeyID: "p384", Use: "enc", Algorithm: "ECDH-ES"}}, []string{"A128GCM", "A256GCM"}), want: ErrResponseEncryptionKeyUnusable},
+		{name: "key wrapping alg", metadata: encryptionMetadataWith([]jose.JSONWebKey{{Key: usable.Key, KeyID: "wrap", Use: "enc", Algorithm: "ECDH-ES+A128KW"}}, []string{"A128GCM", "A256GCM"}), want: ErrResponseEncryptionKeyUnusable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -145,10 +152,12 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 	}
 
 	t.Run("Draft24 is exempt from the HAIP enc rule", func(t *testing.T) {
-		f := newRequestObjectFixture(t)
-		claims := f.claims()
-		claims["client_metadata"] = metadataClaim(t, encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"}))
-		uri := "openid4vp://authorize?" + url.Values{"client_id": {f.clientID()}, "request": {f.sign(t, claims, nil)}}.Encode()
+		f := newRequestObjectFixture(t, "verifier.example")
+		claims := f.draft24Claims()
+		jarm := encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"})
+		jarm.AuthorizationEncryptedResponseAlg = "ECDH-ES"
+		claims["client_metadata"] = metadataClaim(t, jarm)
+		uri := "openid4vp://authorize?" + url.Values{"client_id": {draft24X509ClientID}, "request": {f.sign(t, claims, nil)}}.Encode()
 		p := f.presenter()
 		p.Profile = profile.HAIP()
 		_, err := parseDraft24ForTest(p, uri)

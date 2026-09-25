@@ -27,8 +27,9 @@ func publicEncryptionJWK(t *testing.T, keyID string) map[string]any {
 }
 
 // clientMetadataKeySets are the client_metadata.jwks shapes the kid rule of
-// OpenID4VP 1.0 Section 5.1 tells apart. want is the refusal when the presenter
-// requires key IDs; with the zero-value presenter every one is accepted.
+// OpenID4VP 1.0 Section 5.1 tells apart. want is the refusal on the 1.0 entry
+// points; with the experimental relaxation, and on Draft 24, every one is
+// accepted.
 func clientMetadataKeySets(t *testing.T) []struct {
 	name string
 	keys []any
@@ -64,10 +65,10 @@ func clientMetadataWithKeys(keys []any) map[string]any {
 }
 
 // A plain direct_post request from a redirect_uri Client Identifier carries
-// its client_metadata as a query parameter, on both wire contracts. The rule is
-// the holder's choice (RequireClientMetadataJWKKeyIDs), so the zero-value
-// presenter keeps accepting what it always accepted, and the requiring one
-// refuses at parse with the typed sentinel inside an invalid_request.
+// its client_metadata as a query parameter, on both wire contracts. OpenID4VP
+// 1.0 Section 5.1 requires the kid, so the 1.0 entry points refuse at parse
+// with the typed sentinel inside an invalid_request unless the caller relaxed
+// the rule with ExperimentalOptions. Draft 24 has no such rule.
 func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 	wires := []struct {
 		name   string
@@ -98,13 +99,14 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 	}
 	for _, wire := range wires {
 		for _, keySet := range clientMetadataKeySets(t) {
-			for _, required := range []bool{false, true} {
+			for _, relaxed := range []bool{false, true} {
 				name := wire.name + "/" + keySet.name
-				if required {
-					name += "/required"
+				if relaxed {
+					name += "/relaxed"
 				} else {
-					name += "/lenient"
+					name += "/default"
 				}
+				required := !relaxed && wire.name == "Final"
 				t.Run(name, func(t *testing.T) {
 					verifier := newCountingResponseServer(t)
 					responseURI := verifier.server.URL + "/response"
@@ -112,11 +114,10 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 					encoded, err := json.Marshal(clientMetadataWithKeys(keySet.keys))
 					require.NoError(t, err)
 					values.Set("client_metadata", string(encoded))
-					p := &Oid4vpPresenter{
-						AllowHTTP:                      true,
-						HTTPClient:                     verifier.server.Client(),
-						RequireClientMetadataJWKKeyIDs: required,
-					}
+					p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{
+						AllowHTTP:                            true,
+						AcceptClientMetadataJWKsWithoutKeyID: relaxed,
+					})
 
 					request, err := wire.parse(p, finalQueryURI(values))
 					if !required || keySet.want == nil {
@@ -137,17 +138,14 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 // entry points of both wire contracts authenticate it through the same
 // builder, so the requirement reaches it the same way.
 func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
-	f := newRequestObjectFixture(t)
+	f := newRequestObjectFixture(t, "verifier.example")
 	withoutKeyID := func(draft24 bool) map[string]any {
 		claims := f.claims()
-		claims["client_metadata"] = map[string]any{
-			"jwks": map[string]any{"keys": []any{publicEncryptionJWK(t, "")}},
-			"encrypted_response_enc_values_supported": []string{"A128GCM", "A256GCM"},
-		}
 		if draft24 {
-			delete(claims, "dcql_query")
-			claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
+			claims = f.draft24Claims()
 		}
+		metadata := claims["client_metadata"].(map[string]any)
+		metadata["jwks"] = map[string]any{"keys": []any{publicEncryptionJWK(t, "")}}
 		return claims
 	}
 	entryPoints := []struct {
@@ -161,25 +159,29 @@ func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
 	for _, entry := range entryPoints {
 		t.Run(entry.name, func(t *testing.T) {
 			requestObject := f.sign(t, withoutKeyID(entry.draft24), nil)
+			clientID := f.clientID()
+			if entry.draft24 {
+				clientID = draft24X509ClientID
+			}
 
-			lenient := f.presenter()
-			request, err := entry.parse(lenient, requestObject, f.clientID())
+			relaxed := withExperimental(f.presenter(), ExperimentalOptions{AcceptClientMetadataJWKsWithoutKeyID: true})
+			request, err := entry.parse(relaxed, requestObject, clientID)
 			require.NoError(t, err)
 			require.NotNil(t, request.RequestObjectVerification)
 
-			strict := f.presenter()
-			strict.RequireClientMetadataJWKKeyIDs = true
-			_, err = entry.parse(strict, requestObject, f.clientID())
-			require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
+			_, err = entry.parse(f.presenter(), requestObject, clientID)
+			if entry.draft24 {
+				// Draft 24 §5.1 does not require a kid.
+				require.NoError(t, err)
+			} else {
+				require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
+			}
 
 			withKeyID := f.sign(t, f.claims(), nil)
 			if entry.draft24 {
-				claims := f.claims()
-				delete(claims, "dcql_query")
-				claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
-				withKeyID = f.sign(t, claims, nil)
+				withKeyID = f.sign(t, f.draft24Claims(), nil)
 			}
-			_, err = entry.parse(strict, withKeyID, f.clientID())
+			_, err = entry.parse(f.presenter(), withKeyID, clientID)
 			require.NoError(t, err)
 		})
 	}
@@ -198,8 +200,8 @@ func TestClientMetadataJWKKeyIDsOnDCAPIRequests(t *testing.T) {
 	}
 
 	_, err := parseDCAPIForTest((&Oid4vpPresenter{}), invocation)
-	require.NoError(t, err)
-
-	_, err = parseDCAPIForTest((&Oid4vpPresenter{RequireClientMetadataJWKKeyIDs: true}), invocation)
 	require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
+
+	_, err = parseDCAPIForTest(withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AcceptClientMetadataJWKsWithoutKeyID: true}), invocation)
+	require.NoError(t, err)
 }

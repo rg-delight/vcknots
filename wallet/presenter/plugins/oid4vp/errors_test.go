@@ -191,7 +191,7 @@ func TestSubmitErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := &Oid4vpPresenter{AllowHTTP: true}
+	p := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
 	request := admitDirectPost(t, p, server.URL+"/response", "state-1")
 	result, err := p.SubmitErrorResponse(context.Background(), request, "access_denied", "user declined")
 	require.NoError(t, err)
@@ -211,9 +211,9 @@ func TestSubmitErrorResponseRefusesAnUnadmittedRequest(t *testing.T) {
 		reached = true
 	}))
 	defer server.Close()
-	request := admitDirectPost(t, &Oid4vpPresenter{AllowHTTP: true}, server.URL+"/response", "")
+	request := admitDirectPost(t, withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true}), server.URL+"/response", "")
 
-	_, err := (&Oid4vpPresenter{AllowHTTP: true}).SubmitErrorResponse(context.Background(), request, "access_denied", "")
+	_, err := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true}).SubmitErrorResponse(context.Background(), request, "access_denied", "")
 	require.ErrorIs(t, err, ErrRequestNotAdmittedHere)
 	require.False(t, reached)
 }
@@ -227,7 +227,7 @@ func TestSubmitErrorResponseRefusesAnInvalidDescription(t *testing.T) {
 		reached = true
 	}))
 	defer server.Close()
-	p := &Oid4vpPresenter{AllowHTTP: true}
+	p := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
 	request := admitDirectPost(t, p, server.URL+"/response", "")
 
 	for name, description := range map[string]string{
@@ -263,7 +263,7 @@ func TestSubmitErrorResponseEncryptsUnderDirectPostJWT(t *testing.T) {
 		"encrypted_response_enc_values_supported": []string{"A128GCM"},
 	})
 	require.NoError(t, err)
-	p := &Oid4vpPresenter{AllowHTTP: true}
+	p := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
 	request, err := p.ParseRequest(context.Background(), "openid4vp://authorize?"+url.Values{
 		"client_id":       {"redirect_uri:" + server.URL + "/response"},
 		"response_type":   {"vp_token"},

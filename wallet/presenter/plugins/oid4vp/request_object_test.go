@@ -17,7 +17,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -169,10 +168,15 @@ func TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	}
 	requestObject := f.signWithRoot(t, f.claims(), true)
 
-	// The Request Object is passed by value; the attestation is what lets it
-	// satisfy the HAIP Section 5.1 delivery requirement.
+	// HAIP Section 5.1 requires request_uri, so the Request Object is fetched.
+	f.mu.Lock()
+	f.requestObject = []byte(requestObject)
+	f.mu.Unlock()
 	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP()}
-	_, err := parseRequestObjectWithSourceForTest(haip, requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
+	_, err := haip.ParsePresentationRequest("openid4vp://authorize?" + url.Values{
+		"client_id":   {f.clientID()},
+		"request_uri": {f.server.URL + "/request-object"},
+	}.Encode())
 	if err == nil || !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
 		t.Fatalf("HAIP must reject the anchor in x5c with a root pool: %v", err)
 	}
@@ -213,7 +217,7 @@ func TestFinalRequestObjectRejectsUntrustedOrUnprovenAuthentication(t *testing.T
 	claims := f.claims()
 	uri := "openid4vp://authorize?" + url.Values{"client_id": []string{f.clientID()}, "request": []string{f.sign(t, claims, nil)}}.Encode()
 	for _, insecure := range []bool{false, true} {
-		p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: insecure}
+		p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, ExperimentalOptions{InsecureSkipX509Verify: insecure})
 		if _, err := p.ParsePresentationRequest(uri); err == nil {
 			t.Fatalf("untrusted leaf accepted with insecure=%v", insecure)
 		}
@@ -235,7 +239,7 @@ func TestFinalRequestObjectRejectsUntrustedOrUnprovenAuthentication(t *testing.T
 		}
 	}
 	claims["client_id"] = "redirect_uri:https://verifier.example/response"
-	claims["client_metadata"] = map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, Algorithm: "ES256"}}}}
+	claims["client_metadata"] = map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, KeyID: "signing", Algorithm: "ES256"}}}}
 	token := f.sign(t, claims, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt"))
 	uri = "openid4vp://authorize?" + url.Values{
 		"client_id": []string{"redirect_uri:https://verifier.example/response"},

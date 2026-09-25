@@ -102,6 +102,7 @@ func newHierarchy(t *testing.T, opts hierarchyOptions) *hierarchy {
 	if opts.verifierMetadata == nil {
 		opts.verifierMetadata = map[string]any{VerifierEntityType: map[string]any{"client_name": "Original verifier"}}
 	}
+	opts.verifierMetadata = withVerifierJWKS(opts.verifierMetadata, newSigningKey(t, "request-key").jwks)
 	nonNil := func(policy map[string]any) any {
 		if policy == nil {
 			return nil
@@ -176,7 +177,7 @@ func TestResolveVerifierTrustThroughAnIntermediateAppliesItsPolicies(t *testing.
 	if got := statementPairs(trust.TrustChain); !reflect.DeepEqual(got, h.viaIntermediate()) {
 		t.Fatalf("statements = %v", got)
 	}
-	requireJSON(t, trust.Metadata, `{
+	requireJSON(t, withoutJWKS(trust.Metadata), `{
 		"client_name": "Federated verifier",
 		"contacts": ["ops@example.test", "security@example.test"],
 		"logo_uri": "https://verifier.example.test/logo.png"
@@ -223,7 +224,7 @@ func TestResolveVerifierTrustFallsBackWhenTheShortestChainCannotDeriveMetadata(t
 	if got := statementPairs(trust.TrustChain); !reflect.DeepEqual(got, h.viaIntermediate()) {
 		t.Fatalf("statements = %v", got)
 	}
-	requireJSON(t, trust.Metadata, `{"client_name": "Original verifier"}`)
+	requireJSON(t, withoutJWKS(trust.Metadata), `{"client_name": "Original verifier"}`)
 }
 
 func TestResolveTrustChainsFetchesEachEntityOnce(t *testing.T) {

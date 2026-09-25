@@ -130,7 +130,7 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
 		for _, plugin := range w.presenter.Plugins() {
-			require.True(t, plugin.(*oid4vp.Oid4vpPresenter).AllowHTTP)
+			require.True(t, plugin.(*oid4vp.Oid4vpPresenter).ExperimentalOptions().AllowHTTP)
 		}
 	})
 
@@ -140,7 +140,7 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
 		for _, plugin := range w.presenter.Plugins() {
-			require.False(t, plugin.(*oid4vp.Oid4vpPresenter).AllowHTTP)
+			require.False(t, plugin.(*oid4vp.Oid4vpPresenter).ExperimentalOptions().AllowHTTP)
 		}
 	})
 

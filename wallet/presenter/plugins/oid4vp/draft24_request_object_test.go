@@ -117,81 +117,39 @@ func TestDraft24RequestObjectRejectsExpiredRequestObject(t *testing.T) {
 	}
 }
 
-// draft24ClientMetadataSignedURI is a Draft24 request whose Request Object is
-// signed with the key its own client_metadata publishes: the one Draft24 path
-// that is not the shared Final authentication.
-func draft24ClientMetadataSignedURI(t *testing.T, f *requestObjectFixture, issuedAt time.Time, lifetime time.Duration) string {
-	t.Helper()
+// TestDraft24RequestObjectIsNeverVerifiedWithClientMetadataKeys covers Draft
+// 24 §5.1 ("Public keys included in this parameter MUST NOT be used to verify
+// the signature of signed Authorization Requests") and the redirect_uri scheme
+// of §5.10.4 ("The Authorization Request MUST NOT be signed"): a Request
+// Object signed with a key its own client_metadata publishes authenticates
+// nobody.
+func TestDraft24RequestObjectIsNeverVerifiedWithClientMetadataKeys(t *testing.T) {
+	f := newRequestObjectFixture(t, "verifier.example")
 	claims := map[string]any{
 		"client_id":     "redirect_uri:https://verifier.example/response",
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"response_uri":  "https://verifier.example/response",
 		"nonce":         "draft24-nonce",
-		"iat":           issuedAt.Unix(),
-		"exp":           issuedAt.Add(lifetime).Unix(),
 		"client_metadata": map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
 			{Key: &f.key.PublicKey, Algorithm: "ES256", KeyID: "verifier-key"},
 		}}},
-		"presentation_definition": map[string]any{
-			"id":                "pd-1",
-			"input_descriptors": []any{map[string]any{"id": "pid"}},
-		},
+		"presentation_definition": map[string]any{"id": "pd-1", "input_descriptors": []any{map[string]any{"id": "pid"}}},
 	}
 	token := f.sign(t, claims, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt").WithHeader("kid", "verifier-key"))
-	return "openid4vp://authorize?" + url.Values{
-		"client_id": {"redirect_uri:https://verifier.example/response"},
-		"request":   {token},
-	}.Encode()
+	uri := "openid4vp://authorize?" + url.Values{"client_id": {claims["client_id"].(string)}, "request": {token}}.Encode()
+	if _, err := parseDraft24ForTest(f.presenter(), uri); !errors.Is(err, ErrRequestObjectClientAuthUnsupported) {
+		t.Fatalf("a signed redirect_uri Request Object must be refused: %v", err)
+	}
 }
 
-// TestDraft24ClientMetadataRequestObjectUsesTheCallerClock is the regression
-// for a Draft24 Request Object judged against the wall clock. A wallet that
-// re-authenticates at consent the Request Object it admitted earlier passes
-// the admission instant as Now; the object must be judged at that instant
-// with the caller's ClockSkew, exactly as the Final path judges it.
-func TestDraft24ClientMetadataRequestObjectUsesTheCallerClock(t *testing.T) {
+// A Draft24 x509_san_dns Request Object is authenticated through the shared
+// X.509 path even when the caller configured only X509TrustChainRoots: the DNS
+// name names the certificate, but only the chain says it is trusted.
+func TestDraft24X509SanDNSRequiresTrustedChain(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
-	// Issued an hour ago with a one-minute lifetime: expired by the wall
-	// clock, valid at the admission instant the caller names.
-	admission := time.Now().Add(-time.Hour).Truncate(time.Second)
-	uri := draft24ClientMetadataSignedURI(t, f, admission, time.Minute)
-	parse := func(now time.Time, skew time.Duration) error {
-		options := RequestObjectValidationOptions{Now: func() time.Time { return now }, ClockSkew: skew}
-		presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
-		_, err := parseDraft24ForTest(presenter, uri)
-		return err
-	}
-
-	if err := parse(admission.Add(30*time.Second), 0); err != nil {
-		t.Fatalf("a Request Object valid at the caller's instant was refused: %v", err)
-	}
-	err := parse(admission.Add(2*time.Minute), 0)
-	if !errors.Is(err, ErrRequestObjectExpired) {
-		t.Fatalf("a Request Object past exp at the caller's instant must be refused as expired: %v", err)
-	}
-	if err := parse(admission.Add(2*time.Minute), 5*time.Minute); err != nil {
-		t.Fatalf("the caller's ClockSkew must be applied to exp: %v", err)
-	}
-
-	// Judged at an instant before iat, the object is refused as issued in
-	// the future, which this path has always done, with the skew applied.
-	early := admission.Add(-time.Hour)
-	if err := parse(early, 0); !errors.Is(err, ErrRequestObjectExpired) {
-		t.Fatalf("a Request Object issued after the caller's instant must be refused: %v", err)
-	}
-	if err := parse(early, 2*time.Hour); err != nil {
-		t.Fatalf("the caller's ClockSkew must be applied to iat: %v", err)
-	}
-}
-
-// A Draft24 x509_hash Request Object is authenticated through the shared X.509
-// path even when the caller configured only X509TrustChainRoots: the
-// thumbprint names the certificate, but only the chain says it is trusted.
-func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
-	f := newRequestObjectFixture(t)
 	claims := map[string]any{
-		"aud": "https://self-issued.me/v2", "client_id": f.clientID(), "nonce": "n",
+		"aud": "https://self-issued.me/v2", "client_id": draft24X509ClientID, "nonce": "n",
 		"response_type": "vp_token", "response_mode": "direct_post",
 		"response_uri":            "https://verifier.example/response",
 		"presentation_definition": map[string]any{"id": "definition"},
@@ -201,7 +159,7 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 	trusted := x509.NewCertPool()
 	trusted.AddCert(f.root)
 	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: trusted}
-	request, err := parseDraft24RequestObjectForTest(p, token, f.clientID())
+	request, err := parseDraft24RequestObjectForTest(p, token, draft24X509ClientID)
 	if err != nil {
 		t.Fatalf("a chain to the configured root must be accepted: %v", err)
 	}
@@ -213,8 +171,8 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 	untrusted := x509.NewCertPool()
 	untrusted.AddCert(other.root)
 	p = &Oid4vpPresenter{HTTPClient: f.server.Client(), X509TrustChainRoots: untrusted}
-	if _, err := parseDraft24RequestObjectForTest(p, token, f.clientID()); err == nil {
-		t.Fatal("an x509_hash certificate outside the configured roots must be refused")
+	if _, err := parseDraft24RequestObjectForTest(p, token, draft24X509ClientID); err == nil {
+		t.Fatal("a certificate outside the configured roots must be refused")
 	}
 }
 
@@ -224,11 +182,10 @@ func TestDraft24X509HashRequiresTrustedChain(t *testing.T) {
 // both direct_post modes.
 func TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
-	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: true}
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, ExperimentalOptions{InsecureSkipX509Verify: true})
 	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
 		t.Run(mode, func(t *testing.T) {
-			claims := f.claims()
-			claims["client_id"] = "x509_san_dns:verifier.example"
+			claims := f.draft24Claims()
 			claims["response_mode"] = mode
 			parse := func() (*CredentialPresentationRequest, error) {
 				return parseDraft24RequestObjectForTest(p, f.sign(t, claims, nil), "x509_san_dns:verifier.example")

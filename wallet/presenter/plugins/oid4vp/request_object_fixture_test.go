@@ -141,6 +141,23 @@ func (f *requestObjectFixture) presenter() *Oid4vpPresenter {
 	return &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
 }
 
+// draft24X509ClientID is the Draft 24 Client Identifier of a fixture created
+// with the DNS name verifier.example. x509_hash is not a Draft 24 Client
+// Identifier Scheme (Draft 24 §5.10.4).
+const draft24X509ClientID = "x509_san_dns:verifier.example"
+
+// draft24Claims is claims as a Draft 24 request: the x509_san_dns Client
+// Identifier and a Presentation Exchange presentation_definition. The fixture
+// must have been created with the DNS name verifier.example.
+func (f *requestObjectFixture) draft24Claims() map[string]any {
+	claims := f.claims()
+	claims["client_id"] = draft24X509ClientID
+	claims["client_metadata"] = draft24JARMClientMetadataClaim()
+	delete(claims, "dcql_query")
+	claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
+	return claims
+}
+
 func (f *requestObjectFixture) claims() map[string]any {
 	return map[string]any{
 		// The HAIP profile requires a bounded Request Object lifetime, so the
@@ -204,13 +221,13 @@ type requestFixtureOptions struct {
 func (f *requestObjectFixture) presenterWith(opts requestFixtureOptions) *Oid4vpPresenter {
 	validation := f.options()
 	validation.RequireExpiry = opts.RequireExpiry
-	return &Oid4vpPresenter{
+	presenter := &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &validation,
 		Profile:                 opts.Profile,
-		AllowHTTP:               opts.AllowHTTP,
-		InsecureSkipX509Verify:  opts.Insecure,
 	}
+	presenter.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: opts.AllowHTTP, InsecureSkipX509Verify: opts.Insecure})
+	return presenter
 }
 
 // parseRequest signs the claims with the fixture certificate and parses the

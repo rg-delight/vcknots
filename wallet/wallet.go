@@ -377,11 +377,14 @@ func newWallet(config Config) (*Wallet, error) {
 	}
 
 	if config.Presenter == nil {
-		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{
-			AllowHTTP:                     config.Experimental.Transport.AllowHTTP,
+		oid4vpPresenter := &oid4vp.Oid4vpPresenter{
 			Profile:                       walletProfile,
 			SupportedTransactionDataTypes: slices.Clone(config.SupportedTransactionDataTypes),
-		}))
+		}
+		if config.Experimental.Transport.AllowHTTP {
+			oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})
+		}
+		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default presenter: %w", err)
 		}

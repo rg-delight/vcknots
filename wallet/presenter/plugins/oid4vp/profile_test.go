@@ -41,7 +41,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Fatalf("Final must accept AllowHTTP test policy: %v", err)
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, AllowHTTP: true})
-		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify") {
+		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject AllowHTTP: %v", err)
 		}
 	})
@@ -55,7 +55,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Log("Final rejected insecure verify for its own reason")
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, Insecure: true})
-		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify") {
+		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject InsecureSkipX509Verify: %v", err)
 		}
 	})
@@ -159,8 +159,8 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 // TestFinalAndHAIPProfileDraft24Exempt verifies the Draft24 entrypoints are not
 // constrained by the HAIP profile.
 func TestFinalAndHAIPProfileDraft24Exempt(t *testing.T) {
-	f := newRequestObjectFixture(t)
-	claims := f.claims()
+	f := newRequestObjectFixture(t, "verifier.example")
+	claims := f.draft24Claims()
 	// A Draft24-legal request would fail every HAIP checkpoint, yet the Draft24
 	// builder must ignore the profile entirely.
 	token := f.sign(t, claims, nil)

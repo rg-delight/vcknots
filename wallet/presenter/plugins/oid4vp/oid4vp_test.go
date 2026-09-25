@@ -346,25 +346,15 @@ func mustParseURL(t *testing.T, rawURL string) *url.URL {
 	return u
 }
 
-func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
-	// mockserver / httptest.NewServer use http; allow it for these tests.
-
-	// Setup mock verifier server with proper JWT signing
-	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
-	defer verifierServer.Close()
-
-	// Create client_metadata with JWKS for JWT verification
-	keyPair := verifierServer.GetKeyPair()
-	clientMetadata := map[string]any{
-		"client_name": "Test Client",
-		"jwks":        keyPair.CreateJWKS(),
-	}
-
-	// Create properly signed JWT with the mock verifier's issuer
-	testClaims := map[string]any{
-		"aud":           "test-client",
+// draft24LegacyClaims is a Draft 24 Authorization Request from the
+// x509_san_dns Client Identifier of a fixture created with verifier.example.
+func draft24LegacyClaims(f *requestObjectFixture) map[string]any {
+	return map[string]any{
+		"aud":           "https://self-issued.me/v2",
+		"iat":           f.now.Unix(),
+		"exp":           f.now.Add(time.Hour).Unix(),
 		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:https://example.com/response",
+		"client_id":     draft24X509ClientID,
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
@@ -373,111 +363,93 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
 			},
 		},
-		"response_uri":    "https://example.com/response",
-		"client_metadata": clientMetadata,
+		"response_uri":    "https://verifier.example/response",
+		"client_metadata": map[string]any{"client_name": "Test Client"},
 	}
+}
 
-	mockJWT, err := verifierServer.CreateSignedJWT(testClaims)
-	if err != nil {
-		t.Fatalf("Failed to create signed JWT: %v", err)
-	}
+// draft24Builder is a Draft 24 builder that trusts the fixture's root.
+func (f *requestObjectFixture) draft24Builder() *draft24RequestBuilder {
+	builder := newDraft24RequestBuilder()
+	builder.setRequestObjectValidation(f.options())
+	builder.httpClient = f.server.Client()
+	return builder
+}
 
-	setupMockJWTServer := func(expectedMethod string) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != expectedMethod {
-				t.Errorf("Expected %s method, got %s", expectedMethod, r.Method)
-			}
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(mockJWT))
-		}))
-	}
+func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
+	f := newRequestObjectFixture(t, "verifier.example")
+	f.setRequestObjectHandler(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		claims := draft24LegacyClaims(f)
+		if nonce := r.Form.Get("wallet_nonce"); nonce != "" {
+			claims["wallet_nonce"] = nonce
+		}
+		claims["state"] = r.Method
+		w.Header().Set("Content-Type", "application/oauth-authz-req+jwt")
+		_, _ = w.Write([]byte(f.sign(t, claims, nil)))
+	})
+	requestURI := url.QueryEscape(f.server.URL + "/request-object")
+	clientID := url.QueryEscape(draft24X509ClientID)
 
 	tests := []struct {
-		name    string
-		uri     string
-		setup   func() *httptest.Server
-		wantErr bool
+		name       string
+		uri        string
+		wantMethod string
+		wantErr    bool
 	}{
 		{
-			name:    "Query parameters without authority",
-			uri:     "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
-			setup:   nil,
-			wantErr: false,
+			name: "Query parameters without authority",
+			uri:  "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
 		},
 		{
-			name:    "Query parameters",
-			uri:     "openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
-			setup:   nil,
-			wantErr: false,
+			name: "Query parameters",
+			uri:  "openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
 		},
 		{
-			name:    "request_uri with default GET method",
-			setup:   func() *httptest.Server { return setupMockJWTServer("GET") },
-			wantErr: false,
+			name:       "request_uri with default GET method",
+			uri:        "openid4vp://present?client_id=" + clientID + "&request_uri=" + requestURI,
+			wantMethod: http.MethodGet,
 		},
 		{
-			name:    "request_uri with explicit GET method",
-			setup:   func() *httptest.Server { return setupMockJWTServer("GET") },
-			wantErr: false,
+			name:       "request_uri with explicit GET method",
+			uri:        "openid4vp://present?client_id=" + clientID + "&request_uri=" + requestURI + "&request_uri_method=get",
+			wantMethod: http.MethodGet,
 		},
 		{
-			name:    "request_uri with POST method",
-			setup:   func() *httptest.Server { return setupMockJWTServer("POST") },
-			wantErr: false,
+			name:       "request_uri with POST method",
+			uri:        "openid4vp://present?client_id=" + clientID + "&request_uri=" + requestURI + "&request_uri_method=post",
+			wantMethod: http.MethodPost,
 		},
 		{
-			name: "request_uri server error",
-			setup: func() *httptest.Server {
-				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusInternalServerError)
-				}))
-			},
+			name:    "request_uri server error",
+			uri:     "openid4vp://present?client_id=" + clientID + "&request_uri=" + url.QueryEscape(f.server.URL+"/missing"),
 			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var server *httptest.Server
-			if tt.setup != nil {
-				server = tt.setup()
-				defer server.Close()
-			}
-
-			var uri string
-			if tt.uri != "" {
-				uri = tt.uri
-			} else {
-				// Build URI with request_uri
-				switch tt.name {
-				case "request_uri with default GET method":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
-				case "request_uri with explicit GET method":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=GET"
-				case "request_uri with POST method":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=POST"
-				case "request_uri server error":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
-				}
-			}
-
-			p := &Oid4vpPresenter{AllowHTTP: true}
-			req, err := parseDraft24ForTest(p, uri)
-
+			options := f.options()
+			p := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+			req, err := parseDraft24ForTest(p, tt.uri)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ParsePresentationRequest() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("ParsePresentationRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
 				return
 			}
-
-			if !tt.wantErr && req == nil {
-				t.Error("Expected non-nil request for successful case")
+			if req == nil {
+				t.Fatal("Expected non-nil request for successful case")
+			}
+			if tt.wantMethod != "" && req.State != tt.wantMethod {
+				t.Fatalf("request_uri was fetched with %s, want %s", req.State, tt.wantMethod)
 			}
 		})
 	}
 
 	// Test invalid URI
 	t.Run("Invalid URI", func(t *testing.T) {
-		p := &Oid4vpPresenter{AllowHTTP: true}
+		p := &Oid4vpPresenter{}
 		_, err := parseDraft24ForTest(p, "://invalid-uri")
 		if err == nil {
 			t.Error("Expected error for invalid URI, got nil")
@@ -487,45 +459,11 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 
 // TestOid4vpPresenter_WithRequestObject_TypHeader tests 'typ' header validation
 func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
-	// Setup mock verifier server with proper JWT signing
-	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
-	defer verifierServer.Close()
-
-	// Create client_metadata with JWKS for JWT verification
-	keyPair := verifierServer.GetKeyPair()
-	clientMetadata := map[string]any{
-		"client_name": "Test Client",
-		"jwks":        keyPair.CreateJWKS(),
-	}
-
-	// Create test claims
-	testClaims := map[string]any{
-		"aud":           "test-client",
-		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:https://example.com/response",
-		"response_type": "vp_token",
-		"response_mode": "direct_post",
-		"state":         "test-state",
-		"dcql_query": map[string]any{
-			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-			},
-		},
-		"response_uri":    "https://example.com/response",
-		"client_metadata": clientMetadata,
-	}
+	f := newRequestObjectFixture(t, "verifier.example")
+	x5c := []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)}
 
 	t.Run("Valid 'typ' header should succeed", func(t *testing.T) {
-		// Create JWT with correct 'typ' header (done by mockserver by default)
-		mockJWT, err := verifierServer.CreateSignedJWT(testClaims)
-		if err != nil {
-			t.Fatalf("Failed to create signed JWT: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(mockJWT)
-
-		req, err := builder.Build()
+		req, err := f.draft24Builder().WithRequestObject(f.sign(t, draft24LegacyClaims(f), nil)).Build()
 		if err != nil {
 			t.Errorf("Expected no error with valid 'typ' header, got: %v", err)
 		}
@@ -535,56 +473,17 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 	})
 
 	t.Run("Missing 'typ' header should fail", func(t *testing.T) {
-		// Create signer without 'typ' header
-		joseKey := keyPair.CreateJWK()
-		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: joseKey}, nil)
-		if err != nil {
-			t.Fatalf("Failed to create signer: %v", err)
-		}
-
-		// Create JWT without 'typ' header
-		invalidJWT, err := jwt.Signed(signer).Claims(testClaims).Serialize()
-		if err != nil {
-			t.Fatalf("Failed to create JWT without 'typ' header: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(invalidJWT)
-
-		_, err = builder.Build()
-		if err == nil {
-			t.Error("Expected error for missing 'typ' header, got nil")
-		}
-		if !strings.Contains(err.Error(), "must include 'typ' header parameter") {
+		invalidJWT := f.sign(t, draft24LegacyClaims(f), (&jose.SignerOptions{}).WithHeader("x5c", x5c))
+		_, err := f.draft24Builder().WithRequestObject(invalidJWT).Build()
+		if err == nil || !strings.Contains(err.Error(), "must include 'typ' header parameter") {
 			t.Errorf("Expected error message about missing 'typ' header, got: %v", err)
 		}
 	})
 
 	t.Run("Invalid 'typ' header should fail", func(t *testing.T) {
-		// Create signer with wrong 'typ' header
-		joseKey := keyPair.CreateJWK()
-		signerOptions := &jose.SignerOptions{}
-		signerOptions.WithType("JWT") // Wrong typ header
-
-		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: joseKey}, signerOptions)
-		if err != nil {
-			t.Fatalf("Failed to create signer: %v", err)
-		}
-
-		// Create JWT with wrong 'typ' header
-		invalidJWT, err := jwt.Signed(signer).Claims(testClaims).Serialize()
-		if err != nil {
-			t.Fatalf("Failed to create JWT with wrong 'typ' header: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(invalidJWT)
-
-		_, err = builder.Build()
-		if err == nil {
-			t.Error("Expected error for invalid 'typ' header, got nil")
-		}
-		if !strings.Contains(err.Error(), "must be 'oauth-authz-req+jwt'") {
+		invalidJWT := f.sign(t, draft24LegacyClaims(f), (&jose.SignerOptions{}).WithType("JWT").WithHeader("x5c", x5c))
+		_, err := f.draft24Builder().WithRequestObject(invalidJWT).Build()
+		if err == nil || !strings.Contains(err.Error(), "must be 'oauth-authz-req+jwt'") {
 			t.Errorf("Expected error message about invalid 'typ' header, got: %v", err)
 		}
 	})
@@ -592,205 +491,63 @@ func TestOid4vpPresenter_Draft24_WithRequestObject_TypHeader(t *testing.T) {
 
 // TestOid4vpPresenter_WithRequestObject_IssClaimIgnored tests 'iss' claim handling
 func TestOid4vpPresenter_Draft24_WithRequestObject_IssClaimIgnored(t *testing.T) {
-	// Setup mock verifier server with proper JWT signing
-	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
-	defer verifierServer.Close()
+	f := newRequestObjectFixture(t, "verifier.example")
+	claims := draft24LegacyClaims(f)
+	claims["iss"] = "should-be-ignored" // This should be ignored per OID4VP spec
 
-	// Create client_metadata with JWKS for JWT verification
-	keyPair := verifierServer.GetKeyPair()
-	clientMetadata := map[string]any{
-		"client_name": "Test Client",
-		"jwks":        keyPair.CreateJWKS(),
+	req, err := f.draft24Builder().WithRequestObject(f.sign(t, claims, nil)).Build()
+	if err != nil {
+		t.Fatalf("Expected no error when 'iss' claim is present, got: %v", err)
 	}
-
-	// Create test claims including 'iss' claim
-	testClaims := map[string]any{
-		"iss":           "should-be-ignored", // This should be ignored per OID4VP spec
-		"aud":           "test-client",
-		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:https://example.com/response",
-		"response_type": "vp_token",
-		"response_mode": "direct_post",
-		"state":         "test-state",
-		"dcql_query": map[string]any{
-			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-			},
-		},
-		"response_uri":    "https://example.com/response",
-		"client_metadata": clientMetadata,
+	if req.ClientID != draft24X509ClientID {
+		t.Fatalf("Expected ClientID %q, got: %s", draft24X509ClientID, req.ClientID)
 	}
-
-	t.Run("JWT with 'iss' claim should be processed correctly", func(t *testing.T) {
-		// Create JWT with 'iss' claim
-		mockJWT, err := verifierServer.CreateSignedJWT(testClaims)
-		if err != nil {
-			t.Fatalf("Failed to create signed JWT: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(mockJWT)
-
-		req, err := builder.Build()
-		if err != nil {
-			t.Fatalf("Expected no error when 'iss' claim is present, got: %v", err)
-		}
-		if req == nil {
-			t.Fatalf("Expected valid request object, got nil")
-		}
-
-		// Verify that other claims were processed correctly
-		if req.ClientID != "redirect_uri:https://example.com/response" {
-			t.Fatalf("Expected ClientID 'redirect_uri:https://example.com/response', got: %s", req.ClientID)
-		}
-		if req.ResponseType != "vp_token" {
-			t.Fatalf("Expected ResponseType 'vp_token', got: %s", req.ResponseType)
-		}
-	})
+	if req.ResponseType != "vp_token" {
+		t.Fatalf("Expected ResponseType 'vp_token', got: %s", req.ResponseType)
+	}
 }
 
 // TestOid4vpPresenter_WithRequestObject_StandardClaimsValidation tests standard JWT claims validation
 func TestOid4vpPresenter_Draft24_WithRequestObject_StandardClaimsValidation(t *testing.T) {
-	// Setup mock verifier server with proper JWT signing
-	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
-	defer verifierServer.Close()
-
-	// Create client_metadata with JWKS for JWT verification
-	keyPair := verifierServer.GetKeyPair()
-	clientMetadata := map[string]any{
-		"client_name": "Test Client",
-		"jwks":        keyPair.CreateJWKS(),
+	f := newRequestObjectFixture(t, "verifier.example")
+	build := func(iat, exp *time.Time) error {
+		claims := draft24LegacyClaims(f)
+		delete(claims, "iat")
+		delete(claims, "exp")
+		if iat != nil {
+			claims["iat"] = iat.Unix()
+		}
+		if exp != nil {
+			claims["exp"] = exp.Unix()
+		}
+		_, err := f.draft24Builder().WithRequestObject(f.sign(t, claims, nil)).Build()
+		return err
 	}
-
-	// Helper function to create JWT with custom time claims
-	createJWTWithTimeClaims := func(iat, exp int64) (string, error) {
-		testClaims := map[string]any{
-			"iat":           iat,
-			"exp":           exp,
-			"aud":           "test-client",
-			"nonce":         "test-nonce",
-			"client_id":     "redirect_uri:https://example.com/response",
-			"response_type": "vp_token",
-			"response_mode": "direct_post",
-			"state":         "test-state",
-			"dcql_query": map[string]any{
-				"credentials": []any{
-					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-				},
-			},
-			"response_uri":    "https://example.com/response",
-			"client_metadata": clientMetadata,
-		}
-
-		// Create JWT with custom claims (bypassing mockserver's default time claims)
-		joseKey := keyPair.CreateJWK()
-		signerOptions := &jose.SignerOptions{}
-		signerOptions.WithType("oauth-authz-req+jwt")
-
-		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: joseKey}, signerOptions)
-		if err != nil {
-			return "", err
-		}
-
-		token, err := jwt.Signed(signer).Claims(testClaims).Serialize()
-		return token, err
+	at := func(d time.Duration) *time.Time {
+		instant := f.now.Add(d)
+		return &instant
 	}
 
 	t.Run("Valid time claims should succeed", func(t *testing.T) {
-		now := time.Now()
-		validJWT, err := createJWTWithTimeClaims(now.Unix(), now.Add(time.Hour).Unix())
-		if err != nil {
-			t.Fatalf("Failed to create JWT with valid time claims: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(validJWT)
-
-		req, err := builder.Build()
-		if err != nil {
+		if err := build(at(0), at(time.Hour)); err != nil {
 			t.Errorf("Expected no error with valid time claims, got: %v", err)
 		}
-		if req == nil {
-			t.Error("Expected valid request object, got nil")
-		}
 	})
-
 	t.Run("Expired JWT should fail", func(t *testing.T) {
-		now := time.Now()
-		expiredJWT, err := createJWTWithTimeClaims(
-			now.Add(-2*time.Hour).Unix(), // issued 2 hours ago
-			now.Add(-time.Hour).Unix(),   // expired 1 hour ago
-		)
-		if err != nil {
-			t.Fatalf("Failed to create expired JWT: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(expiredJWT)
-
-		_, err = builder.Build()
-		if err == nil {
-			t.Error("Expected error for expired JWT, got nil")
-		}
-		if !strings.Contains(err.Error(), "JWT standard claims validation failed") {
+		err := build(at(-2*time.Hour), at(-time.Hour))
+		if err == nil || !strings.Contains(err.Error(), "JWT standard claims validation failed") {
 			t.Errorf("Expected error message about JWT claims validation, got: %v", err)
 		}
 	})
-
 	t.Run("Future iat claim should fail", func(t *testing.T) {
-		now := time.Now()
-		futureIatJWT, err := createJWTWithTimeClaims(
-			now.Add(time.Hour).Unix(),   // issued in the future
-			now.Add(2*time.Hour).Unix(), // expires 2 hours from now
-		)
-		if err != nil {
-			t.Fatalf("Failed to create JWT with future iat: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(futureIatJWT)
-
-		_, err = builder.Build()
-		if err == nil {
-			t.Error("Expected error for future iat claim, got nil")
-		}
-		if !strings.Contains(err.Error(), "JWT standard claims validation failed") {
+		err := build(at(time.Hour), at(2*time.Hour))
+		if err == nil || !strings.Contains(err.Error(), "JWT standard claims validation failed") {
 			t.Errorf("Expected error message about JWT claims validation, got: %v", err)
 		}
 	})
-
 	t.Run("JWT without exp claim should succeed with leeway", func(t *testing.T) {
-		// Test JWT without exp claim - should be allowed
-		testClaims := map[string]any{
-			"aud":           "test-client",
-			"nonce":         "test-nonce",
-			"client_id":     "redirect_uri:https://example.com/response",
-			"response_type": "vp_token",
-			"response_mode": "direct_post",
-			"state":         "test-state",
-			"dcql_query": map[string]any{
-				"credentials": []any{
-					map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-				},
-			},
-			"response_uri":    "https://example.com/response",
-			"client_metadata": clientMetadata,
-		}
-
-		noExpJWT, err := verifierServer.CreateSignedJWT(testClaims)
-		if err != nil {
-			t.Fatalf("Failed to create JWT without exp claim: %v", err)
-		}
-
-		builder := newDraft24RequestBuilder()
-		builder = builder.WithRequestObject(noExpJWT)
-
-		req, err := builder.Build()
-		if err != nil {
+		if err := build(nil, nil); err != nil {
 			t.Errorf("Expected no error for JWT without exp claim, got: %v", err)
-		}
-		if req == nil {
-			t.Error("Expected valid request object, got nil")
 		}
 	})
 }
@@ -801,7 +558,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 		"registered-client": {},
 	}}
 
-	p.AllowHTTP = false
+	p.SetExperimentalOptions(ExperimentalOptions{})
 
 	tests := []struct {
 		name    string
@@ -900,7 +657,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 }
 
 func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
-	p := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
+	p := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
 
 	newErrorCapturingServer := func(t *testing.T) (*httptest.Server, *url.Values) {
 		t.Helper()
@@ -1045,7 +802,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 			server, captured := newErrorCapturingServer(t)
 			defer server.Close()
 
-			presenter := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
+			presenter := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
 			if unbound.register {
 				presenter.PreRegisteredClients = map[string]PreRegisteredClient{unbound.clientID: {}}
 			}
@@ -1075,7 +832,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		server, captured := newErrorCapturingServer(t)
 		defer server.Close()
 
-		presenter := &Oid4vpPresenter{AllowHTTP: true}
+		presenter := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
 		_, err := presenter.ParsePresentationRequest(baseURI(server.URL, "&dcql_query=%7B%22credentials%22%3A%5B%5D%7D"))
 		var authzErr *AuthorizationRequestError
 		if !errors.As(err, &authzErr) || authzErr.Code != InvalidRequestError {
@@ -1133,7 +890,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	p := &Oid4vpPresenter{}
 
-	p.AllowHTTP = true
+	p.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: true})
 
 	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response"
 	req, err := p.ParsePresentationRequest(uri)
@@ -1252,42 +1009,11 @@ func TestOid4vpPresenter_ClientMetadataParsing_And_ResponseModeConstraint(t *tes
 }
 
 func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
-	// Setup mock verifier server with proper JWT signing
-	verifierServer := mockserver.NewOID4VPVerifierServer(nil)
-	defer verifierServer.Close()
+	f := newRequestObjectFixture(t, "verifier.example")
+	uri := "openid4vp://present?request=" + url.QueryEscape(f.sign(t, draft24LegacyClaims(f), nil))
 
-	// Create client_metadata with JWKS for JWT verification
-	keyPair := verifierServer.GetKeyPair()
-	clientMetadata := map[string]any{
-		"client_name": "Test Client",
-		"jwks":        keyPair.CreateJWKS(),
-	}
-
-	// claims inside request parameter
-	claims := map[string]any{
-		"aud":           "test-client",
-		"nonce":         "test-nonce",
-		"client_id":     "redirect_uri:https://example.com/response",
-		"response_type": "vp_token",
-		"response_mode": "direct_post",
-		"state":         "test-state",
-		"dcql_query": map[string]any{
-			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-			},
-		},
-		"response_uri":    "https://example.com/response",
-		"client_metadata": clientMetadata,
-	}
-
-	jwtStr, err := verifierServer.CreateSignedJWT(claims)
-	if err != nil {
-		t.Fatalf("failed to create signed JWT: %v", err)
-	}
-
-	uri := "openid4vp://present?request=" + url.QueryEscape(jwtStr)
-
-	p := &Oid4vpPresenter{}
+	options := f.options()
+	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
 	req, err := parseDraft24ForTest(p, uri)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1482,6 +1208,13 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 	}
 }
 
+// httpAllowedBuilder is a 1.0 builder that accepts the http mock server.
+func httpAllowedBuilder() *requestBuilder {
+	builder := NewRequestBuilder()
+	builder.allowHTTP = true
+	return builder
+}
+
 func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 	// mockserver is HTTP-only; allow http scheme for these tests.
 
@@ -1501,7 +1234,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 
 		requestObjectURI, _ := url.Parse(m.URL() + "/request-object")
 
-		rb := NewRequestBuilder().WithHTTPAllowed(true)
+		rb := httpAllowedBuilder()
 		rb.WithRequestObjectURI(requestObjectURI.String(), RequestURIMethodGET)
 		if !called {
 			t.Fatal("handler was not invoked")
@@ -1519,7 +1252,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			if ua := r.Header.Get("User-Agent"); ua != "" {
 				t.Errorf("User-Agent is not empty string, got %q", ua)
 			}
-			if got := r.Header.Get("Accept"); got != "application/oauth-authz-req+jwt, application/jwt, text/plain, */*" {
+			if got := r.Header.Get("Accept"); got != "application/oauth-authz-req+jwt" {
 				t.Errorf("unexpected Accept header: %q", got)
 			}
 			if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
@@ -1528,8 +1261,11 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			if err := r.ParseForm(); err != nil {
 				t.Fatalf("failed to parse form: %v", err)
 			}
-			if got := r.Form.Get("wallet_metadata"); got != "{}" {
-				t.Errorf("unexpected wallet_metadata body value: %q", got)
+			if _, present := r.Form["wallet_metadata"]; present {
+				t.Errorf("wallet_metadata sent without configured metadata: %q", r.Form.Get("wallet_metadata"))
+			}
+			if r.Form.Get("wallet_nonce") == "" {
+				t.Error("wallet_nonce missing from the POST body")
 			}
 			w.WriteHeader(http.StatusOK)
 		})
@@ -1559,7 +1295,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 
 		requestObjectURI, _ := url.Parse(m.URL() + "/request-object")
 
-		rb := NewRequestBuilder().WithHTTPAllowed(true)
+		rb := httpAllowedBuilder()
 		rb.WithRequestObjectURI(requestObjectURI.String(), RequestURIMethodPOST)
 
 		if gotContentType != "application/x-www-form-urlencoded" {
@@ -1598,7 +1334,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			"file:///etc/passwd",
 			"data:text/plain,foo",
 		} {
-			rb := NewRequestBuilder().WithHTTPAllowed(true)
+			rb := httpAllowedBuilder()
 			rb.WithRequestObjectURI(badURI, RequestURIMethodGET)
 			if rb.errValidation == nil || !strings.Contains(rb.errValidation.Error(), "https required") {
 				t.Errorf("uri=%q: expected https-required error, got: %v", badURI, rb.errValidation)

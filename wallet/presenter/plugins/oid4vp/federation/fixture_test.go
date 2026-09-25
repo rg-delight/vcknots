@@ -126,19 +126,22 @@ type federationServer struct {
 	*httptest.Server
 	mu        sync.Mutex
 	responses map[string]string
-	requests  []string
-	accepts   []string
+	// contentTypes overrides the Entity Statement media type per URL.
+	contentTypes map[string]string
+	requests     []string
+	accepts      []string
 }
 
 func newFederationServer(t *testing.T) *federationServer {
 	t.Helper()
-	server := &federationServer{responses: map[string]string{}}
+	server := &federationServer{responses: map[string]string{}, contentTypes: map[string]string{}}
 	server.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requested := "https://" + r.Host + r.URL.RequestURI()
 		server.mu.Lock()
 		server.requests = append(server.requests, requested)
 		server.accepts = append(server.accepts, r.Header.Get("Accept"))
 		body, ok := server.responses[requested]
+		contentType, overridden := server.contentTypes[requested]
 		server.mu.Unlock()
 		if !ok {
 			w.Header().Set("Content-Type", "text/plain")
@@ -146,7 +149,10 @@ func newFederationServer(t *testing.T) *federationServer {
 			_, _ = w.Write([]byte("not found"))
 			return
 		}
-		w.Header().Set("Content-Type", entityStatementMediaType)
+		if !overridden {
+			contentType = entityStatementMediaType
+		}
+		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(server.Close)
@@ -181,6 +187,14 @@ func (s *federationServer) serveSubordinate(t *testing.T, endpoint, subject, jwt
 	s.mu.Unlock()
 }
 
+// serve publishes body at location with the given media type.
+func (s *federationServer) serve(location, body, contentType string) {
+	s.mu.Lock()
+	s.responses[location] = body
+	s.contentTypes[location] = contentType
+	s.mu.Unlock()
+}
+
 func (s *federationServer) remove(t *testing.T, entityID string) {
 	t.Helper()
 	statementURL, err := EntityConfigurationURL(entityID)
@@ -202,6 +216,38 @@ func (s *federationServer) resolver(anchors ...TrustAnchor) *Resolver {
 	return &Resolver{HTTPClient: s.Client(), TrustAnchors: anchors, Now: func() time.Time { return testNow }}
 }
 
+// withVerifierJWKS returns metadata with jwks added to its
+// openid_credential_verifier metadata, when it has one.
+func withVerifierJWKS(metadata map[string]any, jwks jose.JSONWebKeySet) map[string]any {
+	verifier, ok := metadata[VerifierEntityType].(map[string]any)
+	if !ok {
+		return metadata
+	}
+	copied := make(map[string]any, len(metadata))
+	for name, value := range metadata {
+		copied[name] = value
+	}
+	withKeys := make(map[string]any, len(verifier)+1)
+	for name, value := range verifier {
+		withKeys[name] = value
+	}
+	withKeys["jwks"] = jwks
+	copied[VerifierEntityType] = withKeys
+	return copied
+}
+
+// withoutJWKS returns a copy of metadata without its jwks member, for
+// comparing the rest of derived metadata exactly.
+func withoutJWKS(metadata map[string]any) map[string]any {
+	copied := make(map[string]any, len(metadata))
+	for name, value := range metadata {
+		if name != "jwks" {
+			copied[name] = value
+		}
+	}
+	return copied
+}
+
 func fetchEndpointMetadata(endpoint string) map[string]any {
 	return map[string]any{"federation_entity": map[string]any{"federation_fetch_endpoint": endpoint}}
 }
@@ -213,7 +259,10 @@ type directFederation struct {
 	verifier, anchor string
 	verifierKey      signingKey
 	anchorKey        signingKey
-	chain            []string
+	// requestKey is the key the Verifier signs Request Objects with, which
+	// its openid_credential_verifier metadata publishes in jwks.
+	requestKey signingKey
+	chain      []string
 }
 
 type directOptions struct {
@@ -221,6 +270,12 @@ type directOptions struct {
 	subordinatePolicy map[string]any
 	anchorMetadata    map[string]any
 	verifierKid       string
+	// keepVerifierKeys leaves the verifier metadata without the jwks of the
+	// request key, for a test that publishes its keys itself.
+	keepVerifierKeys bool
+	// verifierPaths sets openid_credential_verifier metadata members to URLs
+	// on the fixture server, by member name and path.
+	verifierPaths map[string]string
 }
 
 func newDirectFederation(t *testing.T, opts directOptions) *directFederation {
@@ -233,8 +288,17 @@ func newDirectFederation(t *testing.T, opts directOptions) *directFederation {
 	}
 	f.verifierKey = newSigningKey(t, kid)
 	f.anchorKey = newSigningKey(t, "anchor-key")
+	f.requestKey = newSigningKey(t, "request-key")
 	if opts.verifierMetadata == nil {
 		opts.verifierMetadata = map[string]any{VerifierEntityType: map[string]any{"client_name": "Original verifier"}}
+	}
+	if !opts.keepVerifierKeys {
+		opts.verifierMetadata = withVerifierJWKS(opts.verifierMetadata, f.requestKey.jwks)
+	}
+	if verifier, ok := opts.verifierMetadata[VerifierEntityType].(map[string]any); ok {
+		for member, path := range opts.verifierPaths {
+			verifier[member] = server.URL + path
+		}
 	}
 	if opts.anchorMetadata == nil {
 		opts.anchorMetadata = fetchEndpointMetadata(server.fetchEndpoint("anchor"))

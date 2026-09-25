@@ -11,8 +11,9 @@ import "strings"
 type Options struct {
 	// ForbidInsecureTransports refuses the test-only transport escapes of the
 	// protocol plugins: Config.Experimental.Transport and the OpenID4VCI
-	// receiver's Experimental (package experimental), and AllowHTTP and
-	// InsecureSkipX509Verify on the OpenID4VP presenter.
+	// receiver's Experimental (package experimental), and the experimental
+	// AllowHTTP and InsecureSkipX509Verify of the OpenID4VP presenter
+	// (oid4vp.ExperimentalOptions).
 	// HAIP 1.0 §4 (FAPI 2.0 TLS) and §5 (x509_hash Verifier authentication).
 	ForbidInsecureTransports bool
 	// AllowedCredentialFormats restricts the Credential Format Identifiers a
@@ -80,9 +81,9 @@ type Options struct {
 	AttestationX5C X5CRules
 
 	// RequireSignedRequestByReference requires a redirect-based
-	// Authorization Request to be a signed Request Object passed by
-	// request_uri (or by value with the caller's DeliveredByReference
-	// statement).
+	// Authorization Request to be a signed Request Object the presenter
+	// fetched from request_uri itself; a Request Object passed by value is
+	// refused.
 	// HAIP 1.0 §5.1 (OpenID4VP via redirects).
 	RequireSignedRequestByReference bool
 	// RequireDirectPostJWT requires the response mode direct_post.jwt on a
@@ -147,7 +148,6 @@ func HAIPOptions() Options {
 			ECDHESOnly:             true,
 			P256Only:               true,
 			GCMOnly:                true,
-			RequireJWKAlg:          true,
 			RequireVerifierGCMBoth: true,
 		},
 		AlwaysKeyBindingWhenConfirmed: true,
@@ -201,7 +201,6 @@ func (o Options) weakened(floor Options) []string {
 	flag("ResponseEncryption.ECDHESOnly", enc.ECDHESOnly, floorEnc.ECDHESOnly)
 	flag("ResponseEncryption.P256Only", enc.P256Only, floorEnc.P256Only)
 	flag("ResponseEncryption.GCMOnly", enc.GCMOnly, floorEnc.GCMOnly)
-	flag("ResponseEncryption.RequireJWKAlg", enc.RequireJWKAlg, floorEnc.RequireJWKAlg)
 	flag("ResponseEncryption.RequireVerifierGCMBoth", enc.RequireVerifierGCMBoth, floorEnc.RequireVerifierGCMBoth)
 	flag("AlwaysKeyBindingWhenConfirmed", o.AlwaysKeyBindingWhenConfirmed, floor.AlwaysKeyBindingWhenConfirmed)
 	return names
@@ -231,9 +230,9 @@ func (r X5CRules) Union(s X5CRules) X5CRules {
 
 // ResponseEncryptionRules restrict the JWE of an encrypted Authorization
 // Response (OpenID4VP 1.0 §8.3). The zero value is OpenID4VP 1.0: ECDH-ES
-// family key agreement on P-256, P-384 or P-521, any content encryption the
-// library supports, and a JWK without alg accepted when the Verifier names
-// the draft-era authorization_encrypted_response_alg.
+// family key agreement on P-256, P-384 or P-521 with the alg the Verifier's
+// JWK names (§8.3: "The alg parameter MUST be present in the JWKs"), and any
+// content encryption the library supports.
 type ResponseEncryptionRules struct {
 	// ECDHESOnly accepts only the key agreement alg ECDH-ES.
 	ECDHESOnly bool
@@ -241,9 +240,6 @@ type ResponseEncryptionRules struct {
 	P256Only bool
 	// GCMOnly accepts only the content encryption A128GCM and A256GCM.
 	GCMOnly bool
-	// RequireJWKAlg refuses a Verifier key without alg, as OpenID4VP 1.0
-	// §8.3 states.
-	RequireJWKAlg bool
 	// RequireVerifierGCMBoth refuses Verifier metadata whose
 	// encrypted_response_enc_values_supported does not list both A128GCM and
 	// A256GCM.
