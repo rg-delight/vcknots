@@ -17,12 +17,14 @@ var (
 	// does not carry a usable `status_list` reference: the member is absent or
 	// is not a JSON object, `idx` is not an exactly representable non-negative
 	// integer, `uri` is not a non-empty string, or the URI is not an absolute
-	// https URL without query and fragment
+	// https URL without user information and fragment
 	// (draft-ietf-oauth-status-list Section 7.1).
 	ErrStatusReferenceInvalid = common.NewCodedError("status_reference_invalid", "credential status_list reference is not usable")
 	// ErrStatusListFetchFailed reports that the Status List Token could not be
 	// retrieved from the referenced URI: the request failed, the endpoint
-	// answered with a redirect or a non-2xx status, the response was not typed
+	// answered with a non-2xx status, a redirect that could not be followed
+	// (not a 301, 302, 303, 307 or 308, no Location, a target that is not an
+	// https URL, or more than five in a row), the response was not typed
 	// application/statuslist+jwt (draft-ietf-oauth-status-list Section 10.1),
 	// or the body was empty or larger than the configured cap.
 	ErrStatusListFetchFailed = common.NewCodedError("status_list_fetch_failed", "status list token could not be fetched")

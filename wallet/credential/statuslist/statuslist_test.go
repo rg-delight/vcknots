@@ -506,8 +506,6 @@ func TestCheckReferenceRefusesUnusableReferences(t *testing.T) {
 			return strings.Replace(h.uri, "https://", "http://", 1)
 		}, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "other scheme", uri: uri("ftp://issuer.example.test/status"), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
-		{name: "query", uri: func(h *harness) string { return h.uri + "?page=1" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
-		{name: "empty query", uri: func(h *harness) string { return h.uri + "?" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "fragment", uri: func(h *harness) string { return h.uri + "#x" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "user information", uri: func(h *harness) string {
 			return strings.Replace(h.uri, "https://", "https://user:pass@", 1)
@@ -523,26 +521,7 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			return h.respond
 		}
 	}
-	var redirectTargetHits atomic.Int32
 	runFailureCases(t, []failureCase{
-		{
-			name: "redirect to a valid token is not followed",
-			respond: func(t *testing.T, h *harness) func(http.ResponseWriter, *http.Request) {
-				token := signES256(t, h.key, defaultHeader(), defaultClaims(h.uri))
-				return func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/moved" {
-						redirectTargetHits.Add(1)
-						w.Header().Set("Content-Type", statusListTokenMediaType)
-						_, _ = w.Write([]byte(token))
-						return
-					}
-					http.Redirect(w, r, "/moved", http.StatusFound)
-				}
-			},
-			want:           ErrStatusListFetchFailed,
-			wantMessage:    "redirect status 302",
-			hookMustNotRun: true,
-		},
 		{name: "server error", respond: respondWith(served{status: 500, contentType: statusListTokenMediaType, body: "x"}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
 		{name: "not found", respond: respondWith(served{status: 404, contentType: statusListTokenMediaType}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
 		{name: "json content type", respond: respondWith(served{contentType: "application/json", body: "not-a-jwt"}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
@@ -599,9 +578,6 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			hookMustNotRun: true,
 		},
 	})
-	if hits := redirectTargetHits.Load(); hits != 0 {
-		t.Fatalf("redirect target was requested %d times", hits)
-	}
 }
 
 func TestCheckReferenceRefusesTokensBeforeResolvingKeys(t *testing.T) {

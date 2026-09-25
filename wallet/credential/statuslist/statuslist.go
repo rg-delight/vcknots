@@ -48,6 +48,13 @@ import (
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
+// maxStatusListRedirects bounds the redirects one Status List Token retrieval
+// follows. draft-ietf-oauth-status-list Section 8.2 says a client SHOULD
+// follow a 3xx redirect, and Section 11.4 that it MUST follow RFC 9110
+// Section 15.4, which warns against redirect loops; a fixed bound is what
+// keeps a loop from becoming a denial of service.
+const maxStatusListRedirects = 5
+
 const (
 	// statusListTokenType is the `typ` header value
 	// draft-ietf-oauth-status-list Section 5.1 assigns to a Status List Token,
@@ -138,10 +145,11 @@ type ResolveIssuerKeysFunc func(ctx context.Context, issuer string, header map[s
 // therefore no status can be read; a Checker is safe for concurrent use as long
 // as its fields are not mutated after the first check.
 type Checker struct {
-	// HTTPClient performs the Status List Token request. A nil client means a
-	// client with a 30 second timeout. The client's redirect policy is never
-	// used: the checker copies the client for each request and refuses
-	// redirects itself, so a caller-owned client is not mutated.
+	// HTTPClient performs the Status List Token requests. A nil client means
+	// a client with a 30 second timeout. The client's redirect policy is never
+	// used: the checker copies the client for each request and follows
+	// redirects itself (see CheckReference), so a caller-owned client is not
+	// mutated.
 	HTTPClient *http.Client
 	// Now reads the clock the check is evaluated against. A nil value means
 	// time.Now.
@@ -381,13 +389,14 @@ func (c *Checker) maxTokenBytes() int64 {
 // parseStatusListURI validates the `uri` member as a Status List endpoint.
 //
 // The URI must be absolute and https — http is permitted only for a local test
-// through Checker.AllowHTTP — and must carry neither a query nor a fragment.
-// Both restrictions come from what the URI is for: draft-ietf-oauth-status-list
-// Section 5.1 requires the token's `sub` to equal it, so it is an identifier
-// that is compared for equality, and a query or fragment makes two spellings of
-// the same endpoint that no longer compare equal. A fragment additionally never
-// reaches the server at all. User information is refused because it would be
-// sent to the endpoint as credentials the wallet never meant to present.
+// through Checker.AllowHTTP — and must carry no fragment. A query is part of
+// the resource the URI names and is sent as it is written: the token's `sub`
+// is compared with the `uri` member exactly as the credential spells it
+// (draft-ietf-oauth-status-list Section 5.1), so a query cannot make one
+// endpoint answer for another. A fragment, by contrast, never reaches the
+// server, so a URI carrying one names something the fetched token cannot be
+// about. User information is refused because it would be sent to the endpoint
+// as credentials the wallet never meant to present.
 func parseStatusListURI(raw string, allowHTTP bool) (*url.URL, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("%w: status_list uri is empty", ErrStatusReferenceInvalid)
@@ -408,9 +417,6 @@ func parseStatusListURI(raw string, allowHTTP bool) (*url.URL, error) {
 	if parsed.User != nil {
 		return nil, fmt.Errorf("%w: status_list uri must carry no user information", ErrStatusReferenceInvalid)
 	}
-	if parsed.RawQuery != "" || parsed.ForceQuery {
-		return nil, fmt.Errorf("%w: status_list uri must carry no query", ErrStatusReferenceInvalid)
-	}
 	if parsed.Fragment != "" || parsed.RawFragment != "" {
 		return nil, fmt.Errorf("%w: status_list uri must carry no fragment", ErrStatusReferenceInvalid)
 	}
@@ -425,25 +431,13 @@ func parseStatusListURI(raw string, allowHTTP bool) (*url.URL, error) {
 // and saying so here keeps that failure out of the JWS parser, where it would
 // have surfaced as an unrelated syntax complaint.
 func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, error) {
-	request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointStatusList), http.MethodGet, endpoint.String(), nil)
+	response, err := c.get(ctx, endpoint)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
-	}
-	request.Header.Set("Accept", statusListTokenMediaType)
-
-	// Redirects are refused: the token's `sub` must equal the URI the
-	// credential named, so a token served from elsewhere cannot be the one
-	// asked for.
-	response, err := httpfetch.NoRedirect(c.HTTPClient).Do(request)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
+		return "", err
 	}
 	defer response.Body.Close()
 
-	switch {
-	case response.StatusCode >= 300 && response.StatusCode < 400:
-		return "", fmt.Errorf("%w: status list endpoint answered with redirect status %d", ErrStatusListFetchFailed, response.StatusCode)
-	case response.StatusCode < 200 || response.StatusCode >= 300:
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", fmt.Errorf("%w: status list endpoint answered with status %d", ErrStatusListFetchFailed, response.StatusCode)
 	}
 	if !httpfetch.MediaTypeIs(response.Header, statusListTokenMediaType) {
@@ -463,4 +457,79 @@ func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, er
 		return "", fmt.Errorf("%w: status list endpoint answered with an empty body", ErrStatusListFetchFailed)
 	}
 	return token, nil
+}
+
+// get requests the Status List Token from endpoint and follows the redirects
+// it is answered with, returning the first response that is not a followed
+// redirect. The caller closes its body.
+//
+// draft-ietf-oauth-status-list Section 8.2 lets the Status Provider redirect
+// the client with a 3xx status "which clients SHOULD follow". Following one is
+// safe because nothing about the redirect is believed: the token served at the
+// end must still carry a `sub` equal to the `uri` the credential named and a
+// signature of its issuer. What Section 11.4 and RFC 9110 Section 15.4 ask of
+// the client is bounded work, so at most maxStatusListRedirects redirects are
+// followed. Every target is held to the rules of the original URI — absolute,
+// https (http only under Checker.AllowHTTP), no user information — so a
+// redirect cannot downgrade the transport or smuggle credentials; its
+// fragment, which is not sent, is dropped. Only the redirects that repeat the
+// request (301, 302, 303, 307, 308) are followed; any other 3xx is an answer
+// without a token.
+func (c *Checker) get(ctx context.Context, endpoint *url.URL) (*http.Response, error) {
+	client := httpfetch.NoRedirect(c.HTTPClient)
+	target := endpoint
+	for redirects := 0; ; redirects++ {
+		request, err := http.NewRequestWithContext(observe.WithEndpoint(ctx, observe.EndpointStatusList), http.MethodGet, target.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
+		}
+		request.Header.Set("Accept", statusListTokenMediaType)
+		response, err := client.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStatusListFetchFailed, err)
+		}
+		if response.StatusCode < 300 || response.StatusCode >= 400 {
+			return response, nil
+		}
+		location := response.Header.Get("Location")
+		_ = response.Body.Close()
+		switch response.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		default:
+			return nil, fmt.Errorf("%w: status list endpoint answered with redirect status %d", ErrStatusListFetchFailed, response.StatusCode)
+		}
+		if redirects == maxStatusListRedirects {
+			return nil, fmt.Errorf("%w: status list endpoint redirected more than %d times", ErrStatusListFetchFailed, maxStatusListRedirects)
+		}
+		if location == "" {
+			return nil, fmt.Errorf("%w: status list endpoint answered with redirect status %d without a Location", ErrStatusListFetchFailed, response.StatusCode)
+		}
+		next, err := target.Parse(location)
+		if err != nil {
+			return nil, fmt.Errorf("%w: redirect location is not a URI: %w", ErrStatusListFetchFailed, err)
+		}
+		next.Fragment, next.RawFragment = "", ""
+		if err := checkRedirectTarget(next, c.AllowHTTP); err != nil {
+			return nil, err
+		}
+		target = next
+	}
+}
+
+// checkRedirectTarget holds a redirect target to the transport rules of
+// parseStatusListURI.
+func checkRedirectTarget(target *url.URL, allowHTTP bool) error {
+	if target.Host == "" {
+		return fmt.Errorf("%w: redirect location must be an absolute URL", ErrStatusListFetchFailed)
+	}
+	switch {
+	case strings.EqualFold(target.Scheme, "https"):
+	case allowHTTP && strings.EqualFold(target.Scheme, "http"):
+	default:
+		return fmt.Errorf("%w: redirect location must use the https scheme, got %q", ErrStatusListFetchFailed, target.Scheme)
+	}
+	if target.User != nil {
+		return fmt.Errorf("%w: redirect location must carry no user information", ErrStatusListFetchFailed)
+	}
+	return nil
 }
