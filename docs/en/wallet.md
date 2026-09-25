@@ -866,7 +866,7 @@ The checks are:
 
 * A `nil` policy on an OpenID4VCI 1.0 method, a `Draft13()` method or `VerifyCredentialForAcceptance` stores nothing (`ErrCredentialAcceptancePolicyRequired`). `ReceiveCredential` without a policy only parses the credential.
 * `UnverifiedIssuer: true` accepts a credential without authenticating its issuer. It applies only when neither `IssuerX509` nor a resolver is set, and the other checks still run.
-* Under HAIP an SD-JWT VC requires `IssuerX509` (HAIP §6.1.1): it must carry `x5c` (`ErrHAIPX5CRequired`) without the trust anchor (`ErrHAIPTrustAnchorInX5C`), and `UnverifiedIssuer` does not apply to it.
+* Under HAIP an SD-JWT VC requires `IssuerX509` (HAIP §6.1.1): it must carry `x5c` (`ErrHAIPX5CRequired`) without the trust anchor (`ErrHAIPTrustAnchorInX5C`) and with a signing certificate that is not self-signed (`ErrIssuerCertificateSelfSigned`), and `UnverifiedIssuer` does not apply to it.
 * `AllowUnadvertisedRevocation` keeps certificates without a CRL distribution point on the trust path and reports them separately. OCSP is not consulted.
 
 ## OpenID4VP 1.0 presentation {#openid4vp-10-presentation}

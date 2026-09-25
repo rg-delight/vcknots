@@ -588,3 +588,20 @@ func TestFinalRequestObjectIssuedInTheFuture(t *testing.T) {
 		t.Fatalf("an iat within the clock skew must be accepted: %v", err)
 	}
 }
+
+// TestHAIPRequestObjectRejectsSelfSignedSigner covers HAIP Section 5: "The
+// X.509 certificate signing the request MUST NOT be self-signed."
+func TestHAIPRequestObjectRejectsSelfSignedSigner(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	haip := requestCore{profile: profile.HAIP}
+	if err := haip.rejectTrustAnchorInX5C([]*x509.Certificate{f.root}, f.options()); err == nil || !strings.Contains(err.Error(), "self-signed") {
+		t.Fatalf("a self-signed signing certificate must be refused: %v", err)
+	}
+	if err := haip.rejectTrustAnchorInX5C([]*x509.Certificate{f.leaf}, f.options()); err != nil {
+		t.Fatalf("a CA-issued signing certificate must be accepted: %v", err)
+	}
+	final := requestCore{profile: profile.Final}
+	if err := final.rejectTrustAnchorInX5C([]*x509.Certificate{f.root}, f.options()); err != nil {
+		t.Fatalf("Final applies no x5c rule: %v", err)
+	}
+}

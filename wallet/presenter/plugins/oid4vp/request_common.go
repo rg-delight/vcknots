@@ -345,12 +345,16 @@ func (c *requestCore) resolveClaimPolicy(options RequestObjectValidationOptions,
 	return policy
 }
 
-// rejectTrustAnchorInX5C enforces HAIP §5 and §6.1.1: "The X.509 certificate
-// of the trust anchor MUST NOT be included in the x5c JOSE header of the
-// signed request." It is inert outside the HAIP profile.
+// rejectTrustAnchorInX5C enforces HAIP §5: "The X.509 certificate of the
+// trust anchor MUST NOT be included in the x5c JOSE header of the signed
+// request. The X.509 certificate signing the request MUST NOT be
+// self-signed." It is inert outside the HAIP profile.
 func (c *requestCore) rejectTrustAnchorInX5C(certificates []*x509.Certificate, options RequestObjectValidationOptions) error {
 	if !c.haipRequestObjectPolicy() {
 		return nil
+	}
+	if err := commonX509.RequireNonSelfSignedLeaf(certificates, "request object"); err != nil {
+		return err
 	}
 	anchored, err := commonX509.ContainsTrustAnchor(certificates, options.TrustAnchors, options.RootCAs)
 	if err != nil {

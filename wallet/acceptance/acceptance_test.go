@@ -354,6 +354,9 @@ func TestVerifyTypedFailures(t *testing.T) {
 		return buildWire(t, spec)
 	}
 	disclosed := map[string]string{"given_name": "Erika"}
+	// A self-signed issuer certificate that is not a configured anchor.
+	stranger := newTestIssuerChain(t, []string{"issuer.example.test"})
+	selfSigned := buildWire(t, testWire{signingKey: stranger.caKey, x5c: []string{base64.StdEncoding.EncodeToString(stranger.caCert.Raw)}, cnf: &holder})
 
 	cases := []struct {
 		name     string
@@ -377,6 +380,7 @@ func TestVerifyTypedFailures(t *testing.T) {
 		{"issuer DNS binding", profile.Final, x509Trust(chain.anchors(), true), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
 		{"HAIP x5c required", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
 		{"HAIP trust anchor in x5c", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
+		{"HAIP self-signed issuer certificate", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

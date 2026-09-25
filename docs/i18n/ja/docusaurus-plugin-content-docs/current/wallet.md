@@ -959,7 +959,7 @@ wallet は Credential を返す、または保存する前に、`Config.Credenti
 
 * OpenID4VCI 1.0 のメソッド、`Draft13()` のメソッド、`VerifyCredentialForAcceptance` でポリシーが `nil` の場合は、何も保存しません（`ErrCredentialAcceptancePolicyRequired`）。ポリシーのない `ReceiveCredential` は Credential を解析するだけです。
 * `UnverifiedIssuer: true` は Issuer を認証せずに Credential を受け入れます。`IssuerX509` もリゾルバも設定されていないときだけ適用され、その他の検査は実行されます。
-* HAIP では SD-JWT VC に `IssuerX509` が必要です（HAIP §6.1.1）。`x5c` を持たなければならず（`ErrHAIPX5CRequired`）、トラストアンカーを含んではならず（`ErrHAIPTrustAnchorInX5C`）、`UnverifiedIssuer` は適用されません。
+* HAIP では SD-JWT VC に `IssuerX509` が必要です（HAIP §6.1.1）。`x5c` を持たなければならず（`ErrHAIPX5CRequired`）、トラストアンカーを含んではならず（`ErrHAIPTrustAnchorInX5C`）、署名証明書は自己署名であってはならず（`ErrIssuerCertificateSelfSigned`）、`UnverifiedIssuer` は適用されません。
 * `AllowUnadvertisedRevocation` は、CRL 配布点を持たない証明書を信頼経路に残し、別に数えて報告します。OCSP は参照しません。
 
 ## OpenID4VP 1.0 の提示 {#openid4vp-10-presentation}

@@ -58,6 +58,11 @@ func (a *Acceptor) authenticateIssuer(ctx context.Context, parsed *credential.Cr
 	}
 	trust := policy.IssuerX509
 	if a.profile.IsHAIP() {
+		// HAIP §6.1.1: "The X.509 certificate signing the request MUST NOT be
+		// self-signed."
+		if err := commonX509.RequireNonSelfSignedLeaf(certificates, "issuer"); err != nil {
+			return fmt.Errorf("%w: %w", ErrIssuerCertificateSelfSigned, err)
+		}
 		// HAIP §6.1.1: "The X.509 certificate of the trust anchor MUST NOT be
 		// included in the x5c JOSE header". Both anchor forms are consulted.
 		containsAnchor, err := commonX509.ContainsTrustAnchor(certificates, trust.TrustAnchors, trust.RootCAs)

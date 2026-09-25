@@ -57,4 +57,7 @@ var (
 	// ErrHAIPTrustAnchorInX5C reports an x5c chain that carries a configured
 	// trust anchor under the HAIP profile (HAIP §6.1.1).
 	ErrHAIPTrustAnchorInX5C = common.NewCodedError("haip_trust_anchor_in_x5c", "HAIP forbids including the trust anchor certificate in the x5c header")
+	// ErrIssuerCertificateSelfSigned reports a self-signed issuer signing
+	// certificate under the HAIP profile (HAIP §6.1.1).
+	ErrIssuerCertificateSelfSigned = common.NewCodedError("issuer_certificate_self_signed", "the issuer signing certificate must not be self-signed")
 )
