@@ -86,4 +86,12 @@ var (
 	// reach the verification path: neither authenticates an issuer to a wallet
 	// that holds only public keys.
 	ErrStatusListAlgorithmUnsupported = common.NewCodedError("status_list_alg_unsupported", "status list token alg header is not an accepted signing algorithm")
+	// ErrStatusListCertificateRejected reports that the token's x5c header
+	// does not satisfy the x5c rules of the Checker's profile
+	// (profile.Options.StatusListTokenX5C, HAIP 1.0 Section 6.1): the header
+	// carries no x5c or a malformed one where the rules apply, its leaf is
+	// self-signed, its chain includes a trust anchor (reported by the key
+	// resolution hook), or the key the token would be verified under is not
+	// the x5c leaf's.
+	ErrStatusListCertificateRejected = common.NewCodedError("status_list_certificate_rejected", "status list token x5c header does not satisfy the profile")
 )

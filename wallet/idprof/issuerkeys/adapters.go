@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/credential/statuslist"
 )
 
 // This file adapts the ladder to the two hooks the rest of the library asks an
@@ -184,9 +185,9 @@ const failureChainUntrusted = "certificate chain is not trusted"
 // ResolveIssuerKeys hook (statuslist.ResolveIssuerKeysFunc). template carries
 // what the token header does not, as for NewKeyLookup; x5c, when non-nil,
 // enables the `x5c` chain as a key source. See StatusListKeys for the rules.
-func (r *Resolver) StatusListKeyFunc(template Request, x5c *X5CTrust) func(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
-	return func(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
-		keys, _, err := r.StatusListKeys(ctx, template, x5c, issuer, header)
+func (r *Resolver) StatusListKeyFunc(template Request, x5c *X5CTrust) statuslist.ResolveIssuerKeysFunc {
+	return func(ctx context.Context, request statuslist.KeyRequest) ([]jose.JSONWebKey, error) {
+		keys, _, err := r.StatusListKeys(ctx, template, x5c, request.Issuer, request.Header)
 		return keys, err
 	}
 }

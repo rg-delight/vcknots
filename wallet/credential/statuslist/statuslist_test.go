@@ -150,10 +150,10 @@ func (h *harness) checker(keys ...jose.JSONWebKey) *Checker {
 	return &Checker{
 		HTTPClient: h.server.Client(),
 		Now:        func() time.Time { return testNow },
-		ResolveIssuerKeys: func(_ context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+		ResolveIssuerKeys: func(_ context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
 			h.hookCalls.Add(1)
-			h.hookIss.Store(issuer)
-			h.hookHdr.Store(header)
+			h.hookIss.Store(request.Issuer)
+			h.hookHdr.Store(request.Header)
 			return keys, nil
 		},
 	}
@@ -667,7 +667,7 @@ func TestCheckReferenceRefusesUnresolvedKeys(t *testing.T) {
 	hookFailure := errors.New("jwks endpoint unreachable")
 	resolveWith := func(keys []jose.JSONWebKey, err error) func(*harness, *Checker) {
 		return func(_ *harness, c *Checker) {
-			c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+			c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 				return keys, err
 			}
 		}
@@ -733,7 +733,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Algorithm = string(jose.ES384)
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -744,7 +744,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Use = "enc"
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -756,7 +756,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Algorithm = ""
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -916,7 +916,7 @@ func TestCheckReferenceAllowsCleartextOnlyWhenEnabled(t *testing.T) {
 	})
 	checker := &Checker{
 		Now: func() time.Time { return testNow },
-		ResolveIssuerKeys: func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+		ResolveIssuerKeys: func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 			return []jose.JSONWebKey{publicJWK(key, "key-1")}, nil
 		},
 	}

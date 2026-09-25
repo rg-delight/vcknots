@@ -11,13 +11,14 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/credential/statuslist"
 )
 
 // The adapters are handed to hooks whose signatures the rest of the library
 // fixes; these assignments fail to compile if either drifts.
 var (
-	_ func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)                      = (&KeyLookup{}).Keys
-	_ func(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) = (&Resolver{}).StatusListKeyFunc(Request{}, nil)
+	_ func(issuer string, header map[string]any) ([]jose.JSONWebKey, error) = (&KeyLookup{}).Keys
+	_ statuslist.ResolveIssuerKeysFunc                                      = (&Resolver{}).StatusListKeyFunc(Request{}, nil)
 )
 
 func TestKeyLookup(t *testing.T) {
@@ -330,7 +331,7 @@ func TestStatusListKeys(t *testing.T) {
 		f := newStatusListFixture(t)
 		template := f.template()
 		template.IssuerMetadataJWKS = keySet(jose.JSONWebKey{Key: f.metadata.private, KeyID: "metadata-key"})
-		keys, err := f.resolver.StatusListKeyFunc(template, nil)(context.Background(), f.issuer, map[string]any{"alg": "ES256"})
+		keys, err := f.resolver.StatusListKeyFunc(template, nil)(context.Background(), statuslist.KeyRequest{Issuer: f.issuer, Header: map[string]any{"alg": "ES256"}})
 		if err != nil {
 			t.Fatalf("StatusListKeyFunc failed: %v", err)
 		}

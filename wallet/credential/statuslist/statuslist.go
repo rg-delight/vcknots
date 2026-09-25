@@ -59,6 +59,7 @@ import (
 	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // maxStatusListRedirects bounds the redirects one Status List Token retrieval
@@ -149,17 +150,35 @@ type Status struct {
 	CheckedAt time.Time
 }
 
+// KeyRequest is what the Checker asks its ResolveIssuerKeys hook for: the
+// candidate public keys a Status List Token may be verified under.
+type KeyRequest struct {
+	// Issuer is the issuer whose keys are wanted: the credential issuer the
+	// caller passed to Check, or the Status Issuer that
+	// Checker.AcceptStatusIssuer accepted. It is never taken from the token
+	// alone. It is empty when the credential carries no `iss`, whose Issuer is
+	// then the subject of its x5c leaf certificate (SD-JWT VC -19 Section
+	// 2.5): the hook must then bind the token to that certificate itself.
+	Issuer string
+	// Header is the token's decoded protected header (JSON numbers appear as
+	// float64). It is unauthenticated at the time of the call and must be
+	// treated as a hint for selecting keys, never as a fact.
+	Header map[string]any
+	// X5C are the x5c rules of the Checker's profile
+	// (profile.Options.StatusListTokenX5C, HAIP 1.0 Section 6.1). The Checker
+	// enforces Require and RejectSelfSigned itself; ExcludeAnchor needs the
+	// hook's trust anchors, so a hook that validates an x5c chain must refuse
+	// a chain carrying one of them, with an error wrapping
+	// ErrStatusListCertificateRejected. Under Require the hook must return
+	// only the leaf key of a chain it validated.
+	X5C profile.X5CRules
+}
+
 // ResolveIssuerKeysFunc returns the candidate public keys of a Status List
-// Token issuer. issuer is the credential issuer the caller passed to Check, or
-// the Status Issuer that Checker.AcceptStatusIssuer accepted. It is empty when
-// the credential carries no `iss`, whose Issuer is then the subject of its x5c
-// leaf certificate (SD-JWT VC -19 Section 2.5): the hook must then bind the
-// token to that certificate subject itself. It is never taken from the token
-// alone. header is the token's decoded protected header (JSON
-// numbers appear as float64); it is unauthenticated at the time of the call and
-// must be treated as a hint for selecting keys, never as a fact. Returning no
-// key, or an error, makes the check fail with ErrStatusListIssuerKeyUnresolved.
-type ResolveIssuerKeysFunc func(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error)
+// Token issuer (see KeyRequest). Returning no key, or an error, makes the
+// check fail with ErrStatusListIssuerKeyUnresolved; an error wrapping
+// ErrStatusListCertificateRejected fails it with that sentinel instead.
+type ResolveIssuerKeysFunc func(ctx context.Context, request KeyRequest) ([]jose.JSONWebKey, error)
 
 // Checker fetches and verifies Status List Tokens. The zero value is usable
 // except for ResolveIssuerKeys, without which no token can be authenticated and
@@ -210,8 +229,22 @@ type Checker struct {
 	// AllowHTTP permits a cleartext Status List endpoint for a local test.
 	// Status List Tokens are signed, so cleartext does not let a network
 	// attacker forge a verdict, but it does let one observe which credential is
-	// being checked; it stays off outside a test.
+	// being checked; it stays off outside a test. A Profile whose options
+	// carry ForbidInsecureTransports ignores it.
 	AllowHTTP bool
+	// Profile is the protocol profile the check runs under. The zero value is
+	// profile.Final(), which adds nothing to draft-ietf-oauth-status-list.
+	// Its Options().StatusListTokenX5C applies HAIP 1.0 Section 6.1: "The
+	// public key used to validate the signature on the Status List Token
+	// ... MUST be included in the x5c JOSE header of the Token. The X.509
+	// certificate of the trust anchor MUST NOT be included in the x5c JOSE
+	// header of the Status List Token. The X.509 certificate signing the
+	// request MUST NOT be self-signed." Require refuses a token without x5c
+	// and a verifying key that is not the x5c leaf's; RejectSelfSigned a
+	// self-signed leaf; ExcludeAnchor is passed to ResolveIssuerKeys, which
+	// holds the anchors (KeyRequest.X5C). Failures are
+	// ErrStatusListCertificateRejected.
+	Profile profile.Profile
 }
 
 // ParseReference reads the `status_list` member of a credential's `status`
@@ -277,7 +310,8 @@ func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map
 // step would have rejected anyway, and a hostile endpoint never reaches a stage
 // its token had not yet earned.
 func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, reference Reference) (*Status, error) {
-	endpoint, err := parseStatusListURI(reference.URI, c.AllowHTTP)
+	options := c.Profile.Options()
+	endpoint, err := parseStatusListURI(reference.URI, c.allowHTTP())
 	if err != nil {
 		return nil, err
 	}
@@ -304,6 +338,10 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 	}
 
 	keyID, _ := header["kid"].(string)
+	leaf, err := checkX5CRules(header, options.StatusListTokenX5C)
+	if err != nil {
+		return nil, err
+	}
 
 	signed, err := jose.ParseSignedCompact(token, algorithms)
 	if err != nil {
@@ -328,9 +366,14 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 	if err != nil {
 		return nil, err
 	}
-	keys, err := c.resolveIssuerKeys(ctx, issuer, header)
+	keys, err := c.resolveIssuerKeys(ctx, KeyRequest{Issuer: issuer, Header: header, X5C: options.StatusListTokenX5C})
 	if err != nil {
 		return nil, err
+	}
+	if options.StatusListTokenX5C.Require {
+		if keys, err = leafKeysOnly(keys, leaf); err != nil {
+			return nil, err
+		}
 	}
 	payload, verifiedKeyID, err := verifySignature(signed, keys, keyID)
 	if err != nil {
@@ -388,6 +431,12 @@ func (c *Checker) statusIssuer(ctx context.Context, credentialIssuer, tokenIssue
 		return "", fmt.Errorf("%w: token iss %q is not accepted for the credential issuer %q: %w", ErrStatusListIssuerMismatch, tokenIssuer, credentialIssuer, err)
 	}
 	return tokenIssuer, nil
+}
+
+// allowHTTP reports whether a cleartext endpoint is permitted: AllowHTTP,
+// unless the profile forbids the test-only transport escapes.
+func (c *Checker) allowHTTP() bool {
+	return c.AllowHTTP && !c.Profile.Options().ForbidInsecureTransports
 }
 
 func (c *Checker) now() time.Time {
@@ -534,7 +583,7 @@ func (c *Checker) get(ctx context.Context, endpoint *url.URL) (*http.Response, e
 			return nil, fmt.Errorf("%w: redirect location is not a URI: %w", ErrStatusListFetchFailed, err)
 		}
 		next.Fragment, next.RawFragment = "", ""
-		if err := checkRedirectTarget(next, c.AllowHTTP); err != nil {
+		if err := checkRedirectTarget(next, c.allowHTTP()); err != nil {
 			return nil, err
 		}
 		target = next

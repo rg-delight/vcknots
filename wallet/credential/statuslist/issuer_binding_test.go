@@ -39,9 +39,9 @@ func TestCheckBindsTheTokenToTheCredentialIssuerByKey(t *testing.T) {
 		checker := &Checker{
 			HTTPClient: h.server.Client(),
 			Now:        func() time.Time { return testNow },
-			ResolveIssuerKeys: func(_ context.Context, issuer string, _ map[string]any) ([]jose.JSONWebKey, error) {
-				resolved = append(resolved, issuer)
-				return registry[issuer], nil
+			ResolveIssuerKeys: func(_ context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
+				resolved = append(resolved, request.Issuer)
+				return registry[request.Issuer], nil
 			},
 		}
 		return h, checker, &resolved

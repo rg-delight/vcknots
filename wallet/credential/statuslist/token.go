@@ -3,6 +3,7 @@ package statuslist
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
+	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // tokenClaims is the verified payload of a Status List Token, reduced to the
@@ -193,11 +196,15 @@ func optionalIssuer(claims map[string]any) (string, error) {
 // hold in this path, and a symmetric key would turn the signature check into a
 // MAC check that proves nothing about the issuer. Both describe the caller's
 // configuration, so they are reported as ErrStatusListIssuerKeyUnresolved.
-func (c *Checker) resolveIssuerKeys(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+func (c *Checker) resolveIssuerKeys(ctx context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
+	issuer := request.Issuer
 	if c.ResolveIssuerKeys == nil {
 		return nil, fmt.Errorf("%w: no issuer key resolver is configured", ErrStatusListIssuerKeyUnresolved)
 	}
-	keys, err := c.ResolveIssuerKeys(ctx, issuer, header)
+	keys, err := c.ResolveIssuerKeys(ctx, request)
+	if errors.Is(err, ErrStatusListCertificateRejected) {
+		return nil, fmt.Errorf("%w: issuer %q: %w", ErrStatusListCertificateRejected, issuer, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolving keys for issuer %q: %w", ErrStatusListIssuerKeyUnresolved, issuer, err)
 	}
@@ -363,4 +370,54 @@ func numericDateClaim(claims map[string]any, name string) (time.Time, bool, erro
 		return time.Time{}, true, fmt.Errorf("%w: %w", ErrStatusListTokenInvalid, err)
 	}
 	return at, present, nil
+}
+
+// checkX5CRules applies the profile's Status List Token x5c rules that need no
+// trust anchor (HAIP 1.0 Section 6.1) to the unauthenticated header, before
+// any key is resolved, and returns the decoded leaf certificate when the
+// header carries an x5c. Require refuses a token without x5c; RejectSelfSigned
+// a self-signed leaf. A malformed x5c is refused whenever a rule applies. With
+// no rule, x5c is left to the key resolution hook.
+func checkX5CRules(header map[string]any, rules profile.X5CRules) (*x509.Certificate, error) {
+	if rules == (profile.X5CRules{}) {
+		return nil, nil
+	}
+	raw, present := header["x5c"]
+	if !present {
+		if rules.Require {
+			return nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", ErrStatusListCertificateRejected)
+		}
+		return nil, nil
+	}
+	chain, err := commonX509.DecodeX5CChain(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStatusListCertificateRejected, err)
+	}
+	if rules.RejectSelfSigned {
+		if err := commonX509.RequireNonSelfSignedLeaf(chain, "status list token"); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStatusListCertificateRejected, err)
+		}
+	}
+	return chain[0], nil
+}
+
+// leafKeysOnly keeps the keys that are the x5c leaf's public key, for a
+// profile that requires "the public key used to validate the signature" to be
+// "included in the x5c JOSE header" (HAIP 1.0 Section 6.1). A hook that
+// returns any other key has not resolved the key from the x5c header.
+func leafKeysOnly(keys []jose.JSONWebKey, leaf *x509.Certificate) ([]jose.JSONWebKey, error) {
+	if leaf == nil {
+		return nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", ErrStatusListCertificateRejected)
+	}
+	leafKey := jose.JSONWebKey{Key: leaf.PublicKey}
+	var matching []jose.JSONWebKey
+	for _, key := range keys {
+		if equal, err := commonjose.EqualPublicKey(key, leafKey); err == nil && equal {
+			matching = append(matching, key)
+		}
+	}
+	if len(matching) == 0 {
+		return nil, fmt.Errorf("%w: no resolved key is the x5c leaf certificate's key", ErrStatusListCertificateRejected)
+	}
+	return matching, nil
 }

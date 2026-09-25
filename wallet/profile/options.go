@@ -25,8 +25,11 @@ type Options struct {
 	// anchor, RejectSelfSigned a self-signed leaf.
 	// HAIP 1.0 §6.1.1 (Issuer identification and key resolution).
 	IssuerX5C X5CRules
-	// StatusListTokenX5C applies to the signature of a Status List Token.
-	// It is not enforced yet: the status list client does not consult it.
+	// StatusListTokenX5C applies to the signature of a Status List Token,
+	// through statuslist.Checker.Profile: Require makes the x5c leaf key the
+	// only verifying key, RejectSelfSigned refuses a self-signed leaf, and
+	// ExcludeAnchor (enforced by the key resolution hook, which holds the
+	// anchors) a chain carrying a trust anchor.
 	// HAIP 1.0 §6.1 (IETF SD-JWT VC Profile).
 	StatusListTokenX5C X5CRules
 
