@@ -45,8 +45,9 @@ type exchange struct {
 	resourceServer bool
 	// dpopNonceSource marks an exchange without a DPoP proof whose
 	// DPoP-Nonce response header is meant for later proofs: the OpenID4VCI
-	// 1.0 Section 7.2 Nonce Response. The nonce is kept unattributed until a
-	// key claims it.
+	// 1.0 Section 7.2 Nonce Response and the challenge endpoint response
+	// (draft-ietf-oauth-attestation-based-client-auth-11 Section 6.3). The
+	// nonce is kept unattributed until a key claims it.
 	dpopNonceSource bool
 	// limit bounds the response body; zero means httpfetch.DefaultBodyLimit.
 	limit int64

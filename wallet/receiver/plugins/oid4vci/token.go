@@ -219,10 +219,12 @@ func requireClientAssertionPrerequisites(endpointURL url.URL, clientID string, a
 }
 
 // FetchClientAttestationChallenge fetches a challenge from the authorization
-// server's challenge endpoint. ctx bounds the request.
+// server's challenge endpoint. ctx bounds the request. A DPoP-Nonce the
+// response carries is kept for the next DPoP proof to that authorization
+// server (draft-ietf-oauth-attestation-based-client-auth-11 Section 6.3).
 func (o *Oid4vciReceiver) FetchClientAttestationChallenge(ctx context.Context, endpoint common.URIField) (*types.ClientAttestationChallengeResponse, error) {
 	var response types.ClientAttestationChallengeResponse
-	if err := o.doJSON(observe.WithEndpoint(ctx, observe.EndpointAttestationChallenge), exchange{method: http.MethodPost, url: url.URL(endpoint)}, &response); err != nil {
+	if err := o.doJSON(observe.WithEndpoint(ctx, observe.EndpointAttestationChallenge), exchange{method: http.MethodPost, url: url.URL(endpoint), dpopNonceSource: true}, &response); err != nil {
 		return nil, fmt.Errorf("failed to fetch client attestation challenge: %w", err)
 	}
 	return &response, nil
