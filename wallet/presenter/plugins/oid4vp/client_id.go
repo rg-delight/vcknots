@@ -62,12 +62,16 @@ func (c *OID4VPClientID) Original() string {
 
 // RequiresRequestObjectSignature reports whether the prefix itself can only be
 // authenticated by a signed Request Object: x509_san_dns, x509_hash and
-// verifier_attestation (OID4VP 1.0 §5.9.3). The parse entry points refuse
-// such a request in plain parameters with ErrRequestObjectSignatureRequired.
+// verifier_attestation (OID4VP 1.0 §5.9.3), and openid_federation, whose
+// Relying Party "MUST demonstrate that the requesting Entity controls the
+// Entity's RP keys" by signing the request (OpenID Federation 1.0 §12.1.1).
+// The parse entry points refuse such a request in plain parameters with
+// ErrRequestObjectSignatureRequired.
 func (c *OID4VPClientID) RequiresRequestObjectSignature() bool {
 	return c.prefix == OID4VPClientIDPrefixX509SanDNS ||
 		c.prefix == OID4VPClientIDPrefixX509Hash ||
-		c.prefix == OID4VPClientIDPrefixVerifierAttestation
+		c.prefix == OID4VPClientIDPrefixVerifierAttestation ||
+		c.prefix == OID4VPClientIDPrefixOIDFederation
 }
 
 // parseOID4VPClientID is the package-internal spelling of ParseOID4VPClientID.

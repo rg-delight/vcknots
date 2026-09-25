@@ -15,12 +15,12 @@ func TestParseOID4VPClientIDExported(t *testing.T) {
 		clientID   string
 		wantPrefix OID4VPClientIDPrefix
 		wantOrigin string
-		wantX509   bool
+		wantSigned bool
 	}{
-		{name: "x509 san dns", clientID: "x509_san_dns:verifier.example", wantPrefix: OID4VPClientIDPrefixX509SanDNS, wantOrigin: "verifier.example", wantX509: true},
-		{name: "x509 hash", clientID: "x509_hash:abcd", wantPrefix: OID4VPClientIDPrefixX509Hash, wantOrigin: "abcd", wantX509: true},
+		{name: "x509 san dns", clientID: "x509_san_dns:verifier.example", wantPrefix: OID4VPClientIDPrefixX509SanDNS, wantOrigin: "verifier.example", wantSigned: true},
+		{name: "x509 hash", clientID: "x509_hash:abcd", wantPrefix: OID4VPClientIDPrefixX509Hash, wantOrigin: "abcd", wantSigned: true},
 		{name: "redirect uri", clientID: "redirect_uri:https://verifier.example/cb", wantPrefix: OID4VPClientIDPrefixRedirectURI, wantOrigin: "https://verifier.example/cb"},
-		{name: "federation", clientID: "openid_federation:https://verifier.example", wantPrefix: OID4VPClientIDPrefixOIDFederation, wantOrigin: "https://verifier.example"},
+		{name: "federation", clientID: "openid_federation:https://verifier.example", wantPrefix: OID4VPClientIDPrefixOIDFederation, wantOrigin: "https://verifier.example", wantSigned: true},
 		{name: "pre registered", clientID: "known-verifier", wantPrefix: OID4VPClientIDPrefixPreRegistered, wantOrigin: "known-verifier"},
 	}
 	for _, testCase := range testCases {
@@ -35,8 +35,8 @@ func TestParseOID4VPClientIDExported(t *testing.T) {
 			if parsed.Original() != testCase.wantOrigin {
 				t.Fatalf("original = %q, want %q", parsed.Original(), testCase.wantOrigin)
 			}
-			if parsed.RequiresRequestObjectSignature() != testCase.wantX509 {
-				t.Fatalf("RequiresRequestObjectSignature() = %v, want %v", parsed.RequiresRequestObjectSignature(), testCase.wantX509)
+			if parsed.RequiresRequestObjectSignature() != testCase.wantSigned {
+				t.Fatalf("RequiresRequestObjectSignature() = %v, want %v", parsed.RequiresRequestObjectSignature(), testCase.wantSigned)
 			}
 		})
 	}

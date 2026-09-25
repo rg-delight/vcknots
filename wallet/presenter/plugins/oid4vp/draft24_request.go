@@ -126,10 +126,6 @@ func (b *draft24RequestBuilder) WithQueryParams(params map[string][]string) *dra
 		b.errValidation = err
 		return b
 	}
-	if err := b.authenticateUnsignedFederationRequest(b.parseClientID, singleParams); err != nil {
-		b.errValidation = err
-		return b
-	}
 	return b
 }
 

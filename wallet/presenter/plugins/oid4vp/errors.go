@@ -66,8 +66,8 @@ var (
 	// plain parameters from a Verifier that can only be authenticated by a
 	// signed Request Object: the x509_san_dns, x509_hash and
 	// verifier_attestation prefixes (OID4VP 1.0 §5.9.3), openid_federation
-	// unless FederationTrustOptions.AllowUnsignedRequests is set, and a
-	// pre-registered client with RequireSignedRequestObject.
+	// (OpenID Federation 1.0 §12.1.1), and a pre-registered client with
+	// RequireSignedRequestObject.
 	ErrRequestObjectSignatureRequired = common.NewCodedError("request_object_signature_required", "this client identifier requires a signed Request Object")
 	// ErrAuthorizationRequestInvalid reports an Authorization Request the
 	// Wallet refused for a reason no more specific error names. The parse

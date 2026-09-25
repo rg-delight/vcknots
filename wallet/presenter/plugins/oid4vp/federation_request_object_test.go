@@ -318,32 +318,27 @@ func requireErrorIs(t *testing.T, err, want error) {
 }
 
 // An unsigned openid_federation request authenticates nothing about the
-// request itself, so it is refused before any Trust Chain is resolved unless
-// the Wallet opts in with AllowUnsignedRequests.
-func TestFederationUnsignedRequestNeedsOptIn(t *testing.T) {
+// Verifier: OpenID Federation 1.0 §12.1.1 requires the request to demonstrate
+// control of the RP keys and rejects one that does not. It is refused before
+// any Trust Chain is resolved, on both wire contracts.
+func TestFederationUnsignedRequestIsRefused(t *testing.T) {
 	f := newFederationRequestFixture(t)
 	query := url.Values{
 		"client_id": {f.clientID()}, "response_type": {"vp_token"}, "response_mode": {"direct_post"},
 		"response_uri": {federationResponseURI}, "nonce": {"n"},
 		"dcql_query": {`{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eudi:pid:1"]}}]}`},
 	}
-	uri := "openid4vp://authorize?" + query.Encode()
-
 	options := f.options()
-	refusing := &Oid4vpPresenter{HTTPClient: offlineClient(t), RequestObjectValidation: &options}
-	if _, err := refusing.ParsePresentationRequest(uri); !errors.Is(err, ErrRequestObjectSignatureRequired) {
+	presenter := &Oid4vpPresenter{HTTPClient: offlineClient(t), RequestObjectValidation: &options}
+	if _, err := presenter.ParsePresentationRequest("openid4vp://authorize?" + query.Encode()); !errors.Is(err, ErrRequestObjectSignatureRequired) {
 		t.Fatalf("want ErrRequestObjectSignatureRequired, got %v", err)
 	}
 
-	allowing := f.options()
-	allowing.Federation.AllowUnsignedRequests = true
-	presenter := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &allowing}
-	request, err := presenter.ParsePresentationRequest(uri)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if request.VerifierFederation == nil || request.VerifierFederation.SubjectEntityID != f.verifierID {
-		t.Fatalf("missing federation evidence: %+v", request.VerifierFederation)
+	query.Set("client_id", f.verifierID)
+	query.Del("dcql_query")
+	query.Set("presentation_definition", `{"id":"pd","input_descriptors":[{"id":"pid"}]}`)
+	if _, err := parseDraft24ForTest(presenter, "openid4vp://authorize?"+query.Encode()); !errors.Is(err, ErrRequestObjectSignatureRequired) {
+		t.Fatalf("Draft 24: want ErrRequestObjectSignatureRequired, got %v", err)
 	}
 }
 

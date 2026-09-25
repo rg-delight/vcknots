@@ -147,10 +147,6 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 		b.errValidation = err
 		return b
 	}
-	if err := b.authenticateUnsignedFederationRequest(b.parseClientID, singleParams); err != nil {
-		b.errValidation = err
-		return b
-	}
 
 	return b
 }
