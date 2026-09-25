@@ -440,8 +440,8 @@ func (c *requestCore) requireWalletNonceEcho(verified commonJOSE.Claims) error {
 // Request Object: the Client Identifier binding to the leaf and the response
 // endpoint (OID4VP 1.0 §5.9.3), the signature, the wallet_nonce echo, the
 // claim policy and the certificate chain. verifyChain false is the
-// InsecureSkipX509Verify mode, which checks only the binding and the
-// signature. c.req must already hold the request parameters.
+// ExperimentalOptions.InsecureSkipX509Verify mode, which checks only the
+// binding and the signature. c.req must already hold the request parameters.
 func (c *requestCore) authenticateX509RequestObject(obj string, parsed *jwt.JSONWebToken, options RequestObjectValidationOptions, verifyChain bool) error {
 	clientID, err := parseOID4VPClientID(c.req.ClientID)
 	if err != nil {

@@ -10,8 +10,9 @@ import "strings"
 // Options is comparable, so a Profile is comparable too.
 type Options struct {
 	// ForbidInsecureTransports refuses the test-only transport escapes of the
-	// protocol plugins: AllowHTTP on the OpenID4VCI receiver and on the
-	// OpenID4VP presenter, and InsecureSkipX509Verify on the presenter.
+	// protocol plugins: AllowHTTP on the OpenID4VCI receiver, and the
+	// experimental AllowHTTP and InsecureSkipX509Verify of the OpenID4VP
+	// presenter (oid4vp.ExperimentalOptions).
 	// HAIP 1.0 §4 (FAPI 2.0 TLS) and §5 (x509_hash Verifier authentication).
 	ForbidInsecureTransports bool
 	// AllowedCredentialFormats restricts the Credential Format Identifiers a

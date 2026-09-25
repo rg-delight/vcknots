@@ -182,7 +182,7 @@ func TestDraft24X509SanDNSRequiresTrustedChain(t *testing.T) {
 // both direct_post modes.
 func TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
-	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: true}
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, ExperimentalOptions{InsecureSkipX509Verify: true})
 	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
 		t.Run(mode, func(t *testing.T) {
 			claims := f.draft24Claims()

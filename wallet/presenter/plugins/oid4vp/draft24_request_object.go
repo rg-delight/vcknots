@@ -7,9 +7,10 @@ import (
 // withRequestObject authenticates a Draft 24 Request Object and loads its
 // claims. The key that verifies it comes from what the Client Identifier
 // Scheme names (Draft 24 §5.10.4): the x5c chain for x509_san_dns, which
-// InsecureSkipX509Verify reduces to the binding and signature checks, the
-// attestation for verifier_attestation, the Trust Chain for an https Entity
-// Identifier, and the registration for a pre-registered client. Draft 24 §5.1
+// ExperimentalOptions.InsecureSkipX509Verify reduces to the binding and
+// signature checks, the attestation for verifier_attestation, the Trust Chain
+// for an https Entity Identifier, and the registration for a pre-registered
+// client. Draft 24 §5.1
 // forbids the client_metadata keys: "Public keys included in this parameter
 // MUST NOT be used to verify the signature of signed Authorization Requests",
 // and the redirect_uri scheme states "The Authorization Request MUST NOT be

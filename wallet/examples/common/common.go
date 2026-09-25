@@ -152,9 +152,11 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 	}
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           env.IsHTTPAllowed(),
 		X509TrustChainRoots: certPool,
 	}
+	// The sample verifier listens on plain http; that is outside OpenID4VP
+	// and is opted into explicitly.
+	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: env.IsHTTPAllowed()})
 	presenterDispatcher, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)

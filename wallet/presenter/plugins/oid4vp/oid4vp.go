@@ -20,17 +20,11 @@ import (
 // Oid4vpPresenter is the OpenID4VP presenter plugin. Its fields configure the
 // HTTP client, trust and protocol policy applied to requests and responses.
 type Oid4vpPresenter struct {
-	HTTPClient *http.Client
-	// AllowHTTP permits HTTP response endpoints for a local test verifier.
-	AllowHTTP           bool
+	HTTPClient          *http.Client
 	X509TrustChainRoots *x509.CertPool
 	// RequestObjectValidation selects explicit trust, time and signing policy
 	// for Final. X509TrustChainRoots remains available for existing consumers.
 	RequestObjectValidation *RequestObjectValidationOptions
-	// InsecureSkipX509Verify skips certificate verification for testing purposes.
-	// WARNING: This should NEVER be set to true in production environments.
-	// This is only for conformance testing with self-signed or non-standard certificates.
-	InsecureSkipX509Verify bool
 	// Profile is the OpenID4VP 1.0 profile whose Options the presenter
 	// applies. The zero value is profile.Final(), which adds no constraint;
 	// profile.HAIP() enforces HAIP 1.0 on the 1.0 path. The Draft24
@@ -67,12 +61,10 @@ type Oid4vpPresenter struct {
 	// is chosen by an unauthenticated request, and a caller that wants to
 	// answer it calls AuthorizationRequestError.SendErrorResponse itself.
 	SendParseErrorResponses bool
-	// RequireClientMetadataJWKKeyIDs refuses a client_metadata.jwks member
-	// without a kid (ErrClientMetadataJWKKeyIDMissing) or with a duplicate kid
-	// (ErrClientMetadataJWKKeyIDDuplicate), as OID4VP 1.0 §5.1 requires. The
-	// zero value accepts them: the Wallet selects the encryption key by use
-	// and alg, and Verifiers in the field omit kid.
-	RequireClientMetadataJWKKeyIDs bool
+
+	// experimental holds the non-conforming relaxations of
+	// SetExperimentalOptions; the zero value applies none.
+	experimental ExperimentalOptions
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -226,10 +218,13 @@ func (p *Oid4vpPresenter) profileOptions() (profile.Options, error) {
 func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) {
 	core.ctx = ctx
 	core.httpClient = p.httpClient()
-	core.allowHTTP = p.AllowHTTP
+	core.allowHTTP = p.experimental.AllowHTTP
 	core.x509TrustChainRoots = p.X509TrustChainRoots
-	core.insecureSkipX509Verify = p.InsecureSkipX509Verify
-	core.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
+	core.insecureSkipX509Verify = p.experimental.InsecureSkipX509Verify
+	// OID4VP 1.0 §5.1: "Each JWK in the set MUST have a kid (Key ID)
+	// parameter that uniquely identifies the key within the context of the
+	// request." The Draft 24 builder clears it: Draft 24 has no such rule.
+	core.requireClientMetadataJWKKeyIDs = !p.experimental.AcceptClientMetadataJWKsWithoutKeyID
 	if p.PreRegisteredClients != nil || p.ResolvePreRegisteredClient != nil {
 		core.preRegistry = &preRegisteredRegistry{clients: p.PreRegisteredClients, resolve: p.ResolvePreRegisteredClient}
 	}
@@ -245,10 +240,10 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 	if err != nil {
 		return nil, err
 	}
-	if options.ForbidInsecureTransports && (p.AllowHTTP || p.InsecureSkipX509Verify) {
+	if options.ForbidInsecureTransports && (p.experimental.AllowHTTP || p.experimental.InsecureSkipX509Verify) {
 		// HAIP §5: the profile requires TLS verifier endpoints and verified
-		// X.509 request signing; the test-only escapes must not weaken it.
-		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
+		// X.509 request signing; the experimental escapes must not weaken it.
+		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify")
 	}
 	builder := NewRequestBuilder()
 	builder.options = options

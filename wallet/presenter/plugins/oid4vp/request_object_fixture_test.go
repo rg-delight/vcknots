@@ -221,13 +221,13 @@ type requestFixtureOptions struct {
 func (f *requestObjectFixture) presenterWith(opts requestFixtureOptions) *Oid4vpPresenter {
 	validation := f.options()
 	validation.RequireExpiry = opts.RequireExpiry
-	return &Oid4vpPresenter{
+	presenter := &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &validation,
 		Profile:                 opts.Profile,
-		AllowHTTP:               opts.AllowHTTP,
-		InsecureSkipX509Verify:  opts.Insecure,
 	}
+	presenter.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: opts.AllowHTTP, InsecureSkipX509Verify: opts.Insecure})
+	return presenter
 }
 
 // parseRequest signs the claims with the fixture certificate and parses the

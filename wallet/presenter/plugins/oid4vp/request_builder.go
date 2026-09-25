@@ -39,7 +39,11 @@ func (b *requestBuilder) settings() builderPolicy {
 // NewRequestBuilder creates a builder for OpenID4VP 1.0 Authorization
 // Requests under profile.Final(). WithProfile selects another profile.
 func NewRequestBuilder() *requestBuilder {
-	return &requestBuilder{requestCore: newRequestCore()}
+	core := newRequestCore()
+	// OID4VP 1.0 §5.1 requires a unique kid on every client_metadata.jwks
+	// member.
+	core.requireClientMetadataJWKKeyIDs = true
+	return &requestBuilder{requestCore: core}
 }
 
 // WithProfile selects the OpenID4VP 1.0 profile whose Options the builder
@@ -51,12 +55,6 @@ func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
 		return b
 	}
 	b.options = p.Options()
-	return b
-}
-
-// WithHTTPAllowed enables HTTP response endpoints for local tests only.
-func (b *requestBuilder) WithHTTPAllowed(allow bool) *requestBuilder {
-	b.allowHTTP = allow
 	return b
 }
 

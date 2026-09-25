@@ -93,6 +93,8 @@ func (p *Oid4vpPresenter) newDraft24RequestBuilder(ctx context.Context) (*draft2
 	}
 	builder := newDraft24RequestBuilder()
 	p.configureCore(ctx, &builder.requestCore)
+	// Draft 24 §5.1 does not require a kid on client_metadata.jwks members.
+	builder.requireClientMetadataJWKKeyIDs = false
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
 	builder.walletMetadata = p.WalletMetadata
 	builder.requestURINonce = p.RequestURINonce

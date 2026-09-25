@@ -373,7 +373,6 @@ func newWallet(config Config) (*Wallet, error) {
 
 	if config.Presenter == nil {
 		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{
-			AllowHTTP:                     env.IsHTTPAllowed(),
 			Profile:                       walletProfile,
 			SupportedTransactionDataTypes: slices.Clone(config.SupportedTransactionDataTypes),
 		}))

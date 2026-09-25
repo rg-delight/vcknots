@@ -217,7 +217,7 @@ func TestFinalRequestObjectRejectsUntrustedOrUnprovenAuthentication(t *testing.T
 	claims := f.claims()
 	uri := "openid4vp://authorize?" + url.Values{"client_id": []string{f.clientID()}, "request": []string{f.sign(t, claims, nil)}}.Encode()
 	for _, insecure := range []bool{false, true} {
-		p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: insecure}
+		p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, ExperimentalOptions{InsecureSkipX509Verify: insecure})
 		if _, err := p.ParsePresentationRequest(uri); err == nil {
 			t.Fatalf("untrusted leaf accepted with insecure=%v", insecure)
 		}
@@ -239,7 +239,7 @@ func TestFinalRequestObjectRejectsUntrustedOrUnprovenAuthentication(t *testing.T
 		}
 	}
 	claims["client_id"] = "redirect_uri:https://verifier.example/response"
-	claims["client_metadata"] = map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, Algorithm: "ES256"}}}}
+	claims["client_metadata"] = map[string]any{"jwks": jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, KeyID: "signing", Algorithm: "ES256"}}}}
 	token := f.sign(t, claims, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt"))
 	uri = "openid4vp://authorize?" + url.Values{
 		"client_id": []string{"redirect_uri:https://verifier.example/response"},

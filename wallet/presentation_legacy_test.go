@@ -20,6 +20,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/jwtvc"
@@ -131,11 +132,24 @@ func TestController_ParsePresentationRequest_RejectsNonHTTPSResponseURI(t *testi
 	assert.ErrorContains(t, err, "response_uri must use https scheme")
 }
 
-func TestController_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
+// TestController_DefaultPresenterIgnoresTheHTTPEnvironment: plain http is an
+// experimental relaxation a caller opts into in code
+// (oid4vp.ExperimentalOptions); the environment no longer relaxes the default
+// presenter.
+func TestController_DefaultPresenterIgnoresTheHTTPEnvironment(t *testing.T) {
+	t.Setenv(env.HTTP_ALLOWED.String(), "true")
 	controller := createTestControllerWithDefaults(t)
+	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
+	uri := fmt.Sprintf(
+		"openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=%s&response_mode=direct_post&response_uri=http://example.com/response",
+		dcqlQuery,
+	)
+	_, err := controller.ParsePresentationRequest(t.Context(), uri)
+	assert.ErrorContains(t, err, "response_uri must use https scheme")
+}
+
+func TestController_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
+	controller := createTestControllerWithHTTPPresenter(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 	uri := fmt.Sprintf(
@@ -234,10 +248,7 @@ func TestWallet_SelectCredentialsForConsent(t *testing.T) {
 }
 
 func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerWithHTTPPresenter(t)
 	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	holderKey := &realSigningKeyEntry{id: "holder-key-1", key: holderPrivateKey}
@@ -573,11 +584,28 @@ func TestNewestCredentials_ReturnsEntriesInDescendingReceivedAtOrder(t *testing.
 	assert.Equal(t, "second", selected[1].Entry.Id)
 }
 
+// createTestControllerWithHTTPPresenter is createTestControllerWithDefaults
+// with a presenter that accepts the plain-http verifiers of these tests, which
+// is outside OpenID4VP and opted into with oid4vp.ExperimentalOptions.
+func createTestControllerWithHTTPPresenter(t *testing.T) *Wallet {
+	t.Helper()
+	tempConfigDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
+	t.Setenv("HOME", tempConfigDir)
+	plugin := &oid4vp.Oid4vpPresenter{}
+	plugin.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})
+	dispatcher, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, plugin))
+	require.NoError(t, err)
+	controller, err := NewWalletWithConfig(Config{Presenter: dispatcher})
+	require.NoError(t, err)
+	return controller
+}
+
 func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry) {
 	t.Helper()
 	t.Setenv(env.DEBUG.String(), "")
 	t.Setenv(env.HTTP_ALLOWED.String(), "true")
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerWithHTTPPresenter(t)
 	issuer, _, closeServer := newReceiveCredentialTestServer(t)
 	t.Cleanup(closeServer)
 	key := newMockKeyEntry()

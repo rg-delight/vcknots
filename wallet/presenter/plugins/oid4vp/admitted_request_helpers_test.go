@@ -19,6 +19,13 @@ func admittedRequest(handle types.AdmittedRequest, err error) (*CredentialPresen
 	return handle.(*AdmittedRequest).req, nil
 }
 
+// withExperimental applies options to p, for a test that needs a local http
+// verifier or another experimental relaxation.
+func withExperimental(p *Oid4vpPresenter, options ExperimentalOptions) *Oid4vpPresenter {
+	p.SetExperimentalOptions(options)
+	return p
+}
+
 func parseDraft24ForTest(p *Oid4vpPresenter, uri string) (*CredentialPresentationRequest, error) {
 	return admittedRequest(p.ParseDraft24Request(context.Background(), uri))
 }

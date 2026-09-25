@@ -558,7 +558,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 		"registered-client": {},
 	}}
 
-	p.AllowHTTP = false
+	p.SetExperimentalOptions(ExperimentalOptions{})
 
 	tests := []struct {
 		name    string
@@ -657,7 +657,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 }
 
 func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
-	p := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
+	p := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
 
 	newErrorCapturingServer := func(t *testing.T) (*httptest.Server, *url.Values) {
 		t.Helper()
@@ -802,7 +802,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 			server, captured := newErrorCapturingServer(t)
 			defer server.Close()
 
-			presenter := &Oid4vpPresenter{AllowHTTP: true, SendParseErrorResponses: true}
+			presenter := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
 			if unbound.register {
 				presenter.PreRegisteredClients = map[string]PreRegisteredClient{unbound.clientID: {}}
 			}
@@ -832,7 +832,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		server, captured := newErrorCapturingServer(t)
 		defer server.Close()
 
-		presenter := &Oid4vpPresenter{AllowHTTP: true}
+		presenter := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
 		_, err := presenter.ParsePresentationRequest(baseURI(server.URL, "&dcql_query=%7B%22credentials%22%3A%5B%5D%7D"))
 		var authzErr *AuthorizationRequestError
 		if !errors.As(err, &authzErr) || authzErr.Code != InvalidRequestError {
@@ -890,7 +890,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	p := &Oid4vpPresenter{}
 
-	p.AllowHTTP = true
+	p.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: true})
 
 	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response"
 	req, err := p.ParsePresentationRequest(uri)
@@ -1208,6 +1208,13 @@ func TestOid4vpPresenter_RequestObject_WithX5C_X509Hash(t *testing.T) {
 	}
 }
 
+// httpAllowedBuilder is a 1.0 builder that accepts the http mock server.
+func httpAllowedBuilder() *requestBuilder {
+	builder := NewRequestBuilder()
+	builder.allowHTTP = true
+	return builder
+}
+
 func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 	// mockserver is HTTP-only; allow http scheme for these tests.
 
@@ -1227,7 +1234,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 
 		requestObjectURI, _ := url.Parse(m.URL() + "/request-object")
 
-		rb := NewRequestBuilder().WithHTTPAllowed(true)
+		rb := httpAllowedBuilder()
 		rb.WithRequestObjectURI(requestObjectURI.String(), RequestURIMethodGET)
 		if !called {
 			t.Fatal("handler was not invoked")
@@ -1288,7 +1295,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 
 		requestObjectURI, _ := url.Parse(m.URL() + "/request-object")
 
-		rb := NewRequestBuilder().WithHTTPAllowed(true)
+		rb := httpAllowedBuilder()
 		rb.WithRequestObjectURI(requestObjectURI.String(), RequestURIMethodPOST)
 
 		if gotContentType != "application/x-www-form-urlencoded" {
@@ -1327,7 +1334,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			"file:///etc/passwd",
 			"data:text/plain,foo",
 		} {
-			rb := NewRequestBuilder().WithHTTPAllowed(true)
+			rb := httpAllowedBuilder()
 			rb.WithRequestObjectURI(badURI, RequestURIMethodGET)
 			if rb.errValidation == nil || !strings.Contains(rb.errValidation.Error(), "https required") {
 				t.Errorf("uri=%q: expected https-required error, got: %v", badURI, rb.errValidation)
