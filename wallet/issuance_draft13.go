@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/common"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -116,10 +117,22 @@ func (d *Draft13Issuance) checkOfferIssuer(transport receiverTypes.Draft13Transp
 	return nil
 }
 
+// draft13Discovery resolves Credential Issuer Metadata at the Draft 13
+// Section 11.2.2 location for discoverIssuance; the OpenID4VCI 1.0 Section
+// 12.2.2 location is never tried for a Draft 13 issuance.
+type draft13Discovery struct {
+	receiverTypes.Draft13Transport
+}
+
+// DiscoverCredentialIssuer is DiscoverDraft13CredentialIssuer.
+func (d draft13Discovery) DiscoverCredentialIssuer(ctx context.Context, issuer common.URIField) (*receiverTypes.CredentialIssuerMetadata, error) {
+	return d.DiscoverDraft13CredentialIssuer(ctx, issuer)
+}
+
 // discover resolves the metadata an offer points at and checks that every
 // offered configuration is described.
 func (d *Draft13Issuance) discover(ctx context.Context, transport receiverTypes.Draft13Transport, offer *CredentialOffer, hint string) (*issuanceDiscovery, error) {
-	discovery, err := d.w.discoverIssuance(ctx, transport, nil, offer.CredentialIssuer.String(), offeredAuthorizationServer(hint), true)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, nil, offer.CredentialIssuer.String(), offeredAuthorizationServer(hint), true)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +299,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err := d.w.checkAuthorizationState(a, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
-	discovery, err := d.w.discoverIssuance(ctx, transport, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +436,7 @@ func (d *Draft13Issuance) credentialStage(ctx context.Context, cache *issuanceMe
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	discovery, err := d.w.discoverIssuance(ctx, transport, cache, issuer, offeredAuthorizationServer(""), false)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, cache, issuer, offeredAuthorizationServer(""), false)
 	if err != nil {
 		return nil, nil, nil, err
 	}

@@ -17,7 +17,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -39,12 +38,6 @@ type Oid4vciReceiver struct {
 	// 12.2 does, and a profile with ForbidInsecureTransports refuses any
 	// other value.
 	Experimental experimental.Transport
-	// AppendedMetadataPathFallback retries Credential Issuer Metadata at the
-	// OpenID4VCI Draft 13 Section 11.2.2 location, the well-known path appended
-	// to an identifier that has a path, when the Section 12.2.2 location
-	// answers 404. It is off by default and never applies under
-	// Options.RequireWellKnownMetadataLocation.
-	AppendedMetadataPathFallback bool
 	// Profile is the OpenID4VCI 1.0 profile whose Options the receiver
 	// applies. The zero value is profile.Final(); profile.HAIP() enforces
 	// HAIP 1.0. A draft profile is refused (profile.ErrDraftProfile).
@@ -54,14 +47,6 @@ type Oid4vciReceiver struct {
 	// HAIP and accepts an unsigned application/json document in every profile;
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
-	// IssuerMetadataFederation resolves the Credential Issuer Metadata of an
-	// issuer whose metadata document is not found (404) from its OpenID
-	// Federation Entity: the openid_credential_issuer metadata derived from a
-	// Trust Chain to one of the resolver's TrustAnchors (OpenID Federation 1.0
-	// Section 6.1.4). A nil HTTPClient uses HTTPClient. Without a valid chain
-	// the fetch fails. It does not apply when IssuerMetadataSigning.Require is
-	// set, because the result is not Section 12.2.3 signed metadata.
-	IssuerMetadataFederation *federation.Resolver
 
 	// dpopNonceMu guards dpopNonces.
 	dpopNonceMu sync.Mutex

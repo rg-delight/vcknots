@@ -132,11 +132,18 @@ type Draft13CredentialTransport interface {
 }
 
 // Draft13Transport is everything an OpenID4VCI Draft 13 issuance needs from a
-// receiver plugin.
+// receiver plugin. A Draft 13 issuance resolves Credential Issuer Metadata
+// with DiscoverDraft13CredentialIssuer, never with the OpenID4VCI 1.0
+// DiscoverCredentialIssuer of IssuerDiscovery.
 type Draft13Transport interface {
 	IssuerDiscovery
 	AuthorizationTransport
 	Draft13CredentialTransport
+	// DiscoverDraft13CredentialIssuer resolves the Draft 13 Section 11.2
+	// Credential Issuer Metadata of issuer from the Section 11.2.2 location
+	// only: the well-known path appended to the identifier. Its
+	// credential_issuer equals issuer.
+	DiscoverDraft13CredentialIssuer(ctx context.Context, issuer common.URIField) (*CredentialIssuerMetadata, error)
 }
 
 // Draft13Proof is the Draft 13 Section 7.2.1 proof object; Draft 13 carries a

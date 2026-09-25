@@ -59,11 +59,6 @@ type Options struct {
 	// when the receiver configures no IssuerMetadataSigning of its own.
 	// HAIP 1.0 §4.1 (signed Issuer Metadata MUST be supported).
 	RequestSignedIssuerMetadata bool
-	// RequireWellKnownMetadataLocation retrieves Credential Issuer Metadata
-	// only from the OpenID4VCI 1.0 Section 12.2.2 location, disabling the
-	// receiver's AppendedMetadataPathFallback.
-	// HAIP 1.0 §4.1 (metadata retrieval per OpenID4VCI 1.0 §12.2.2).
-	RequireWellKnownMetadataLocation bool
 	// SignedMetadataX5C applies to the x5c header of signed Credential Issuer
 	// Metadata. The signer is always resolved from x5c; ExcludeAnchor and
 	// RejectSelfSigned add the HAIP certificate rules.
@@ -136,7 +131,6 @@ func HAIPOptions() Options {
 		RequireIssuerMetadataScopes:       true,
 		RequireNonceEndpointForKeyBinding: true,
 		RequestSignedIssuerMetadata:       true,
-		RequireWellKnownMetadataLocation:  true,
 		SignedMetadataX5C:                 all,
 		RequireClientAuthentication:       true,
 		AttestationX5C:                    all,
@@ -190,7 +184,6 @@ func (o Options) weakened(floor Options) []string {
 	flag("RequireIssuerMetadataScopes", o.RequireIssuerMetadataScopes, floor.RequireIssuerMetadataScopes)
 	flag("RequireNonceEndpointForKeyBinding", o.RequireNonceEndpointForKeyBinding, floor.RequireNonceEndpointForKeyBinding)
 	flag("RequestSignedIssuerMetadata", o.RequestSignedIssuerMetadata, floor.RequestSignedIssuerMetadata)
-	flag("RequireWellKnownMetadataLocation", o.RequireWellKnownMetadataLocation, floor.RequireWellKnownMetadataLocation)
 	rules("SignedMetadataX5C", o.SignedMetadataX5C, floor.SignedMetadataX5C)
 	flag("RequireClientAuthentication", o.RequireClientAuthentication, floor.RequireClientAuthentication)
 	rules("AttestationX5C", o.AttestationX5C, floor.AttestationX5C)

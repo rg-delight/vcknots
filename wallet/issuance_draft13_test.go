@@ -1245,3 +1245,34 @@ func TestDraft13RefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
 	require.NotNil(t, result.Notification)
 	require.Zero(t, draft13StoredCount(t, fixture.wallet))
 }
+
+// A Draft 13 issuance reads Credential Issuer Metadata from the Draft 13
+// Section 11.2.2 location only; the OpenID4VCI 1.0 Section 12.2.2 location of
+// an identifier with a path is never requested.
+func TestDraft13DiscoversMetadataAtTheDraft13LocationOnly(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	issuer, err := url.Parse(server.URL + "/tenant")
+	require.NoError(t, err)
+
+	fixture := newDraft13Fixture(t)
+	w := fixture.newWallet(t, func(c *Config) { c.Receiver = fixture.receiver(t, server.Client()) })
+	_, err = w.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), PreAuthorizedIssuanceRequest{CredentialOffer: &CredentialOffer{
+		CredentialIssuer:           issuer,
+		CredentialConfigurationIDs: []string{"any"},
+		Grants: map[string]*CredentialOfferGrant{
+			string(receiverTypes.PreAuthorizedCode): {PreAuthorizedCode: "code"},
+		},
+	}})
+	require.Error(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"/tenant/.well-known/openid-credential-issuer"}, paths)
+}
