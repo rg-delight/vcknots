@@ -72,8 +72,9 @@ type Oid4vpPresenter struct {
 
 	// Experimental relaxes the presenter beyond OpenID4VP for a local test
 	// verifier (package experimental). The zero value applies none. A profile
-	// with ForbidInsecureTransports (HAIP) refuses Transport and
-	// InsecureSkipX509Verify.
+	// with ForbidInsecureTransports (HAIP) refuses any non-zero value on every
+	// entry point: the OpenID4VP 1.0, Digital Credentials API, Draft 24 and
+	// re-admission parses.
 	Experimental experimental.Presenter
 }
 
@@ -215,12 +216,23 @@ func authorizationRequestQuery(uriString string) (url.Values, error) {
 }
 
 // profileOptions returns the Options of the presenter's profile, failing
-// closed on a draft profile before any network access.
+// closed before any network access on a draft profile, and on any
+// experimental relaxation under a profile with ForbidInsecureTransports
+// (HAIP). Every entry point calls it - the OpenID4VP 1.0, Digital
+// Credentials API, Draft 24 and re-admission parses - so a HAIP presenter
+// refuses Experimental wherever it would take effect, rather than applying a
+// part of it on a path that forgot to look.
 func (p *Oid4vpPresenter) profileOptions() (profile.Options, error) {
 	if err := p.Profile.RequireFinalVersion(); err != nil {
 		return profile.Options{}, fmt.Errorf("invalid OID4VP profile: %w", err)
 	}
-	return p.Profile.Options(), nil
+	options := p.Profile.Options()
+	if options.ForbidInsecureTransports && p.Experimental != (experimental.Presenter{}) {
+		// HAIP 1.0 §5: TLS verifier endpoints, verified X.509 request signing
+		// and OpenID4VP 1.0 as written; no experimental escape weakens it.
+		return profile.Options{}, newAuthorizationRequestError(InvalidRequestError, "the %s profile does not permit Oid4vpPresenter.Experimental", p.Profile.Name())
+	}
+	return options, nil
 }
 
 // configureCore copies the presenter's transport and trust policy into the
@@ -258,11 +270,6 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 	options, err := p.profileOptions()
 	if err != nil {
 		return nil, err
-	}
-	if options.ForbidInsecureTransports && (p.Experimental.Transport != (experimental.Transport{}) || p.Experimental.InsecureSkipX509Verify) {
-		// HAIP §5: the profile requires TLS verifier endpoints and verified
-		// X.509 request signing; the experimental escapes must not weaken it.
-		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit Experimental.Transport or Experimental.InsecureSkipX509Verify")
 	}
 	builder := NewRequestBuilder()
 	builder.options = options

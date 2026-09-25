@@ -18,6 +18,8 @@
 //     resolution of the credential acceptor and of the Status List checker;
 //   - statuslist.Checker.Experimental (Transport) for the Status List Token
 //     retrieval.
+//   - acceptance.IssuerX509TrustOptions.Experimental (Transport) for the
+//     binding of an http iss to an x5c leaf.
 //
 // Code that relaxes a rule therefore imports this package, which makes the
 // departure visible in review and searchable. The rules are:
@@ -27,7 +29,8 @@
 //     setting takes effect only where a caller sets it.
 //   - A profile that forbids a departure refuses it rather than ignoring it:
 //     profile.Options.ForbidInsecureTransports (HAIP) refuses Transport
-//     wherever it is carried and Presenter's InsecureSkipX509Verify, and
+//     wherever it is carried and any non-zero Presenter on every presenter
+//     entry point, and
 //     Hooks, which rewrite draft protocol messages, are refused unless a
 //     draft profile is enabled.
 //   - A new departure is added as a field of one of these types (or a new

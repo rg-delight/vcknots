@@ -1245,7 +1245,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 `SetReceiver` も同じ plugin の確認を行います。
 plugin のフィールドは登録後に変更してはなりません。
 HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
-`Experimental.Transport`（wallet、receiver、Issuer の鍵の resolver、Status List の checker）と、presenter の `Experimental.Transport`、`Experimental.InsecureSkipX509Verify` は拒否します。
+`Experimental.Transport`（wallet、receiver、Issuer の鍵の resolver、Status List の checker）と、presenter のゼロ値でない `Experimental` は、すべての入口で拒否します。
 
 ## エラーコード {#error-codes}
 
@@ -1347,13 +1347,13 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 | 設定 | 渡す場所 | 効果 |
 | --- | --- | --- |
-| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport`（wallet が構築する plugin）、`oid4vci.Oid4vciReceiver.Experimental`、`issuerkeys.Resolver.Experimental`、`statuslist.Checker.Experimental` | ローカルのテスト用 Issuer のために、平文 HTTP のエンドポイント、識別子、メタデータ、Status List のエンドポイントを受け付けます。wallet が構築する presenter にも設定します。client assertion を平文 HTTP で送るのは、引き続き loopback ホストに対してだけです。 |
+| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport`（wallet が構築する plugin）、`oid4vci.Oid4vciReceiver.Experimental`、`issuerkeys.Resolver.Experimental`、`statuslist.Checker.Experimental`、`acceptance.IssuerX509TrustOptions.Experimental` | ローカルのテスト用 Issuer のために、平文 HTTP のエンドポイント、識別子、メタデータ、Status List のエンドポイントを受け付け、`http` の `iss` を host で `x5c` の leaf に束縛します。wallet が構築する presenter にも設定します。client assertion を平文 HTTP で送るのは、引き続き loopback ホストに対してだけです。 |
 | `experimental.Presenter{Transport, InsecureSkipX509Verify, AcceptClientMetadataJWKsWithoutKeyID}` | `oid4vp.Oid4vpPresenter.Experimental` | 平文 HTTP の Verifier エンドポイント、チェーンを検証しない Draft 24 の `x509_san_dns` の Request Object、1.0 の経路での `kid` が一意でない `client_metadata.jwks`（OpenID4VP 1.0 §5.1）を受け付けます。 |
 | `experimental.Hooks{KeyProof, PresentationExchangeResponse}` | `Config.Experimental.Hooks` | Draft 13 の key proof（`ProofTransform`、`ProofJWTContent`）と Draft 24 の応答（`Draft24ResponseTransform`）を構築後に書き換えます。 |
 
 どの型もゼロ値が規格どおりの挙動です。
 環境変数からは何も読みません。
-規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は、どこに渡した `Transport` も、`Presenter.InsecureSkipX509Verify` も拒否します（Status List の checker は `statuslist.ErrStatusListInsecureTransportForbidden`、ほかは不正な入力または `invalid_request` のエラーです）。`Hooks` には Draft のプロファイルが必要です。
+規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は、どこに渡した `Transport` も、ゼロ値でない `Presenter` も拒否します。`Presenter` は presenter のすべての入口（OpenID4VP 1.0、Digital Credentials API、Draft 24、再受理）で、ネットワークに触れる前に拒否します（Status List の checker は `statuslist.ErrStatusListInsecureTransportForbidden`、ほかは不正な入力または `invalid_request` のエラーです）。`Hooks` には Draft のプロファイルが必要です。
 
 ## 環境変数
 

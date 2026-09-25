@@ -153,6 +153,9 @@ func (p *Oid4vpPresenter) ReadmitDraft24Request(ctx context.Context, sealed type
 }
 
 func (p *Oid4vpPresenter) readmitRequest(ctx context.Context, sealed types.SealedAdmission, key []byte) (*AdmittedRequest, error) {
+	if _, err := p.profileOptions(); err != nil {
+		return nil, err
+	}
 	record, admittedAt, err := p.openSealedAdmission(sealed, key, wireOpenID4VP1)
 	if err != nil {
 		return nil, err
@@ -171,6 +174,9 @@ func (p *Oid4vpPresenter) readmitRequest(ctx context.Context, sealed types.Seale
 }
 
 func (p *Oid4vpPresenter) readmitDraft24Request(ctx context.Context, sealed types.SealedAdmission, key []byte) (*AdmittedRequest, error) {
+	if _, err := p.profileOptions(); err != nil {
+		return nil, err
+	}
 	record, admittedAt, err := p.openSealedAdmission(sealed, key, wireDraft24)
 	if err != nil {
 		return nil, err
