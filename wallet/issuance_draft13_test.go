@@ -22,6 +22,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
@@ -141,6 +142,8 @@ func newDraft13Fixture(t *testing.T, configure ...func(*Config)) *draft13Fixture
 			"authorization_endpoint":   base + "/authorize",
 			"token_endpoint":           base + "/token",
 			"response_types_supported": []string{"code"},
+			// The pre-authorized fixtures send no client_id (Section 11.3).
+			"pre-authorized_grant_anonymous_access_supported": true,
 		}
 		for name, value := range f.asMetadataExtra {
 			metadata[name] = value
@@ -216,7 +219,7 @@ func (f *draft13Fixture) newWallet(t *testing.T, extra ...func(*Config)) *Wallet
 // receiver is a receiving dispatcher whose OpenID4VCI plugin uses client.
 func (f *draft13Fixture) receiver(t *testing.T, client *http.Client) *receiver.ReceivingDispatcher {
 	t.Helper()
-	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: client, AllowHTTP: true})
+	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: client, Experimental: experimental.Transport{AllowHTTP: true}})
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	return receiving
@@ -531,8 +534,8 @@ func TestDraft13ReportsASecondInvalidProof(t *testing.T) {
 func TestDraft13KeyProofHookRewritesTheProofBeforeAndAfterSigning(t *testing.T) {
 	var seenNonce any
 	fixture := newDraft13Fixture(t, func(c *Config) {
-		c.TestHooks = &TestHooks{KeyProof: ProofTransform{
-			Content: func(content ProofJWTContent) (ProofJWTContent, error) {
+		c.Experimental.Hooks = experimental.Hooks{KeyProof: experimental.ProofTransform{
+			Content: func(content experimental.ProofJWTContent) (experimental.ProofJWTContent, error) {
 				seenNonce = content.Claims["nonce"]
 				content.Header["kid"] = "did:key:elsewhere#elsewhere"
 				content.Claims["nonce"] = "replayed"
@@ -571,18 +574,18 @@ func TestDraft13KeyProofHookRewritesTheProofBeforeAndAfterSigning(t *testing.T) 
 func TestDraft13ZeroProofTransformIsTheUntouchedProof(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	nonce := "nonce-1"
-	build := func(transform ProofTransform) (map[string]any, map[string]any) {
+	build := func(transform experimental.ProofTransform) (map[string]any, map[string]any) {
 		compact, err := fixture.wallet.generateJWTProofWithTransform(context.Background(), fixture.key, "did:key:zExample#zExample", &nonce, "https://issuer.example", nil, credentialRequestProofBindingMethodKID, transform)
 		require.NoError(t, err)
 		claims := draft13DecodeProof(t, compact, 1)
 		delete(claims, "iat")
 		return draft13DecodeProof(t, compact, 0), claims
 	}
-	identity := ProofTransform{
-		Content:    func(content ProofJWTContent) (ProofJWTContent, error) { return content, nil },
+	identity := experimental.ProofTransform{
+		Content:    func(content experimental.ProofJWTContent) (experimental.ProofJWTContent, error) { return content, nil },
 		Serialized: func(compact string) (string, error) { return compact, nil },
 	}
-	zeroHeader, zeroClaims := build(ProofTransform{})
+	zeroHeader, zeroClaims := build(experimental.ProofTransform{})
 	identityHeader, identityClaims := build(identity)
 	require.Equal(t, zeroHeader, identityHeader)
 	require.Equal(t, zeroClaims, identityClaims)
@@ -591,8 +594,8 @@ func TestDraft13ZeroProofTransformIsTheUntouchedProof(t *testing.T) {
 
 func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 	fixture := newDraft13Fixture(t, func(c *Config) {
-		c.TestHooks = &TestHooks{KeyProof: ProofTransform{Content: func(ProofJWTContent) (ProofJWTContent, error) {
-			return ProofJWTContent{}, io.ErrUnexpectedEOF
+		c.Experimental.Hooks = experimental.Hooks{KeyProof: experimental.ProofTransform{Content: func(experimental.ProofJWTContent) (experimental.ProofJWTContent, error) {
+			return experimental.ProofJWTContent{}, io.ErrUnexpectedEOF
 		}}}
 	})
 
@@ -601,12 +604,12 @@ func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 	require.Empty(t, fixture.credentials())
 }
 
-// TestHooks are refused when a HAIP wallet is constructed.
+// Experimental.Hooks are refused when a HAIP wallet is constructed.
 func TestDraft13KeyProofHookIsRefusedUnderHAIP(t *testing.T) {
 	_, err := NewWalletWithConfig(Config{
-		Profiles:  []profile.Profile{profile.HAIP()},
-		CredStore: newProfileCredStore(t),
-		TestHooks: &TestHooks{KeyProof: ProofTransform{}},
+		Profiles:     []profile.Profile{profile.HAIP()},
+		CredStore:    newProfileCredStore(t),
+		Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}},
 	})
 	draft13RequireCoded(t, err, ErrProfileForbidsDraft)
 }
@@ -809,6 +812,30 @@ func TestDraft13DeferredRequiresTheDPoPKeyOfTheToken(t *testing.T) {
 	_, err = withKey.Draft13().RequestDeferredCredential(context.Background(), deferred)
 	draft13RequireCoded(t, err, ErrDPoPKeyMismatch)
 	require.Empty(t, fixture.deferreds())
+}
+
+// Draft 13 Section 11.3 has the same default as OpenID4VCI 1.0 Section 12.3:
+// without pre-authorized_grant_anonymous_access_supported true, a wallet with
+// no client_id sends no Token Request; with a client_id it is not anonymous.
+func TestDraft13PreAuthorizedAnonymousAccessDefaultsToFalse(t *testing.T) {
+	for name, flag := range map[string]any{"omitted": nil, "false": false} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			fixture.set(func(f *draft13Fixture) {
+				f.asMetadataExtra = map[string]any{"pre-authorized_grant_anonymous_access_supported": flag}
+			})
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), fixture.preAuthorizedRequest())
+			draft13RequireCoded(t, err, errNoUsableClientAuthMethod)
+			require.Empty(t, fixture.tokens())
+
+			named := newDraft13Fixture(t, func(c *Config) { c.ClientAuth.ClientID = "wallet-client" })
+			named.set(func(f *draft13Fixture) {
+				f.asMetadataExtra = map[string]any{"pre-authorized_grant_anonymous_access_supported": flag}
+			})
+			named.preAuthorize(t, named.wallet)
+			require.Equal(t, "wallet-client", named.tokens()[0].Get("client_id"))
+		})
+	}
 }
 
 // With a DPoP key and an authorization server that advertises DPoP, the
@@ -1216,4 +1243,50 @@ func TestDraft13RefusesUnboundCredentialWhenBindingIsRequired(t *testing.T) {
 	require.Empty(t, result.Credentials)
 	require.NotNil(t, result.Notification)
 	require.Zero(t, draft13StoredCount(t, fixture.wallet))
+}
+
+// A Draft 13 issuance reads Credential Issuer Metadata from the Draft 13
+// Section 11.2.2 location only; the OpenID4VCI 1.0 Section 12.2.2 location of
+// an identifier with a path is never requested.
+func TestDraft13DiscoversMetadataAtTheDraft13LocationOnly(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	issuer, err := url.Parse(server.URL + "/tenant")
+	require.NoError(t, err)
+
+	fixture := newDraft13Fixture(t)
+	w := fixture.newWallet(t, func(c *Config) { c.Receiver = fixture.receiver(t, server.Client()) })
+	_, err = w.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), PreAuthorizedIssuanceRequest{CredentialOffer: &CredentialOffer{
+		CredentialIssuer:           issuer,
+		CredentialConfigurationIDs: []string{"any"},
+		Grants: map[string]*CredentialOfferGrant{
+			string(receiverTypes.PreAuthorizedCode): {PreAuthorizedCode: "code"},
+		},
+	}})
+	require.Error(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"/tenant/.well-known/openid-credential-issuer"}, paths)
+}
+
+// Draft 13 Appendix A is the format table of a Draft 13 issuance: the 1.0
+// identifier dc+sd-jwt and unknown identifiers are refused before the Token
+// Request.
+func TestDraft13RefusesFormatsOutsideTheDraft13Table(t *testing.T) {
+	for _, format := range []string{"dc+sd-jwt", "jwt_vc", "application/vc+jwt", "unknown-format"} {
+		t.Run(format, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			fixture.set(func(f *draft13Fixture) { f.configuration["format"] = format })
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), fixture.preAuthorizedRequest())
+			draft13RequireCoded(t, err, receiverOid4vci.ErrCredentialFormatUnsupported)
+			require.Empty(t, fixture.tokens())
+		})
+	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -36,7 +37,7 @@ func newRedirectingOID4VCIEndpoint(t *testing.T) (redirectingURL string, relayed
 
 func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	response, err := receiver.PushAuthorizationRequest(t.Context(),
 		mustURIField(t, redirectingURL+"/par"),
@@ -50,7 +51,7 @@ func TestPushAuthorizationRequestRefusesRedirect(t *testing.T) {
 
 func TestRequestCredentialRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	response, err := postCredentialBody(t.Context(), receiver,
 		mustURIField(t, redirectingURL+"/credential"),
@@ -68,7 +69,7 @@ func TestRequestCredentialRefusesRedirect(t *testing.T) {
 
 func TestFetchIssuerMetadataRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	// Metadata gets no same-origin exemption: Section 12.2.2 fixes the metadata
 	// path inside the Credential Issuer Identifier, so a redirect can only serve
@@ -83,7 +84,7 @@ func TestFetchIssuerMetadataRefusesRedirect(t *testing.T) {
 
 func TestRequestNonceRefusesRedirect(t *testing.T) {
 	redirectingURL, relayedRequests := newRedirectingOID4VCIEndpoint(t)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	response, err := receiver.RequestNonce(t.Context(), mustURIField(t, redirectingURL+"/nonce"))
 

@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/keystore"
@@ -79,10 +80,14 @@ type finalIssuanceFixture struct {
 	encryptionRequired       bool
 	// responseAlgValues and responseEncValues, when set, are the
 	// credential_response_encryption alg and enc values published.
-	responseAlgValues     []string
-	responseEncValues     []string
-	requestEncryption     bool
-	omitPAREndpoint       bool
+	responseAlgValues []string
+	responseEncValues []string
+	requestEncryption bool
+	omitPAREndpoint   bool
+	// anonymousAccess is the pre-authorized_grant_anonymous_access_supported
+	// the authorization server metadata carries; nil omits it. The default
+	// fixture sets it to true.
+	anonymousAccess       *bool
 	issParameterSupported bool
 	// walletProfile selects the wallet and plugin profile; HAIP also serves
 	// TLS (HAIP Section 4).
@@ -160,6 +165,7 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 		issuerKey:            issuerKey,
 		includeNonceEndpoint: true,
 		parExpiresIn:         60,
+		anonymousAccess:      boolPtr(true),
 	}
 	f.encryptionKey = newPrivateJWKForFinalVCITest(t, "credential-response-enc-key-1")
 	f.encryptionKey.Algorithm = "ECDH-ES"
@@ -190,9 +196,9 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 func (f *finalIssuanceFixture) newWallet(t *testing.T) *Wallet {
 	t.Helper()
 	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
-		HTTPClient: f.server.Client(),
-		AllowHTTP:  !f.walletProfile.Options().ForbidInsecureTransports,
-		Profile:    f.walletProfile,
+		HTTPClient:   f.server.Client(),
+		Experimental: experimental.Transport{AllowHTTP: !f.walletProfile.Options().ForbidInsecureTransports},
+		Profile:      f.walletProfile,
 	})
 	if f.wrapReceiverPlugin != nil {
 		plugin = f.wrapReceiverPlugin(plugin)
@@ -403,11 +409,13 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 	case "/.well-known/oauth-authorization-server":
 		f.asMetadataCalls++
 		metadata := map[string]any{
-			"issuer":                 f.authorizationServerIssuer(base),
-			"authorization_endpoint": base + "/authorize",
-			"token_endpoint":         base + "/token",
-			"pre-authorized_grant_anonymous_access_supported": true,
-			"response_types_supported":                        []string{"code"},
+			"issuer":                   f.authorizationServerIssuer(base),
+			"authorization_endpoint":   base + "/authorize",
+			"token_endpoint":           base + "/token",
+			"response_types_supported": []string{"code"},
+		}
+		if f.anonymousAccess != nil {
+			metadata["pre-authorized_grant_anonymous_access_supported"] = *f.anonymousAccess
 		}
 		if !f.omitPAREndpoint {
 			metadata["pushed_authorization_request_endpoint"] = base + "/par"

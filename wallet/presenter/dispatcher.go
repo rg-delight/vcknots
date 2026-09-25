@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
@@ -35,11 +34,11 @@ func NewPresentationDispatcher(options ...func(*PresentationDispatcher) error) (
 	return d, nil
 }
 
-// WithDefaultConfig registers an oid4vp.Oid4vpPresenter for types.Oid4vp,
-// allowing plain http endpoints only when env.IsHTTPAllowed reports true.
+// WithDefaultConfig registers a zero oid4vp.Oid4vpPresenter for types.Oid4vp,
+// which requires https endpoints.
 func WithDefaultConfig() func(d *PresentationDispatcher) error {
 	return func(d *PresentationDispatcher) error {
-		oid4vpReceiver := &oid4vp.Oid4vpPresenter{AllowHTTP: env.IsHTTPAllowed()}
+		oid4vpReceiver := &oid4vp.Oid4vpPresenter{}
 		return d.registerPlugin(types.Oid4vp, oid4vpReceiver)
 	}
 }

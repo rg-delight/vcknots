@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/oid4vcijwe"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -44,7 +45,7 @@ func TestCredentialEndpointError_InvalidProof(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
 	if err == nil {
 		t.Fatal("expected error")
@@ -76,7 +77,7 @@ func TestCredentialEndpointError_NonJSONKeepsStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte("{}"), "application/json", noopProofFactory)
 	var endpointErr *types.CredentialEndpointError
 	if !errors.As(err, &endpointErr) {
@@ -112,7 +113,7 @@ func TestRequestCredentialNonceRetry_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
 	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
@@ -123,7 +124,7 @@ func TestRequestCredentialNonceRetry_Success(t *testing.T) {
 			return []byte(`{"proof":"` + cNonce + `"}`), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if err != nil {
 		t.Fatalf("RequestCredential() error = %v", err)
@@ -161,7 +162,7 @@ func TestRequestCredentialNonceRetry_SecondInvalidNonceStops(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
 	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
@@ -172,7 +173,7 @@ func TestRequestCredentialNonceRetry_SecondInvalidNonceStops(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want invalid_nonce", err)
@@ -197,7 +198,7 @@ func TestRequestCredentialNonceRetry_NoNonceEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
 		dpopAccessToken("access-1"),
@@ -207,7 +208,7 @@ func TestRequestCredentialNonceRetry_NoNonceEndpoint(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want invalid_nonce", err)
@@ -227,7 +228,7 @@ func TestDecodeDeferredCredentialResponse_Interval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	response, err := requestCredentialJSON(t.Context(), receiver,
 		mustURIField(t, server.URL+"/deferred"),
 		"access-1",
@@ -750,14 +751,14 @@ func TestBearerTokenDPoPChallengeFailsClosed(t *testing.T) {
 			}))
 			defer server.Close()
 
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 			_, err := receiver.RequestCredential(t.Context(),
 				mustURIField(t, server.URL+"/credential"),
 				types.CredentialIssuanceAccessToken{Token: "bearer-access-1", TokenType: "Bearer"},
 				"initial-nonce",
 				func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
 				nil,
-				noopProofFactory,
+				testProver(noopProofFactory),
 			)
 			if !errors.Is(err, ErrDPoPRequired) {
 				t.Fatalf("error = %v, want ErrDPoPRequired", err)
@@ -802,7 +803,7 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
 	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
@@ -813,7 +814,7 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if err != nil {
 		t.Fatalf("RequestCredential() error = %v", err)
@@ -849,7 +850,7 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 	}))
 	defer server.Close()
 
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	nonceEndpoint := mustURIField(t, server.URL+"/nonce")
 	_, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, server.URL+"/credential"),
@@ -857,7 +858,7 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 		"initial-nonce",
 		func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want ErrInvalidNonce", err)
@@ -889,7 +890,7 @@ func TestRequestNonceRejectsEmptyCNonce(t *testing.T) {
 			}))
 			defer server.Close()
 
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 			response, err := receiver.RequestNonce(t.Context(), mustURIField(t, server.URL+"/nonce"))
 			if !errors.Is(err, types.ErrNonceResponseInvalid) {
 				t.Fatalf("error = %v, want ErrNonceResponseInvalid", err)

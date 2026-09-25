@@ -14,7 +14,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore/types"
-	"github.com/trustknots/vcknots/wallet/env"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
@@ -51,7 +50,7 @@ func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 	if err := w.requireDraft13(); err != nil {
 		return nil, err
 	}
-	preAuthCode, err := w.validateCredentialOffer(req.CredentialOffer)
+	preAuthCode, err := w.validateCredentialOffer(req.CredentialOffer, req.Type)
 	if err != nil {
 		return nil, keepMessage(ErrInvalidArgument, err)
 	}
@@ -92,13 +91,15 @@ func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 	return w.storeAndParseCredential(context.Background(), policy, issuerMetadata.CredentialIssuer, credentialJWT, serializationFlavor, holderKey)
 }
 
-// validateCredentialOffer validates the credential offer and extracts pre-authorization code.
-func (w *Wallet) validateCredentialOffer(offer *CredentialOffer) (string, error) {
+// validateCredentialOffer validates the credential offer and extracts
+// pre-authorization code. The issuer identifier may be plain http only when
+// the receiver plugin for receivingType allows it (receiverTypes.HTTPSchemePolicy).
+func (w *Wallet) validateCredentialOffer(offer *CredentialOffer, receivingType receiverTypes.SupportedReceivingTypes) (string, error) {
 	if offer == nil {
 		return "", fmt.Errorf("credential offer is required")
 	}
 
-	if err := validateCredentialIssuerIdentifier(offer.CredentialIssuer, env.IsHTTPAllowed()); err != nil {
+	if err := validateCredentialIssuerIdentifier(offer.CredentialIssuer, w.receiverAllowsHTTP(receivingType)); err != nil {
 		return "", err
 	}
 
@@ -529,4 +530,16 @@ func (w *Wallet) storeAndParseCredential(ctx context.Context, policy *acceptance
 		Entry:        &credentialEntry,
 		Verification: verification,
 	}, nil
+}
+
+// receiverAllowsHTTP reports whether the receiver plugin for receivingType
+// accepts plain http endpoints; a plugin that does not report its policy
+// does not.
+func (w *Wallet) receiverAllowsHTTP(receivingType receiverTypes.SupportedReceivingTypes) bool {
+	transport, err := w.receiver.Draft13Transport(receivingType)
+	if err != nil {
+		return false
+	}
+	policy, ok := transport.(receiverTypes.HTTPSchemePolicy)
+	return ok && policy.HTTPAllowed()
 }

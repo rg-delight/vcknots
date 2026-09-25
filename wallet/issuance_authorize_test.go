@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver"
@@ -26,7 +26,7 @@ import (
 // with the given plain-HTTP allowance.
 func authorizeTestOfferWallet(t *testing.T, server *httptest.Server, allowHTTP bool) *Wallet {
 	t.Helper()
-	plugin := &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: allowHTTP}
+	plugin := &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: allowHTTP}}
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	w, err := NewWalletWithConfig(Config{CredStore: newProfileCredStore(t), Receiver: receiving})
@@ -97,10 +97,11 @@ func TestResolveCredentialOffer_ByReferenceEnforcesSizeLimit(t *testing.T) {
 	authorizeTestRequireCoded(t, err)
 }
 
-// The plain-HTTP escape is the receiver's AllowHTTP alone: the process-wide
-// environment switch does not widen it for offer resolution.
+// The plain-HTTP escape is the receiver's Experimental.AllowHTTP alone: the
+// removed VCKNOTS_WALLET_HTTP_ALLOWED environment variable does not widen it
+// for offer resolution.
 func TestResolveCredentialOffer_PlainHTTPFollowsReceiverPolicyOnly(t *testing.T) {
-	t.Setenv(env.HTTP_ALLOWED.String(), "true")
+	t.Setenv("VCKNOTS_WALLET_HTTP_ALLOWED", "true")
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -171,8 +172,6 @@ func TestBeginIssuance_IssuerIdentifierMismatch(t *testing.T) {
 // URL. A wallet whose receiver does not allow plain HTTP refuses a plain-http
 // issuer at metadata discovery, before any authorization request.
 func TestBeginIssuance_RefusesPlainHTTPIssuerWithoutAllowance(t *testing.T) {
-	t.Setenv(env.HTTP_ALLOWED.String(), "")
-
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -184,7 +183,7 @@ func TestBeginIssuance_RefusesPlainHTTPIssuerWithoutAllowance(t *testing.T) {
 
 	issuerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: false})
+	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{HTTPClient: server.Client()})
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	wallet, err := NewWalletWithConfig(Config{

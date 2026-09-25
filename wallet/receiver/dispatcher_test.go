@@ -231,8 +231,12 @@ func TestReceivingDispatcher_TransportCapabilities(t *testing.T) {
 	}
 }
 
-func TestReceivingDispatcher_DefaultHTTPPolicyIsCaptured(t *testing.T) {
-	t.Setenv(env.DEBUG.String(), "")
+// The default receiver requires https whatever the environment says: the
+// VCKNOTS_WALLET_HTTP_ALLOWED variable no longer relaxes it, and a plain http
+// endpoint is reachable only through experimental.Transport.
+func TestReceivingDispatcher_DefaultConfigIgnoresHTTPAllowedEnvironment(t *testing.T) {
+	t.Setenv(env.DEBUG.String(), "true")
+	t.Setenv("VCKNOTS_WALLET_HTTP_ALLOWED", "true")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"credential_issuer":"http://%s","credential_endpoint":"http://%s/credential"}`, r.Host, r.Host)
@@ -242,22 +246,11 @@ func TestReceivingDispatcher_DefaultHTTPPolicyIsCaptured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, allow := range []bool{false, true} {
-		t.Run(fmt.Sprintf("allow_%t", allow), func(t *testing.T) {
-			t.Setenv(env.HTTP_ALLOWED.String(), fmt.Sprint(allow))
-			dispatcher, err := NewReceivingDispatcher(WithDefaultConfig())
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Changing the process setting must not mutate an existing receiver policy.
-			t.Setenv(env.HTTP_ALLOWED.String(), fmt.Sprint(!allow))
-			_, err = dispatcher.FetchIssuerMetadata(*endpoint, types.Oid4vci)
-			if allow && err != nil {
-				t.Fatalf("explicitly allowed local HTTP: %v", err)
-			}
-			if !allow && err == nil {
-				t.Fatal("HTTP must remain disabled")
-			}
-		})
+	dispatcher, err := NewReceivingDispatcher(WithDefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.FetchIssuerMetadata(*endpoint, types.Oid4vci); err == nil {
+		t.Fatal("the default receiver fetched plain http metadata")
 	}
 }

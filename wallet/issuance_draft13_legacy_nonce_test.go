@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -37,10 +36,7 @@ func TestController_fetchCredentialNonce_ReturnsNilWhenNoNonceSource(t *testing.
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://127.0.0.1:1/nonce")
 	require.NoError(t, err)
@@ -56,9 +52,6 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenEndpointFails(
 }
 
 func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(false)
 	controller := createTestControllerWithDefaults(t)
 
 	nonceEndpoint, err := common.ParseURIField("http://example.com/nonce")
@@ -74,10 +67,7 @@ func TestController_fetchCredentialNonce_RejectsNonHTTPSNonceEndpoint(t *testing
 }
 
 func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	nonceValue := "nonce-from-endpoint"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,10 +93,7 @@ func TestController_fetchCredentialNonce_UsesNonceEndpointWhenFallbackMissing(t 
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFallback(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary failure", http.StatusInternalServerError)
@@ -126,10 +113,7 @@ func TestController_fetchCredentialNonce_ReturnsErrorWhenEndpointFailsWithoutFal
 }
 
 func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLarge(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,10 +136,7 @@ func TestController_fetchCredentialNonce_FallbackToAccessTokenWhenResponseTooLar
 }
 
 func TestController_fetchCredentialNonce_ReturnsErrorWhenResponseTooLargeWithoutFallback(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	largeNonce := strings.Repeat("a", int(testMaxNonceResponseBodyBytes))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

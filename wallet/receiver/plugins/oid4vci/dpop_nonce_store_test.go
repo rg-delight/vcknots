@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -102,9 +103,9 @@ func postOneCredentialRequest(t *testing.T, receiver *Oid4vciReceiver, key jose.
 			return []byte(`{"credential_configuration_id":"pid"}`), "application/json", nil
 		},
 		nil,
-		func(nonce string) (string, error) {
+		testProver(func(nonce string) (string, error) {
 			return signDPoP(key, http.MethodPost, credentialEndpoint, nonce, "access-token-1")
-		},
+		}),
 	)
 	if err != nil {
 		t.Fatalf("RequestCredential() error = %v", err)
@@ -123,7 +124,7 @@ func postOneCredentialRequest(t *testing.T, receiver *Oid4vciReceiver, key jose.
 // carries it.
 func TestNonceEndpointDPoPNonceSeedsTheFirstCredentialProof(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
@@ -155,7 +156,7 @@ func TestNonceEndpointDPoPNonceSeedsTheFirstCredentialProof(t *testing.T) {
 // a nonce, or reusing one from another server, would only be rejected.
 func TestNonceEndpointWithoutDPoPNonceLeavesTheProofNonceless(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
@@ -185,7 +186,7 @@ func TestNonceEndpointWithoutDPoPNonceLeavesTheProofNonceless(t *testing.T) {
 func TestDPoPNonceStoreIsKeyedByServer(t *testing.T) {
 	issuer := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
 	other := newDPoPNonceTestServer(t, "")
-	receiver := &Oid4vciReceiver{HTTPClient: issuer.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: issuer.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	if _, err := receiver.RequestNonce(t.Context(), mustURIField(t, issuer.server.URL+"/nonce")); err != nil {
@@ -209,7 +210,7 @@ func TestDPoPNonceStoreIsKeyedByServer(t *testing.T) {
 // map cannot be allocated in a constructor. Run with -race.
 func TestDPoPNonceStoreIsRaceSafe(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	endpoint := mustURIField(t, fixture.server.URL+"/nonce")
 
 	var wg sync.WaitGroup
@@ -226,27 +227,72 @@ func TestDPoPNonceStoreIsRaceSafe(t *testing.T) {
 }
 
 // The store is shared by every flow the receiver serves, so it is bounded: the
-// servers used least recently are forgotten first.
+// entries used least recently are forgotten first.
 func TestDPoPNonceStoreIsBounded(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
-	serverURL := func(i int) url.URL {
-		return url.URL{Scheme: "https", Host: fmt.Sprintf("issuer-%d.example", i)}
+	exchangeFor := func(i int) exchange {
+		return exchange{url: url.URL{Scheme: "https", Host: fmt.Sprintf("issuer-%d.example", i)}, dpop: testProver(fixedProof("proof"))}
 	}
 	for i := 0; i < maxDPoPNonceServers+8; i++ {
-		receiver.rememberDPoPNonce(serverURL(i), fmt.Sprintf("nonce-%d", i))
+		receiver.rememberDPoPNonce(exchangeFor(i), fmt.Sprintf("nonce-%d", i))
 		if i == 0 {
 			continue
 		}
 		// Server 0 stays in use, so it is never the least recently used.
-		receiver.dpopNonceFor(serverURL(0))
+		receiver.dpopNonceFor(exchangeFor(0))
 	}
 	if got := len(receiver.dpopNonces.entries); got != maxDPoPNonceServers {
 		t.Fatalf("stored servers = %d, want %d", got, maxDPoPNonceServers)
 	}
-	if got := receiver.dpopNonceFor(serverURL(0)); got != "nonce-0" {
+	if got := receiver.dpopNonceFor(exchangeFor(0)); got != "nonce-0" {
 		t.Fatalf("recently used server lost its nonce: %q", got)
 	}
-	if got := receiver.dpopNonceFor(serverURL(1)); got != "" {
+	if got := receiver.dpopNonceFor(exchangeFor(1)); got != "" {
 		t.Fatalf("least recently used server kept its nonce: %q", got)
+	}
+}
+
+// A DPoP nonce is kept per server role and per key (RFC 9449 Sections 8.2
+// and 9): a nonce the authorization server issued is not sent to a resource
+// server on the same origin, and a nonce issued for one key is not sent with
+// another key, which would let the server link the two keys.
+func TestDPoPNonceStoreIsKeyedByRoleAndKey(t *testing.T) {
+	origin := url.URL{Scheme: "https", Host: "issuer.example"}
+	keyed := func(thumbprint string, resource bool) exchange {
+		return exchange{url: origin, resourceServer: resource, dpop: types.DPoPProver{KeyThumbprint: thumbprint, Proof: fixedProof("proof")}}
+	}
+	receiver := &Oid4vciReceiver{}
+	receiver.rememberDPoPNonce(keyed("key-a", false), "as-nonce-a")
+	if got := receiver.dpopNonceFor(keyed("key-a", false)); got != "as-nonce-a" {
+		t.Fatalf("same key and role: %q", got)
+	}
+	if got := receiver.dpopNonceFor(keyed("key-a", true)); got != "" {
+		t.Fatalf("an authorization server nonce reached the resource server: %q", got)
+	}
+	if got := receiver.dpopNonceFor(keyed("key-b", false)); got != "" {
+		t.Fatalf("a nonce issued for key-a was offered to key-b: %q", got)
+	}
+	if got := receiver.dpopNonceFor(exchange{url: origin, dpop: types.DPoPProver{Proof: fixedProof("proof")}}); got != "" {
+		t.Fatalf("a prover without a key thumbprint got a kept nonce: %q", got)
+	}
+}
+
+// An unattributed nonce (the Section 7.2 Nonce Response header) goes to the
+// first key that asks the same server role, and to that key only.
+func TestDPoPUnattributedNonceIsClaimedByOneKey(t *testing.T) {
+	origin := url.URL{Scheme: "https", Host: "issuer.example"}
+	receiver := &Oid4vciReceiver{}
+	receiver.rememberDPoPNonce(exchange{url: origin, resourceServer: true, dpopNonceSource: true}, "nonce-endpoint-nonce")
+	keyed := func(thumbprint string) exchange {
+		return exchange{url: origin, resourceServer: true, dpop: types.DPoPProver{KeyThumbprint: thumbprint, Proof: fixedProof("proof")}}
+	}
+	if got := receiver.dpopNonceFor(keyed("key-a")); got != "nonce-endpoint-nonce" {
+		t.Fatalf("first key: %q", got)
+	}
+	if got := receiver.dpopNonceFor(keyed("key-b")); got != "" {
+		t.Fatalf("a second key reused the claimed nonce: %q", got)
+	}
+	if got := receiver.dpopNonceFor(keyed("key-a")); got != "nonce-endpoint-nonce" {
+		t.Fatalf("the claiming key lost its nonce: %q", got)
 	}
 }

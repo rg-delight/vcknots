@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -18,7 +19,7 @@ import (
 func TestOid4vciReceiver_RequestCredentialDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +80,7 @@ func TestOid4vciReceiver_RequestCredentialDPoPRetry(t *testing.T) {
 func TestOid4vciReceiver_RequestCredentialEndpointDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +146,7 @@ func TestOid4vciReceiver_RequestCredentialEndpointDPoPRetry(t *testing.T) {
 func TestOid4vciReceiver_RequestTokenDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,10 +213,10 @@ func TestOid4vciReceiver_RequestTokenDPoPRetry(t *testing.T) {
 	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
 		ClientAttestation:    "attestation-jwt",
 		ClientAttestationPop: "attestation-pop-jwt",
-	}), DPoP: func(nonce string) (string, error) {
+	}), DPoP: testProver(func(nonce string) (string, error) {
 		proofNonces = append(proofNonces, nonce)
 		return "proof:" + nonce, nil
-	}})
+	})})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -233,7 +234,7 @@ func TestOid4vciReceiver_RequestTokenDPoPRetry(t *testing.T) {
 func TestOid4vciReceiver_RequestDeferredCredentialDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +288,7 @@ func TestOid4vciReceiver_RequestDeferredCredentialDPoPRetry(t *testing.T) {
 func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,10 +320,10 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 		common.URIField(*parsed),
 		dpopAccessToken("access-1"),
 		types.NotificationRequest{NotificationID: "notification-1", Event: "credential_accepted"},
-		func(nonce string) (string, error) {
+		testProver(func(nonce string) (string, error) {
 			proofNonces = append(proofNonces, nonce)
 			return "proof:" + nonce, nil
-		},
+		}),
 	)
 	if err != nil {
 		t.Fatalf("SendNotification() error = %v", err)
@@ -338,7 +339,7 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 	issuer := mockserver.NewOID4VCIIssuerServer(nil)
 	defer issuer.Close()
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
@@ -348,7 +349,7 @@ func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 
 	require.NoError(t, err)
@@ -368,7 +369,7 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 	config.TokenResponse["token_type"] = "DPoP"
 	issuer := mockserver.NewOID4VCIIssuerServer(config)
 	defer issuer.Close()
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	response, err := receiver.RequestCredential(t.Context(),
 		mustURIField(t, issuer.URL()+"/credential"),
@@ -378,7 +379,7 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 
 	require.NoError(t, err)

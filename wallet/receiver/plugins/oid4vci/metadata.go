@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,7 +19,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -119,7 +117,8 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 
 // DiscoverCredentialIssuer resolves the OpenID4VCI 1.0 Section 12.2 Credential
 // Issuer Metadata of issuer (a Credential Issuer Identifier, or its well-known
-// metadata URL). The document's credential_issuer must equal the identifier
+// metadata URL) from the Section 12.2.2 location only. The document's
+// credential_issuer must equal the identifier
 // (Section 12.2.4); signed metadata follows IssuerMetadataSigning (Section
 // 12.2.3); the metadata must also satisfy the profile's HAIP Section 4.1
 // options.
@@ -141,77 +140,48 @@ func (o *Oid4vciReceiver) DiscoverCredentialIssuer(ctx context.Context, issuer c
 	return metadata, nil
 }
 
-// fetchIssuerMetadata fetches the Section 12.2.2 document. After a 404 it
-// tries the Draft 13 location when AppendedMetadataPathFallback allows it, and
-// then the issuer's OpenID Federation Entity when IssuerMetadataFederation is
-// set.
+// fetchIssuerMetadata fetches the Section 12.2.2 document. It tries no other
+// location: the Draft 13 Section 11.2.2 location belongs to the Draft 13
+// profile (DiscoverDraft13CredentialIssuer), and Section 12.2.2 makes the
+// well-known document the metadata of a Credential Issuer.
 func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint common.URIField, options profile.Options) (*types.CredentialIssuerMetadata, error) {
 	signing := o.issuerMetadataSigningOptions(options)
 	identifier := credentialIssuerIdentifier(url.URL(endpoint))
 
 	var metadata types.CredentialIssuerMetadata
-	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, options, &metadata)
-	if err == nil {
-		return &metadata, nil
+	if err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, options, &metadata); err != nil {
+		return nil, err
 	}
-	endpointURL := url.URL(endpoint)
-	if o.AppendedMetadataPathFallback && !options.RequireWellKnownMetadataLocation && isNotFound(err) &&
-		strings.Trim(endpointURL.Path, "/") != "" &&
-		!strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) {
-		appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
-		if err = o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, options, &metadata); err == nil {
-			return &metadata, nil
-		}
-	}
-	if o.IssuerMetadataFederation != nil && !signing.Require && isNotFound(err) {
-		return o.federationIssuerMetadata(ctx, identifier)
-	}
-	return nil, err
+	return &metadata, nil
 }
 
-// isNotFound reports a 404 answer to a metadata request.
-func isNotFound(err error) bool {
-	var statusError *httpStatusError
-	return errors.As(err, &statusError) && statusError.isNotFound()
+// DiscoverDraft13CredentialIssuer resolves the OpenID4VCI Draft 13 Section 11.2
+// Credential Issuer Metadata of issuer, a Credential Issuer Identifier. Draft
+// 13 Section 11.2.2 forms the metadata URL by appending the well-known path to
+// the identifier, after removing a terminating "/" from its path, and answers
+// with application/json only. The document's credential_issuer must equal
+// issuer. The receiver's OpenID4VCI 1.0 profile options do not apply.
+func (o *Oid4vciReceiver) DiscoverDraft13CredentialIssuer(ctx context.Context, issuer common.URIField) (*types.CredentialIssuerMetadata, error) {
+	identifier := url.URL(issuer)
+	if identifier.RawQuery != "" || identifier.Fragment != "" {
+		return nil, stageError(StageIssuerMetadata, fmt.Errorf("%w: a Credential Issuer Identifier has no query or fragment", common.ErrInvalidInput))
+	}
+	requestURL := draft13IssuerMetadataURL(identifier)
+	var metadata types.CredentialIssuerMetadata
+	if err := o.fetchIssuerMetadataDocument(ctx, requestURL, identifier.String(), IssuerMetadataSigningOptions{}, profile.Options{}, &metadata); err != nil {
+		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
+	}
+	return &metadata, nil
 }
 
-// credentialIssuerEntityType is the OpenID Federation Entity Type whose
-// metadata is Credential Issuer Metadata.
-const credentialIssuerEntityType = "openid_credential_issuer"
-
-// federationIssuerMetadata derives the Credential Issuer Metadata of
-// identifier from the first of its valid Trust Chains that yields it. The
-// credential_issuer member must still equal identifier (Section 12.2.4).
-func (o *Oid4vciReceiver) federationIssuerMetadata(ctx context.Context, identifier string) (*types.CredentialIssuerMetadata, error) {
-	resolver := *o.IssuerMetadataFederation
-	if resolver.HTTPClient == nil {
-		resolver.HTTPClient = o.HTTPClient
-	}
-	chains, err := resolver.ResolveTrustChains(ctx, identifier)
-	if err != nil {
-		return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
-	}
-	for _, chain := range chains {
-		derived, deriveErr := federation.DeriveEntityMetadata(chain, credentialIssuerEntityType)
-		if deriveErr != nil {
-			err = deriveErr
-			continue
-		}
-		document, err := json.Marshal(derived)
-		if err != nil {
-			return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
-		}
-		var metadata types.CredentialIssuerMetadata
-		if err := json.Unmarshal(document, &metadata); err != nil {
-			return nil, fmt.Errorf("issuer metadata from OpenID Federation: failed to parse: %w", err)
-		}
-		if err := requireMatchingCredentialIssuer(metadata.CredentialIssuer, identifier); err != nil {
-			return nil, err
-		}
-		metadata.RawDocument = document
-		return &metadata, nil
-	}
-	return nil, fmt.Errorf("issuer metadata from OpenID Federation: %w", err)
+// draft13IssuerMetadataURL is the Draft 13 Section 11.2.2 metadata URL of a
+// Credential Issuer Identifier: the identifier, without a terminating "/",
+// followed by the well-known path.
+func draft13IssuerMetadataURL(identifier url.URL) url.URL {
+	metadataURL := identifier
+	metadataURL.Path = strings.TrimSuffix(identifier.Path, "/") + wellKnownCredentialIssuer
+	metadataURL.RawPath = ""
+	return metadataURL
 }
 
 // issuerMetadataSigningOptions resolves the signed metadata policy for one

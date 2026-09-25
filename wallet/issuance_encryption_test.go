@@ -2,8 +2,11 @@ package wallet
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -181,5 +184,56 @@ func TestCredentialResponseEncryptionNegotiatesTheAlgorithm(t *testing.T) {
 		jwk, _ := requested["jwk"].(map[string]any)
 		require.Equal(t, "ECDH-ES+A128KW", jwk["alg"])
 		require.Contains(t, fixture.credentialHeaders.Get("Content-Type"), "application/jwt")
+	})
+}
+
+// A DeferredIssuance must let a later process decrypt the Credential Response
+// (OpenID4VCI 1.0 Section 10), so its JSON carries the response decryption key
+// as a private JWK; it is a bearer secret. The key is an ephemeral key of this
+// request, not the DPoP key or a holder key, whose private halves never leave
+// the wallet. Without response encryption the state carries no private key.
+func TestDeferredStateCarriesOnlyTheEphemeralResponseKey(t *testing.T) {
+	deferredFixture := func(t *testing.T, encrypted bool) (*finalIssuanceFixture, map[string]any) {
+		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+			f.includeDeferredEndpoint = true
+			f.responseEncryption = encrypted
+			f.requestEncryption = encrypted
+			f.credentialHandler = func(w http.ResponseWriter, _ *http.Request) {
+				f.writeDefaultCredentialResponse(w, map[string]any{"transaction_id": "tx-1", "interval": 5})
+			}
+		})
+		result, err := fixture.receive(fixture.issuanceRequest())
+		require.NoError(t, err)
+		require.NotNil(t, result.Deferred)
+		raw, err := json.Marshal(result.Deferred)
+		require.NoError(t, err)
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		return fixture, decoded
+	}
+
+	t.Run("encrypted", func(t *testing.T) {
+		fixture, decoded := deferredFixture(t, true)
+		key, ok := decoded["response_decryption_key"].(map[string]any)
+		require.True(t, ok)
+		require.NotNil(t, key["d"], "the key must be usable by a later process")
+		raw, err := json.Marshal(key)
+		require.NoError(t, err)
+		var responseKey jose.JSONWebKey
+		require.NoError(t, responseKey.UnmarshalJSON(raw))
+		thumbprint := jwkThumbprintForTest(t, responseKey)
+		require.NotEqual(t, jwkThumbprintForTest(t, fixture.clientKey), thumbprint, "not the DPoP key")
+		require.NotEqual(t, jwkThumbprintForTest(t, fixture.holderKey), thumbprint, "not a holder key")
+
+		holders, ok := decoded["holder_keys"].([]any)
+		require.True(t, ok)
+		for _, holder := range holders {
+			require.NotContains(t, holder.(map[string]any), "d", "holder keys are public")
+		}
+	})
+
+	t.Run("plain", func(t *testing.T) {
+		_, decoded := deferredFixture(t, false)
+		require.NotContains(t, decoded, "response_decryption_key")
 	})
 }

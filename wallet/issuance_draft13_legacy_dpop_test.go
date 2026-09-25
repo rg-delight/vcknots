@@ -14,16 +14,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -143,10 +139,7 @@ func TestController_requestCredential_DPoPAccessTokenRetriesWithNonceFromHeader(
 }
 
 func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
@@ -225,10 +218,7 @@ func TestController_requestCredential_DPoPAccessTokenUsesConfiguredDPoPKey(t *te
 }
 
 func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredentialNonce(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{
@@ -338,10 +328,7 @@ func TestController_requestCredential_DPoPNonceChallengeDoesNotRefetchCredential
 }
 
 func TestController_requestCredential_DPoPNonceError_StopsAfterSecondChallenge(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
 	controller.dpop = DPoPConfig{

@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
-	"github.com/trustknots/vcknots/wallet/env"
 	"math/big"
 	"os"
 
@@ -17,11 +16,14 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/clientconfig"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -57,17 +59,18 @@ func LoadClientAuth() (wallet.ClientAuthConfig, error) {
 // examples. The local sample server publishes JWT VC Issuer Metadata at
 // /.well-known/jwt-vc-issuer (SD-JWT VC -19 §4), which authenticates its
 // SD-JWT VCs; a DID issuer is accepted once the Credential Issuer's origin
-// links it with a DID Configuration. The sample server runs on plain http,
-// so the experimental AllowHTTP follows VCKNOTS_WALLET_HTTP_ALLOWED; never
-// set it in production. When issuerCAPath names a PEM file, a credential
-// carrying x5c is authenticated against the certificates in it.
-func SampleIssuerAcceptance(issuerCAPath string) (*acceptance.Policy, error) {
+// links it with a DID Configuration. The local sample server runs on plain
+// http, so allowHTTP lets the key resolution reach it through the
+// experimental setting; it is not for production use. When issuerCAPath names
+// a PEM file, a credential carrying x5c is authenticated against the
+// certificates in it.
+func SampleIssuerAcceptance(issuerCAPath string, allowHTTP bool) (*acceptance.Policy, error) {
 	policy := &acceptance.Policy{IssuerKeys: &issuerkeys.Resolver{
 		Mechanisms: issuerkeys.Mechanisms{
 			JWTVCIssuerMetadata: true, RemoteJWKS: true,
 			DIDKey: true, DIDJWK: true, DIDWeb: true, DIDConfiguration: true,
 		},
-		AllowHTTP: env.IsHTTPAllowed(),
+		AllowHTTP: allowHTTP,
 	}}
 	if issuerCAPath == "" {
 		return policy, nil
@@ -149,13 +152,18 @@ type Runtime struct {
 	Wallet     *wallet.Wallet
 }
 
-func NewOID4VPRuntime(certPath string) (*Runtime, error) {
+// NewOID4VPRuntime builds a wallet for the sample flows. allowHTTP accepts the
+// plain http endpoints of a local sample server through the experimental
+// transport settings; it is not for production use.
+func NewOID4VPRuntime(certPath string, allowHTTP bool) (*Runtime, error) {
 	credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 	if err != nil {
 		return nil, err
 	}
 
-	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{
+		Experimental: experimental.Transport{AllowHTTP: allowHTTP},
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +193,7 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 	}
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           env.IsHTTPAllowed(),
+		AllowHTTP:           allowHTTP,
 		X509TrustChainRoots: certPool,
 	}
 	presenterDispatcher, err := presenter.NewPresentationDispatcher(
@@ -205,7 +213,7 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 		return nil, err
 	}
 
-	issuerAcceptance, err := SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"))
+	issuerAcceptance, err := SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"), allowHTTP)
 	if err != nil {
 		return nil, err
 	}

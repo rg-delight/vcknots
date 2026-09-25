@@ -17,6 +17,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
@@ -170,7 +171,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 	})
 
 	t.Run("Final proceeds to metadata discovery", func(t *testing.T) {
-		w := newWallet(profile.Final(), &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true, Profile: profile.Final()})
+		w := newWallet(profile.Final(), &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Final()})
 		_, err := w.BeginIssuance(t.Context(), request)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "client authentication")

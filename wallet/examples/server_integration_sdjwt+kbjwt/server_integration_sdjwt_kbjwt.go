@@ -26,7 +26,6 @@ import (
 
 	"github.com/trustknots/vcknots/wallet"
 	"github.com/trustknots/vcknots/wallet/credential"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/examples/common"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
@@ -277,12 +276,9 @@ func parseCredentialOffer(offerURI string, logger *slog.Logger) *wallet.Credenti
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	logger.Info("Enabled HTTP transport for local server integration testing")
 
-	runtime, err := common.NewOID4VPRuntime(os.Getenv("VCKNOTS_CERT_PATH"))
+	runtime, err := common.NewOID4VPRuntime(os.Getenv("VCKNOTS_CERT_PATH"), true)
 	if err != nil {
 		panic(err)
 	}

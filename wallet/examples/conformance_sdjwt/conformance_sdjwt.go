@@ -191,7 +191,7 @@ func main() {
 	// implementation. The credential acceptance policy is required: the
 	// conformance suite signs its SD-JWT VC with x5c, so its certificate
 	// authority is passed in VCKNOTS_ISSUER_CA_PATH.
-	issuerAcceptance, err := common.SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"))
+	issuerAcceptance, err := common.SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"), false)
 	if err != nil {
 		logger.Error("Failed to load the issuer trust", "error", err)
 		os.Exit(1)

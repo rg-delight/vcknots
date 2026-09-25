@@ -6,11 +6,20 @@
 // WithEndpoint. An integrator wraps the transport of the *http.Client it
 // injects into the library with Transport and receives one Exchange per round
 // trip, so it never re-derives a request's role from its URL.
+//
+// Transport redacts the credentials a request carries before the observer
+// sees it (see Redacted); UnredactedTransport is the opt-in for an observer
+// that must see them.
 package observe
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"mime"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -96,7 +105,10 @@ func EndpointOf(ctx context.Context) Endpoint {
 type Exchange struct {
 	// Endpoint is the label of the request context.
 	Endpoint Endpoint
-	// Request is the request as handed to the transport.
+	// Request is the request as handed to the transport. Under Transport, a
+	// request that carried a credential is a copy with the credentials
+	// replaced (see Redacted); its GetBody, when set, returns the redacted
+	// body.
 	Request *http.Request
 	// Response is the response, nil when Err is set. Its Body belongs to the
 	// caller of the round trip.
@@ -124,35 +136,154 @@ type ObserverFunc func(Exchange)
 // ObserveExchange calls f.
 func (f ObserverFunc) ObserveExchange(exchange Exchange) { f(exchange) }
 
+// Redacted is what Transport puts in place of a credential.
+const Redacted = "[REDACTED]"
+
+// redactedHeaders are the request headers that carry a credential: the access
+// token (RFC 6750, RFC 9449 Section 7.1), the DPoP proof (RFC 9449 Section 4),
+// and the OAuth Client Attestation and its PoP
+// (draft-ietf-oauth-attestation-based-client-auth).
+var redactedHeaders = []string{"Authorization", "DPoP", "OAuth-Client-Attestation", "OAuth-Client-Attestation-PoP"}
+
+// redactedFormFields are the application/x-www-form-urlencoded request
+// parameters that carry a credential: the grants of an OpenID4VCI Token
+// Request (pre-authorized_code, tx_code, code, code_verifier, refresh_token)
+// and the RFC 7523 client_assertion.
+var redactedFormFields = []string{"pre-authorized_code", "tx_code", "code", "code_verifier", "client_assertion", "refresh_token"}
+
 // Transport returns a RoundTripper that sends through base
 // (http.DefaultTransport when nil) and reports every round trip to observer. A
 // nil observer returns base unchanged. Observation never changes the result of
 // the round trip.
+//
+// The observer sees each request with its credentials replaced by Redacted:
+// the value of the Authorization header after its scheme, the DPoP,
+// OAuth-Client-Attestation and OAuth-Client-Attestation-PoP headers, and the
+// pre-authorized_code, tx_code, code, code_verifier, client_assertion and
+// refresh_token parameters of a form body. The request sent is unchanged.
 func Transport(base http.RoundTripper, observer Observer) http.RoundTripper {
+	return newObservingTransport(base, observer, true)
+}
+
+// UnredactedTransport is Transport without redaction: the observer sees
+// access tokens, DPoP proofs, client attestations, authorization and
+// pre-authorized codes, transaction codes, PKCE verifiers and client
+// assertions as they were sent. It is an opt-in for an observer that keeps
+// them where only the wallet can read them; logging or tracing them hands
+// them to whoever reads the log.
+func UnredactedTransport(base http.RoundTripper, observer Observer) http.RoundTripper {
+	return newObservingTransport(base, observer, false)
+}
+
+func newObservingTransport(base http.RoundTripper, observer Observer, redact bool) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
 	}
 	if observer == nil {
 		return base
 	}
-	return &observingTransport{base: base, observer: observer}
+	return &observingTransport{base: base, observer: observer, redact: redact}
 }
 
 type observingTransport struct {
 	base     http.RoundTripper
 	observer Observer
+	redact   bool
 }
 
 func (t *observingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	startedAt := time.Now()
 	response, err := t.base.RoundTrip(request)
+	observed := request
+	if t.redact {
+		observed = redactRequest(request)
+	}
 	t.observer.ObserveExchange(Exchange{
 		Endpoint:  EndpointOf(request.Context()),
-		Request:   request,
+		Request:   observed,
 		Response:  response,
 		Err:       err,
 		StartedAt: startedAt,
 		Duration:  time.Since(startedAt),
 	})
 	return response, err
+}
+
+// redactRequest returns request, or a copy with its credentials replaced when
+// it carries any. The copy's body is not readable; its GetBody returns the
+// redacted form body, or nothing when the body cannot be read again.
+func redactRequest(request *http.Request) *http.Request {
+	headerSecrets := false
+	for _, name := range redactedHeaders {
+		headerSecrets = headerSecrets || len(request.Header.Values(name)) > 0
+	}
+	formBody, formSecrets := redactedForm(request)
+	if !headerSecrets && !formSecrets {
+		return request
+	}
+	clone := request.Clone(request.Context())
+	for _, name := range redactedHeaders {
+		values := clone.Header.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		redacted := make([]string, len(values))
+		for index, value := range values {
+			redacted[index] = Redacted
+			if strings.EqualFold(name, "Authorization") {
+				if scheme, _, found := strings.Cut(strings.TrimSpace(value), " "); found {
+					redacted[index] = scheme + " " + Redacted
+				}
+			}
+		}
+		clone.Header[http.CanonicalHeaderKey(name)] = redacted
+	}
+	clone.Body = http.NoBody
+	clone.GetBody = nil
+	if formBody != nil {
+		clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(formBody)), nil }
+	} else if !formSecrets && request.GetBody != nil {
+		clone.GetBody = request.GetBody
+	}
+	return clone
+}
+
+// redactedForm reads a form body through GetBody and returns it with the
+// credential parameters replaced, and whether it had any. A body that is not
+// a readable form is returned as nil, false.
+func redactedForm(request *http.Request) ([]byte, bool) {
+	if request.GetBody == nil {
+		return nil, false
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/x-www-form-urlencoded" {
+		return nil, false
+	}
+	body, err := request.GetBody()
+	if err != nil {
+		return nil, false
+	}
+	defer body.Close()
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return nil, false
+	}
+	form, err := url.ParseQuery(string(raw))
+	if err != nil {
+		// An unparsable body may still hold a credential; hide it whole.
+		return []byte(Redacted), true
+	}
+	found := false
+	for _, name := range redactedFormFields {
+		if values, ok := form[name]; ok {
+			found = true
+			for index := range values {
+				values[index] = Redacted
+			}
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	return []byte(form.Encode()), true
 }

@@ -23,9 +23,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -127,6 +129,35 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 		t.Fatalf("Failed to create controller with defaults: %v", err)
 	}
 	return controller
+}
+
+// httpTestConfig is a Config whose default plugins accept the plain http
+// endpoints of httptest servers (experimental.Transport).
+func httpTestConfig() Config {
+	return Config{Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}}
+}
+
+// createTestControllerAllowingHTTP is createTestControllerWithDefaults with
+// httpTestConfig.
+func createTestControllerAllowingHTTP(t *testing.T) *Wallet {
+	t.Helper()
+	tempConfigDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfigDir)
+	t.Setenv("HOME", tempConfigDir)
+
+	controller, err := NewWalletWithConfig(httpTestConfig())
+	if err != nil {
+		t.Fatalf("Failed to create controller allowing HTTP: %v", err)
+	}
+	return controller
+}
+
+// newHTTPTestReceiver is the default receiving dispatcher with an OpenID4VCI
+// plugin that accepts plain http endpoints.
+func newHTTPTestReceiver() (*receiver.ReceivingDispatcher, error) {
+	return receiver.NewReceivingDispatcher(receiver.WithDefaultConfig(), receiver.WithPlugin(receiverTypes.Oid4vci, &receiverOid4vci.Oid4vciReceiver{
+		Experimental: experimental.Transport{AllowHTTP: true},
+	}))
 }
 
 func mustParseURL(t *testing.T, rawURL string) *url.URL {

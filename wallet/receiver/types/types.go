@@ -843,6 +843,21 @@ type Receiver interface {
 // server-provided nonce when it is not empty.
 type DPoPProofFactory func(nonce string) (string, error)
 
+// DPoPProver builds the RFC 9449 DPoP proofs of one request with one key. The
+// zero value sends no proof.
+type DPoPProver struct {
+	// KeyThumbprint is the base64url RFC 7638 SHA-256 thumbprint of the key
+	// Proof signs with. A receiver keeps a server-provided DPoP nonce per
+	// server, per server role (authorization server or resource server, RFC
+	// 9449 Section 9) and per key, so a nonce issued for one key is never
+	// sent with another, which would link the two keys. With an empty
+	// KeyThumbprint no nonce is kept across requests; a use_dpop_nonce
+	// challenge is still answered within the request.
+	KeyThumbprint string
+	// Proof builds the proof for one attempt; nil sends no proof.
+	Proof DPoPProofFactory
+}
+
 // CredentialRequestBodyFactory builds the credential request body (already
 // encoded, including any JWE wrapping) for a given c_nonce. OpenID4VCI 1.0
 // §8.3.1 / §8.3.1.2 requires the wallet to embed the current c_nonce in the
@@ -851,8 +866,32 @@ type DPoPProofFactory func(nonce string) (string, error)
 type CredentialRequestBodyFactory func(cNonce string) (body []byte, contentType string, err error)
 
 // OAuthClientAttestationHeadersFactory builds the client attestation headers
-// for one HTTP attempt.
-type OAuthClientAttestationHeadersFactory func() (OAuthClientAttestationHeaders, error)
+// for one HTTP attempt. challenge is the Challenge the Client Attestation PoP
+// carries in its challenge claim, or "" when the server provided none
+// (draft-ietf-oauth-attestation-based-client-auth-07 Sections 5.2 and 8).
+type OAuthClientAttestationHeadersFactory func(challenge string) (OAuthClientAttestationHeaders, error)
+
+// ClientAttestationProver builds the OAuth-Client-Attestation headers of one
+// request with one Client Instance Key. The zero value sends none.
+//
+// The PoP carries the most recently received Challenge
+// (draft-ietf-oauth-attestation-based-client-auth-07 Section 8.1, -11
+// Section 6): Challenge when set, else the OAuth-Client-Attestation-Challenge
+// header of the latest response the receiver saw from the server for the same
+// key, else none. A use_attestation_challenge error with a fresh Challenge is
+// retried once with it (-07 Section 6.2, -11 Sections 6 and 7.4).
+type ClientAttestationProver struct {
+	// KeyThumbprint is the base64url RFC 7638 SHA-256 thumbprint of the Client
+	// Instance Key. It scopes the Challenges a receiver keeps from earlier
+	// responses, so a Challenge is never presented with another key, which
+	// would link the two keys. With an empty KeyThumbprint none is kept.
+	KeyThumbprint string
+	// Challenge is a Challenge obtained for this request from the challenge
+	// endpoint; empty uses the one kept from an earlier response.
+	Challenge string
+	// Headers builds the headers for one attempt; nil sends none.
+	Headers OAuthClientAttestationHeadersFactory
+}
 
 // CredentialEndpointHTTPResponse is the body and Content-Type of a successful
 // Credential or Deferred Credential Endpoint response, before decoding.

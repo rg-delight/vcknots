@@ -37,7 +37,7 @@ func (o *Oid4vciReceiver) RequestDraft13Credential(
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
 	request types.Draft13CredentialRequest,
-	proofFactory types.DPoPProofFactory,
+	proofFactory types.DPoPProver,
 ) (*types.Draft13CredentialResponse, error) {
 	body, err := json.Marshal(request)
 	if err != nil {
@@ -53,7 +53,7 @@ func (o *Oid4vciReceiver) RequestDraft13DeferredCredential(
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
 	transactionID string,
-	proofFactory types.DPoPProofFactory,
+	proofFactory types.DPoPProver,
 ) (*types.Draft13CredentialResponse, error) {
 	if strings.TrimSpace(transactionID) == "" {
 		return nil, fmt.Errorf("transaction_id is required for a deferred credential request")
@@ -71,7 +71,7 @@ func (o *Oid4vciReceiver) SendDraft13Notification(
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
 	notification types.NotificationRequest,
-	proofFactory types.DPoPProofFactory,
+	proofFactory types.DPoPProver,
 ) error {
 	if strings.TrimSpace(notification.NotificationID) == "" {
 		return fmt.Errorf("notification_id is required for a notification request")
@@ -89,7 +89,7 @@ func (o *Oid4vciReceiver) postDraft13CredentialEndpoint(
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
 	body []byte,
-	proofFactory types.DPoPProofFactory,
+	proofFactory types.DPoPProver,
 ) (*types.Draft13CredentialResponse, error) {
 	responseBody, _, err := o.doDraft13ProtectedPost(ctx, endpoint, accessToken, body, proofFactory)
 	if err != nil {
@@ -107,7 +107,7 @@ func (o *Oid4vciReceiver) doDraft13ProtectedPost(
 	endpoint common.URIField,
 	accessToken types.CredentialIssuanceAccessToken,
 	body []byte,
-	proofFactory types.DPoPProofFactory,
+	proofFactory types.DPoPProver,
 ) ([]byte, string, error) {
 	response, err := o.postWithAccessToken(ctx, endpoint, accessToken, body, "application/json", proofFactory, httpfetch.CredentialBodyLimit)
 	if err != nil {

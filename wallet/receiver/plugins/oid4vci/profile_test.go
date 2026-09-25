@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
@@ -33,19 +34,19 @@ func newTokenServer(t *testing.T, tokenType string) common.URIField {
 func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 	t.Run("pre-authorized token path", func(t *testing.T) {
 		bearer := newTokenServer(t, "Bearer")
-		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
+		final := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Final()}
 		token, err := final.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.NoError(t, err)
 		require.Equal(t, "Bearer", token.TokenType)
 
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
+		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 		_, err = haip.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
 	t.Run("DPoP token type is case-insensitive", func(t *testing.T) {
 		dpop := newTokenServer(t, "dpop")
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
+		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 		token, err := haip.FetchAccessToken(types.Oid4vci, dpop, "code", "")
 		require.NoError(t, err)
 		require.Equal(t, "dpop", token.TokenType)
@@ -56,12 +57,12 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		request := types.TokenRequest{
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
-		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
-		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
+		final := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Final()}
+		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.NoError(t, err)
 
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
-		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
+		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
+		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
@@ -70,16 +71,16 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		request := types.TokenRequest{
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
-		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
+		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 			return types.OAuthClientAttestationHeaders{}, nil
-		}, DPoP: func(string) (string, error) { return "proof", nil }})
+		}}, DPoP: testProver(func(string) (string, error) { return "proof", nil })})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
 	t.Run("a draft profile fails closed", func(t *testing.T) {
 		bearer := newTokenServer(t, "DPoP")
-		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Draft13()}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Draft13()}
 		_, err := receiver.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.ErrorIs(t, err, profile.ErrDraftProfile)
 	})
@@ -88,7 +89,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		bearer := newTokenServer(t, "Bearer")
 		dpopOnly, err := profile.Final().With(profile.Options{RequireDPoP: true})
 		require.NoError(t, err)
-		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: dpopOnly}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: dpopOnly}
 		_, err = receiver.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.ErrorIs(t, err, ErrDPoPRequired)
 	})
@@ -186,14 +187,14 @@ func TestOid4vciReceiver_ProfileAllowHTTP(t *testing.T) {
 	t.Cleanup(server.Close)
 	endpoint := common.URIField(*mustParseURL(t, server.URL))
 
-	haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
+	haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 	_, err := haip.FetchIssuerMetadata(endpoint, types.Oid4vci)
-	require.ErrorContains(t, err, "HAIP profile does not permit AllowHTTP")
+	require.ErrorContains(t, err, "HAIP profile does not permit Experimental.Transport")
 	code, coded := common.CodeOf(err)
 	require.True(t, coded)
 	require.Equal(t, "invalid_argument", code)
 
-	final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
+	final := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Final()}
 	_, err = final.FetchIssuerMetadata(endpoint, types.Oid4vci)
 	require.NoError(t, err)
 }

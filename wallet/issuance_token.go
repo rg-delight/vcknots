@@ -67,7 +67,11 @@ func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	auth, err := w.clientAuthentication(ctx, transport, discovery, true)
+	instanceKey, err := w.flowClientInstanceKey(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := w.clientAuthentication(ctx, transport, discovery, true, instanceKey)
 	if err != nil {
 		return nil, err
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -48,7 +49,7 @@ func TestIssuerMetadataDoesNotRetryInvalidOrForbiddenResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 			metadata, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci)
 			if err == nil || metadata != nil {
 				t.Fatalf("metadata = %v, error = %v; want failure", metadata, err)
@@ -60,51 +61,96 @@ func TestIssuerMetadataDoesNotRetryInvalidOrForbiddenResponses(t *testing.T) {
 	}
 }
 
-func TestIssuerMetadataRetriesOnlyMissingDistinctLocalDiscoveryPath(t *testing.T) {
-	for _, secure := range []bool{false, true} {
-		t.Run(fmt.Sprintf("https_%t", secure), func(t *testing.T) {
-			testAppendedMetadataPathFallback(t, secure)
+// OpenID4VCI 1.0 Section 12.2.2 is the only location a 1.0 profile reads
+// metadata from: a 404 there is reported, and neither the Draft 13 Section
+// 11.2.2 location nor an OpenID Federation Entity Configuration is tried.
+func TestIssuerMetadataReadsOnlyTheSection1222Location(t *testing.T) {
+	for name, p := range map[string]profile.Profile{"final": profile.Final(), "haip": profile.HAIP()} {
+		t.Run(name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path == "/tenant/.well-known/openid-credential-issuer" {
+					fmt.Fprint(w, `{"credential_issuer":"`+serverURLFor(r)+`/tenant"}`)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Profile: p}
+			endpoint, err := common.ParseURIField(server.URL + "/tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := receiver.DiscoverCredentialIssuer(t.Context(), *endpoint); err == nil {
+				t.Fatal("expected the 404 to be reported")
+			}
+			if len(paths) != 1 || paths[0] != "/.well-known/openid-credential-issuer/tenant" {
+				t.Fatalf("paths = %v, want only the Section 12.2.2 location", paths)
+			}
 		})
 	}
 }
 
-func testAppendedMetadataPathFallback(t *testing.T, secure bool) {
-	var paths []string
-	var acceptedIdentifier string
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		if r.URL.Path == "/.well-known/openid-credential-issuer/tenant" {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"credential_issuer":"https://discarded.example","credential_request_encryption":{"encryption_required":true}}`)
-			return
+// Draft 13 Section 11.2.2 appends the well-known path to the identifier, after
+// removing a terminating "/", and is the only location a Draft 13 issuance
+// reads: the 1.0 location is not tried first or after a 404.
+func TestDraft13IssuerMetadataReadsOnlyTheSection1122Location(t *testing.T) {
+	for _, tc := range []struct {
+		name, suffix, wantPath string
+	}{
+		{"no path", "", "/.well-known/openid-credential-issuer"},
+		{"path", "/tenant", "/tenant/.well-known/openid-credential-issuer"},
+		{"terminating slash", "/tenant/", "/tenant/.well-known/openid-credential-issuer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				if r.URL.Path == tc.wantPath {
+					fmt.Fprint(w, `{"credential_issuer":"`+serverURLFor(r)+tc.suffix+`"}`)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client()}
+			endpoint, err := common.ParseURIField(server.URL + tc.suffix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, err := receiver.DiscoverDraft13CredentialIssuer(t.Context(), *endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.CredentialIssuer != server.URL+tc.suffix {
+				t.Fatalf("credential_issuer = %q", metadata.CredentialIssuer)
+			}
+			if len(paths) != 1 || paths[0] != tc.wantPath {
+				t.Fatalf("paths = %v, want only %s", paths, tc.wantPath)
+			}
+		})
+	}
+
+	t.Run("a 404 is reported", func(t *testing.T) {
+		var paths []string
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			http.NotFound(w, r)
+		}))
+		defer server.Close()
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client()}
+		endpoint, err := common.ParseURIField(server.URL + "/tenant")
+		if err != nil {
+			t.Fatal(err)
 		}
-		// §12.2.4 binds credential_issuer to the requested identifier, which
-		// for this tenant is the base URL plus the /tenant path.
-		acceptedIdentifier = serverURLFor(r) + "/tenant"
-		fmt.Fprint(w, `{"credential_issuer":"`+acceptedIdentifier+`"}`)
+		if _, err := receiver.DiscoverDraft13CredentialIssuer(t.Context(), *endpoint); err == nil {
+			t.Fatal("expected the 404 to be reported")
+		}
+		if len(paths) != 1 {
+			t.Fatalf("paths = %v", paths)
+		}
 	})
-	server := httptest.NewUnstartedServer(handler)
-	if secure {
-		server.StartTLS()
-	} else {
-		server.Start()
-	}
-	defer server.Close()
-	endpoint, err := common.ParseURIField(server.URL + "/tenant")
-	if err != nil {
-		t.Fatal(err)
-	}
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: !secure, AppendedMetadataPathFallback: true}
-	metadata, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(paths) != 2 || paths[1] != "/tenant/.well-known/openid-credential-issuer" {
-		t.Fatalf("paths = %v", paths)
-	}
-	if metadata.CredentialIssuer != acceptedIdentifier || metadata.CredentialRequestEncryption != nil {
-		t.Fatalf("metadata from discarded response leaked: %+v", metadata)
-	}
 }
 
 func serverURLFor(r *http.Request) string {
@@ -112,44 +158,6 @@ func serverURLFor(r *http.Request) string {
 		return "https://" + r.Host
 	}
 	return "http://" + r.Host
-}
-
-// The Draft 13 location is tried only on request: AllowHTTP alone does not
-// enable it, and HAIP, which is Final-only, never uses it.
-func TestIssuerMetadataAppendedPathFallbackIsOptIn(t *testing.T) {
-	cases := map[string]struct {
-		secure, allowHTTP, fallback bool
-		profile                     profile.Profile
-	}{
-		"AllowHTTP only": {allowHTTP: true},
-		"HAIP":           {secure: true, fallback: true, profile: profile.HAIP()},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			var paths []string
-			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				paths = append(paths, r.URL.Path)
-				http.NotFound(w, r)
-			}))
-			if tc.secure {
-				server.StartTLS()
-			} else {
-				server.Start()
-			}
-			defer server.Close()
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: tc.allowHTTP, Profile: tc.profile, AppendedMetadataPathFallback: tc.fallback}
-			endpoint, err := common.ParseURIField(server.URL + "/tenant")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci); err == nil {
-				t.Fatal("expected the 404 to be reported")
-			}
-			if len(paths) != 1 {
-				t.Fatalf("paths = %v, want only the Section 12.2.2 location", paths)
-			}
-		})
-	}
 }
 
 // signedMetadataFixture issues the certificates and JWTs the §12.2.3 signed
@@ -295,8 +303,8 @@ func TestFetchIssuerMetadataVerifiesSignedMetadata(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -351,8 +359,8 @@ func TestFetchIssuerMetadataRejectsUntrustedSignedMetadata(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -383,8 +391,8 @@ func TestFetchIssuerMetadataRejectsIssuerMismatchInSignedMetadata(t *testing.T) 
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -422,8 +430,8 @@ func TestFetchIssuerMetadataRejectsTrailingSlashInSignedMetadataSub(t *testing.T
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -456,8 +464,8 @@ func TestFetchIssuerMetadataRejectsCredentialIssuerMismatchInSignedMetadata(t *t
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -515,8 +523,8 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			Require:                     true,
@@ -536,7 +544,7 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 	t.Run("requiring signed metadata without trust material is a configuration error", func(t *testing.T) {
 		unconfigured := &Oid4vciReceiver{
 			HTTPClient:            client,
-			AllowHTTP:             true,
+			Experimental:          experimental.Transport{AllowHTTP: true},
 			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
 		}
 		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
@@ -586,7 +594,7 @@ func signedMetadataReceiver(client *http.Client, fixture signedMetadataFixture, 
 	if adjust != nil {
 		adjust(signing)
 	}
-	return &Oid4vciReceiver{HTTPClient: client, AllowHTTP: true, IssuerMetadataSigning: signing}
+	return &Oid4vciReceiver{HTTPClient: client, Experimental: experimental.Transport{AllowHTTP: true}, IssuerMetadataSigning: signing}
 }
 
 func signedMetadataClaims(identifier string) map[string]any {
@@ -764,7 +772,7 @@ func TestFetchIssuerMetadataReportsTypedSignatureFailures(t *testing.T) {
 		})
 		unconfigured := &Oid4vciReceiver{
 			HTTPClient:            client,
-			AllowHTTP:             true,
+			Experimental:          experimental.Transport{AllowHTTP: true},
 			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
 		}
 		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
@@ -828,7 +836,7 @@ func TestAuthorizationServerMetadataIssuerMustMatch(t *testing.T) {
 		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":"https://as.example/token"}`, published)
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	for name, tc := range map[string]struct {
 		endpoint, issuer string

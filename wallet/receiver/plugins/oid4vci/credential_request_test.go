@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -24,7 +25,7 @@ import (
 func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -151,7 +152,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		RedirectURI:  "https://wallet.example/callback",
 		CodeVerifier: "verifier-1",
 		ClientID:     "client-1",
-	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: fixedProof("dpop-token")})
+	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: testProver(fixedProof("dpop-token"))})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -189,7 +190,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 	if err := receiver.SendNotification(t.Context(), endpoint("/notification"), dpopAccessToken("access-1"), types.NotificationRequest{
 		NotificationID: deferred.NotificationID,
 		Event:          "credential_accepted",
-	}, fixedProof("dpop-notification")); err != nil {
+	}, testProver(fixedProof("dpop-notification"))); err != nil {
 		t.Fatalf("notification error = %v", err)
 	}
 }
@@ -312,9 +313,9 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	endpoint := common.URIField(*serverURL)
 
 	t.Run("https is required", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = false
+		receiver.Experimental.AllowHTTP = false
 
 		_, err := receiver.ReceiveCredential(types.Oid4vci, endpoint, "test-config", nil, accessToken, nil, nil)
 		if err == nil {
@@ -323,9 +324,9 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		credential, err := receiver.ReceiveCredential(types.Oid4vci, endpoint, "test-config", nil, accessToken, nil, nil)
 		if err != nil {
@@ -342,7 +343,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Request uses credential_configuration_id and proofs", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -399,7 +400,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Request omits proof fields when jwt proof is not provided", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -450,7 +451,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("DPoP access token sends DPoP authorization and proof headers", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -500,7 +501,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("use_dpop_nonce error is returned as sentinel error", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -534,7 +535,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("DPoP access token skips nil request options", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -580,7 +581,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Request uses credential_identifier when provided", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -628,9 +629,9 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -646,9 +647,9 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -663,9 +664,9 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("No credential in response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		noCredServer := mockserver.NewMockServer()
 		defer noCredServer.Close()
@@ -681,7 +682,7 @@ func TestOid4vciReceiver_ReceiveCredential(t *testing.T) {
 	})
 
 	t.Run("Multiple credentials in response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		multiCredServer := mockserver.NewMockServer()
 		defer multiCredServer.Close()

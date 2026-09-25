@@ -34,8 +34,8 @@ func (o *Oid4vciReceiver) FetchCredentialOffer(ctx context.Context, uri common.U
 }
 
 // HTTPAllowed reports whether this receiver accepts plain http endpoints
-// (AllowHTTP), so a caller can apply the same policy to identifiers it checks
-// itself.
+// (Experimental.AllowHTTP), so a caller can apply the same policy to
+// identifiers it checks itself.
 func (o *Oid4vciReceiver) HTTPAllowed() bool {
-	return o.AllowHTTP
+	return o.Experimental.AllowHTTP
 }

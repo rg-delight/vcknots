@@ -12,7 +12,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/common"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -58,8 +60,8 @@ func (d *Draft13Issuance) AuthorizePreAuthorizedIssuance(ctx context.Context, re
 
 // RequestCredential sends the Draft 13 Credential Request (Section 7.2) with
 // one key proof, retrying once with the fresh c_nonce of an invalid_proof
-// error (Section 7.3.2). Config.TestHooks.KeyProof rewrites the proof. The
-// credential is verified under req.Acceptance, or else
+// error (Section 7.3.2). Config.Experimental.Hooks.KeyProof rewrites the
+// proof. The credential is verified under req.Acceptance, or else
 // Config.CredentialAcceptance, and saved unless the wallet is storeless. With
 // neither policy nothing is sent (ErrCredentialAcceptancePolicyRequired).
 func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
@@ -113,10 +115,22 @@ func (d *Draft13Issuance) checkOfferIssuer(transport receiverTypes.Draft13Transp
 	return nil
 }
 
+// draft13Discovery resolves Credential Issuer Metadata at the Draft 13
+// Section 11.2.2 location for discoverIssuance; the OpenID4VCI 1.0 Section
+// 12.2.2 location is never tried for a Draft 13 issuance.
+type draft13Discovery struct {
+	receiverTypes.Draft13Transport
+}
+
+// DiscoverCredentialIssuer is DiscoverDraft13CredentialIssuer.
+func (d draft13Discovery) DiscoverCredentialIssuer(ctx context.Context, issuer common.URIField) (*receiverTypes.CredentialIssuerMetadata, error) {
+	return d.DiscoverDraft13CredentialIssuer(ctx, issuer)
+}
+
 // discover resolves the metadata an offer points at and checks that every
 // offered configuration is described.
 func (d *Draft13Issuance) discover(ctx context.Context, transport receiverTypes.Draft13Transport, offer *CredentialOffer, hint string) (*issuanceDiscovery, error) {
-	discovery, err := d.w.discoverIssuance(ctx, transport, nil, offer.CredentialIssuer.String(), offeredAuthorizationServer(hint), true)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, nil, offer.CredentialIssuer.String(), offeredAuthorizationServer(hint), true)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +164,11 @@ func selectDraft13Configuration(offer *CredentialOffer, requested string, md *re
 	config, ok := md.CredentialConfigurationSupported[id]
 	if !ok {
 		return "", receiverTypes.CredentialConfiguration{}, fmt.Errorf("credential configuration %q: %w", id, ErrDraft13CredentialConfigurationUnknown)
+	}
+	// Draft 13 Appendix A: a format outside the Draft 13 table is refused
+	// before any request.
+	if _, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format); err != nil {
+		return "", receiverTypes.CredentialConfiguration{}, fmt.Errorf("credential configuration %q: %w", id, err)
 	}
 	return id, config, nil
 }
@@ -283,7 +302,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err := d.w.checkAuthorizationState(a, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
-	discovery, err := d.w.discoverIssuance(ctx, transport, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
 	if err != nil {
 		return nil, err
 	}
@@ -351,12 +370,18 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	}
 	as := discovery.asMetadata
 	// Section 6.1 makes client_id OPTIONAL for this grant; it is sent when
-	// Config names one.
+	// Config names one. Without one the request is anonymous, which Section
+	// 11.3 allows only when the server declares
+	// pre-authorized_grant_anonymous_access_supported true.
+	clientID := strings.TrimSpace(d.w.clientAuth.ClientID)
+	if clientID == "" && !anonymousPreAuthorizedAccessSupported(as) {
+		return nil, errNoUsableClientAuthMethod
+	}
 	token, err := transport.RequestToken(ctx, *as.TokenEndpoint, receiverTypes.TokenRequest{
 		GrantType:         receiverTypes.PreAuthorizedCode,
 		PreAuthorizedCode: grant.PreAuthorizedCode,
 		TxCode:            req.TxCode,
-		ClientID:          strings.TrimSpace(d.w.clientAuth.ClientID),
+		ClientID:          clientID,
 	}, d.tokenAuthentication(ctx, as, true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch access token: %w", err)
@@ -414,7 +439,7 @@ func (d *Draft13Issuance) credentialStage(ctx context.Context, cache *issuanceMe
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	discovery, err := d.w.discoverIssuance(ctx, transport, cache, issuer, offeredAuthorizationServer(""), false)
+	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, cache, issuer, offeredAuthorizationServer(""), false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -558,7 +583,7 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 	if id := strings.TrimSpace(d.w.clientAuth.ClientID); id != "" {
 		clientID = &id
 	}
-	var transform ProofTransform
+	var transform experimental.ProofTransform
 	if d.w.testHooks != nil {
 		transform = d.w.testHooks.KeyProof
 	}
@@ -583,7 +608,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, policy *acceptan
 			DPoPKeyThumbprint: thumbprint,
 		}
 	}
-	flavor, err := receiverOid4vci.OID4VCICredentialFormatToSerializationFlavor(config.Format)
+	flavor, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format)
 	if err != nil {
 		return result, fmt.Errorf("unsupported credential format %q: %w: %w", config.Format, acceptance.ErrCredentialParse, err)
 	}

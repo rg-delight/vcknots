@@ -112,7 +112,8 @@ type CredentialRequest struct {
 }
 
 // IssuanceAuthorization is the state between BeginIssuance and
-// AuthorizeIssuance. It is a bearer secret (CodeVerifier) and is used once:
+// AuthorizeIssuance. It is a bearer secret (CodeVerifier, ClientInstanceKey)
+// and is used once:
 // discard it after AuthorizeIssuance, whether that succeeded or failed.
 type IssuanceAuthorization struct {
 	Version IssuanceVersion `json:"version"`
@@ -139,6 +140,13 @@ type IssuanceAuthorization struct {
 	// RequestURIExpiresAt is the RFC 9126 request_uri expiry; zero when the
 	// request was not pushed or the server stated no lifetime.
 	RequestURIExpiresAt time.Time `json:"request_uri_expires_at,omitempty"`
+	// ClientInstanceKey is the ephemeral private key the Client Attestation
+	// of the Pushed Authorization Request bound, set when the wallet chose a
+	// key for this flow (AttestationConfig.ClientKey unset). The token
+	// request binds the same key, since the authorization server may bind
+	// the code to it (draft-ietf-oauth-attestation-based-client-auth
+	// Section 10.4). Secret.
+	ClientInstanceKey *jose.JSONWebKey `json:"client_instance_key,omitempty"`
 
 	cache *issuanceMetadataCache
 }

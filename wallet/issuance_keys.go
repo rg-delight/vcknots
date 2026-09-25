@@ -26,14 +26,19 @@ const clientAssertionLifetime = 5 * time.Minute
 // clientAttestationPoPLifetime bounds the exp of a Client Attestation PoP.
 const clientAttestationPoPLifetime = 5 * time.Minute
 
-// dpopProofFactory returns the RFC 9449 proof factory for one request, or nil
-// when key is nil.
-func dpopProofFactory(ctx context.Context, key IKeyEntry, method, endpoint, accessToken string) receiverTypes.DPoPProofFactory {
+// dpopProofFactory returns the RFC 9449 prover for one request, or the zero
+// prover when key is nil. The key thumbprint scopes the server nonces the
+// receiver keeps to this key.
+func dpopProofFactory(ctx context.Context, key IKeyEntry, method, endpoint, accessToken string) receiverTypes.DPoPProver {
 	if key == nil {
-		return nil
+		return receiverTypes.DPoPProver{}
 	}
-	return func(nonce string) (string, error) {
-		return jwtproof.DPoP(ctx, key, jwtproof.DPoPOptions{Method: method, URL: endpoint, AccessToken: accessToken, Nonce: nonce})
+	thumbprint, _ := keyThumbprint(key)
+	return receiverTypes.DPoPProver{
+		KeyThumbprint: thumbprint,
+		Proof: func(nonce string) (string, error) {
+			return jwtproof.DPoP(ctx, key, jwtproof.DPoPOptions{Method: method, URL: endpoint, AccessToken: accessToken, Nonce: nonce})
+		},
 	}
 }
 
@@ -85,8 +90,8 @@ func clientAssertion(ctx context.Context, key IKeyEntry, clientID, audience stri
 // configured method can be used at the token endpoint.
 var errNoUsableClientAuthMethod = common.NewCodedError("client_authentication_unavailable",
 	"no usable client authentication method for the authorization server token endpoint; "+
-		"the authorization server declares pre-authorized_grant_anonymous_access_supported as false, "+
-		"or it does not support the configured client authentication method")
+		"the authorization server does not declare pre-authorized_grant_anonymous_access_supported as true "+
+		"and no client_id is configured, or it does not support the configured client authentication method")
 
 // resolveClientAuthMethod reports the configured method (None when empty) and
 // whether the authorization server accepts it.
@@ -103,13 +108,12 @@ func resolveClientAuthMethod(clientAuth ClientAuthConfig, authMetadata *receiver
 func clientAuthMethodAvailable(method receiverTypes.TokenEndpointAuthMethod, clientAuth ClientAuthConfig, authMetadata *receiverTypes.AuthorizationServerMetadata) bool {
 	switch method {
 	case receiverTypes.None:
-		// pre-authorized_grant_anonymous_access_supported is OPTIONAL, so only
-		// an explicit false refuses anonymous access.
-		if authMetadata == nil {
-			return false
+		// A request that names the client with client_id is not anonymous, so
+		// the anonymous access flag does not apply to it.
+		if strings.TrimSpace(clientAuth.ClientID) != "" {
+			return true
 		}
-		anonymousAccess := authMetadata.PreAuthorizedGrantAnonymousAccessSupported
-		return anonymousAccess == nil || *anonymousAccess
+		return anonymousPreAuthorizedAccessSupported(authMetadata)
 	case receiverTypes.PrivateKeyJwt:
 		if strings.TrimSpace(clientAuth.ClientID) == "" || clientAuth.Key == nil {
 			return false
@@ -120,6 +124,18 @@ func clientAuthMethodAvailable(method receiverTypes.TokenEndpointAuthMethod, cli
 		return asMetadataSupportsSigningAlg(authMetadata, clientAuth.signatureAlgorithm())
 	}
 	return false
+}
+
+// anonymousPreAuthorizedAccessSupported applies
+// pre-authorized_grant_anonymous_access_supported (OpenID4VCI 1.0 Section
+// 12.3, Draft 13 Section 11.3): a Token Request with a Pre-Authorized Code and
+// without a client_id is accepted only when the authorization server sets it
+// to true. "The default is false", so an absent value refuses.
+func anonymousPreAuthorizedAccessSupported(authMetadata *receiverTypes.AuthorizationServerMetadata) bool {
+	if authMetadata == nil || authMetadata.PreAuthorizedGrantAnonymousAccessSupported == nil {
+		return false
+	}
+	return *authMetadata.PreAuthorizedGrantAnonymousAccessSupported
 }
 
 func asMetadataSupportsAuthMethod(authMetadata *receiverTypes.AuthorizationServerMetadata, method receiverTypes.TokenEndpointAuthMethod) bool {

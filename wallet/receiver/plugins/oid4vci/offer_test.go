@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
 )
@@ -36,7 +37,7 @@ func TestFetchCredentialOffer(t *testing.T) {
 	recorder := &observetest.Recorder{}
 	client := server.Client()
 	client.Transport = observe.Transport(client.Transport, recorder)
-	receiver := &Oid4vciReceiver{HTTPClient: client, AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: client, Experimental: experimental.Transport{AllowHTTP: true}}
 	body, err := receiver.FetchCredentialOffer(t.Context(), mustURIField(t, server.URL+"/offer"))
 	if err != nil || string(body) != offer {
 		t.Fatalf("FetchCredentialOffer() = %q, %v", body, err)

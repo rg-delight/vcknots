@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -44,7 +45,7 @@ func TestEndpointErrorNamesTheFailedStage(t *testing.T) {
 		_ = mockserver.JSONResponse(w, status, body)
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	endpoint := mustURIField(t, server.URL+"/issuer")
 
 	_, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
@@ -59,12 +60,12 @@ func TestEndpointErrorNamesTheFailedStage(t *testing.T) {
 	_, err = receiver.RequestNonce(context.Background(), endpoint)
 	requireEndpointError(t, err, StageNonce, status, "temporarily_unavailable")
 
-	_, err = receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: noopProofFactory})
+	_, err = receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: testProver(noopProofFactory)})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 
-	_, err = receiver.RequestToken(context.Background(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+	_, err = receiver.RequestToken(context.Background(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 		return types.OAuthClientAttestationHeaders{}, nil
-	}, DPoP: noopProofFactory})
+	}}, DPoP: testProver(noopProofFactory)})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 }
 
@@ -79,9 +80,9 @@ func TestEndpointErrorReportsTheOAuthErrorWithoutTheBody(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
-	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: noopProofFactory})
+	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: testProver(noopProofFactory)})
 	requireEndpointError(t, err, StageToken, http.StatusBadRequest, "invalid_grant")
 	var endpointError *EndpointError
 	_ = errors.As(err, &endpointError)
@@ -108,7 +109,7 @@ func TestErrorStringsDoNotCarryTheResponseBody(t *testing.T) {
 		_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "secret": secret})
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	proof := "proof"
 	calls := map[string]func(path string) error{
 		"FetchAccessToken": func(path string) error {
@@ -156,7 +157,7 @@ func TestCredentialErrorDescriptionIsBoundedAndSanitized(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{"error":"invalid_proof","error_description":"%s"}`, description)
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte(`{}`), "application/json", fixedProof("proof"))
 	var endpointError *types.CredentialEndpointError
@@ -170,7 +171,7 @@ func TestCredentialErrorDescriptionIsBoundedAndSanitized(t *testing.T) {
 		t.Errorf("description = %q", endpointError.Description)
 	}
 
-	_, err = receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, fixedProof("proof"))
+	_, err = receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, testProver(fixedProof("proof")))
 	var draft13Error *types.Draft13CredentialEndpointError
 	if !errors.As(err, &draft13Error) || len(draft13Error.Description) > maxErrorDescriptionLength || strings.Contains(draft13Error.Description, "\x1b") {
 		t.Errorf("draft13 error = %#v", draft13Error)
@@ -185,7 +186,7 @@ func TestEndpointErrorKeepsTheUnderlyingCause(t *testing.T) {
 		w.WriteHeader(http.StatusFound)
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	_, err := receiver.FetchAuthorizationServerMetadata(mustURIField(t, server.URL), types.Oid4vci)
 	requireEndpointError(t, err, StageAuthorizationServerMetadata, 0, "")

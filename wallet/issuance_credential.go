@@ -20,6 +20,7 @@ import (
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/idprof/plugins/did"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -566,19 +567,20 @@ func rawCredentialBytes(value any) ([]byte, error) {
 }
 
 // mimeTypeForCredentialConfiguration maps the configuration's format to the
-// stored MIME type.
+// stored MIME type by the OpenID4VCI 1.0 Appendix A table
+// (receiverOid4vci.CredentialFormatFlavor). An unknown configuration or
+// format maps to "", which no serialization flavor accepts.
 func mimeTypeForCredentialConfiguration(md *receiverTypes.CredentialIssuerMetadata, configurationID string) string {
-	if md != nil {
-		if config, ok := md.CredentialConfigurationSupported[configurationID]; ok {
-			switch config.Format {
-			case "dc+sd-jwt", "vc+sd-jwt":
-				return string(credential.SDJwtVC)
-			case "jwt_vc_json", "jwt_vc", "vc+jwt":
-				return string(credential.JwtVc)
-			case "ldp_vc":
-				return string(credential.LdpVc)
-			}
-		}
+	if md == nil {
+		return ""
 	}
-	return string(credential.JwtVc)
+	config, ok := md.CredentialConfigurationSupported[configurationID]
+	if !ok {
+		return ""
+	}
+	flavor, err := receiverOid4vci.CredentialFormatFlavor(profile.Final(), config.Format)
+	if err != nil {
+		return ""
+	}
+	return string(flavor)
 }

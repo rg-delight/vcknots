@@ -14,9 +14,8 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
-	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -32,14 +31,12 @@ type Oid4vciReceiver struct {
 	// HTTPClient sends every request; nil means a bounded default client.
 	// Redirects are never followed.
 	HTTPClient *http.Client
-	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
-	AllowHTTP bool
-	// AppendedMetadataPathFallback retries Credential Issuer Metadata at the
-	// OpenID4VCI Draft 13 Section 11.2.2 location, the well-known path appended
-	// to an identifier that has a path, when the Section 12.2.2 location
-	// answers 404. It is off by default and never applies under
-	// Options.RequireWellKnownMetadataLocation.
-	AppendedMetadataPathFallback bool
+	// Experimental relaxes transport security for a local test issuer
+	// (experimental.Transport.AllowHTTP). Not specification-conforming; for
+	// testing only. The zero value requires HTTPS, as OpenID4VCI 1.0 Section
+	// 12.2 does, and a profile with ForbidInsecureTransports refuses any
+	// other value.
+	Experimental experimental.Transport
 	// Profile is the OpenID4VCI 1.0 profile whose Options the receiver
 	// applies. The zero value is profile.Final(); profile.HAIP() enforces
 	// HAIP 1.0. A draft profile is refused (profile.ErrDraftProfile).
@@ -49,20 +46,13 @@ type Oid4vciReceiver struct {
 	// HAIP and accepts an unsigned application/json document in every profile;
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
-	// IssuerMetadataFederation resolves the Credential Issuer Metadata of an
-	// issuer whose metadata document is not found (404) from its OpenID
-	// Federation Entity: the openid_credential_issuer metadata derived from a
-	// Trust Chain to one of the resolver's TrustAnchors (OpenID Federation 1.0
-	// Section 6.1.4). A nil HTTPClient uses HTTPClient. Without a valid chain
-	// the fetch fails. It does not apply when IssuerMetadataSigning.Require is
-	// set, because the result is not Section 12.2.3 signed metadata.
-	IssuerMetadataFederation *federation.Resolver
 
-	// dpopNonceMu guards dpopNonces.
+	// dpopNonceMu guards dpopNonces and attestationChallenges.
 	dpopNonceMu sync.Mutex
-	// dpopNonces is created on first use and kept behind a pointer so that
-	// Oid4vciReceiver stays comparable.
-	dpopNonces *dpopNonceCache
+	// dpopNonces and attestationChallenges are created on first use and kept
+	// behind pointers so that Oid4vciReceiver stays comparable.
+	dpopNonces            *recentValues[dpopNonceKey]
+	attestationChallenges *recentValues[attestationChallengeKey]
 }
 
 var (
@@ -87,12 +77,12 @@ func (o *Oid4vciReceiver) profileOptions() (profile.Options, error) {
 	return o.Profile.Options(), nil
 }
 
-// requireSecureTransport rejects the test-only HTTP escape under
+// requireSecureTransport rejects the experimental HTTP escape under
 // Options.ForbidInsecureTransports (HAIP §4 requires TLS for issuer and
 // authorization server endpoints).
 func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error {
-	if options.ForbidInsecureTransports && o.AllowHTTP {
-		return fmt.Errorf("%w: HAIP profile does not permit AllowHTTP", common.ErrInvalidInput)
+	if options.ForbidInsecureTransports && o.Experimental != (experimental.Transport{}) {
+		return fmt.Errorf("%w: HAIP profile does not permit Experimental.Transport", common.ErrInvalidInput)
 	}
 	return nil
 }
@@ -102,22 +92,6 @@ func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error 
 // would replay the body and the Authorization, DPoP and client attestation
 // headers to an origin the response chose.
 var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
-
-// OID4VCICredentialFormatToSerializationFlavor maps OID4VCI credential format
-// identifiers to wallet serialization flavors. SD-JWT VC is "dc+sd-jwt" in
-// OpenID4VCI 1.0 Appendix A.3 and "vc+sd-jwt" in Draft 13 Appendix A.3.
-func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.SupportedSerializationFlavor, error) {
-	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "jwt_vc_json", "jwt_vc", string(credential.JwtVc):
-		return credential.JwtVc, nil
-	case "dc+sd-jwt", "vc+sd-jwt", string(credential.SDJwtVC):
-		return credential.SDJwtVC, nil
-	case "ldp_vc", string(credential.LdpVc):
-		return credential.LdpVc, nil
-	default:
-		return "", fmt.Errorf("unsupported credential format: %q", format)
-	}
-}
 
 // ReceiveCredential performs a Draft 13 credential request. It is a
 // types.Receiver method and carries no context; it binds its request to

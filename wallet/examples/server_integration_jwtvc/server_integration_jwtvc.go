@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/examples/common"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -384,10 +383,6 @@ func presentation(w *wallet.Wallet, key *common.MockKeyEntry, receivedCredential
 }
 
 func main() {
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
-
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	opts, err := parseRunOptions(os.Args[1:])
 	if err != nil {
@@ -395,7 +390,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	runtime, err := common.NewOID4VPRuntime(os.Getenv("VCKNOTS_CERT_PATH"))
+	// The local sample server listens on plain http.
+	runtime, err := common.NewOID4VPRuntime(os.Getenv("VCKNOTS_CERT_PATH"), true)
 	if err != nil {
 		panic(err)
 	}

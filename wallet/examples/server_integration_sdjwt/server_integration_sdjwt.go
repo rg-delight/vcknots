@@ -47,12 +47,14 @@ import (
 	"github.com/trustknots/vcknots/wallet"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/examples/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 	"github.com/trustknots/vcknots/wallet/verifier"
@@ -346,9 +348,6 @@ func main() {
 		logger.Info("=== Server Integration Test Mode ===")
 		logger.Info("Make sure the server is running", "url", serverURL)
 
-		http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-		defer env.SetHTTPAllowed(http_allowed)
-		env.SetHTTPAllowed(true)
 		logger.Info("Enabled HTTP transport for local server integration testing")
 	}
 
@@ -371,7 +370,9 @@ func main() {
 
 	certPool := buildCertPool(isConformanceMode)
 	p := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           env.IsHTTPAllowed(),
+		// The local sample server listens on plain http; the conformance
+		// suite does not.
+		AllowHTTP:           !isConformanceMode,
 		X509TrustChainRoots: certPool,
 	}
 	presenterDisp, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, p))
@@ -379,7 +380,9 @@ func main() {
 		panic(err)
 	}
 
-	receiverDisp, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	receiverDisp, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{
+		Experimental: experimental.Transport{AllowHTTP: !isConformanceMode},
+	}))
 	if err != nil {
 		panic(err)
 	}
@@ -400,7 +403,7 @@ func main() {
 	}
 
 	mockKey := common.NewMockKeyEntry()
-	issuerAcceptance, err := common.SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"))
+	issuerAcceptance, err := common.SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"), !isConformanceMode)
 	if err != nil {
 		panic(err)
 	}

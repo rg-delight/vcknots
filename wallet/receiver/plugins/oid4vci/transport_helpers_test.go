@@ -19,20 +19,34 @@ func dpopAccessToken(accessToken string) types.CredentialIssuanceAccessToken {
 	return types.CredentialIssuanceAccessToken{Token: accessToken, TokenType: dpopAuthorizationScheme}
 }
 
+// testDPoPKeyThumbprint names the key of testProver's proofs.
+const testDPoPKeyThumbprint = "test-dpop-key"
+
+// testProver pairs proof with testDPoPKeyThumbprint.
+func testProver(proof types.DPoPProofFactory) types.DPoPProver {
+	return types.DPoPProver{KeyThumbprint: testDPoPKeyThumbprint, Proof: proof}
+}
+
 // fixedProof returns the same DPoP proof for every attempt.
 func fixedProof(proof string) types.DPoPProofFactory {
 	return func(string) (string, error) { return proof, nil }
 }
 
+// testClientKeyThumbprint names the Client Instance Key of the test provers.
+const testClientKeyThumbprint = "test-client-key"
+
 // fixedAttestationHeaders returns the same client attestation headers for every attempt.
-func fixedAttestationHeaders(headers types.OAuthClientAttestationHeaders) types.OAuthClientAttestationHeadersFactory {
-	return func() (types.OAuthClientAttestationHeaders, error) { return headers, nil }
+func fixedAttestationHeaders(headers types.OAuthClientAttestationHeaders) types.ClientAttestationProver {
+	return types.ClientAttestationProver{
+		KeyThumbprint: testClientKeyThumbprint,
+		Headers:       func(string) (types.OAuthClientAttestationHeaders, error) { return headers, nil },
+	}
 }
 
 // postCredentialBody posts a pre-encoded body to a protected endpoint with a
 // DPoP-bound access token and no c_nonce refresh.
 func postCredentialBody(ctx context.Context, receiver *Oid4vciReceiver, endpoint common.URIField, accessToken string, body []byte, contentType string, proof types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
-	return receiver.RequestDeferredCredential(ctx, endpoint, dpopAccessToken(accessToken), body, contentType, proof)
+	return receiver.RequestDeferredCredential(ctx, endpoint, dpopAccessToken(accessToken), body, contentType, testProver(proof))
 }
 
 // signDPoP builds an RFC 9449 DPoP proof with key, as a wallet's factory does.
