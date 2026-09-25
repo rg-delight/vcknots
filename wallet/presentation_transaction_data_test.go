@@ -58,7 +58,7 @@ func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry,
 	mux.HandleFunc("/.well-known/openid-credential-issuer", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{
 			"credential_issuer": server.URL, "credential_endpoint": server.URL + "/credential", "authorization_servers": []string{server.URL},
-			"credential_configurations_supported": map[string]any{"identity": map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:identity"}},
+			"credential_configurations_supported": map[string]any{"identity": map[string]any{"format": "vc+sd-jwt", "vct": "urn:test:identity"}},
 		})
 	})
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {

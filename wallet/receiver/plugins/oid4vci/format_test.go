@@ -39,24 +39,3 @@ func TestCredentialFormatFlavor(t *testing.T) {
 		}
 	}
 }
-
-// The legacy mapping accepts the identifiers of both versions and nothing
-// else: no alias, no serialization flavor name, no unknown value.
-func TestOID4VCICredentialFormatToSerializationFlavor(t *testing.T) {
-	for format, want := range map[string]credential.SupportedSerializationFlavor{
-		"jwt_vc_json": credential.JwtVc,
-		"dc+sd-jwt":   credential.SDJwtVC,
-		"vc+sd-jwt":   credential.SDJwtVC,
-		"ldp_vc":      credential.LdpVc,
-	} {
-		got, err := OID4VCICredentialFormatToSerializationFlavor(format)
-		if err != nil || got != want {
-			t.Errorf("%s: got %q, %v; want %q", format, got, err, want)
-		}
-	}
-	for _, format := range []string{"mso_mdoc", "jwt_vc", "application/vc+jwt", "application/dc+sd-jwt", "application/vc", "unknown"} {
-		if _, err := OID4VCICredentialFormatToSerializationFlavor(format); !errors.Is(err, ErrCredentialFormatUnsupported) {
-			t.Errorf("%q: want ErrCredentialFormatUnsupported, got %v", format, err)
-		}
-	}
-}

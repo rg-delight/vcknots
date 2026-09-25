@@ -94,7 +94,7 @@ func newAcceptanceFixture(t *testing.T, policy *acceptance.Policy) *acceptanceFi
 			"nonce_endpoint":        server.URL + "/nonce",
 			"authorization_servers": []string{server.URL},
 			"credential_configurations_supported": map[string]any{
-				"acceptance-config": map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:acceptance"},
+				"acceptance-config": map[string]any{"format": "vc+sd-jwt", "vct": "urn:test:acceptance"},
 			},
 		})
 	})

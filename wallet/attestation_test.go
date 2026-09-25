@@ -18,17 +18,10 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-// testLeafCertificate builds a certificate for key: self-signed, or issued by
-// a throwaway CA.
-func testLeafCertificate(t *testing.T, key jose.JSONWebKey, selfSigned bool) *x509.Certificate {
-	t.Helper()
-	leaf, _ := testLeafCertificateAndIssuer(t, key, selfSigned)
-	return leaf
-}
-
-// testLeafCertificateAndIssuer is testLeafCertificate that also returns the
-// certificate that issued the leaf (the leaf itself when self-signed), the
-// anchor an attestation trust policy validates the leaf against.
+// testLeafCertificateAndIssuer builds a certificate for key, self-signed or
+// issued by a throwaway CA, and returns it with its issuer (the leaf itself
+// when self-signed): the anchor an attestation trust policy validates it
+// against.
 func testLeafCertificateAndIssuer(t *testing.T, key jose.JSONWebKey, selfSigned bool) (*x509.Certificate, *x509.Certificate) {
 	t.Helper()
 	template := &x509.Certificate{

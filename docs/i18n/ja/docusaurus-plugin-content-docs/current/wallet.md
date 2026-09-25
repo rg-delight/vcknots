@@ -371,7 +371,7 @@ func receiveSDJwtCredential(w *wallet.Wallet, key wallet.IKeyEntry, offerURI str
 * **CachedIssuerMetadata:** 設定すると Issuer メタデータを取得しません（セクション 4 を参照）。
 * **Acceptance:** この呼び出しの受理ポリシーです。`Config.CredentialAcceptance` より優先します。
 
-`ReceiveCredential` は Issuer と認可サーバーのメタデータを取得し、pre-authorized code でアクセストークンを取得し、`Key` で key proof に署名して Credential を要求し、検査してから保存します。
+`ReceiveCredential` は Draft 13 §11.2.2 の位置（識別子の後ろに well-known のパスを付けた URL）から Issuer のメタデータを、また認可サーバーのメタデータを取得し、pre-authorized code でアクセストークンを取得し、`Key` で key proof に署名して Credential を要求し、検査してから保存します。
 検査には `Acceptance`、なければ `Config.CredentialAcceptance` を使います。
 どちらもなければ何も要求せず、`ErrCredentialAcceptancePolicyRequired` で失敗します。
 Issuer を認証していない Credential は保存しません（SD-JWT VC -19 §2.4）。
@@ -1516,7 +1516,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 **plugin とサブパッケージ**
 
 * `oid4vp.Oid4vpPresenter` は `==` で比較できなくなりました。`oid4vci.Oid4vciReceiver` と `oid4vp.Oid4vpPresenter` には新しいフィールド（`HTTPClient`、receiver の `Experimental`、`Profile` など）とメソッドがあります。`receiver.WithDefaultConfig`、`presenter.WithDefaultConfig`、`NewWallet` が構築する plugin は HTTPS を要求し、環境変数でこれを変えることはできません。
-* `oid4vci.OID4VCICredentialFormatToSerializationFlavor` は非推奨になり、`oid4vci.CredentialFormatFlavor` に置き換わりました。受け付けるのは `jwt_vc_json`、`ldp_vc`、`dc+sd-jwt`、`vc+sd-jwt` の完全一致だけで、`jwt_vc`、シリアライゼーション flavor の名前、未知の値は `oid4vci.ErrCredentialFormatUnsupported` で拒否します。`ReceiveCredential` は未知の形式を JWT VC として保存しなくなりました。
+* `oid4vci.OID4VCICredentialFormatToSerializationFlavor` を削除しました。発行のプロファイルを渡して `oid4vci.CredentialFormatFlavor` を使います。Draft 13 である `ReceiveCredential` は、Issuer のメタデータを Draft 13 §11.2.2 の位置から読み、形式を `CredentialFormatFlavor(profile.Draft13(), …)` の Draft 13 の表（`jwt_vc_json`、`ldp_vc`、`vc+sd-jwt`）で対応付けます。`dc+sd-jwt` は `oid4vci.ErrCredentialFormatUnsupported` で拒否します。未知の形式を JWT VC として保存することはありません。
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
 * `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
 * `Oid4vpPresenter.AllowHTTP` と `InsecureSkipX509Verify` を削除しました。`Oid4vpPresenter.Experimental`（`experimental.Presenter`）で明示的に設定します。`NewWallet` と `presenter.WithDefaultConfig` が構築する presenter は `VCKNOTS_WALLET_HTTP_ALLOWED` を読まなくなりました。`Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` を削除しました。OpenID4VP 1.0 の入口は、`Experimental.AcceptClientMetadataJWKsWithoutKeyID` を設定しない限り、重複のない `kid` を常に要求します。`requestBuilder.WithHTTPAllowed` を削除しました。

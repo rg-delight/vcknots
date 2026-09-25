@@ -156,7 +156,7 @@ var (
 	// ErrDraft13CredentialResponseInvalid reports a Credential Response with
 	// neither a credential nor a transaction_id.
 	ErrDraft13CredentialResponseInvalid = common.NewCodedError("draft13_credential_response_invalid", "credential response does not carry a usable credential")
-	// ErrDraft13ProofTransformFailed reports that TestHooks.KeyProof refused
+	// ErrDraft13ProofTransformFailed reports that Config.Experimental.Hooks.KeyProof refused
 	// the key proof.
 	ErrDraft13ProofTransformFailed = common.NewCodedError("draft13_proof_transform_failed", "proof transform failed")
 )

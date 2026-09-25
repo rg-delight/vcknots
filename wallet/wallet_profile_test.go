@@ -328,7 +328,7 @@ func newDraftIssuanceServer(t *testing.T, wire string, tokenType string) *httpte
 			"nonce_endpoint":        server.URL + "/nonce",
 			"authorization_servers": []string{server.URL},
 			"credential_configurations_supported": map[string]any{
-				"draft-config": map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:acceptance"},
+				"draft-config": map[string]any{"format": "vc+sd-jwt", "vct": "urn:test:acceptance"},
 			},
 		})
 	})

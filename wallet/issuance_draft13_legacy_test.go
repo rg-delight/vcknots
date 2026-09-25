@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -442,7 +443,7 @@ func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *
 				"format": "jwt_vc_json",
 			},
 			"sdjwt-config": map[string]interface{}{
-				"format": "dc+sd-jwt",
+				"format": "vc+sd-jwt",
 				"cryptographic_binding_methods_supported": []string{"jwk"},
 			},
 		},
@@ -868,4 +869,35 @@ func TestController_ReceiveCredential_AdditionalErrorPaths_Integration(t *testin
 			}
 		})
 	}
+}
+
+// Review of 2026-09-25 (finding 8): the legacy ReceiveCredential is Draft 13,
+// yet it read the Credential Issuer Metadata from the OpenID4VCI 1.0 Section
+// 12.2.2 location under the wallet's 1.0 profile. For an identifier with a
+// path the two locations differ; it now reads the Draft 13 Section 11.2.2
+// location only.
+func TestReceiveCredentialReadsTheDraft13MetadataLocation(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	issuer, err := url.Parse(server.URL + "/tenant")
+	require.NoError(t, err)
+
+	_, err = createTestControllerAllowingHTTP(t).ReceiveCredential(ReceiveCredentialRequest{
+		CredentialOffer: &CredentialOffer{
+			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"c"},
+			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}},
+		},
+		Type: receiverTypes.Oid4vci, Key: newMockKeyEntry(), Acceptance: mockIssuerAcceptance(),
+	})
+	require.Error(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"/tenant/.well-known/openid-credential-issuer"}, paths)
 }

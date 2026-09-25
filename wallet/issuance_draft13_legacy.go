@@ -152,7 +152,7 @@ func (w *Wallet) selectCredentialConfiguration(
 				continue
 			}
 
-			flavor, err := receiverOid4vci.OID4VCICredentialFormatToSerializationFlavor(config.Format)
+			flavor, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format)
 			if err != nil {
 				continue
 			}
@@ -175,7 +175,7 @@ func (w *Wallet) selectCredentialConfiguration(
 	}
 
 	configCopy := config
-	flavor, err := receiverOid4vci.OID4VCICredentialFormatToSerializationFlavor(config.Format)
+	flavor, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format)
 	if err != nil {
 		return "", nil, "", fmt.Errorf("unsupported credential format for configuration %q: %w", defaultConfigurationID, err)
 	}
@@ -218,6 +218,26 @@ func (w *Wallet) validateCredentialConfigurationIDs(offer *CredentialOffer, issu
 	return validateOfferedConfigurations(offer, issuerMetadata)
 }
 
+// fetchDraft13IssuerMetadata fetches the Credential Issuer Metadata of a
+// Draft 13 issuance: from the Draft 13 Section 11.2.2 location, without the
+// wallet's OpenID4VCI 1.0 profile options, through the plugin's
+// Draft13Transport. A plugin without that capability (a mock receiver)
+// answers through its own FetchIssuerMetadata.
+func (w *Wallet) fetchDraft13IssuerMetadata(issuer *url.URL, receivingType receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+	if issuer == nil {
+		return nil, invalidArgument("issuer metadata endpoint is required")
+	}
+	identifier, err := common.ParseURIField(issuer.String())
+	if err != nil {
+		return nil, keepMessage(ErrInvalidArgument, fmt.Errorf("failed to parse URI field: %w", err))
+	}
+	transport, err := w.receiver.Draft13Transport(receivingType)
+	if err != nil {
+		return w.receiver.FetchIssuerMetadata(*identifier, receivingType)
+	}
+	return transport.DiscoverDraft13CredentialIssuer(context.Background(), *identifier)
+}
+
 // fetchCredentialMetadata fetches issuer and authorization server metadata.
 func (w *Wallet) fetchCredentialMetadata(req ReceiveCredentialRequest) (*receiverTypes.CredentialIssuerMetadata, *receiverTypes.AuthorizationServerMetadata, error) {
 	var issuerMetadata *receiverTypes.CredentialIssuerMetadata
@@ -226,7 +246,7 @@ func (w *Wallet) fetchCredentialMetadata(req ReceiveCredentialRequest) (*receive
 	if req.CachedIssuerMetadata != nil {
 		issuerMetadata = req.CachedIssuerMetadata
 	} else {
-		issuerMetadata, err = w.FetchCredentialIssuerMetadata(req.CredentialOffer.CredentialIssuer, req.Type)
+		issuerMetadata, err = w.fetchDraft13IssuerMetadata(req.CredentialOffer.CredentialIssuer, req.Type)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to fetch issuer metadata: %w", err)
 		}

@@ -73,8 +73,8 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 		writeJSON(w, map[string]any{
 			"credential_issuer": server.URL, "credential_endpoint": server.URL + "/credential", "authorization_servers": []string{server.URL},
 			"credential_configurations_supported": map[string]any{
-				"urn:test:identity": map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:identity"},
-				"urn:test:address":  map[string]any{"format": "dc+sd-jwt", "vct": "urn:test:address"},
+				"urn:test:identity": map[string]any{"format": "vc+sd-jwt", "vct": "urn:test:identity"},
+				"urn:test:address":  map[string]any{"format": "vc+sd-jwt", "vct": "urn:test:address"},
 			},
 		})
 	})

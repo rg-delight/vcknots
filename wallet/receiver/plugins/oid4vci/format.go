@@ -50,21 +50,3 @@ func CredentialFormatFlavor(p profile.Profile, format string) (credential.Suppor
 	}
 	return "", fmt.Errorf("%w: %q under %s", ErrCredentialFormatUnsupported, format, p.Name())
 }
-
-// OID4VCICredentialFormatToSerializationFlavor maps a Credential Format
-// Identifier of OpenID4VCI 1.0 or Draft 13 to a serialization flavor, for the
-// legacy Wallet.ReceiveCredential, which serves issuers of both versions. It
-// accepts exactly the identifiers CredentialFormatFlavor accepts for either
-// version, and refuses every other value, including serialization flavor
-// names and pre-Draft 13 identifiers such as jwt_vc.
-//
-// Deprecated: use CredentialFormatFlavor with the profile of the issuance.
-func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.SupportedSerializationFlavor, error) {
-	if flavor, err := CredentialFormatFlavor(profile.Final(), format); err == nil {
-		return flavor, nil
-	}
-	if flavor, err := CredentialFormatFlavor(profile.Draft13(), format); err == nil {
-		return flavor, nil
-	}
-	return "", fmt.Errorf("%w: %q", ErrCredentialFormatUnsupported, format)
-}
