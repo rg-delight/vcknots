@@ -63,7 +63,8 @@ func LoadClientAuth() (wallet.ClientAuthConfig, error) {
 // http, so allowHTTP lets the key resolution reach it through the
 // experimental setting; it is not for production use. When issuerCAPath names
 // a PEM file, a credential carrying x5c is authenticated against the
-// certificates in it.
+// certificates in it; its iss must be a host the leaf certificate names
+// (allowHTTP binds an http iss the same way).
 func SampleIssuerAcceptance(issuerCAPath string, allowHTTP bool) (*acceptance.Policy, error) {
 	policy := &acceptance.Policy{IssuerKeys: &issuerkeys.Resolver{
 		Mechanisms: issuerkeys.Mechanisms{
@@ -83,7 +84,11 @@ func SampleIssuerAcceptance(issuerCAPath string, allowHTTP bool) (*acceptance.Po
 	if !roots.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("failed to parse issuer CA certificates")
 	}
-	policy.IssuerX509 = &acceptance.IssuerX509TrustOptions{RootCAs: roots, AllowUnadvertisedRevocation: true}
+	policy.IssuerX509 = &acceptance.IssuerX509TrustOptions{
+		RootCAs:                     roots,
+		AllowUnadvertisedRevocation: true,
+		Experimental:                experimental.Transport{AllowHTTP: allowHTTP},
+	}
 	return policy, nil
 }
 

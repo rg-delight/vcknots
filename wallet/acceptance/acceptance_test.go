@@ -63,7 +63,7 @@ func TestVerifyX509Policy(t *testing.T) {
 	}
 
 	t.Run("a valid x5c credential records the chain", func(t *testing.T) {
-		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{disclosures: map[string]string{"given_name": "Taro"}}), x509Trust(chain.anchors(), false), sdJWT(&holder))
+		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{disclosures: map[string]string{"given_name": "Taro"}}), x509Trust(chain.anchors()), sdJWT(&holder))
 		require.NoError(t, err)
 		require.Len(t, verification.CertificateSHA256, 2)
 		require.GreaterOrEqual(t, verification.RevocationUnadvertised, 1)
@@ -75,12 +75,12 @@ func TestVerifyX509Policy(t *testing.T) {
 		policy  Policy
 		message string
 	}{
-		"anchors that do not contain the CA": {signed(testWire{}), x509Trust(otherChain.anchors(), false), "issuer certificate chain is not trusted"},
-		"an expired credential":              {signed(testWire{exp: time.Now().Add(-time.Hour)}), x509Trust(chain.anchors(), false), "expired"},
-		"a tampered signature":               {signed(testWire{tamperSignature: true}), x509Trust(chain.anchors(), false), "issuer signature could not be verified"},
-		"a disclosure without a digest":      {signed(testWire{disclosures: map[string]string{"given_name": "Taro"}, extraDisclosure: true}), x509Trust(chain.anchors(), false), "disclosure is not referenced"},
-		"an issuer DNS binding mismatch":     {signed(testWire{issuer: "https://other.example.test"}), x509Trust(chain.anchors(), true), "not bound to issuer host"},
-		"a non SD-JWT typ":                   {signed(testWire{typ: "JWT"}), x509Trust(chain.anchors(), false), "typ header"},
+		"anchors that do not contain the CA": {signed(testWire{}), x509Trust(otherChain.anchors()), "issuer certificate chain is not trusted"},
+		"an expired credential":              {signed(testWire{exp: time.Now().Add(-time.Hour)}), x509Trust(chain.anchors()), "expired"},
+		"a tampered signature":               {signed(testWire{tamperSignature: true}), x509Trust(chain.anchors()), "issuer signature could not be verified"},
+		"a disclosure without a digest":      {signed(testWire{disclosures: map[string]string{"given_name": "Taro"}, extraDisclosure: true}), x509Trust(chain.anchors()), "disclosure is not referenced"},
+		"an issuer DNS binding mismatch":     {signed(testWire{issuer: "https://other.example.test"}), x509Trust(chain.anchors()), "not bound to issuer host"},
+		"a non SD-JWT typ":                   {signed(testWire{typ: "JWT"}), x509Trust(chain.anchors()), "typ header"},
 		"x5c without configured X.509 trust": {signed(testWire{}), Policy{}, "does not permit x5c issuer authentication"},
 	}
 	for name, testCase := range rejections {
@@ -91,7 +91,7 @@ func TestVerifyX509Policy(t *testing.T) {
 	}
 
 	t.Run("an issuer DNS binding match is accepted", func(t *testing.T) {
-		_, _, err := acceptor.Verify(t.Context(), signed(testWire{issuer: "https://issuer.example.test"}), x509Trust(chain.anchors(), true), sdJWT(&holder))
+		_, _, err := acceptor.Verify(t.Context(), signed(testWire{issuer: "https://issuer.example.test"}), x509Trust(chain.anchors()), sdJWT(&holder))
 		require.NoError(t, err)
 	})
 
@@ -105,10 +105,11 @@ func TestVerifyX509Policy(t *testing.T) {
 	})
 
 	t.Run("the verification records the x5c mechanism and the certificate subject", func(t *testing.T) {
-		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{}), x509Trust(chain.anchors(), true), sdJWT(&holder))
+		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{}), x509Trust(chain.anchors()), sdJWT(&holder))
 		require.NoError(t, err)
 		require.Equal(t, issuerkeys.MechanismX5CTrustedChain, verification.Mechanism)
-		require.Equal(t, testCredentialIssuer, verification.Issuer)
+		require.Equal(t, "CN=Acceptance Test Issuer", verification.Issuer)
+		require.Equal(t, testCredentialIssuer, verification.ClaimedIssuer)
 		require.True(t, verification.IssuerDNSBound)
 		require.Equal(t, "CN=Acceptance Test Issuer", verification.IssuerCertificateSubject.Subject)
 		require.Equal(t, []string{"issuer.example.test"}, verification.IssuerCertificateSubject.DNSNames)
@@ -127,6 +128,7 @@ func TestVerifyResolvedIssuerKeys(t *testing.T) {
 		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
 		require.Equal(t, issuerkeys.MechanismJWTVCIssuerMetadata, verification.Mechanism)
 		require.Equal(t, testCredentialIssuer, verification.Issuer)
+		require.Equal(t, testCredentialIssuer, verification.ClaimedIssuer)
 		require.Nil(t, verification.IssuerCertificateSubject)
 	})
 
@@ -352,10 +354,10 @@ func TestVerifyTypedFailures(t *testing.T) {
 		{"not yet valid", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{nbf: ptr(time.Now().Add(time.Hour))}), ErrCredentialNotYetValid},
 		{"disclosure integrity", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, extraDisclosure: true}), ErrDisclosureIntegrity},
 		{"sd_alg", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, sdAlg: "sha-1"}), ErrSDAlgUnsupported},
-		{"issuer DNS binding", profile.Final(), x509Trust(chain.anchors(), true), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
-		{"HAIP x5c required", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
-		{"HAIP trust anchor in x5c", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
-		{"HAIP self-signed issuer certificate", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
+		{"issuer DNS binding", profile.Final(), x509Trust(chain.anchors()), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
+		{"HAIP x5c required", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
+		{"HAIP trust anchor in x5c", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
+		{"HAIP self-signed issuer certificate", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

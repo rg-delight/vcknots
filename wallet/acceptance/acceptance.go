@@ -42,8 +42,12 @@ import (
 // credential, and no other mechanism is tried in its place:
 //
 //   - An x5c header is authenticated by the certificate chain alone
-//     (IssuerX509). A chain that is not trusted refuses the credential. With
-//     no iss, the Issuer is the leaf certificate's subject.
+//     (IssuerX509). A chain that is not trusted refuses the credential. The
+//     Issuer is the subject of the leaf certificate (SD-JWT VC -19 §2.5). An
+//     iss beside the x5c must be an https URL whose host the leaf names in a
+//     dNSName or URI subject alternative name; a DID iss is refused (a DID
+//     issuer is authenticated by its DID document, so its credential carries
+//     no x5c), as is any other iss.
 //   - Otherwise an https iss is authenticated by JWT VC Issuer Metadata
 //     (SD-JWT VC -19 §4, SD-JWT VC only; IssuerKeys) or by the keys of an
 //     OpenID Federation Trust Chain for that Entity (Federation).
@@ -94,14 +98,14 @@ type IssuerX509TrustOptions struct {
 	RootCAs                     *x509.CertPool     // exactly one of TrustAnchors / RootCAs
 	CertificateKeyUsages        []x509.ExtKeyUsage // optional ecosystem EKU policy
 	CRL                         commonX509.CRLCheckerOptions
-	AllowUnadvertisedRevocation bool // see commonX509.SigningChainPolicy.AllowUnadvertisedRevocation
-	// RequireIssuerDNSBinding is ecosystem policy, not an SD-JWT VC rule: the
-	// credential must carry an https iss whose host is a dNSName SAN of the
-	// leaf certificate. A credential without iss, or with an iss that is not
-	// an https URL (a DID, an http URL), names no host a certificate could be
-	// bound to and is refused.
-	RequireIssuerDNSBinding bool
-	HTTPClient              *http.Client // CRL fetches; nil uses a bounded default
+	AllowUnadvertisedRevocation bool         // see commonX509.SigningChainPolicy.AllowUnadvertisedRevocation
+	HTTPClient                  *http.Client // CRL fetches; nil uses a bounded default
+	// Experimental.AllowHTTP binds an http iss to the leaf certificate by its
+	// host, as an https iss is, for a local test issuer. Without it an x5c
+	// credential whose iss is not an https URL is refused. A profile with
+	// ForbidInsecureTransports (HAIP) refuses it. Not
+	// specification-conforming; for testing only.
+	Experimental experimental.Transport
 }
 
 // Options are the per-call inputs of Acceptor.Verify and Acceptor.Parse.
@@ -129,10 +133,19 @@ type Verification struct {
 	// IssuerKey is the public key the signature verified under; nil when no
 	// issuer was authenticated (Parse).
 	IssuerKey *jose.JSONWebKey
-	// Issuer is the authenticated credential's Issuer: its iss, or, for an
-	// x5c credential without iss, the leaf certificate's subject (SD-JWT VC
-	// -19 §2.5). Empty after Parse.
+	// Issuer is the authenticated Issuer of the credential. For the x5c
+	// mechanism it is always the subject distinguished name of the leaf
+	// certificate (SD-JWT VC -19 §2.5: "the Issuer of the Verifiable Digital
+	// Credential is the subject of the end-entity certificate"), whatever iss
+	// says; for every other mechanism it is the iss (the issuer of an ldp_vc)
+	// the key was established for. Empty after Parse.
 	Issuer string
+	// ClaimedIssuer is the iss the credential carries (the issuer of an
+	// ldp_vc), empty when it carries none. For the x5c mechanism it is what
+	// the leaf certificate was bound to (IssuerDNSBound), not the
+	// authenticated identity itself; for every other mechanism it equals
+	// Issuer. Empty after Parse.
+	ClaimedIssuer string
 	// Mechanism names how the issuer key was established:
 	// issuerkeys.MechanismX5CTrustedChain, MechanismJWTVCIssuerMetadata,
 	// MechanismDIDConfigurationBinding or MechanismOpenIDFederation. Empty
@@ -141,8 +154,10 @@ type Verification struct {
 	// IssuerCertificateSubject is the leaf certificate's subject and subject
 	// alternative names for the x5c mechanism; nil otherwise.
 	IssuerCertificateSubject *CertificateSubject
-	// IssuerDNSBound reports that the https iss host was matched against a
-	// dNSName of the leaf certificate (IssuerX509TrustOptions.RequireIssuerDNSBinding).
+	// IssuerDNSBound reports that the credential carries an iss and the leaf
+	// certificate names its host in a dNSName or URI subject alternative name.
+	// An x5c credential with an iss is accepted only then; false for an x5c
+	// credential without iss and for every other mechanism.
 	IssuerDNSBound bool
 	// DID is the DID the issuer key came from, for the DID mechanism.
 	DID string
@@ -217,6 +232,9 @@ func (a *Acceptor) Verify(ctx context.Context, raw []byte, policy Policy, opts O
 	if a.forbidInsecure && policy.IssuerKeys != nil && policy.IssuerKeys.Experimental != (experimental.Transport{}) {
 		// SD-JWT VC -19 §3 and HAIP 1.0 §4: key material over TLS only.
 		return nil, nil, fmt.Errorf("%w: the profile forbids an issuer key resolver with Experimental.Transport", common.ErrInvalidInput)
+	}
+	if a.forbidInsecure && policy.IssuerX509 != nil && policy.IssuerX509.Experimental != (experimental.Transport{}) {
+		return nil, nil, fmt.Errorf("%w: the profile forbids IssuerX509.Experimental", common.ErrInvalidInput)
 	}
 	return a.run(ctx, raw, opts, &policy)
 }

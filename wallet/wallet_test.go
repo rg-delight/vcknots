@@ -724,7 +724,7 @@ func createWalletTestSDJWT() string {
 
 	payload := map[string]interface{}{
 		"_sd":     sdDigests,
-		"iss":     "https://example.com/issuer",
+		"iss":     "http://127.0.0.1/issuer",
 		"sub":     "did:key:z6Mkwallet-test-subject",
 		"iat":     1683000000,
 		"exp":     1883000000,

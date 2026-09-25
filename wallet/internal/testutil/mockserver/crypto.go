@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"math/big"
+	"net/url"
 	"sync"
 	"time"
 
@@ -62,7 +63,9 @@ func CredentialTrustAnchors() []*x509.Certificate {
 
 // CertificateChain returns the x5c header value (the leaf only) of a
 // certificate for kp's public key, issued by the CredentialTrustAnchors CA.
-// The leaf names no DNS name, so it authenticates the key, not a host.
+// The leaf names the loopback host the mock servers run on (localhost and
+// the URI http://127.0.0.1), so a credential whose iss is a mock server URL
+// binds to it under IssuerX509TrustOptions.Experimental.AllowHTTP.
 func (kp *KeyPair) CertificateChain() []string {
 	kp.chainOnce.Do(func() {
 		caCertificate, caKey := credentialCA()
@@ -77,6 +80,8 @@ func (kp *KeyPair) CertificateChain() []string {
 			NotAfter:              time.Now().Add(7 * 24 * time.Hour),
 			KeyUsage:              x509.KeyUsageDigitalSignature,
 			BasicConstraintsValid: true,
+			DNSNames:              []string{"localhost"},
+			URIs:                  []*url.URL{{Scheme: "http", Host: "127.0.0.1"}},
 		}
 		der, err := x509.CreateCertificate(rand.Reader, template, caCertificate, kp.PublicKey, caKey)
 		if err != nil {

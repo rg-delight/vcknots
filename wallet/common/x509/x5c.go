@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
@@ -198,6 +199,37 @@ func RequireLeafDNSName(leaf *x509.Certificate, host string, wildcard bool) erro
 		}
 	}
 	return errors.New("SAN of the certificate and client_id did not match")
+}
+
+// RequireLeafNamesIssuer enforces that the leaf certificate names the host of
+// issuer, an issuer identifier URL: a dNSName Subject Alternative Name equal
+// to the host (exactly and case-insensitively, RFC 4343; a wildcard never
+// matches, since it authenticates a TLS server rather than an issuer), or a
+// uniformResourceIdentifier Subject Alternative Name with the same scheme and
+// host. It is how an x5c chain is bound to the issuer an iss claims (SD-JWT
+// VC -19 Section 2.5; an https iss is resolved by its host, Section 4). The
+// caller decides which schemes it admits; this function only compares.
+func RequireLeafNamesIssuer(leaf *x509.Certificate, issuer *url.URL) error {
+	if leaf == nil || len(leaf.Raw) == 0 {
+		return fmt.Errorf("x5c leaf certificate is empty: %w", ErrX5CInvalid)
+	}
+	if issuer == nil || issuer.Hostname() == "" {
+		return errors.New("issuer identifier names no host")
+	}
+	host := issuer.Hostname()
+	if RequireLeafDNSName(leaf, host, false) == nil {
+		return nil
+	}
+	normalizedHost := normalizeDNSName(host)
+	for _, uri := range leaf.URIs {
+		if uri == nil || !strings.EqualFold(uri.Scheme, issuer.Scheme) {
+			continue
+		}
+		if candidate := normalizeDNSName(uri.Hostname()); candidate != "" && candidate == normalizedHost {
+			return nil
+		}
+	}
+	return fmt.Errorf("no dNSName or URI subject alternative name of the certificate names host %q", host)
 }
 
 // normalizeDNSName lowercases a DNS name and drops the trailing dot of an

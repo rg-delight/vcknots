@@ -34,32 +34,73 @@ func x5cClaims(t *testing.T, chain testIssuerChain, holder jose.JSONWebKey, issu
 	return []byte(signedClaims(t, chain.leafKey, "dc+sd-jwt", map[string]any{"x5c": chain.leafOnlyX5C()}, claims))
 }
 
-// Promoted from the 2026-09-24 audit probe (CR-1): with the DNS binding
-// required, a leaf certificate for attacker.example must not sign as an
-// issuer it cannot be bound to. Before the fix an absent, DID or http iss
-// skipped the binding and the credential was accepted under both profiles.
-func TestVerifyDNSBindingRefusesAnIssuerTheLeafCannotBeBoundTo(t *testing.T) {
+// Promoted from the 2026-09-25 final review probe F (and the 2026-09-24 audit
+// probe CR-1): a chain trusted for attacker.example must not make the
+// credential speak for another issuer. SD-JWT VC -19 §2.5 makes the subject of
+// the end-entity certificate the Issuer of an x5c credential, and ADR-0093
+// decision 1 binds an https iss beside it to the leaf by default. Before the
+// fix the binding was an opt-in, so under Final and HAIP alike the credential
+// was accepted with Verification.Issuer set to the victim.
+func TestVerifyX5CBindsTheIssToTheLeafByDefault(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"attacker.example"})
 	holder := newHolderKey(t)
 	for _, p := range []profile.Profile{profile.Final(), profile.HAIP()} {
-		for name, issuer := range map[string]*string{
-			"missing":        nil,
-			"did":            ptr("did:web:victim.example"),
-			"http":           ptr("http://victim.example"),
-			"https mismatch": ptr("https://victim.example"),
+		for name, issuer := range map[string]string{
+			"https victim":        "https://victim.example",
+			"did:web victim":      "did:web:victim.example",
+			"did:web own host":    "did:web:attacker.example",
+			"http victim":         "http://victim.example",
+			"http own host":       "http://attacker.example",
+			"https parent domain": "https://example",
+			"https subdomain":     "https://www.attacker.example",
+			"not a URL":           "attacker.example",
 		} {
 			t.Run(p.Name()+" iss "+name, func(t *testing.T) {
-				_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, issuer), x509Trust(chain.anchors(), true), sdJWT(&holder))
+				_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, &issuer), x509Trust(chain.anchors()), sdJWT(&holder))
 				require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
 				require.Nil(t, verification)
 			})
 		}
+
+		t.Run(p.Name()+" the leaf's own host is bound and the Issuer is the certificate subject", func(t *testing.T) {
+			_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("https://attacker.example/issuer")), x509Trust(chain.anchors()), sdJWT(&holder))
+			require.NoError(t, err)
+			require.True(t, verification.IssuerDNSBound)
+			require.Equal(t, "CN=Acceptance Test Issuer", verification.Issuer)
+			require.Equal(t, "https://attacker.example/issuer", verification.ClaimedIssuer)
+			require.Equal(t, issuerkeys.MechanismX5CTrustedChain, verification.Mechanism)
+		})
 	}
 
-	t.Run("the leaf's own host is bound", func(t *testing.T) {
-		_, verification, err := newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("https://attacker.example")), x509Trust(chain.anchors(), true), sdJWT(&holder))
+	t.Run("a URI subject alternative name of the same scheme binds the host", func(t *testing.T) {
+		uriChain := newTestIssuerChainWithURIs(t, nil, []string{"https://issuer.example.test/credential-issuer"})
+		_, verification, err := newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), x5cClaims(t, uriChain, holder, ptr("https://issuer.example.test")), x509Trust(uriChain.anchors()), sdJWT(&holder))
 		require.NoError(t, err)
 		require.True(t, verification.IssuerDNSBound)
+
+		otherScheme := newTestIssuerChainWithURIs(t, nil, []string{"http://issuer.example.test"})
+		_, _, err = newTestAcceptor(t, profile.Final()).Verify(t.Context(), x5cClaims(t, otherScheme, holder, ptr("https://issuer.example.test")), x509Trust(otherScheme.anchors()), sdJWT(&holder))
+		require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
+	})
+
+	t.Run("a wildcard dNSName does not bind", func(t *testing.T) {
+		wildcard := newTestIssuerChain(t, []string{"*.example.test"})
+		_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), x5cClaims(t, wildcard, holder, ptr("https://issuer.example.test")), x509Trust(wildcard.anchors()), sdJWT(&holder))
+		require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
+	})
+
+	t.Run("Experimental.AllowHTTP binds an http iss by its host, and HAIP refuses it", func(t *testing.T) {
+		policy := x509Trust(chain.anchors())
+		policy.IssuerX509.Experimental = experimental.Transport{AllowHTTP: true}
+		_, verification, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("http://attacker.example")), policy, sdJWT(&holder))
+		require.NoError(t, err)
+		require.True(t, verification.IssuerDNSBound)
+		_, _, err = newTestAcceptor(t, profile.Final()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("http://victim.example")), policy, sdJWT(&holder))
+		require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
+		_, _, err = newTestAcceptor(t, profile.Final()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("did:web:attacker.example")), policy, sdJWT(&holder))
+		require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
+		_, _, err = newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("https://attacker.example")), policy, sdJWT(&holder))
+		require.ErrorIs(t, err, common.ErrInvalidInput)
 	})
 }
 
@@ -70,9 +111,10 @@ func TestVerifyX5CWithoutIssIsIssuedByTheCertificateSubject(t *testing.T) {
 	holder := newHolderKey(t)
 	for _, p := range []profile.Profile{profile.Final(), profile.HAIP()} {
 		t.Run(p.Name(), func(t *testing.T) {
-			_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, nil), x509Trust(chain.anchors(), false), sdJWT(&holder))
+			_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, nil), x509Trust(chain.anchors()), sdJWT(&holder))
 			require.NoError(t, err)
 			require.Equal(t, "CN=Acceptance Test Issuer", verification.Issuer)
+			require.Empty(t, verification.ClaimedIssuer)
 			require.Equal(t, issuerkeys.MechanismX5CTrustedChain, verification.Mechanism)
 			require.False(t, verification.IssuerDNSBound)
 			require.Equal(t, []string{"issuer.example.test"}, verification.IssuerCertificateSubject.DNSNames)
@@ -104,11 +146,9 @@ func TestVerifyRefusesADisclosedIss(t *testing.T) {
 	claims["_sd_alg"] = "sha-256"
 	raw := signedClaims(t, chain.leafKey, "dc+sd-jwt", map[string]any{"x5c": chain.leafOnlyX5C()}, claims) + disclosure + "~"
 
-	for _, dnsBinding := range []bool{true, false} {
-		_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), []byte(raw), x509Trust(chain.anchors(), dnsBinding), sdJWT(&holder))
-		require.ErrorIs(t, err, ErrCredentialParse)
-		require.ErrorIs(t, err, serializerTypes.ErrRegisteredClaimDisclosed)
-	}
+	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), []byte(raw), x509Trust(chain.anchors()), sdJWT(&holder))
+	require.ErrorIs(t, err, ErrCredentialParse)
+	require.ErrorIs(t, err, serializerTypes.ErrRegisteredClaimDisclosed)
 }
 
 // SD-JWT VC -19 §7.3: the verification process follows from iss and the
@@ -126,7 +166,7 @@ func TestVerifyMechanismFollowsTheIssuerIdentifier(t *testing.T) {
 
 	t.Run("an https iss without x5c is refused by an x5c-only policy", func(t *testing.T) {
 		chain := newTestIssuerChain(t, []string{"issuer.example.test"})
-		_, _, err := acceptor.Verify(t.Context(), withIssuer(testCredentialIssuer), x509Trust(chain.anchors(), false), sdJWT(&holder))
+		_, _, err := acceptor.Verify(t.Context(), withIssuer(testCredentialIssuer), x509Trust(chain.anchors()), sdJWT(&holder))
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 	})
 
@@ -205,6 +245,7 @@ func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 		require.Equal(t, issuerkeys.MechanismDIDConfigurationBinding, verification.Mechanism)
 		require.Equal(t, did, verification.DID)
 		require.Equal(t, did, verification.Issuer)
+		require.Equal(t, did, verification.ClaimedIssuer)
 	})
 }
 
@@ -212,7 +253,7 @@ func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 func TestVerifyRefusesAnExperimentalResolverUnderForbidInsecureTransports(t *testing.T) {
 	holder := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
-	policy := x509Trust(chain.anchors(), false)
+	policy := x509Trust(chain.anchors())
 	policy.IssuerKeys = newKeyNetwork().resolver(issuerkeys.Mechanisms{JWTVCIssuerMetadata: true})
 	policy.IssuerKeys.Experimental = experimental.Transport{AllowHTTP: true}
 	_, _, err := newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr(testCredentialIssuer)), policy, sdJWT(&holder))

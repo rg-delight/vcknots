@@ -187,6 +187,7 @@ func revokedIssuerChain(t *testing.T) (testIssuerChain, *http.Client) {
 	leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
 		SerialNumber:          leafSerial,
 		Subject:               pkix.Name{CommonName: "Revoked Test Issuer"},
+		DNSNames:              []string{"issuer.example.test"},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,

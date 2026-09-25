@@ -90,6 +90,7 @@ func authenticateDataIntegrityIssuer(ctx context.Context, document map[string]an
 			continue
 		}
 		verification.Issuer = issuer
+		verification.ClaimedIssuer = issuer
 		verification.IssuerKeyID = method
 		recordCandidate(candidate, verification)
 		return nil

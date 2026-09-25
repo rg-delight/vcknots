@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -215,6 +216,19 @@ func (c testIssuerChain) anchors() []*x509.Certificate {
 
 func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	t.Helper()
+	return newTestIssuerChainWithURIs(t, dnsNames, nil)
+}
+
+// newTestIssuerChainWithURIs is newTestIssuerChain whose leaf also carries
+// uris as uniformResourceIdentifier subject alternative names.
+func newTestIssuerChainWithURIs(t *testing.T, dnsNames []string, uris []string) testIssuerChain {
+	t.Helper()
+	var parsedURIs []*url.URL
+	for _, raw := range uris {
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err)
+		parsedURIs = append(parsedURIs, parsed)
+	}
 	caKey := testutil.NewP256Key(t)
 	caTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -239,6 +253,7 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		DNSNames:              dnsNames,
+		URIs:                  parsedURIs,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, &leafKey.PublicKey, caKey)
 	require.NoError(t, err)
@@ -346,11 +361,10 @@ func resolving(keys ...jose.JSONWebKey) Policy {
 
 // x509Trust is a Policy trusting anchors, with no CRL distribution points
 // required.
-func x509Trust(anchors []*x509.Certificate, dnsBinding bool) Policy {
+func x509Trust(anchors []*x509.Certificate) Policy {
 	return Policy{IssuerX509: &IssuerX509TrustOptions{
 		TrustAnchors:                anchors,
 		AllowUnadvertisedRevocation: true,
-		RequireIssuerDNSBinding:     dnsBinding,
 	}}
 }
 

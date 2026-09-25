@@ -39,8 +39,10 @@ var (
 	// ErrIssuerSignatureInvalid reports that no candidate issuer key verifies
 	// the signature.
 	ErrIssuerSignatureInvalid = common.NewCodedError("issuer_signature_invalid", "issuer signature could not be verified")
-	// ErrIssuerDNSBindingFailed reports that IssuerX509TrustOptions.RequireIssuerDNSBinding
-	// is set and the leaf has no dNSName SAN equal to the host of an https iss.
+	// ErrIssuerDNSBindingFailed reports an x5c credential whose iss the leaf
+	// certificate is not bound to: an https iss whose host the leaf names in
+	// no dNSName or URI subject alternative name, a DID iss (authenticated by
+	// its DID document, never by x5c), or an iss that is not an https URL.
 	ErrIssuerDNSBindingFailed = common.NewCodedError("issuer_dns_binding_failed", "issuer certificate is not bound to the issuer host")
 	// ErrCredentialExpired reports an exp in the past of the policy clock.
 	ErrCredentialExpired = common.NewCodedError("credential_expired", "credential has expired")

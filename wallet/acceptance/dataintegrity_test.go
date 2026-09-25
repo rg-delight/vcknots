@@ -137,7 +137,7 @@ func TestVerifyDataIntegrityCredential(t *testing.T) {
 
 	t.Run("IssuerX509 alone authenticates nothing", func(t *testing.T) {
 		chain := newTestIssuerChain(t, []string{"issuer.example"})
-		_, _, err := acceptor.Verify(t.Context(), raw, x509Trust(chain.anchors(), false), ldpOptions())
+		_, _, err := acceptor.Verify(t.Context(), raw, x509Trust(chain.anchors()), ldpOptions())
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 	})
 

@@ -987,7 +987,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 * **Issuer の鍵:** 方式はポリシーではなく Credential で決まります（SD-JWT VC -19 §2.5、§7.3）。
   ポリシーは方式を許すだけです。
   許していない方式にあたる Credential は拒否し、代わりに別の方式を試すことはしません。
-  * `x5c` ヘッダがあれば、そのチェーンだけで `IssuerX509` に対して認証します（アンカー、CRL による失効確認、任意の EKU）。信頼できないチェーンは拒否します。`RequireIssuerDNSBinding` では、Credential が `https` の `iss` を持ち、その host が leaf の `dNSName` であることを求めます。`iss` がない、または DID や `http` の `iss` を持つ Credential は拒否します。`iss` がなければ、Issuer は leaf 証明書の subject です。
+  * `x5c` ヘッダがあれば、そのチェーンだけで `IssuerX509` に対して認証します（アンカー、CRL による失効確認、任意の EKU）。信頼できないチェーンは拒否します。`iss` の有無にかかわらず、Issuer は leaf 証明書の subject です（SD-JWT VC -19 §2.5）。`x5c` と並ぶ `iss` は `https` の URL でなければならず、その host を leaf が `dNSName`（完全一致、ワイルドカードは不可）か、同じ scheme の `uniformResourceIdentifier` で名指ししていなければなりません。そうでなければ `ErrIssuerDNSBindingFailed` で拒否します。DID の `iss` と `x5c` の組み合わせは拒否します。DID の Issuer は DID document で認証するので、その Credential は `x5c` を持ちません。その他の `iss` も拒否します。例外は `IssuerX509.Experimental.AllowHTTP` の下の `http` の `iss` で、同じ規則で束縛します（ローカルのテスト用 Issuer のためのもので、`ForbidInsecureTransports` を持つプロファイルは拒否します）。
   * `x5c` がなく `iss` が `https` なら、`IssuerKeys` による JWT VC Issuer Metadata（SD-JWT VC -19 §4、SD-JWT VC だけ）か、`Federation`（Entity Identifier が `iss` である OpenID Federation の Trust Chain から導いた `openid_credential_issuer` metadata の鍵。`acceptance.NewFederationIssuerKeys`）で認証します。
   * `x5c` がなく `iss` が DID なら、`IssuerKeys` で解決し、Credential Issuer の origin が DIF Well Known DID Configuration でその DID を結び付けている場合だけ受け入れます（OpenID4VCI 1.0 §14.4）。
   * それ以外の `iss`、または `iss` がなければ拒否します。
@@ -1001,7 +1001,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 平文 HTTP で取得できるのは `Resolver.Experimental`（`experimental.Transport`）を設定したときだけです。SD-JWT VC -19 §3 はすべての取得に HTTPS を求めており、`ForbidInsecureTransports` を持つプロファイル（HAIP）は、これを設定した resolver を持つポリシーを拒否します。
 
 `acceptance.Verification`（`SavedCredential.Verification` も同じ）は、Issuer をどう認証したかを記録します。
-`Issuer`、`Mechanism`（`issuerkeys.MechanismX5CTrustedChain`、`MechanismJWTVCIssuerMetadata`、`MechanismDIDConfigurationBinding`、`MechanismOpenIDFederation`）、Issuer の鍵、証明書のフィンガープリントと `IssuerCertificateSubject`、`IssuerDNSBound`、`DID`、`FederationTrustAnchor`、失効確認の件数、holder binding の結果です。
+`Issuer`（認証した主体。`x5c` では leaf 証明書の subject、その他の方式では `iss`）、`ClaimedIssuer`（Credential が持つ `iss`。`x5c` では leaf を束縛した相手であり、認証した主体そのものではありません）、`Mechanism`（`issuerkeys.MechanismX5CTrustedChain`、`MechanismJWTVCIssuerMetadata`、`MechanismDIDConfigurationBinding`、`MechanismOpenIDFederation`）、Issuer の鍵、証明書のフィンガープリントと `IssuerCertificateSubject`、`IssuerDNSBound`、`DID`、`FederationTrustAnchor`、失効確認の件数、holder binding の結果です。
 失敗はパッケージ `acceptance` のセンチネル（`ErrIssuerKeyUnresolved`、`ErrIssuerSignatureInvalid`、`ErrHolderBindingMismatch` など）をラップします。
 鍵の解決に失敗した場合は、診断を持つ `*issuerkeys.UnresolvedError` か `*issuerkeys.DIDOnlyTrustError` も含みます。
 信頼できない、または失効したチェーンは、パッケージ `common/x509` の `*x509.SigningChainError` または `*x509.CRLCheckError` になります。

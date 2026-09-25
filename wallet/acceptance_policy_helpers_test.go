@@ -86,12 +86,14 @@ func domainLinkageCredential(did, kid, origin string, algorithm jose.SignatureAl
 }
 
 // mockIssuerAcceptance authenticates the credentials the mockserver issuers
-// sign: their x5c chain reaches mockserver.CredentialTrustAnchors. No DNS
-// binding is required, since the mock issuers run on 127.0.0.1.
+// sign: their x5c chain reaches mockserver.CredentialTrustAnchors, and the
+// leaf names the loopback host the mock issuers run on over http
+// (Experimental.AllowHTTP binds an http iss).
 func mockIssuerAcceptance() *acceptance.Policy {
 	return &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{
 		TrustAnchors:                mockserver.CredentialTrustAnchors(),
 		AllowUnadvertisedRevocation: true,
+		Experimental:                experimental.Transport{AllowHTTP: true},
 	}}
 }
 

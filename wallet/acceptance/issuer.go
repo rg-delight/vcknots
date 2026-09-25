@@ -89,10 +89,10 @@ func (a *Acceptor) authenticateX5CIssuer(ctx context.Context, parsed *credential
 		}
 	}
 	leaf := certificates[0]
-	if trust.RequireIssuerDNSBinding {
+	if issuer != "" {
 		// Checked before the chain is walked: it needs no network, and a
 		// certificate for another host must not cost a CRL retrieval.
-		if err := requireIssuerDNSBinding(leaf, issuer); err != nil {
+		if err := bindX5CIssuer(leaf, issuer, trust); err != nil {
 			return err
 		}
 		verification.IssuerDNSBound = true
@@ -116,12 +116,11 @@ func (a *Acceptor) authenticateX5CIssuer(ctx context.Context, parsed *credential
 		verification.IssuerKeyID = result.Fingerprints[0]
 	}
 	verification.IssuerCertificateSubject = certificateSubject(leaf)
-	verification.Issuer = issuer
-	if issuer == "" {
-		// SD-JWT VC -19 §2.5: "In this case, the Issuer of the Verifiable
-		// Digital Credential is the subject of the end-entity certificate."
-		verification.Issuer = verification.IssuerCertificateSubject.Subject
-	}
+	// SD-JWT VC -19 §2.5: "In this case, the Issuer of the Verifiable Digital
+	// Credential is the subject of the end-entity certificate." The iss the
+	// leaf was bound to is reported apart from it.
+	verification.Issuer = verification.IssuerCertificateSubject.Subject
+	verification.ClaimedIssuer = issuer
 	candidate := candidateKey{key: jose.JSONWebKey{Key: leaf.PublicKey}, mechanism: issuerkeys.MechanismX5CTrustedChain}
 	return a.verifyCandidates(parsed, []candidateKey{candidate}, verification)
 }
@@ -251,6 +250,7 @@ func filterCandidates(candidates []candidateKey, header map[string]any) ([]candi
 // that verifies it and records that key, the mechanism and the issuer.
 func (a *Acceptor) verifySignature(parsed *credential.Credential, candidates []candidateKey, issuer string, verification *Verification) error {
 	verification.Issuer = issuer
+	verification.ClaimedIssuer = issuer
 	return a.verifyCandidates(parsed, candidates, verification)
 }
 
@@ -281,22 +281,28 @@ func recordCandidate(candidate candidateKey, verification *Verification) {
 	verification.FederationTrustAnchor = candidate.trustAnchor
 }
 
-// requireIssuerDNSBinding binds an https iss to an exact dNSName SAN of the
-// leaf (no wildcard: a wildcard authenticates a TLS server, not an issuer).
-// A credential without iss, or with an iss that is not an https URL, names no
-// host the certificate could be bound to, so it is refused: otherwise a
-// certificate for any host could sign as a DID or http issuer.
-func requireIssuerDNSBinding(leaf *x509.Certificate, issuer string) error {
-	if issuer == "" {
-		return fmt.Errorf("%w: the credential names no issuer to bind the certificate to", ErrIssuerDNSBindingFailed)
+// bindX5CIssuer binds the iss of an x5c credential to the leaf certificate
+// (SD-JWT VC -19 §2.5 and §7.3). The Issuer of an x5c credential is the leaf's
+// subject, so an iss beside it is accepted only when the leaf speaks for it:
+//
+//   - an https iss must be named by the leaf, by its host in a dNSName
+//     subject alternative name (exact, no wildcard) or in a URI subject
+//     alternative name of the same scheme;
+//   - a DID iss is refused: a DID issuer is authenticated by its DID document
+//     (OpenID4VCI 1.0 §14.4), so a credential that wants that process carries
+//     no x5c, and a certificate cannot speak for a DID;
+//   - any other iss is refused, except an http URL, bound like https, under
+//     IssuerX509TrustOptions.Experimental.AllowHTTP.
+func bindX5CIssuer(leaf *x509.Certificate, issuer string, trust *IssuerX509TrustOptions) error {
+	if strings.HasPrefix(issuer, "did:") {
+		return fmt.Errorf("%w: the credential names a DID issuer and carries x5c; a DID issuer is authenticated by its DID document, not by a certificate chain", ErrIssuerDNSBindingFailed)
 	}
 	parsed, err := url.Parse(issuer)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "https" && (parsed.Scheme != "http" || !trust.Experimental.AllowHTTP)) {
 		return fmt.Errorf("%w: the issuer is not an https URL, so it names no host to bind the certificate to", ErrIssuerDNSBindingFailed)
 	}
-	host := parsed.Hostname()
-	if err := commonX509.RequireLeafDNSName(leaf, host, false); err != nil {
-		return fmt.Errorf("%w: issuer certificate is not bound to issuer host %q", ErrIssuerDNSBindingFailed, host)
+	if err := commonX509.RequireLeafNamesIssuer(leaf, parsed); err != nil {
+		return fmt.Errorf("%w: issuer certificate is not bound to issuer host %q: %w", ErrIssuerDNSBindingFailed, parsed.Hostname(), err)
 	}
 	return nil
 }
