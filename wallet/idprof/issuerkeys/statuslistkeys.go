@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -52,10 +53,15 @@ type X5CTrust struct {
 	// Now is the verification clock. A nil value uses the Resolver's.
 	Now func() time.Time
 	// IssuerCertificate is the validated x5c leaf certificate of the
-	// credential whose status is checked. It is needed only for a credential
-	// without `iss`, whose Issuer is the subject of that certificate (SD-JWT
-	// VC -19 Section 2.5): the Status List Token's leaf must then carry the
-	// same subject. It is not consulted for any other issuer.
+	// credential whose status is checked (the credential acceptor's leaf).
+	// When it is set, a Status List Token with x5c must carry a leaf with the
+	// same subject, whether or not the credential carries `iss`: the token is
+	// bound to the Referenced Token by its signer
+	// (draft-ietf-oauth-status-list-21 Section 11.3), and the Issuer of an x5c
+	// credential is the subject of that certificate (SD-JWT VC -19 Section
+	// 2.5). It is required for a credential without `iss`, which names no
+	// other identity to bind the token to; set it for every credential that
+	// was accepted through its x5c.
 	IssuerCertificate *x509.Certificate
 }
 
@@ -77,10 +83,13 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 // never by the header alone, and a mechanism that applies but fails is the
 // answer: nothing falls back to another mechanism.
 //
-//   - An https issuer (http only under Experimental.AllowHTTP): when the header carries an
-//     x5c, the chain is the only source. It must reach one of
-//     trust.TrustAnchors and its leaf must name the issuer's host as a
-//     dNSName, or the token is refused (MechanismX5CTrustedChain). Without
+//   - An https issuer (http only under Experimental.AllowHTTP): when the
+//     header carries an x5c, the chain is the only source. It must reach one
+//     of trust.TrustAnchors, its leaf must name the issuer's host - in a
+//     dNSName or a URI subject alternative name, the binding the credential
+//     acceptor applies to the credential's own x5c - and, when
+//     trust.IssuerCertificate is set, carry that certificate's subject, or
+//     the token is refused (MechanismX5CTrustedChain). Without
 //     x5c the keys come from the issuer's JWT VC Issuer Metadata, for the
 //     SD-JWT VC family whose web-based resolution that is
 //     (MechanismJWTVCIssuerMetadata).
@@ -140,7 +149,7 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 			resolution.Diagnostics = []MechanismDiagnostic{{Mechanism: RungX5C, Failure: "issuer identifier is neither an https URL nor a DID"}}
 		case len(chain) > 0:
 			resolution.IssuerDNSName = issuerURL.Hostname()
-			candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuer: request.Issuer, dnsName: issuerURL.Hostname()})
+			candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuer: request.Issuer, issuerURL: issuerURL, issuerCertificate: trustIssuerCertificate(trust)})
 		case request.X5C.Require:
 			return nil, nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", statuslist.ErrStatusListCertificateRejected)
 		default:
@@ -165,12 +174,14 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 }
 
 // x5cBinding names what an x5c leaf must say to speak for the issuer: the
-// issuer URL's host as a dNSName, or the subject of the credential's own
-// issuer certificate.
+// issuer URL's host (as the credential acceptor binds a credential's leaf),
+// and the subject of the credential's own issuer certificate when it is known.
 type x5cBinding struct {
 	// issuer is the identifier the key is attributed to (Candidate.Issuer).
-	issuer            string
-	dnsName           string
+	issuer string
+	// issuerURL is the issuer identifier; nil for a credential without iss.
+	issuerURL *url.URL
+	// issuerCertificate is X5CTrust.IssuerCertificate.
 	issuerCertificate *x509.Certificate
 }
 
@@ -232,15 +243,20 @@ func (r *Resolver) statusListX5CRoute(ctx context.Context, resolution *Resolutio
 	}
 	// The binding is checked before the path is walked: it needs no network,
 	// and a chain for another issuer must not cost a CRL retrieval.
-	switch {
-	case binding.dnsName != "":
-		if err := commonX509.RequireLeafDNSName(certificates[0], binding.dnsName, false); err != nil {
+	if binding.issuerURL != nil {
+		if err := commonX509.RequireLeafNamesIssuer(certificates[0], binding.issuerURL); err != nil {
 			return untrusted("certificate does not name the issuer host", nil)
 		}
-	case binding.issuerCertificate == nil:
+	}
+	switch {
+	case binding.issuerCertificate != nil:
+		// draft-ietf-oauth-status-list-21 Section 11.3: the token is bound to
+		// the Referenced Token by its signer.
+		if !bytes.Equal(certificates[0].RawSubject, binding.issuerCertificate.RawSubject) {
+			return untrusted("certificate subject is not the credential issuer", nil)
+		}
+	case binding.issuerURL == nil:
 		return untrusted("credential issuer certificate is not configured", nil)
-	case !bytes.Equal(certificates[0].RawSubject, binding.issuerCertificate.RawSubject):
-		return untrusted("certificate subject is not the credential issuer", nil)
 	}
 
 	now := r.now

@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,6 +410,35 @@ func newTestLeaf(t *testing.T, parent testCertificate, dnsNames ...string) testC
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		DNSNames:              dnsNames,
+	}
+	return createCertificate(t, template, &parent, private)
+}
+
+// newTestLeafWithSubject is newTestLeaf with the subject common name
+// commonName and the URI subject alternative names uris.
+func newTestLeafWithSubject(t *testing.T, parent testCertificate, commonName string, uris []string, dnsNames ...string) testCertificate {
+	t.Helper()
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed []*url.URL
+	for _, raw := range uris {
+		uri, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed = append(parsed, uri)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          randomSerial(t),
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             testNow.Add(-time.Hour),
+		NotAfter:              testNow.Add(time.Hour),
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		DNSNames:              dnsNames,
+		URIs:                  parsed,
 	}
 	return createCertificate(t, template, &parent, private)
 }

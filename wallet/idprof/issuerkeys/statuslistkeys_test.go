@@ -205,6 +205,62 @@ func TestStatusListKeysX5C(t *testing.T) {
 	})
 }
 
+// TestStatusListKeysBindsTheTokenToTheCredentialLeaf covers the review of
+// 2026-09-25 (finding 6): the token of a credential with iss is bound to the
+// credential's own x5c leaf when it is known (draft-ietf-oauth-status-list-21
+// Section 11.3, X5CTrust.IssuerCertificate), and the host binding is the one
+// the credential acceptor applies (a dNSName or URI subject alternative name).
+func TestStatusListKeysBindsTheTokenToTheCredentialLeaf(t *testing.T) {
+	t.Parallel()
+
+	resolve := func(t *testing.T, f *statusListFixture, trust *X5CTrust, leaf testCertificate) error {
+		t.Helper()
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest(f.issuer, statusListHeader(leaf)))
+		return err
+	}
+	failureOf := func(t *testing.T, err error) string {
+		t.Helper()
+		var unresolved *UnresolvedError
+		if !errors.As(err, &unresolved) {
+			t.Fatalf("err = %v, want *UnresolvedError", err)
+		}
+		return diagnosticFor(t, unresolved.Diagnostics, RungX5C).Failure
+	}
+
+	t.Run("a leaf with the credential leaf's subject is accepted", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = newTestLeaf(t, f.ca, "issuer.example.test").certificate
+		if err := resolve(t, f, trust, f.leaf); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a leaf naming the host with another subject is refused", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = newTestLeafWithSubject(t, f.ca, "another issuer", nil, "issuer.example.test").certificate
+		if got := failureOf(t, resolve(t, f, trust, f.leaf)); got != "certificate subject is not the credential issuer" {
+			t.Errorf("x5c failure = %q", got)
+		}
+	})
+
+	t.Run("a URI subject alternative name binds the issuer host", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		leaf := newTestLeafWithSubject(t, f.ca, "issuer signing key", []string{"https://issuer.example.test/status"})
+		if err := resolve(t, f, f.trust(f.ca.certificate), leaf); err != nil {
+			t.Fatal(err)
+		}
+		otherScheme := newTestLeafWithSubject(t, f.ca, "issuer signing key", []string{"http://issuer.example.test"})
+		if got := failureOf(t, resolve(t, f, f.trust(f.ca.certificate), otherScheme)); got != "certificate does not name the issuer host" {
+			t.Errorf("x5c failure = %q", got)
+		}
+	})
+}
+
 // TestStatusListKeysHAIPRules covers HAIP 1.0 Section 6.1 as the checker hands
 // it to the hook in KeyRequest.X5C.
 func TestStatusListKeysHAIPRules(t *testing.T) {
