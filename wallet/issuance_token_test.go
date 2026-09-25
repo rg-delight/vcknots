@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/attestation"
+	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -145,9 +146,16 @@ func tokenTestVerifyClientAttestationHeaders(
 func tokenTestHAIPAttestationFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) (*finalIssuanceFixture, jose.JSONWebKey) {
 	t.Helper()
 	attesterKey := newPrivateJWKForFinalVCITest(t, "client-attester-1")
-	// HAIP Section 4.4.1: x5c with a leaf that is not self-signed.
-	attesterKey.Certificates = []*x509.Certificate{testLeafCertificate(t, attesterKey, false)}
+	// HAIP Section 4.4.1: x5c with a leaf that is not self-signed, validated
+	// against the attester's CA (an unanchored chain is refused under HAIP).
+	leaf, anchor := testLeafCertificateAndIssuer(t, attesterKey, false)
+	attesterKey.Certificates = []*x509.Certificate{leaf}
 	withAttestation := append([]func(*finalIssuanceFixture){func(f *finalIssuanceFixture) {
+		f.attestationTrust = attestation.TrustPolicy{
+			TrustAnchors:                []*x509.Certificate{anchor},
+			AllowUnadvertisedRevocation: true,
+			CRL:                         commonX509.CRLCheckerOptions{HTTPClient: &http.Client{}},
+		}
 		f.clientAuthKey = nil
 		f.clientAttestation = &attestation.StaticClientAttester{
 			Key: testKeyEntry(t, attesterKey), Chain: attesterKey.Certificates, Issuer: "https://attester.example",

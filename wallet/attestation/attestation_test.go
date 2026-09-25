@@ -191,7 +191,7 @@ func with(base map[string]any, name string, value any) map[string]any {
 func TestStaticClientAttesterProducesAValidAttestation(t *testing.T) {
 	clientKey := newPrivateJWK(t, "client-key-1")
 	attesterKey := newPrivateJWK(t, "attester-key-1")
-	leaf := testLeafCertificate(t, attesterKey, false)
+	leaf, anchor := testAttesterChain(t, attesterKey)
 	attester := &StaticClientAttester{Key: keyEntry(t, attesterKey), Chain: []*x509.Certificate{leaf}, Issuer: "https://attester.example"}
 	request := ClientRequest{ClientID: "client-1", ClientKey: clientKey, AuthorizationServer: "https://as.example"}
 
@@ -199,9 +199,12 @@ func TestStaticClientAttesterProducesAValidAttestation(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, attestation.ExpiresAt.IsZero())
 
-	// The x5c leaf authenticates it, and HAIP accepts the non-self-signed leaf.
+	// The x5c leaf authenticates it, and HAIP accepts the non-self-signed leaf
+	// once its chain reaches a configured anchor.
 	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, TrustPolicy{}))
-	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, TrustPolicy{X5C: haipX5C}))
+	haip := anchoredPolicy(t, anchor)
+	haip.X5C = haipX5C
+	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, haip))
 
 	header, claims, err := parseJWT(attestation.JWT)
 	require.NoError(t, err)
@@ -490,6 +493,18 @@ func TestValidateChecksTheChain(t *testing.T) {
 	t.Run("a chain reaching no anchor is refused", func(t *testing.T) {
 		_, unrelated := testAttesterChain(t, newPrivateJWK(t, "unrelated-attester"))
 		require.ErrorContains(t, ValidateClientAttestation(t.Context(), client, clientRequest, anchoredPolicy(t, unrelated)), "chain is not trusted")
+	})
+
+	// Review of 2026-09-25 (finding 8): without anchors the chain was not
+	// validated at all, so under HAIP any non-self-signed certificate
+	// authenticated an attestation. HAIP's rules now need an anchor.
+	t.Run("HAIP refuses a chain when no anchor is configured", func(t *testing.T) {
+		for _, rules := range []profile.X5CRules{haipX5C, {Require: true}, {ExcludeAnchor: true}} {
+			policy := TrustPolicy{X5C: rules}
+			require.ErrorContains(t, ValidateClientAttestation(t.Context(), client, clientRequest, policy), "configures no TrustAnchors or RootCAs")
+			require.ErrorContains(t, ValidateKeyAttestation(t.Context(), key, keyRequest, policy), "configures no TrustAnchors or RootCAs")
+		}
+		require.NoError(t, ValidateClientAttestation(t.Context(), client, clientRequest, TrustPolicy{X5C: profile.X5CRules{RejectSelfSigned: true}}), "a policy without HAIP's anchor rules still verifies the signature only")
 	})
 
 	t.Run("anchors without a revocation client are refused", func(t *testing.T) {

@@ -926,6 +926,7 @@ attestation は送信前に `Config.Attestation.Trust`（`attestation.TrustPolic
 パッケージ `attestation` の `StaticClientAttester` と `StaticKeyAttester` は、テストと単一運用者の構成のために、ローカルの鍵で自己発行します。
 これらの鍵は wallet が自ら解決します。
 HAIP では、attestation は自己署名でない `x5c` leaf を持ち、トラストアンカーを含んではなりません。
+さらにチェーンは `TrustAnchors` か `RootCAs` に届かなければなりません。どちらもなければ、`x5c` を持つ attestation を署名だけで検証せずに拒否します。
 拒否された attestation は `attestation.ErrClientAttestationInvalid` または `attestation.ErrKeyAttestationInvalid` になります。
 
 ### 署名付き Issuer メタデータ

@@ -22,6 +22,15 @@ import (
 // a throwaway CA.
 func testLeafCertificate(t *testing.T, key jose.JSONWebKey, selfSigned bool) *x509.Certificate {
 	t.Helper()
+	leaf, _ := testLeafCertificateAndIssuer(t, key, selfSigned)
+	return leaf
+}
+
+// testLeafCertificateAndIssuer is testLeafCertificate that also returns the
+// certificate that issued the leaf (the leaf itself when self-signed), the
+// anchor an attestation trust policy validates the leaf against.
+func testLeafCertificateAndIssuer(t *testing.T, key jose.JSONWebKey, selfSigned bool) (*x509.Certificate, *x509.Certificate) {
+	t.Helper()
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		NotBefore:             time.Now().Add(-time.Hour),
@@ -51,7 +60,10 @@ func testLeafCertificate(t *testing.T, key jose.JSONWebKey, selfSigned bool) *x5
 	require.NoError(t, err)
 	certificate, err := x509.ParseCertificate(der)
 	require.NoError(t, err)
-	return certificate
+	if selfSigned {
+		return certificate, certificate
+	}
+	return certificate, issuer
 }
 
 // testKeyEntry wraps a private test JWK as the attester key a static attester

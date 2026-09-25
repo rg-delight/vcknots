@@ -45,7 +45,9 @@ type TrustPolicy struct {
 	// profile's Options.AttestationX5C.
 	X5C profile.X5CRules
 	// TrustAnchors or RootCAs (at most one) are the Wallet Provider anchors.
-	// Without them an x5c chain is not validated; only the signature is.
+	// Without them an x5c chain is not validated, only the signature is, and
+	// under X5C.Require or X5C.ExcludeAnchor (HAIP) an attestation with x5c
+	// is refused.
 	TrustAnchors []*x509.Certificate
 	RootCAs      *x509.CertPool
 	// KeyUsages constrains the attester certificate's extended key usage.
@@ -352,11 +354,17 @@ func authenticate(ctx context.Context, token string, header jwtHeader, policy Tr
 	return nil
 }
 
-// verifyChain validates an x5c chain against the configured anchors; without
-// anchors there is nothing to validate against. Under X5C.ExcludeAnchor the
-// chain must not carry the anchor (HAIP §4.4.1, §4.5.1).
+// verifyChain validates an x5c chain against the configured anchors. Without
+// anchors there is nothing to validate against, which only a policy without
+// HAIP's certificate rules accepts: under X5C.Require or X5C.ExcludeAnchor
+// (HAIP §4.4.1, §4.5.1) an unanchored chain would authenticate an
+// attestation signed by any certificate, so it is refused. Under
+// X5C.ExcludeAnchor the chain must not carry the anchor.
 func verifyChain(ctx context.Context, chain []*x509.Certificate, policy TrustPolicy, label string, now time.Time) error {
 	if len(policy.TrustAnchors) == 0 && policy.RootCAs == nil {
+		if policy.X5C.Require || policy.X5C.ExcludeAnchor {
+			return fmt.Errorf("%s x5c chain cannot be validated: the profile requires a trusted chain and the attestation trust policy configures no TrustAnchors or RootCAs", label)
+		}
 		return nil
 	}
 	if policy.X5C.ExcludeAnchor {
