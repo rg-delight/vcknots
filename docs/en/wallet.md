@@ -15,7 +15,7 @@ Both **JWT-VC** (`jwt_vc_json`, `application/vc+jwt`) and **SD-JWT VC** (`dc+sd-
 
 ## Supported protocols and profiles
 
-The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. **HAIP 1.0** is a profile selected with `Config.Profile`: the zero value of `profile.Profile` is `profile.Final`, and `profile.HAIP` adds the HAIP constraints. OpenID4VCI Draft 13 and OpenID4VP Draft 24 are available through the `Draft13()` and `Draft24()` views, and the pre-existing `ReceiveCredential` / `PresentCredential` methods are kept.
+The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. `Config.Profiles` selects the protocol profiles it runs: one 1.0 profile, `profile.Final()` or `profile.HAIP()` (HAIP 1.0, a set of constraints on the 1.0 specifications), and the draft profiles `profile.Draft13()` (OpenID4VCI Draft 13, the `Draft13()` view and `ReceiveCredential`) and `profile.Draft24()` (OpenID4VP Draft 24, the `Draft24()` view). The default is Final with both drafts. The pre-existing `ReceiveCredential` / `PresentCredential` methods are kept.
 
 | Protocol / feature | Public API | Notes |
 | --- | --- | --- |
@@ -36,16 +36,21 @@ The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. **HAIP 1.0** is 
 | DCQL | `SelectCredentials`, `oid4vp.ResolveSatisfiableDCQLCredentials`, `oid4vp.ValidateDCQLMatches` | `credential_sets`, `claims`, `claim_sets`, `values`, nested and array claim paths, `multiple`, `trusted_authorities` of type `aki` and `openid_federation`. |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | `dc+sd-jwt` presentations with key binding only. |
 | W3C Digital Credentials API (`dc_api`, `dc_api.jwt`; unsigned, signed, multi-signed) | `ParseDCAPIRequest` + `SubmitPresentation` | Protocol handling only; the caller supplies the platform-authenticated origin. |
-| OpenID4VCI Draft 13 | `Draft13()`, `ReceiveCredential` | Refused under HAIP. |
-| OpenID4VP Draft 24 (Presentation Exchange) | `Draft24()` + `SubmitPresentation` | Refused under HAIP. |
+| OpenID4VCI Draft 13 | `Draft13()`, `ReceiveCredential` | Needs `profile.Draft13()` in `Config.Profiles`; never with HAIP. |
+| OpenID4VP Draft 24 (Presentation Exchange) | `Draft24()` + `SubmitPresentation` | Needs `profile.Draft24()` in `Config.Profiles`; never with HAIP. |
 | Formats | `credential.SDJwtVC`, `credential.JwtVc`, `credential.LdpVc` | SD-JWT VC issuer `typ` may be `dc+sd-jwt` or `vc+sd-jwt`. `ldp_vc` uses Data Integrity `eddsa-rdfc-2022` proofs. |
 
 **Not implemented.** ISO mdoc (`mso_mdoc`): there is no mdoc / COSE / CBOR serializer, so no mdoc presentation can be built. The `decentralized_identifier` Client Identifier Prefix is parsed and refused. Of the DCQL `trusted_authorities` types `aki` and `openid_federation` are evaluated; an entry of another type (`etsi_tl`) matches no credential.
 
-### Profiles (Final and HAIP)
+### Profiles (Final, HAIP and the drafts)
 
-* **Final** is OpenID4VCI 1.0 and OpenID4VP 1.0 without additional constraints. It is the default: a zero `profile.Profile` normalizes to `profile.Final`.
-* **HAIP** adds the HAIP 1.0 constraints. Select it with `Config.Profile`, and build the receiver and presenter plugins with the same profile (`oid4vci.Oid4vciReceiver.Profile`, `oid4vp.Oid4vpPresenter.Profile`). The plugins the wallet builds itself get the wallet's profile.
+A profile is a protocol version and the constraints the wallet adds on top of it (package `profile`).
+
+* **Final** (`profile.Final()`) is OpenID4VCI 1.0 and OpenID4VP 1.0 without additional constraints. The zero `profile.Profile` is Final.
+* **HAIP** (`profile.HAIP()`) is Final with `profile.HAIPOptions()`: every HAIP 1.0 requirement, each an `Options` field named after the HAIP section that states it. They are the profile's Must options.
+* `Profile.With(options)` strengthens a profile: `profile.Final().With(profile.Options{RequireDPoP: true})` adds one HAIP requirement to Final. It never weakens an option the profile already carries (`profile.ErrProfileMustOption`).
+* **Draft 13** (`profile.Draft13()`) and **Draft 24** (`profile.Draft24()`) enable the draft views. They take no options, and HAIP profiles only the 1.0 specifications, so they cannot be combined with HAIP.
+* Build the receiver and presenter plugins with the wallet's 1.0 profile (`oid4vci.Oid4vciReceiver.Profile`, `oid4vp.Oid4vpPresenter.Profile`). The plugins the wallet builds itself get it.
 * The wallet never changes a plugin it is given. See [Profile rules](#profile-rules) for what `NewWalletWithConfig` checks.
 
 ## 1. Prerequisites
@@ -343,7 +348,7 @@ Notes on `ReceiveCredentialRequest`:
 * **TxCode:** sent to the token endpoint as `tx_code` when the offer requires one.
 * **CachedIssuerMetadata:** when set, the issuer metadata is not fetched (see section 4).
 
-`ReceiveCredential` fetches the issuer and authorization server metadata, obtains an access token with the pre-authorized code, signs the key proof with `Key`, requests the credential, checks it and stores it. The check is `Config.CredentialAcceptance` when it is set; without a policy the credential is only parsed (`typ`, `alg`, and a `cnf` that must match `Key`) and its issuer is not authenticated. `ReceiveCredential` is refused under HAIP; new code uses `AuthorizePreAuthorizedIssuance` and `RequestCredential`.
+`ReceiveCredential` fetches the issuer and authorization server metadata, obtains an access token with the pre-authorized code, signs the key proof with `Key`, requests the credential, checks it and stores it. The check is `Config.CredentialAcceptance` when it is set; without a policy the credential is only parsed (`typ`, `alg`, and a `cnf` that must match `Key`) and its issuer is not authenticated. `ReceiveCredential` is OpenID4VCI Draft 13 and needs `profile.Draft13()` in `Config.Profiles`; new code uses `AuthorizePreAuthorizedIssuance` and `RequestCredential`.
 
 ### 3-3. Presenting a Credential (OpenID4VP)
 
@@ -459,7 +464,7 @@ Input for `NewWalletWithConfig`. Every field is optional.
 | Field | Meaning |
 | --- | --- |
 | `CredStore`, `IDProfiler`, `Receiver`, `Serializer`, `Verifier`, `Presenter` | The dispatchers. `nil` builds the default. The OpenID4VP plugin of an injected `Presenter` must be an `*oid4vp.Oid4vpPresenter`, because the presentation methods answer its `*oid4vp.AdmittedRequest` handles. |
-| `Profile` | `profile.Final` (zero value) or `profile.HAIP`. |
+| `Profiles` | The protocol profiles: one 1.0 profile (`profile.Final()`, `profile.HAIP()`, or one of them strengthened with `With`) and optionally `profile.Draft13()` and `profile.Draft24()`. Empty is `wallet.DefaultProfiles()`: Final with both drafts. |
 | `Storeless` | No credential store. `CredStore` must then be `nil`; methods that need a store return `ErrNoCredentialStore`. |
 | `CredentialAcceptance` | `*acceptance.Policy` applied before a received credential is returned or stored. `nil` makes every OpenID4VCI 1.0 method, every `Draft13()` method and `VerifyCredentialForAcceptance` fail with `ErrCredentialAcceptancePolicyRequired`. |
 | `SupportedTransactionDataTypes` | The `transaction_data` types of the presenter the wallet builds. Setting it together with `Presenter` is refused; set `Oid4vpPresenter.SupportedTransactionDataTypes` on an injected plugin. |
@@ -467,7 +472,7 @@ Input for `NewWalletWithConfig`. Every field is optional.
 | `ClientAuth` | [ClientAuthConfig](#ClientAuthConfig). `ClientID` is the wallet's `client_id` for every OpenID4VCI version. |
 | `Issuance` | `IssuanceConfig{RedirectURI, CredentialEncryption}`: the Authorization Code Flow `redirect_uri` and the holder's `CredentialEncryptionPolicy`. |
 | `Attestation` | `AttestationConfig{Client, ClientKey, Key, Trust}`: client and key attestation providers, the key the client attestation binds (`nil` means `DPoP.Key`) and the `attestation.TrustPolicy` that authenticates them. |
-| `TestHooks` | `*TestHooks{KeyProof, PresentationExchangeResponse}`: rewrite Draft 13 key proofs and Draft 24 responses after they were built, for testing a peer. Refused under HAIP. |
+| `TestHooks` | `*TestHooks{KeyProof, PresentationExchangeResponse}`: rewrite Draft 13 key proofs and Draft 24 responses after they were built, for testing a peer. Refused unless a draft profile is enabled, so never under HAIP. |
 
 ### ReceiveCredentialRequest {#ReceiveCredentialRequest}
 
@@ -850,7 +855,7 @@ func receiveDraft13(ctx context.Context, w *wallet.Wallet, offerURI, txCode stri
 
 ## Credential acceptance
 
-Package `acceptance` decides whether a received credential may be stored. It needs no wallet: `acceptance.NewAcceptor(profile, serializer, verifier)` returns an `Acceptor` whose `Verify(ctx, raw, policy, options)` applies an `acceptance.Policy`. The wallet runs the same check with `Config.CredentialAcceptance` before it returns or stores a credential.
+Package `acceptance` decides whether a received credential may be stored. It needs no wallet: `acceptance.NewAcceptor(options, serializer, verifier)` (the `profile.Options` of the wallet's profile) returns an `Acceptor` whose `Verify(ctx, raw, policy, options)` applies an `acceptance.Policy`. The wallet runs the same check with `Config.CredentialAcceptance` before it returns or stores a credential.
 
 The checks are:
 
@@ -1092,14 +1097,14 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 
 ## Profile rules {#profile-rules}
 
-`NewWalletWithConfig` checks the configuration against `Config.Profile`:
+`NewWalletWithConfig` checks the configuration against `Config.Profiles`:
 
-* An unknown profile is refused (`profile.ErrUnknownProfile`).
-* A receiver or presenter plugin that implements `profile.Carrier` must report the wallet's profile (`ErrProfileMismatch`). Under HAIP a plugin that does not implement `profile.Carrier` is refused (`ErrProfilePluginUnsupported`); under Final it is accepted.
-* Under HAIP, `TestHooks` is refused and every `Draft13()` / `Draft24()` method and `ReceiveCredential` returns `ErrProfileForbidsDraft`.
+* `Config.Profiles` names exactly one 1.0 profile and each draft profile at most once (`ErrInvalidArgument`). HAIP together with a draft profile is refused (`ErrProfileForbidsDraft`).
+* A receiver or presenter plugin that implements `profile.Carrier` must report the wallet's 1.0 profile, options included (`ErrProfileMismatch`); a plugin reporting a draft profile is refused (`profile.ErrDraftProfile`). When the 1.0 profile carries options (HAIP, or Final strengthened with `With`), a plugin that does not implement `profile.Carrier` is refused (`ErrProfilePluginUnsupported`); under plain Final it is accepted.
+* `Draft13()` methods and `ReceiveCredential` return `ErrProfileForbidsDraft` unless `profile.Draft13()` is enabled, and `Draft24()` methods and Draft 24 handles unless `profile.Draft24()` is. `TestHooks` is refused unless a draft profile is enabled.
 * `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
-`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `AllowHTTP` and `InsecureSkipX509Verify` are refused.
+`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `AllowHTTP` and `InsecureSkipX509Verify` are refused.
 
 ## Error codes {#error-codes}
 
@@ -1191,11 +1196,11 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 **Package `wallet`**
 
 * `Config` is no longer comparable with `==`.
-* `Config` has new fields: `Profile`, `Storeless`, `CredentialAcceptance`, `SupportedTransactionDataTypes`, `Issuance`, `Attestation`, `TestHooks`. `CredentialOfferGrant` has `IssuerState` and `AuthorizationServer`; `SavedCredential` has `Verification`.
-* `NewWalletWithConfig` refuses an unknown `Profile`, a plugin whose profile differs from the wallet's, and under HAIP a plugin that does not implement `profile.Carrier` and any `TestHooks`. It refuses `Storeless` with a `CredStore`, `SupportedTransactionDataTypes` with an injected `Presenter`, and a presenter plugin other than `*oid4vp.Oid4vpPresenter`. Its errors carry codes.
+* `Config` has new fields: `Profiles`, `Storeless`, `CredentialAcceptance`, `SupportedTransactionDataTypes`, `Issuance`, `Attestation`, `TestHooks`. `CredentialOfferGrant` has `IssuerState` and `AuthorizationServer`; `SavedCredential` has `Verification`.
+* `NewWalletWithConfig` refuses an invalid `Profiles` set, a plugin whose profile differs from the wallet's, a plugin that does not implement `profile.Carrier` when the profile carries options, and `TestHooks` without a draft profile. It refuses `Storeless` with a `CredStore`, `SupportedTransactionDataTypes` with an injected `Presenter`, and a presenter plugin other than `*oid4vp.Oid4vpPresenter`. Its errors carry codes.
 * `SetReceiver` is deprecated. It checks the dispatcher's plugins as `NewWalletWithConfig` does; a refused dispatcher is not installed, and every method that needs the receiver returns the refusal.
 * `VerifyCredential` returns true only when the proof verifies, and only for `acceptance.DefaultSigningAlgorithms()` (ES256); a nil credential returns false.
-* `ReceiveCredential` returns `ErrProfileForbidsDraft` under HAIP. The credential is checked before it is stored: under `Config.CredentialAcceptance` when set, otherwise by parsing it (`typ`, `alg`, and a `cnf` that must match `Key`). A credential that fails is not stored. A storeless wallet returns `ErrNoCredentialStore` after the check.
+* `ReceiveCredential` returns `ErrProfileForbidsDraft` unless `Config.Profiles` enables `profile.Draft13()`, which the default does. The credential is checked before it is stored: under `Config.CredentialAcceptance` when set, otherwise by parsing it (`typ`, `alg`, and a `cnf` that must match `Key`). A credential that fails is not stored. A storeless wallet returns `ErrNoCredentialStore` after the check.
 * `PresentCredential` and `PresentCredentialWithOptions` run `ParsePresentationRequest`, `SelectCredentials` and `SubmitPresentation`. Stored credentials are chosen by the DCQL query instead of taking the newest one, each answered query gets its own presentation, and a Key Binding JWT is attached as the query requires. The request is admitted under the rules of [Verifier authentication](#verifier-authentication).
 * `GetCredentialEntries` and `GetCredentialEntry` return `ErrNoCredentialStore` on a storeless wallet.
 * Every error returned by a method of `Wallet` carries a code (`wallet.ErrorCode`).
@@ -1206,7 +1211,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 * The receiver plugin refuses every HTTP redirect (`ErrHTTPRedirectNotAllowed`), bounds response bodies, and refuses Credential Issuer Metadata whose `credential_issuer` is not the requested identifier and authorization server metadata whose `issuer` is not the requested one.
 * `Oid4vpPresenter.ParsePresentationRequest` authenticates the verifier as described in [Verifier authentication](#verifier-authentication): signed Request Objects are verified by the prefix's own mechanism and never with keys from `client_metadata`, `x509_*` prefixes require a signed Request Object, a colon-less `client_id` is a pre-registered client that must be registered, and a future `iat` is refused. `InsecureSkipX509Verify` makes the OpenID4VP 1.0 path refuse signed Request Objects; it applies to the Draft 24 entry points. `X509TrustChainRoots` keeps accepting certificates without revocation information.
 * The presenter no longer posts an error response when parsing fails; `SendParseErrorResponses` or `AuthorizationRequestError.SendErrorResponse` does it on request. The `request_uri` fetch and the response POST (`Present`) do not follow redirects, and a non-2xx response to `Present` is an `*oid4vp.VerifierResponseError`.
-* `NewRequestBuilder` builds OpenID4VP 1.0 requests under `profile.Final`.
+* `NewRequestBuilder` builds OpenID4VP 1.0 requests under `profile.Final()`; `WithProfile` selects another 1.0 profile.
 * `receiver.ReceivingDispatcher` and `presenter.PresentationDispatcher` have new methods (`Plugins`, the transport and parse accessors). `sdjwtvc.SdJwtVcPresentationOptions` has `LimitDisclosureToSelectedClaims` and `RequireRootClaimMatch`. `presenterTypes.PresentationRequest` has `ResponseMode`. The metadata types in `receiver/types` have new fields.
 * `env.IsHTTPAllowed` no longer returns true because of `VCKNOTS_WALLET_DEBUG`.
 * The sentinel errors of the component packages (`keystore`, `credstore`, `presenter/types`, `common` and others) carry codes; `errors.Is` still matches them.

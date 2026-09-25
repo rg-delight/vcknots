@@ -35,7 +35,7 @@ paths in the configuration.
 | `dpopKeyFile` | string | required | Private JWK of `wallet.Config.DPoP.Key`. |
 | `clientKeyFile` | string | required | Private JWK of the `private_key_jwt` key (`Config.ClientAuth.Key`) and of the key the client attestation binds (`Config.Attestation.ClientKey`). |
 | `tlsCAFiles` | []string | `[]` | Extra PEM roots added to the system roots for TLS, also used for CRL fetches. |
-| `profile` | string | `""` | `""`, `"final"` or `"haip"`. Applied to `Config.Profile` and to both plugins the driver builds. Unknown values are rejected. |
+| `profile` | string | `""` | `""`, `"final"` or `"haip"`. Selects `profile.Final()` or `profile.HAIP()` as the only entry of `Config.Profiles` and the profile of both plugins the driver builds. Unknown values are rejected. |
 | `verifierCAFiles` | []string | `[]` | PEM trust anchors for signed Request Objects (`oid4vp.RequestObjectValidationOptions.TrustAnchors`). A file with no certificate is rejected. When empty, `RequestObjectValidation` stays nil and X.509 Request Objects are rejected. |
 | `verifierAllowUnadvertisedRevocation` | bool | `false` | `RequestObjectValidationOptions.AllowUnadvertisedRevocation`. Requires `verifierCAFiles`. |
 | `walletAudience` | []string | `[]` | `RequestObjectValidationOptions.WalletAudience`. Requires `verifierCAFiles`. |

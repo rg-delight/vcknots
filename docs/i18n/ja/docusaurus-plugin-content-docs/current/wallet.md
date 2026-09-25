@@ -16,9 +16,10 @@ wallet は OpenID for Verifiable Credentials の各仕様を実装していま�
 ## 対応プロトコルとプロファイル
 
 wallet は **OpenID4VCI 1.0** と **OpenID4VP 1.0** を実装しています。
-**HAIP 1.0** は `Config.Profile` で選ぶプロファイルです。
-`profile.Profile` のゼロ値は `profile.Final` で、`profile.HAIP` を選ぶと HAIP の制約が加わります。
-OpenID4VCI Draft 13 と OpenID4VP Draft 24 は `Draft13()` と `Draft24()` のビューから利用でき、以前からある `ReceiveCredential` / `PresentCredential` も残っています。
+`Config.Profiles` で、wallet が動かすプロトコルプロファイルを選びます。
+1.0 のプロファイル 1 つ（`profile.Final()` か、1.0 仕様への制約の集合である HAIP 1.0 の `profile.HAIP()`）と、Draft のプロファイル `profile.Draft13()`（OpenID4VCI Draft 13。`Draft13()` ビューと `ReceiveCredential`）と `profile.Draft24()`（OpenID4VP Draft 24。`Draft24()` ビュー）です。
+既定値は Final と 2 つの Draft です。
+以前からある `ReceiveCredential` / `PresentCredential` も残っています。
 
 | プロトコル / 機能 | 公開 API | 備考 |
 | --- | --- | --- |
@@ -39,8 +40,8 @@ OpenID4VCI Draft 13 と OpenID4VP Draft 24 は `Draft13()` と `Draft24()` の�
 | DCQL | `SelectCredentials`、`oid4vp.ResolveSatisfiableDCQLCredentials`、`oid4vp.ValidateDCQLMatches` | `credential_sets`、`claims`、`claim_sets`、`values`、nested / array の claim path、`multiple`、`aki` と `openid_federation` 種別の `trusted_authorities` に対応します。 |
 | `transaction_data` | `Config.SupportedTransactionDataTypes` | key binding つきの `dc+sd-jwt` 提示に限ります。 |
 | W3C Digital Credentials API（`dc_api`、`dc_api.jwt`、unsigned / signed / multi-signed） | `ParseDCAPIRequest` + `SubmitPresentation` | プロトコル処理のみです。platform が認証した origin は呼出し側が渡します。 |
-| OpenID4VCI Draft 13 | `Draft13()`、`ReceiveCredential` | HAIP では拒否します。 |
-| OpenID4VP Draft 24（Presentation Exchange） | `Draft24()` + `SubmitPresentation` | HAIP では拒否します。 |
+| OpenID4VCI Draft 13 | `Draft13()`、`ReceiveCredential` | `Config.Profiles` に `profile.Draft13()` が必要です。HAIP とは併用できません。 |
+| OpenID4VP Draft 24（Presentation Exchange） | `Draft24()` + `SubmitPresentation` | `Config.Profiles` に `profile.Draft24()` が必要です。HAIP とは併用できません。 |
 | 形式 | `credential.SDJwtVC`、`credential.JwtVc`、`credential.LdpVc` | SD-JWT VC の issuer `typ` は `dc+sd-jwt` または `vc+sd-jwt` です。`ldp_vc` は Data Integrity の `eddsa-rdfc-2022` proof を使います。 |
 
 **未実装。**
@@ -48,10 +49,15 @@ ISO mdoc（`mso_mdoc`）は mdoc / COSE / CBOR の serializer がないため、
 `decentralized_identifier` の Client Identifier Prefix は解析したうえで拒否します。
 DCQL の `trusted_authorities` で評価するのは `aki` と `openid_federation` 種別で、他の種別（`etsi_tl`）の entry はどの Credential にも一致しません。
 
-### プロファイル（Final と HAIP）
+### プロファイル（Final、HAIP、Draft）
 
-* **Final** は追加制約のない OpenID4VCI 1.0 と OpenID4VP 1.0 です。既定値であり、`profile.Profile` のゼロ値は `profile.Final` に正規化されます。
-* **HAIP** は HAIP 1.0 の制約を加えます。`Config.Profile` で選び、receiver と presenter の plugin も同じ profile で構築します（`oid4vci.Oid4vciReceiver.Profile`、`oid4vp.Oid4vpPresenter.Profile`）。wallet が自ら構築する plugin には wallet の profile が設定されます。
+プロファイルは、プロトコルの版と、wallet がその上に加える制約の組です（パッケージ `profile`）。
+
+* **Final**（`profile.Final()`）は追加制約のない OpenID4VCI 1.0 と OpenID4VP 1.0 です。`profile.Profile` のゼロ値は Final です。
+* **HAIP**（`profile.HAIP()`）は Final に `profile.HAIPOptions()` を加えたものです。HAIP 1.0 の要件を 1 つずつ `Options` のフィールドで表し、各フィールドには要件を定める HAIP の節を記しています。これらはこのプロファイルの Must option です。
+* `Profile.With(options)` はプロファイルを強めます。たとえば `profile.Final().With(profile.Options{RequireDPoP: true})` は Final に HAIP の要件を 1 つ加えます。プロファイルが持つ option を弱めることはできません（`profile.ErrProfileMustOption`）。
+* **Draft 13**（`profile.Draft13()`）と **Draft 24**（`profile.Draft24()`）は Draft のビューを有効にします。option は持ちません。HAIP は 1.0 仕様だけのプロファイルなので、HAIP とは併用できません。
+* receiver と presenter の plugin は wallet の 1.0 プロファイルで構築します（`oid4vci.Oid4vciReceiver.Profile`、`oid4vp.Oid4vpPresenter.Profile`）。wallet が自ら構築する plugin にはそれが設定されます。
 * wallet は渡された plugin を変更しません。`NewWalletWithConfig` が確認する内容は[プロファイルの規則](#profile-rules)を参照してください。
 
 ## 1. 前提条件
@@ -364,7 +370,7 @@ func receiveSDJwtCredential(w *wallet.Wallet, key wallet.IKeyEntry, offerURI str
 `ReceiveCredential` は Issuer と認可サーバーのメタデータを取得し、pre-authorized code でアクセストークンを取得し、`Key` で key proof に署名して Credential を要求し、検査してから保存します。
 検査には、`Config.CredentialAcceptance` が設定されていればそれを使います。
 ポリシーがない場合は Credential を解析するだけで（`typ`、`alg`、`Key` と一致すべき `cnf`）、Issuer は認証しません。
-`ReceiveCredential` は HAIP では拒否されます。
+`ReceiveCredential` は OpenID4VCI Draft 13 であり、`Config.Profiles` に `profile.Draft13()` が必要です。
 新しいコードでは `AuthorizePreAuthorizedIssuance` と `RequestCredential` を使います。
 
 ### 3-3. Credentialの提示 (OpenID4VP)
@@ -491,7 +497,7 @@ receiver は、`credential_issuer` が要求した識別子と異なるメタデ
 | フィールド | 意味 |
 | --- | --- |
 | `CredStore`、`IDProfiler`、`Receiver`、`Serializer`、`Verifier`、`Presenter` | ディスパッチャです。`nil` なら既定のものを構築します。注入した `Presenter` の OpenID4VP plugin は `*oid4vp.Oid4vpPresenter` でなければなりません。提示メソッドはその `*oid4vp.AdmittedRequest` handle に応答するためです。 |
-| `Profile` | `profile.Final`（ゼロ値）または `profile.HAIP` です。 |
+| `Profiles` | プロトコルプロファイルです。1.0 のプロファイル 1 つ（`profile.Final()`、`profile.HAIP()`、またはそれらを `With` で強めたもの）と、必要に応じて `profile.Draft13()` と `profile.Draft24()` を並べます。空なら `wallet.DefaultProfiles()`（Final と 2 つの Draft）です。 |
 | `Storeless` | Credential ストアを持ちません。このとき `CredStore` は `nil` でなければならず、ストアを必要とするメソッドは `ErrNoCredentialStore` を返します。 |
 | `CredentialAcceptance` | 受領した Credential を返す、または保存する前に適用する `*acceptance.Policy` です。`nil` の場合、OpenID4VCI 1.0 の全メソッド、`Draft13()` の全メソッド、`VerifyCredentialForAcceptance` が `ErrCredentialAcceptancePolicyRequired` で失敗します。 |
 | `SupportedTransactionDataTypes` | wallet が構築する presenter の `transaction_data` の type です。`Presenter` と同時に設定すると拒否します。注入した plugin には `Oid4vpPresenter.SupportedTransactionDataTypes` を設定します。 |
@@ -499,7 +505,7 @@ receiver は、`credential_issuer` が要求した識別子と異なるメタデ
 | `ClientAuth` | [ClientAuthConfig](#ClientAuthConfig) です。`ClientID` はすべての OpenID4VCI バージョンで wallet の `client_id` になります。 |
 | `Issuance` | `IssuanceConfig{RedirectURI, CredentialEncryption}` で、Authorization Code Flow の `redirect_uri` と holder の `CredentialEncryptionPolicy` です。 |
 | `Attestation` | `AttestationConfig{Client, ClientKey, Key, Trust}` で、client attestation と key attestation の provider、client attestation が束縛する鍵（`nil` なら `DPoP.Key`）、それらを認証する `attestation.TrustPolicy` です。 |
-| `TestHooks` | `*TestHooks{KeyProof, PresentationExchangeResponse}` で、相手側の挙動を試すために Draft 13 の key proof と Draft 24 の応答を構築後に書き換えます。HAIP では拒否します。 |
+| `TestHooks` | `*TestHooks{KeyProof, PresentationExchangeResponse}` で、相手側の挙動を試すために Draft 13 の key proof と Draft 24 の応答を構築後に書き換えます。Draft のプロファイルが有効でなければ拒否するので、HAIP では常に拒否します。 |
 
 ### ReceiveCredentialRequest {#ReceiveCredentialRequest}
 
@@ -940,7 +946,7 @@ func receiveDraft13(ctx context.Context, w *wallet.Wallet, offerURI, txCode stri
 ## Credential の受理
 
 パッケージ `acceptance` は、受領した Credential を保存してよいかを判定します。
-wallet を必要とせず、`acceptance.NewAcceptor(profile, serializer, verifier)` が返す `Acceptor` の `Verify(ctx, raw, policy, options)` が `acceptance.Policy` を適用します。
+wallet を必要とせず、`acceptance.NewAcceptor(options, serializer, verifier)`（`options` は wallet のプロファイルの `profile.Options`） が返す `Acceptor` の `Verify(ctx, raw, policy, options)` が `acceptance.Policy` を適用します。
 wallet は Credential を返す、または保存する前に、`Config.CredentialAcceptance` で同じ検査を実行します。
 
 検査の内容は次のとおりです。
@@ -1234,16 +1240,16 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 
 ## プロファイルの規則 {#profile-rules}
 
-`NewWalletWithConfig` は構成を `Config.Profile` に照らして確認します。
+`NewWalletWithConfig` は構成を `Config.Profiles` に照らして確認します。
 
-* 未知の profile は拒否します（`profile.ErrUnknownProfile`）。
-* `profile.Carrier` を実装する receiver / presenter の plugin は、wallet の profile を報告しなければなりません（`ErrProfileMismatch`）。HAIP では `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、Final では受け入れます。
-* HAIP では `TestHooks` を拒否し、`Draft13()` / `Draft24()` のすべてのメソッドと `ReceiveCredential` は `ErrProfileForbidsDraft` を返します。
+* `Config.Profiles` は 1.0 のプロファイルをちょうど 1 つ、Draft のプロファイルをそれぞれ高々 1 つ含みます（`ErrInvalidArgument`）。HAIP と Draft のプロファイルの併用は拒否します（`ErrProfileForbidsDraft`）。
+* `profile.Carrier` を実装する receiver / presenter の plugin は、option を含めて wallet の 1.0 プロファイルを報告しなければなりません（`ErrProfileMismatch`）。Draft のプロファイルを報告する plugin は拒否します（`profile.ErrDraftProfile`）。1.0 プロファイルが option を持つとき（HAIP、または `With` で強めた Final）は `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、素の Final では受け入れます。
+* `Draft13()` のメソッドと `ReceiveCredential` は `profile.Draft13()` が、`Draft24()` のメソッドと Draft 24 の handle は `profile.Draft24()` が有効でなければ `ErrProfileForbidsDraft` を返します。`TestHooks` は Draft のプロファイルが 1 つも有効でなければ拒否します。
 * `Storeless` と `CredStore` の併用、`SupportedTransactionDataTypes` と `Presenter` の併用、`*oid4vp.Oid4vpPresenter` 以外の `Presenter` plugin は拒否します（`ErrInvalidArgument`）。
 
 `SetReceiver` も同じ plugin の確認を行います。
 plugin のフィールドは登録後に変更してはなりません。
-HAIP はさらに、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
+HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
 `AllowHTTP` と `InsecureSkipX509Verify` は拒否します。
 
 ## エラーコード {#error-codes}
@@ -1354,11 +1360,11 @@ observer は応答ヘッダーが届いた後に呼ばれます。
 **パッケージ `wallet`**
 
 * `Config` は `==` で比較できなくなりました。
-* `Config` に新しいフィールド `Profile`、`Storeless`、`CredentialAcceptance`、`SupportedTransactionDataTypes`、`Issuance`、`Attestation`、`TestHooks` があります。`CredentialOfferGrant` に `IssuerState` と `AuthorizationServer` が、`SavedCredential` に `Verification` があります。
-* `NewWalletWithConfig` は、未知の `Profile`、wallet と異なる profile の plugin、HAIP では `profile.Carrier` を実装しない plugin と `TestHooks` を拒否します。`CredStore` を伴う `Storeless`、注入した `Presenter` を伴う `SupportedTransactionDataTypes`、`*oid4vp.Oid4vpPresenter` 以外の presenter plugin も拒否します。エラーにはコードがあります。
+* `Config` に新しいフィールド `Profiles`、`Storeless`、`CredentialAcceptance`、`SupportedTransactionDataTypes`、`Issuance`、`Attestation`、`TestHooks` があります。`CredentialOfferGrant` に `IssuerState` と `AuthorizationServer` が、`SavedCredential` に `Verification` があります。
+* `NewWalletWithConfig` は、不正な `Profiles`、wallet と異なる profile の plugin、プロファイルが option を持つときの `profile.Carrier` を実装しない plugin、Draft のプロファイルがないときの `TestHooks` を拒否します。`CredStore` を伴う `Storeless`、注入した `Presenter` を伴う `SupportedTransactionDataTypes`、`*oid4vp.Oid4vpPresenter` 以外の presenter plugin も拒否します。エラーにはコードがあります。
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
 * `VerifyCredential` は、proof が検証できたときだけ、かつ `acceptance.DefaultSigningAlgorithms()`（ES256）に限り true を返します。nil の Credential には false を返します。
-* `ReceiveCredential` は HAIP で `ErrProfileForbidsDraft` を返します。Credential は保存前に検査します。`Config.CredentialAcceptance` があればそれで、なければ解析（`typ`、`alg`、`Key` と一致すべき `cnf`）で検査し、失敗した Credential は保存しません。storeless の wallet は検査の後に `ErrNoCredentialStore` を返します。
+* `ReceiveCredential` は `Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。Credential は保存前に検査します。`Config.CredentialAcceptance` があればそれで、なければ解析（`typ`、`alg`、`Key` と一致すべき `cnf`）で検査し、失敗した Credential は保存しません。storeless の wallet は検査の後に `ErrNoCredentialStore` を返します。
 * `PresentCredential` と `PresentCredentialWithOptions` は `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を実行します。保存済み Credential は最新のものではなく DCQL クエリで選び、答える query ごとに提示を作り、query の要求どおりに Key Binding JWT を付けます。要求は [Verifier の認証](#verifier-authentication)の規則で受け付けます。
 * `GetCredentialEntries` と `GetCredentialEntry` は、storeless の wallet で `ErrNoCredentialStore` を返します。
 * `Wallet` のメソッドが返すエラーにはすべてコードがあります（`wallet.ErrorCode`）。
@@ -1369,7 +1375,7 @@ observer は応答ヘッダーが届いた後に呼ばれます。
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
 * `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`InsecureSkipX509Verify` を設定すると OpenID4VP 1.0 の経路は署名付き Request Object を拒否し、この設定は Draft 24 の入口に適用されます。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
 * presenter は解析に失敗しても、エラー応答を送らなくなりました。求める場合は `SendParseErrorResponses` または `AuthorizationRequestError.SendErrorResponse` が送ります。`request_uri` の取得と応答の POST（`Present`）はリダイレクトに従わず、`Present` への 2xx 以外の応答は `*oid4vp.VerifierResponseError` になります。
-* `NewRequestBuilder` は `profile.Final` の下で OpenID4VP 1.0 の要求を構築します。
+* `NewRequestBuilder` は `profile.Final()` の下で OpenID4VP 1.0 の要求を構築します。`WithProfile` で別の 1.0 プロファイルを選べます。
 * `receiver.ReceivingDispatcher` と `presenter.PresentationDispatcher` に新しいメソッド（`Plugins`、transport と解析のアクセサ）があります。`sdjwtvc.SdJwtVcPresentationOptions` に `LimitDisclosureToSelectedClaims` と `RequireRootClaimMatch` が、`presenterTypes.PresentationRequest` に `ResponseMode` があります。`receiver/types` のメタデータの型に新しいフィールドがあります。
 * `env.IsHTTPAllowed` は、`VCKNOTS_WALLET_DEBUG` によって true を返すことがなくなりました。
 * コンポーネントのパッケージ（`keystore`、`credstore`、`presenter/types`、`common` など）のセンチネルエラーはコードを持ちます。`errors.Is` は引き続き一致します。

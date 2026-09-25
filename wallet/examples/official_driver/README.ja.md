@@ -31,7 +31,7 @@ holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイル
 | `dpopKeyFile` | string | 必須 | `wallet.Config.DPoP.Key` の秘密 JWK です。 |
 | `clientKeyFile` | string | 必須 | `private_key_jwt` の鍵（`Config.ClientAuth.Key`）と、client attestation が束縛する鍵（`Config.Attestation.ClientKey`）の秘密 JWK です。 |
 | `tlsCAFiles` | []string | `[]` | TLS のためにシステムのルートに追加する PEM で、CRL の取得にも使います。 |
-| `profile` | string | `""` | `""`、`"final"`、`"haip"` のいずれかです。`Config.Profile` と driver が構築する両 plugin に適用します。未知の値は拒否します。 |
+| `profile` | string | `""` | `""`、`"final"`、`"haip"` のいずれかです。`profile.Final()` か `profile.HAIP()` を選び、`Config.Profiles` の唯一の要素と、driver が構築する両 plugin のプロファイルにします。未知の値は拒否します。 |
 | `verifierCAFiles` | []string | `[]` | 署名付き Request Object の PEM トラストアンカー（`oid4vp.RequestObjectValidationOptions.TrustAnchors`）です。証明書を含まないファイルは拒否します。空の場合 `RequestObjectValidation` は nil のままで、X.509 の Request Object は拒否されます。 |
 | `verifierAllowUnadvertisedRevocation` | bool | `false` | `RequestObjectValidationOptions.AllowUnadvertisedRevocation` です。`verifierCAFiles` が必要です。 |
 | `walletAudience` | []string | `[]` | `RequestObjectValidationOptions.WalletAudience` です。`verifierCAFiles` が必要です。 |
