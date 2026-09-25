@@ -219,6 +219,13 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 		return nil, nil, fmt.Errorf("%w: issuer JWT alg %q is not supported by the verifier", ErrCredentialAlgUnsupported, algorithm)
 	}
 
+	if flavor == credential.SDJwtVC {
+		// Checked before the serializer, which refuses an unknown _sd_alg as
+		// a parse failure, so the refusal keeps its own sentinel.
+		if _, err := sdAlgorithm(payload); err != nil {
+			return nil, nil, err
+		}
+	}
 	parsed, err := a.serializer.DeserializeCredential(flavor, raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrCredentialParse, err)

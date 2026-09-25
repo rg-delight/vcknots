@@ -398,9 +398,9 @@ func ReconstructClaimsObject(rawCredential string) (map[string]any, error) {
 	if err := decoder.Decode(&payload); err != nil {
 		return nil, fmt.Errorf("invalid SD-JWT payload: %w", err)
 	}
-	algorithm := defaultHashAlgorithm
-	if value, ok := payload["_sd_alg"].(string); ok {
-		algorithm = normalizeSDHashAlgorithm(value)
+	algorithm, err := sdHashAlgorithm(payload)
+	if err != nil {
+		return nil, err
 	}
 	resolver, err := newSDJWTDisclosureResolver(combined.Disclosures, algorithm)
 	if err != nil {
