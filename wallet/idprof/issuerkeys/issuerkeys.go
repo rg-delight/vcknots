@@ -19,8 +19,9 @@
 // An `x5c` certification path (SD-JWT VC -19 §2.5, "Inline X.509
 // Certificates") is not resolved here: the credential acceptor
 // (wallet/acceptance) validates it against its trust anchors. The `x5c` rung
-// of this package only reports the DNS name such a path must be bound to,
-// which Resolver.StatusListKeys uses. OpenID Federation keys come from a Trust
+// of this package only reports the DNS name such a path must be bound to;
+// Resolver.StatusListKeys walks the path of a Status List Token itself
+// (statuslistkeys.go). OpenID Federation keys come from a Trust
 // Chain and are handled by the acceptor too (acceptance.FederationIssuerKeys).
 //
 // A caller reads Resolution.Candidates front to back and stops at the first key
@@ -202,7 +203,8 @@ type Resolution struct {
 // a switch on never makes a mechanism apply to an `iss` it is not defined for.
 type Mechanisms struct {
 	// X5C allows the `x5c` header rung to report the DNS name a certification
-	// path must be bound to (Resolver.StatusListKeys).
+	// path must be bound to, and Resolver.StatusListKeys to take a Status List
+	// Token's key from its x5c chain.
 	X5C bool
 	// JWTVCIssuerMetadata allows the IETF SD-JWT VC key resolution mechanism at
 	// /.well-known/jwt-vc-issuer.
@@ -307,8 +309,8 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (*Resolution, e
 
 // resolve runs every rung and returns what they produced, including a
 // resolution with no candidate, which Resolve turns into an *UnresolvedError.
-// StatusListKeys needs the empty resolution: the `x5c` rung contributes a DNS
-// name rather than a key, and a caller that walks the chain may still end up
+// The empty resolution still carries what the `x5c` rung contributes - a DNS
+// name rather than a key - and a caller that walks the chain may still end up
 // with a key when the rungs produced none.
 //
 // At most one of the key rungs applies to a given `iss`: the JWT VC Issuer

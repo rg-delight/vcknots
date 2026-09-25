@@ -500,7 +500,8 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 		}
 	}
 
-	payload, err := signed.Verify(result.Chain[0].PublicKey)
+	// RFC 7518 Section 3.3: an RSA key under 2048 bits is refused.
+	payload, err := commonjose.VerifySignature(signed, result.Chain[0].PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}

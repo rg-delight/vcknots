@@ -150,10 +150,10 @@ func (h *harness) checker(keys ...jose.JSONWebKey) *Checker {
 	return &Checker{
 		HTTPClient: h.server.Client(),
 		Now:        func() time.Time { return testNow },
-		ResolveIssuerKeys: func(_ context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+		ResolveIssuerKeys: func(_ context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
 			h.hookCalls.Add(1)
-			h.hookIss.Store(issuer)
-			h.hookHdr.Store(header)
+			h.hookIss.Store(request.Issuer)
+			h.hookHdr.Store(request.Header)
 			return keys, nil
 		},
 	}
@@ -196,6 +196,7 @@ func TestCheckReferenceReportsTheVerifiedEntryAndItsEvidence(t *testing.T) {
 		Bits:           1,
 		Value:          0,
 		TokenIssuer:    testIssuer,
+		StatusIssuer:   testIssuer,
 		TokenSubject:   h.uri,
 		TokenSHA256:    base64.RawURLEncoding.EncodeToString(digest[:]),
 		TokenIssuedAt:  time.Unix(testIssuedAt, 0).UTC(),
@@ -506,8 +507,6 @@ func TestCheckReferenceRefusesUnusableReferences(t *testing.T) {
 			return strings.Replace(h.uri, "https://", "http://", 1)
 		}, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "other scheme", uri: uri("ftp://issuer.example.test/status"), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
-		{name: "query", uri: func(h *harness) string { return h.uri + "?page=1" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
-		{name: "empty query", uri: func(h *harness) string { return h.uri + "?" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "fragment", uri: func(h *harness) string { return h.uri + "#x" }, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "user information", uri: func(h *harness) string {
 			return strings.Replace(h.uri, "https://", "https://user:pass@", 1)
@@ -523,26 +522,7 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			return h.respond
 		}
 	}
-	var redirectTargetHits atomic.Int32
 	runFailureCases(t, []failureCase{
-		{
-			name: "redirect to a valid token is not followed",
-			respond: func(t *testing.T, h *harness) func(http.ResponseWriter, *http.Request) {
-				token := signES256(t, h.key, defaultHeader(), defaultClaims(h.uri))
-				return func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path == "/moved" {
-						redirectTargetHits.Add(1)
-						w.Header().Set("Content-Type", statusListTokenMediaType)
-						_, _ = w.Write([]byte(token))
-						return
-					}
-					http.Redirect(w, r, "/moved", http.StatusFound)
-				}
-			},
-			want:           ErrStatusListFetchFailed,
-			wantMessage:    "redirect status 302",
-			hookMustNotRun: true,
-		},
 		{name: "server error", respond: respondWith(served{status: 500, contentType: statusListTokenMediaType, body: "x"}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
 		{name: "not found", respond: respondWith(served{status: 404, contentType: statusListTokenMediaType}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
 		{name: "json content type", respond: respondWith(served{contentType: "application/json", body: "not-a-jwt"}), want: ErrStatusListFetchFailed, hookMustNotRun: true},
@@ -599,9 +579,6 @@ func TestCheckReferenceRefusesFailedFetches(t *testing.T) {
 			hookMustNotRun: true,
 		},
 	})
-	if hits := redirectTargetHits.Load(); hits != 0 {
-		t.Fatalf("redirect target was requested %d times", hits)
-	}
 }
 
 func TestCheckReferenceRefusesTokensBeforeResolvingKeys(t *testing.T) {
@@ -681,7 +658,6 @@ func TestCheckReferenceRefusesTokensBeforeResolvingKeys(t *testing.T) {
 			want:           ErrStatusListTokenInvalid,
 			hookMustNotRun: true,
 		},
-		{name: "iss missing", token: claimsWith(func(c map[string]any) { delete(c, "iss") }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 		{name: "iss empty", token: claimsWith(func(c map[string]any) { c["iss"] = "" }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 		{name: "iss not a string", token: claimsWith(func(c map[string]any) { c["iss"] = 7 }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 	})
@@ -691,7 +667,7 @@ func TestCheckReferenceRefusesUnresolvedKeys(t *testing.T) {
 	hookFailure := errors.New("jwks endpoint unreachable")
 	resolveWith := func(keys []jose.JSONWebKey, err error) func(*harness, *Checker) {
 		return func(_ *harness, c *Checker) {
-			c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+			c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 				return keys, err
 			}
 		}
@@ -757,7 +733,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Algorithm = string(jose.ES384)
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -768,7 +744,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Use = "enc"
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -780,7 +756,7 @@ func TestCheckReferenceRefusesUnverifiedSignatures(t *testing.T) {
 			configure: func(h *harness, c *Checker) {
 				key := publicJWK(h.key, "key-1")
 				key.Algorithm = ""
-				c.ResolveIssuerKeys = func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+				c.ResolveIssuerKeys = func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 					return []jose.JSONWebKey{key}, nil
 				}
 			},
@@ -940,7 +916,7 @@ func TestCheckReferenceAllowsCleartextOnlyWhenEnabled(t *testing.T) {
 	})
 	checker := &Checker{
 		Now: func() time.Time { return testNow },
-		ResolveIssuerKeys: func(context.Context, string, map[string]any) ([]jose.JSONWebKey, error) {
+		ResolveIssuerKeys: func(context.Context, KeyRequest) ([]jose.JSONWebKey, error) {
 			return []jose.JSONWebKey{publicJWK(key, "key-1")}, nil
 		},
 	}

@@ -3,8 +3,10 @@ package statuslist
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,6 +17,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
+	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // tokenClaims is the verified payload of a Status List Token, reduced to the
@@ -156,17 +160,31 @@ func decodePayloadObject(payload []byte) (map[string]any, error) {
 	return claims, nil
 }
 
-// unverifiedIssuer reads `iss` from a payload whose signature has not been
-// checked yet. The value is only ever a hint for the key resolution hook;
-// parseTokenClaims reads `iss` again from the verified payload.
+// unverifiedIssuer reads the optional `iss` from a payload whose signature has
+// not been checked yet, returning the empty string when the token carries
+// none. The value only selects an external Status Issuer for
+// Checker.AcceptStatusIssuer to judge; parseTokenClaims reads `iss` again from
+// the verified payload.
 func unverifiedIssuer(signed *jose.JSONWebSignature) (string, error) {
 	claims, err := decodePayloadObject(signed.UnsafePayloadWithoutVerification())
 	if err != nil {
 		return "", err
 	}
-	issuer, isString := claims["iss"].(string)
+	return optionalIssuer(claims)
+}
+
+// optionalIssuer reads `iss`. draft-ietf-oauth-status-list-21 Section 5.1
+// defines no `iss` for a Status List Token, so its absence is not an error;
+// when present it is the RFC 7519 Section 4.1.1 StringOrURI, and a value of
+// another type, or an empty string, is refused rather than treated as absent.
+func optionalIssuer(claims map[string]any) (string, error) {
+	raw, present := claims["iss"]
+	if !present {
+		return "", nil
+	}
+	issuer, isString := raw.(string)
 	if !isString || issuer == "" {
-		return "", fmt.Errorf("%w: iss must be a non-empty string", ErrStatusListTokenInvalid)
+		return "", fmt.Errorf("%w: iss, when present, must be a non-empty string", ErrStatusListTokenInvalid)
 	}
 	return issuer, nil
 }
@@ -178,11 +196,15 @@ func unverifiedIssuer(signed *jose.JSONWebSignature) (string, error) {
 // hold in this path, and a symmetric key would turn the signature check into a
 // MAC check that proves nothing about the issuer. Both describe the caller's
 // configuration, so they are reported as ErrStatusListIssuerKeyUnresolved.
-func (c *Checker) resolveIssuerKeys(ctx context.Context, issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
+func (c *Checker) resolveIssuerKeys(ctx context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
+	issuer := request.Issuer
 	if c.ResolveIssuerKeys == nil {
 		return nil, fmt.Errorf("%w: no issuer key resolver is configured", ErrStatusListIssuerKeyUnresolved)
 	}
-	keys, err := c.ResolveIssuerKeys(ctx, issuer, header)
+	keys, err := c.ResolveIssuerKeys(ctx, request)
+	if errors.Is(err, ErrStatusListCertificateRejected) {
+		return nil, fmt.Errorf("%w: issuer %q: %w", ErrStatusListCertificateRejected, issuer, err)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolving keys for issuer %q: %w", ErrStatusListIssuerKeyUnresolved, issuer, err)
 	}
@@ -244,11 +266,21 @@ func verifySignature(signed *jose.JSONWebSignature, keys []jose.JSONWebKey, head
 	if len(candidates) == 0 {
 		return nil, "", fmt.Errorf("%w: none of the %d resolved keys is usable for alg %s", ErrStatusListSignatureInvalid, len(keys), algorithm)
 	}
+	// A key RFC 7518 forbids for the token's algorithm (an RSA modulus under
+	// 2048 bits) is refused rather than tried, and the refusal is kept on the
+	// error so the caller sees why the signature did not count.
+	var weakKey error
 	for _, key := range candidates {
-		payload, err := signed.Verify(key.Key)
+		payload, err := commonjose.VerifySignature(signed, key.Key)
 		if err == nil {
 			return payload, key.KeyID, nil
 		}
+		if errors.Is(err, commonjose.ErrVerificationKeyTooWeak) {
+			weakKey = err
+		}
+	}
+	if weakKey != nil {
+		return nil, "", fmt.Errorf("%w: none of %d candidate keys verified the token: %w", ErrStatusListSignatureInvalid, len(candidates), weakKey)
 	}
 	return nil, "", fmt.Errorf("%w: none of %d candidate keys verified the token", ErrStatusListSignatureInvalid, len(candidates))
 }
@@ -256,7 +288,8 @@ func verifySignature(signed *jose.JSONWebSignature, keys []jose.JSONWebKey, head
 // parseTokenClaims reads the claims draft-ietf-oauth-status-list Section 5.1
 // defines out of a verified Status List Token payload.
 //
-// `iss` must be a non-empty string, `sub` must equal expectedSubject exactly,
+// `iss` is optional and, when present, a non-empty string; `sub` must equal
+// expectedSubject exactly,
 // `iat` is REQUIRED and numeric, `exp` and `nbf` are optional and numeric,
 // `ttl` is optional and a positive finite number (not necessarily an integer),
 // and `status_list` must be an object carrying `bits` (1, 2, 4 or 8) and a
@@ -268,9 +301,9 @@ func parseTokenClaims(payload []byte, expectedSubject string) (*tokenClaims, err
 	if err != nil {
 		return nil, err
 	}
-	issuer, isString := claims["iss"].(string)
-	if !isString || issuer == "" {
-		return nil, fmt.Errorf("%w: iss must be a non-empty string", ErrStatusListTokenInvalid)
+	issuer, err := optionalIssuer(claims)
+	if err != nil {
+		return nil, err
 	}
 	subject, isString := claims["sub"].(string)
 	if !isString || subject != expectedSubject {
@@ -337,4 +370,54 @@ func numericDateClaim(claims map[string]any, name string) (time.Time, bool, erro
 		return time.Time{}, true, fmt.Errorf("%w: %w", ErrStatusListTokenInvalid, err)
 	}
 	return at, present, nil
+}
+
+// checkX5CRules applies the profile's Status List Token x5c rules that need no
+// trust anchor (HAIP 1.0 Section 6.1) to the unauthenticated header, before
+// any key is resolved, and returns the decoded leaf certificate when the
+// header carries an x5c. Require refuses a token without x5c; RejectSelfSigned
+// a self-signed leaf. A malformed x5c is refused whenever a rule applies. With
+// no rule, x5c is left to the key resolution hook.
+func checkX5CRules(header map[string]any, rules profile.X5CRules) (*x509.Certificate, error) {
+	if rules == (profile.X5CRules{}) {
+		return nil, nil
+	}
+	raw, present := header["x5c"]
+	if !present {
+		if rules.Require {
+			return nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", ErrStatusListCertificateRejected)
+		}
+		return nil, nil
+	}
+	chain, err := commonX509.DecodeX5CChain(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrStatusListCertificateRejected, err)
+	}
+	if rules.RejectSelfSigned {
+		if err := commonX509.RequireNonSelfSignedLeaf(chain, "status list token"); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStatusListCertificateRejected, err)
+		}
+	}
+	return chain[0], nil
+}
+
+// leafKeysOnly keeps the keys that are the x5c leaf's public key, for a
+// profile that requires "the public key used to validate the signature" to be
+// "included in the x5c JOSE header" (HAIP 1.0 Section 6.1). A hook that
+// returns any other key has not resolved the key from the x5c header.
+func leafKeysOnly(keys []jose.JSONWebKey, leaf *x509.Certificate) ([]jose.JSONWebKey, error) {
+	if leaf == nil {
+		return nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", ErrStatusListCertificateRejected)
+	}
+	leafKey := jose.JSONWebKey{Key: leaf.PublicKey}
+	var matching []jose.JSONWebKey
+	for _, key := range keys {
+		if equal, err := commonjose.EqualPublicKey(key, leafKey); err == nil && equal {
+			matching = append(matching, key)
+		}
+	}
+	if len(matching) == 0 {
+		return nil, fmt.Errorf("%w: no resolved key is the x5c leaf certificate's key", ErrStatusListCertificateRejected)
+	}
+	return matching, nil
 }
