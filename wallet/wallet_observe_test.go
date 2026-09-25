@@ -2,7 +2,9 @@ package wallet
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -133,4 +135,47 @@ func TestObserveLabelsDeferredCredentialPoll(t *testing.T) {
 	labels := requireFixtureEndpointLabels(t, recorder.Exchanges())
 	require.Contains(t, labels, observe.EndpointCredential)
 	require.Contains(t, labels, observe.EndpointDeferredCredential)
+}
+
+// An observer of the library's requests does not see the credentials they
+// carry: the pre-authorized_code, tx_code, access token and DPoP proofs reach
+// it redacted, through the whole issuance.
+func TestObserverSeesNoCredentials(t *testing.T) {
+	recorder := &observetest.Recorder{}
+	fixture := newFinalIssuanceFixture(t, observeFixtureTransport(recorder))
+	req := fixture.tokenTestPreAuthorizedRequest(&TxCode{Length: 4})
+	req.TxCode = "4321"
+	grant, err := fixture.tokenTestPreAuthorize(req)
+	require.NoError(t, err)
+	_, err = fixture.wallet.RequestCredential(context.Background(), grant, fixture.credentialRequest())
+	require.NoError(t, err)
+
+	secrets := []string{"pre-auth-code-1", "4321", grant.AccessToken.Token}
+	seen := map[observe.Endpoint]bool{}
+	for _, exchange := range recorder.Exchanges() {
+		seen[exchange.Endpoint] = true
+		request := exchange.Request
+		for _, name := range []string{"DPoP", "OAuth-Client-Attestation", "OAuth-Client-Attestation-PoP"} {
+			if value := request.Header.Get(name); value != "" {
+				require.Equal(t, observe.Redacted, value, "%s header of %s", name, exchange.Endpoint)
+			}
+		}
+		if value := request.Header.Get("Authorization"); value != "" {
+			require.Equal(t, "DPoP "+observe.Redacted, value, "Authorization of %s", exchange.Endpoint)
+		}
+		if request.GetBody != nil {
+			body, err := request.GetBody()
+			require.NoError(t, err)
+			raw, err := io.ReadAll(body)
+			require.NoError(t, err)
+			for _, secret := range secrets {
+				require.NotContains(t, string(raw), secret, "body of %s", exchange.Endpoint)
+			}
+			if exchange.Endpoint == observe.EndpointToken {
+				require.Contains(t, string(raw), "pre-authorized_code="+url.QueryEscape(observe.Redacted))
+			}
+		}
+	}
+	require.True(t, seen[observe.EndpointToken])
+	require.True(t, seen[observe.EndpointCredential])
 }
