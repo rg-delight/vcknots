@@ -373,6 +373,37 @@ func TestAuthorizePreAuthorizedIssuanceAcceptsAnonymousBearer(t *testing.T) {
 	require.Empty(t, fixture.credentialHeaders.Get("DPoP"))
 }
 
+// OpenID4VCI 1.0 Section 12.3: pre-authorized_grant_anonymous_access_supported
+// defaults to false, so a wallet with no client_id and no client
+// authentication sends no Token Request to a server that omits it or sets it
+// to false.
+func TestAuthorizePreAuthorizedIssuanceRefusesAnonymousAccessByDefault(t *testing.T) {
+	for name, flag := range map[string]*bool{"omitted": nil, "false": boolPtr(false)} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
+				f.anonymousAccess = flag
+			})
+			fixture.wallet.clientAuth = ClientAuthConfig{}
+			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+			requireCoded(t, err, errNoUsableClientAuthMethod)
+			require.Zero(t, fixture.tokenCalls)
+		})
+	}
+}
+
+// A Token Request that carries a client_id is not anonymous, so the anonymous
+// access flag does not stop it.
+func TestAuthorizePreAuthorizedIssuanceWithClientIDIgnoresAnonymousAccess(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
+		f.anonymousAccess = boolPtr(false)
+	})
+	fixture.wallet.clientAuth = ClientAuthConfig{ClientID: "wallet-client"}
+	_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+	require.NoError(t, err)
+	require.Equal(t, 1, fixture.tokenCalls)
+	require.Equal(t, "wallet-client", fixture.tokenForms[0].Get("client_id"))
+}
+
 // With a DPoP key the token is bound to it and presented with the RFC 9449
 // Section 7.1 scheme.
 func TestAuthorizePreAuthorizedIssuanceAcceptsDPoP(t *testing.T) {

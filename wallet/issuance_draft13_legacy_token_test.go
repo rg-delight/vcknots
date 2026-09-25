@@ -449,20 +449,23 @@ func TestWallet_fetchCredentialMetadata_RejectsWhenNoUsableMethod(t *testing.T) 
 	assert.Contains(t, err.Error(), "no usable client authentication method")
 }
 
-// TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess pins the three
-// states of the OPTIONAL pre-authorized_grant_anonymous_access_supported metadata
-// parameter. Omitting it means "unknown", not "unsupported" — issuers commonly leave it
-// out, the OpenID conformance suite among them — so only an explicit false may stop the
-// pre-authorized code flow.
+// OpenID4VCI 1.0 Section 12.3 (Draft 13 Section 11.3):
+// pre-authorized_grant_anonymous_access_supported is OPTIONAL and "The default
+// is false", so a Token Request without a client_id goes only to a server that
+// sets it to true. A wallet that names its client with client_id is not
+// anonymous, and the flag does not apply to it.
 func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *testing.T) {
 	tests := []struct {
 		name            string
 		anonymousAccess *bool
+		clientID        string
 		wantErr         bool
 	}{
-		{name: "omitted", anonymousAccess: nil, wantErr: false},
+		{name: "omitted", anonymousAccess: nil, wantErr: true},
 		{name: "explicit true", anonymousAccess: mockserver.BoolPtr(true), wantErr: false},
 		{name: "explicit false", anonymousAccess: mockserver.BoolPtr(false), wantErr: true},
+		{name: "omitted with a client_id", anonymousAccess: nil, clientID: "wallet-id", wantErr: false},
+		{name: "explicit false with a client_id", anonymousAccess: mockserver.BoolPtr(false), clientID: "wallet-id", wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -488,7 +491,7 @@ func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *tes
 
 			d, err := newHTTPTestReceiver()
 			require.NoError(t, err)
-			w := &Wallet{receiver: d}
+			w := &Wallet{receiver: d, clientAuth: ClientAuthConfig{ClientID: tt.clientID}}
 
 			_, authMetadata, err := w.fetchCredentialMetadata(ReceiveCredentialRequest{
 				CredentialOffer: &CredentialOffer{

@@ -142,6 +142,8 @@ func newDraft13Fixture(t *testing.T, configure ...func(*Config)) *draft13Fixture
 			"authorization_endpoint":   base + "/authorize",
 			"token_endpoint":           base + "/token",
 			"response_types_supported": []string{"code"},
+			// The pre-authorized fixtures send no client_id (Section 11.3).
+			"pre-authorized_grant_anonymous_access_supported": true,
 		}
 		for name, value := range f.asMetadataExtra {
 			metadata[name] = value
@@ -810,6 +812,30 @@ func TestDraft13DeferredRequiresTheDPoPKeyOfTheToken(t *testing.T) {
 	_, err = withKey.Draft13().RequestDeferredCredential(context.Background(), deferred)
 	draft13RequireCoded(t, err, ErrDPoPKeyMismatch)
 	require.Empty(t, fixture.deferreds())
+}
+
+// Draft 13 Section 11.3 has the same default as OpenID4VCI 1.0 Section 12.3:
+// without pre-authorized_grant_anonymous_access_supported true, a wallet with
+// no client_id sends no Token Request; with a client_id it is not anonymous.
+func TestDraft13PreAuthorizedAnonymousAccessDefaultsToFalse(t *testing.T) {
+	for name, flag := range map[string]any{"omitted": nil, "false": false} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			fixture.set(func(f *draft13Fixture) {
+				f.asMetadataExtra = map[string]any{"pre-authorized_grant_anonymous_access_supported": flag}
+			})
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), fixture.preAuthorizedRequest())
+			draft13RequireCoded(t, err, errNoUsableClientAuthMethod)
+			require.Empty(t, fixture.tokens())
+
+			named := newDraft13Fixture(t, func(c *Config) { c.ClientAuth.ClientID = "wallet-client" })
+			named.set(func(f *draft13Fixture) {
+				f.asMetadataExtra = map[string]any{"pre-authorized_grant_anonymous_access_supported": flag}
+			})
+			named.preAuthorize(t, named.wallet)
+			require.Equal(t, "wallet-client", named.tokens()[0].Get("client_id"))
+		})
+	}
 }
 
 // With a DPoP key and an authorization server that advertises DPoP, the

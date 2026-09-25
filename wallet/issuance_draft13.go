@@ -354,12 +354,18 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	}
 	as := discovery.asMetadata
 	// Section 6.1 makes client_id OPTIONAL for this grant; it is sent when
-	// Config names one.
+	// Config names one. Without one the request is anonymous, which Section
+	// 11.3 allows only when the server declares
+	// pre-authorized_grant_anonymous_access_supported true.
+	clientID := strings.TrimSpace(d.w.clientAuth.ClientID)
+	if clientID == "" && !anonymousPreAuthorizedAccessSupported(as) {
+		return nil, errNoUsableClientAuthMethod
+	}
 	token, err := transport.RequestToken(ctx, *as.TokenEndpoint, receiverTypes.TokenRequest{
 		GrantType:         receiverTypes.PreAuthorizedCode,
 		PreAuthorizedCode: grant.PreAuthorizedCode,
 		TxCode:            req.TxCode,
-		ClientID:          strings.TrimSpace(d.w.clientAuth.ClientID),
+		ClientID:          clientID,
 	}, d.tokenAuthentication(ctx, as, true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch access token: %w", err)
