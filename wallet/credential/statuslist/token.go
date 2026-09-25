@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -244,11 +245,21 @@ func verifySignature(signed *jose.JSONWebSignature, keys []jose.JSONWebKey, head
 	if len(candidates) == 0 {
 		return nil, "", fmt.Errorf("%w: none of the %d resolved keys is usable for alg %s", ErrStatusListSignatureInvalid, len(keys), algorithm)
 	}
+	// A key RFC 7518 forbids for the token's algorithm (an RSA modulus under
+	// 2048 bits) is refused rather than tried, and the refusal is kept on the
+	// error so the caller sees why the signature did not count.
+	var weakKey error
 	for _, key := range candidates {
-		payload, err := signed.Verify(key.Key)
+		payload, err := commonjose.VerifySignature(signed, key.Key)
 		if err == nil {
 			return payload, key.KeyID, nil
 		}
+		if errors.Is(err, commonjose.ErrVerificationKeyTooWeak) {
+			weakKey = err
+		}
+	}
+	if weakKey != nil {
+		return nil, "", fmt.Errorf("%w: none of %d candidate keys verified the token: %w", ErrStatusListSignatureInvalid, len(candidates), weakKey)
 	}
 	return nil, "", fmt.Errorf("%w: none of %d candidate keys verified the token", ErrStatusListSignatureInvalid, len(candidates))
 }

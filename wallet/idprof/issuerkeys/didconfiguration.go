@@ -117,7 +117,8 @@ func (r *Resolver) domainLinkageBinds(ctx context.Context, token, didValue, orig
 		return false
 	}
 	for _, key := range keys {
-		if _, err := signature.Verify(key); err != nil {
+		// RFC 7518 Section 3.3: an RSA key under 2048 bits is refused.
+		if _, err := commonjose.VerifySignature(signature, key); err != nil {
 			continue
 		}
 		if !withinJWTValidity(claims, r.now()) {

@@ -22,6 +22,7 @@ import (
 	"math/big"
 
 	"github.com/go-jose/go-jose/v4"
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/verifier/types"
 )
@@ -32,7 +33,7 @@ import (
 // these algorithms". A shorter key is refused rather than verified, so an
 // issuer cannot downgrade the signature strength of a credential by presenting
 // one.
-const MinimumRSAModulusBits = 2048
+const MinimumRSAModulusBits = commonjose.MinimumRSAModulusBits
 
 // ECDSA verifies an ECDSA proof of algorithm with the curve and digest RFC 7518
 // Section 3.4 binds to it. The signature is the fixed-width R || S
