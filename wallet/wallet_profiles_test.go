@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/mock"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -87,9 +88,13 @@ func TestDraftEntryPointsNeedTheirDraftProfile(t *testing.T) {
 	require.NotErrorIs(t, err, ErrProfileForbidsDraft)
 }
 
-func TestTestHooksNeedADraftProfile(t *testing.T) {
-	_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final()}, Storeless: true, TestHooks: &TestHooks{}})
+func TestExperimentalHooksNeedADraftProfile(t *testing.T) {
+	_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final()}, Storeless: true, Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}})
 	requireCoded(t, err, ErrProfileForbidsDraft)
-	_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final(), profile.Draft13()}, Storeless: true, TestHooks: &TestHooks{}})
+	_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final(), profile.Draft13()}, Storeless: true, Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}})
 	require.NoError(t, err)
 }
+
+// identityProof is a key proof hook that changes nothing, so a test can set
+// Experimental.Hooks without altering a message.
+func identityProof(proof string) (string, error) { return proof, nil }

@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/keystore"
@@ -190,9 +191,9 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 func (f *finalIssuanceFixture) newWallet(t *testing.T) *Wallet {
 	t.Helper()
 	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
-		HTTPClient: f.server.Client(),
-		AllowHTTP:  !f.walletProfile.Options().ForbidInsecureTransports,
-		Profile:    f.walletProfile,
+		HTTPClient:   f.server.Client(),
+		Experimental: experimental.Transport{AllowHTTP: !f.walletProfile.Options().ForbidInsecureTransports},
+		Profile:      f.walletProfile,
 	})
 	if f.wrapReceiverPlugin != nil {
 		plugin = f.wrapReceiverPlugin(plugin)

@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
-	"github.com/trustknots/vcknots/wallet/env"
 	"math/big"
 	"os"
 
@@ -16,10 +15,13 @@ import (
 	"github.com/trustknots/vcknots/wallet"
 	"github.com/trustknots/vcknots/wallet/clientconfig"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -116,13 +118,18 @@ type Runtime struct {
 	Wallet     *wallet.Wallet
 }
 
-func NewOID4VPRuntime(certPath string) (*Runtime, error) {
+// NewOID4VPRuntime builds a wallet for the sample flows. allowHTTP accepts the
+// plain http endpoints of a local sample server through the experimental
+// transport settings; it is not for production use.
+func NewOID4VPRuntime(certPath string, allowHTTP bool) (*Runtime, error) {
 	credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 	if err != nil {
 		return nil, err
 	}
 
-	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{
+		Experimental: experimental.Transport{AllowHTTP: allowHTTP},
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +159,7 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 	}
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
-		AllowHTTP:           env.IsHTTPAllowed(),
+		AllowHTTP:           allowHTTP,
 		X509TrustChainRoots: certPool,
 	}
 	presenterDispatcher, err := presenter.NewPresentationDispatcher(

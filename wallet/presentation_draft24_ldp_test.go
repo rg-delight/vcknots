@@ -17,6 +17,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
@@ -220,13 +221,13 @@ func TestWallet_SubmitPresentationDraft24LdpRefusesAnUnpinnedContext(t *testing.
 	require.Len(t, fixture.posted, 0)
 }
 
-// TestHooks.PresentationExchangeResponse sees the finished response and what
+// Experimental.Hooks.PresentationExchangeResponse sees the finished response and what
 // it returns is what the Verifier receives; its refusal stops the
 // presentation before sending.
 func TestWallet_SubmitPresentationAppliesTheResponseTransform(t *testing.T) {
 	fixture := newLdpPresentationFixture(t)
-	hooked := func(transform Draft24ResponseTransform) *Wallet {
-		w, err := NewWalletWithConfig(Config{Presenter: fixture.presenting, Storeless: true, TestHooks: &TestHooks{PresentationExchangeResponse: transform}})
+	hooked := func(transform experimental.Draft24ResponseTransform) *Wallet {
+		w, err := NewWalletWithConfig(Config{Presenter: fixture.presenting, Storeless: true, Experimental: experimental.Options{Hooks: experimental.Hooks{PresentationExchangeResponse: transform}}})
 		require.NoError(t, err)
 		return w
 	}

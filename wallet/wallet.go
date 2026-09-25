@@ -33,7 +33,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	joseutil "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/credstore"
-	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/presenter"
@@ -81,7 +81,8 @@ type Wallet struct {
 	issuance IssuanceConfig
 	// attestationConfig is a pointer so that Wallet stays comparable.
 	attestationConfig *AttestationConfig
-	testHooks         *TestHooks
+	// testHooks is nil unless Config.Experimental.Hooks sets a hook.
+	testHooks *experimental.Hooks
 
 	credentialAcceptance *acceptance.Policy
 }
@@ -155,9 +156,11 @@ type Config struct {
 	// Attestation supplies and authenticates client and key attestations.
 	Attestation AttestationConfig
 
-	// TestHooks rewrites protocol messages the library built, for testing how
-	// a peer handles them. Nil leaves every message as built.
-	TestHooks *TestHooks
+	// Experimental carries the settings that depart from the OpenID4VC
+	// specifications: plain http endpoints and rewrites of draft protocol
+	// messages. Not specification-conforming; for testing only. The zero
+	// value conforms. See package experimental.
+	Experimental experimental.Options
 }
 
 // DPoPConfig holds configuration for DPoP proof generation. Key is the
@@ -221,19 +224,6 @@ type AttestationConfig struct {
 	Key attestation.KeyProvider
 	// Trust authenticates the attestations Client and Key return.
 	Trust attestation.TrustPolicy
-}
-
-// TestHooks rewrite messages after the library built them, so a tester can
-// see how an issuer or verifier handles a malformed one. A nil hook leaves its
-// message unchanged. They rewrite draft protocol messages only, so they are
-// refused (ErrProfileForbidsDraft) unless Config.Profiles enables a draft
-// profile, which never happens under HAIP.
-type TestHooks struct {
-	// KeyProof rewrites Draft 13 key proofs.
-	KeyProof ProofTransform
-	// PresentationExchangeResponse rewrites Draft 24 Presentation Exchange
-	// responses.
-	PresentationExchangeResponse Draft24ResponseTransform
 }
 
 // attestationSettings returns Config.Attestation, or its zero value for a
@@ -321,8 +311,8 @@ func newWallet(config Config) (*Wallet, error) {
 		return nil, err
 	}
 	walletProfile := profiles.final
-	if config.TestHooks != nil && !profiles.draft13 && !profiles.draft24 {
-		return nil, fmt.Errorf("%w: TestHooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
+	if err := checkExperimental(config, profiles); err != nil {
+		return nil, err
 	}
 	if config.Storeless && config.CredStore != nil {
 		return nil, fmt.Errorf("%w: a storeless wallet cannot be configured with a credential store", ErrInvalidArgument)
@@ -348,7 +338,7 @@ func newWallet(config Config) (*Wallet, error) {
 	}
 
 	if config.Receiver == nil {
-		receiver, err := newDefaultReceiver(walletProfile)
+		receiver, err := newDefaultReceiver(walletProfile, config.Experimental.Transport)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default receiver: %w", err)
 		}
@@ -373,7 +363,7 @@ func newWallet(config Config) (*Wallet, error) {
 
 	if config.Presenter == nil {
 		presenter, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{
-			AllowHTTP:                     env.IsHTTPAllowed(),
+			AllowHTTP:                     config.Experimental.Transport.AllowHTTP,
 			Profile:                       walletProfile,
 			SupportedTransactionDataTypes: slices.Clone(config.SupportedTransactionDataTypes),
 		}))
@@ -401,6 +391,11 @@ func newWallet(config Config) (*Wallet, error) {
 		config.DPoP.Key = key
 	}
 	attestationConfig := config.Attestation
+	var testHooks *experimental.Hooks
+	if config.Experimental.Hooks.Set() {
+		hooks := config.Experimental.Hooks
+		testHooks = &hooks
+	}
 	return &Wallet{
 		credStore:  config.CredStore,
 		idProf:     config.IDProfiler,
@@ -417,23 +412,45 @@ func newWallet(config Config) (*Wallet, error) {
 
 		issuance:          config.Issuance,
 		attestationConfig: &attestationConfig,
-		testHooks:         config.TestHooks,
+		testHooks:         testHooks,
 
 		credentialAcceptance: config.CredentialAcceptance,
 	}, nil
 }
 
 // newDefaultReceiver builds the receiver of a wallet whose Config.Receiver is
-// nil: the upstream defaults under plain Final, and only an OpenID4VCI plugin
-// constructed with the wallet's profile when that profile carries options.
-func newDefaultReceiver(walletProfile profile.Profile) (*receiver.ReceivingDispatcher, error) {
-	if walletProfile == profile.Final() {
+// nil: the upstream defaults under plain Final without experimental transport
+// settings, and otherwise only an OpenID4VCI plugin constructed with the
+// wallet's profile and transport.
+func newDefaultReceiver(walletProfile profile.Profile, transport experimental.Transport) (*receiver.ReceivingDispatcher, error) {
+	if walletProfile == profile.Final() && transport == (experimental.Transport{}) {
 		return receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
 	}
 	return receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &receiverOid4vci.Oid4vciReceiver{
-		AllowHTTP: env.IsHTTPAllowed(),
-		Profile:   walletProfile,
+		Experimental: transport,
+		Profile:      walletProfile,
 	}))
+}
+
+// checkExperimental refuses Config.Experimental settings the wallet could not
+// apply or its profiles forbid: hooks without a draft profile (they rewrite
+// draft messages only), a transport escape under
+// Options.ForbidInsecureTransports (HAIP Section 4), and a transport escape
+// with an injected plugin, which the wallet does not reconfigure.
+func checkExperimental(config Config, profiles walletProfiles) error {
+	if config.Experimental.Hooks.Set() && !profiles.draft13 && !profiles.draft24 {
+		return fmt.Errorf("%w: Experimental.Hooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
+	}
+	if config.Experimental.Transport == (experimental.Transport{}) {
+		return nil
+	}
+	if profiles.final.Options().ForbidInsecureTransports {
+		return fmt.Errorf("%w: %s does not permit Experimental.Transport", ErrInvalidArgument, profiles.final)
+	}
+	if config.Receiver != nil || config.Presenter != nil {
+		return fmt.Errorf("%w: Experimental.Transport configures only the plugins the wallet builds; set it on the injected plugin", ErrInvalidArgument)
+	}
+	return nil
 }
 
 // checkPluginProfiles refuses a plugin whose profile.Carrier reports another

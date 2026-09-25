@@ -151,9 +151,10 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce strin
 	return proofSent, &exchangeResponse{statusCode: response.StatusCode, header: response.Header, body: responseBody}, nil
 }
 
-// requireEndpointScheme refuses a non-https endpoint unless AllowHTTP is set.
+// requireEndpointScheme refuses a non-https endpoint unless
+// Experimental.AllowHTTP is set.
 func (o *Oid4vciReceiver) requireEndpointScheme(endpointURL url.URL) error {
-	if !o.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.Experimental.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 	return nil

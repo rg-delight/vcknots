@@ -220,17 +220,18 @@ func TestWallet_validateCredentialOffer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpAllowed := env.IsHTTPAllowed()
 			debugMode := env.IsDebugMode()
-			defer env.SetHTTPAllowed(httpAllowed)
 			defer env.SetDebugMode(debugMode)
 			env.SetDebugMode(false)
-			env.SetHTTPAllowed(tt.httpAllowed)
 
-			w, err := NewWallet()
+			config := Config{}
+			if tt.httpAllowed {
+				config = httpTestConfig()
+			}
+			w, err := NewWalletWithConfig(config)
 			require.NoError(t, err)
 
-			got, gotErr := w.validateCredentialOffer(tt.offer)
+			got, gotErr := w.validateCredentialOffer(tt.offer, receiverTypes.Oid4vci)
 			if tt.wantErr {
 				require.Error(t, gotErr)
 				if tt.wantErrContains != "" {

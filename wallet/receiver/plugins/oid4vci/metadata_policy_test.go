@@ -26,6 +26,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -48,7 +49,7 @@ func TestIssuerMetadataDoesNotRetryInvalidOrForbiddenResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 			metadata, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci)
 			if err == nil || metadata != nil {
 				t.Fatalf("metadata = %v, error = %v; want failure", metadata, err)
@@ -94,7 +95,7 @@ func testAppendedMetadataPathFallback(t *testing.T, secure bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: !secure, AppendedMetadataPathFallback: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: !secure}, AppendedMetadataPathFallback: true}
 	metadata, err := receiver.FetchIssuerMetadata(*endpoint, types.Oid4vci)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +138,7 @@ func TestIssuerMetadataAppendedPathFallbackIsOptIn(t *testing.T) {
 				server.Start()
 			}
 			defer server.Close()
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: tc.allowHTTP, Profile: tc.profile, AppendedMetadataPathFallback: tc.fallback}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: tc.allowHTTP}, Profile: tc.profile, AppendedMetadataPathFallback: tc.fallback}
 			endpoint, err := common.ParseURIField(server.URL + "/tenant")
 			if err != nil {
 				t.Fatal(err)
@@ -295,8 +296,8 @@ func TestFetchIssuerMetadataVerifiesSignedMetadata(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -351,8 +352,8 @@ func TestFetchIssuerMetadataRejectsUntrustedSignedMetadata(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -383,8 +384,8 @@ func TestFetchIssuerMetadataRejectsIssuerMismatchInSignedMetadata(t *testing.T) 
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -422,8 +423,8 @@ func TestFetchIssuerMetadataRejectsTrailingSlashInSignedMetadataSub(t *testing.T
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -456,8 +457,8 @@ func TestFetchIssuerMetadataRejectsCredentialIssuerMismatchInSignedMetadata(t *t
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			TrustAnchors:                []*x509.Certificate{fixture.caCert},
@@ -515,8 +516,8 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 	})
 
 	receiver := &Oid4vciReceiver{
-		HTTPClient: client,
-		AllowHTTP:  true,
+		HTTPClient:   client,
+		Experimental: experimental.Transport{AllowHTTP: true},
 		IssuerMetadataSigning: &IssuerMetadataSigningOptions{
 			Request:                     true,
 			Require:                     true,
@@ -536,7 +537,7 @@ func TestFetchIssuerMetadataRequireRejectsUnsignedResponse(t *testing.T) {
 	t.Run("requiring signed metadata without trust material is a configuration error", func(t *testing.T) {
 		unconfigured := &Oid4vciReceiver{
 			HTTPClient:            client,
-			AllowHTTP:             true,
+			Experimental:          experimental.Transport{AllowHTTP: true},
 			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
 		}
 		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
@@ -586,7 +587,7 @@ func signedMetadataReceiver(client *http.Client, fixture signedMetadataFixture, 
 	if adjust != nil {
 		adjust(signing)
 	}
-	return &Oid4vciReceiver{HTTPClient: client, AllowHTTP: true, IssuerMetadataSigning: signing}
+	return &Oid4vciReceiver{HTTPClient: client, Experimental: experimental.Transport{AllowHTTP: true}, IssuerMetadataSigning: signing}
 }
 
 func signedMetadataClaims(identifier string) map[string]any {
@@ -764,7 +765,7 @@ func TestFetchIssuerMetadataReportsTypedSignatureFailures(t *testing.T) {
 		})
 		unconfigured := &Oid4vciReceiver{
 			HTTPClient:            client,
-			AllowHTTP:             true,
+			Experimental:          experimental.Transport{AllowHTTP: true},
 			IssuerMetadataSigning: &IssuerMetadataSigningOptions{Require: true},
 		}
 		_, err := unconfigured.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
@@ -828,7 +829,7 @@ func TestAuthorizationServerMetadataIssuerMustMatch(t *testing.T) {
 		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":"https://as.example/token"}`, published)
 	}))
 	defer server.Close()
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	for name, tc := range map[string]struct {
 		endpoint, issuer string

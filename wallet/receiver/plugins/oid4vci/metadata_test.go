@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -26,9 +27,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	endpoint := common.URIField(*serverURL)
 
 	t.Run("https is required", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = false
+		receiver.Experimental.AllowHTTP = false
 
 		_, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -37,9 +38,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		metadata, err := receiver.FetchIssuerMetadata(endpoint, types.Oid4vci)
 		if err != nil {
@@ -56,7 +57,7 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Unsupported receiving type", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err := receiver.FetchIssuerMetadata(common.URIField{}, types.SupportedReceivingTypes(999))
 		if err == nil {
 			t.Fatal("Expected error for unsupported receiving type")
@@ -64,9 +65,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -82,9 +83,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Empty response body", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		emptyServer := mockserver.NewMockServer()
 		defer emptyServer.Close()
@@ -99,9 +100,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -116,9 +117,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Trailing slash in endpoint", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		var metadata types.CredentialIssuerMetadata
 		// Use a raw handler to bypass ServeMux's automatic path cleaning and redirects
@@ -149,9 +150,9 @@ func TestOid4vciReceiver_FetchIssuerMetadata(t *testing.T) {
 	})
 
 	t.Run("Trailing slash in endpoint with path component", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		var metadata types.CredentialIssuerMetadata
 		// Use a raw handler to bypass ServeMux's automatic path cleaning and redirects
@@ -192,7 +193,7 @@ func TestOid4vciReceiver_FetchIssuerMetadataCredentialIssuerIdentity(t *testing.
 		issuer := mockserver.NewOID4VCIIssuerServer(nil)
 		defer issuer.Close()
 
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
 		require.NoError(t, err)
 		require.Equal(t, issuer.IssuerIdentifier(), metadata.CredentialIssuer)
@@ -204,7 +205,7 @@ func TestOid4vciReceiver_FetchIssuerMetadataCredentialIssuerIdentity(t *testing.
 		issuer := mockserver.NewOID4VCIIssuerServer(config)
 		defer issuer.Close()
 
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
 		require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
 		require.Nil(t, metadata)
@@ -219,7 +220,7 @@ func TestOid4vciReceiver_FetchIssuerMetadataCredentialIssuerIdentity(t *testing.
 		// different identifier.
 		config.CredentialIssuerIdentifier = issuer.URL() + "/"
 
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, issuer.URL()), types.Oid4vci)
 		require.ErrorIs(t, err, ErrIssuerIdentifierMismatch)
 		require.Nil(t, metadata)
@@ -235,9 +236,9 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	endpoint := common.URIField(*serverURL)
 
 	t.Run("https is required", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = false
+		receiver.Experimental.AllowHTTP = false
 
 		_, err := receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 		if err == nil {
@@ -246,9 +247,9 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		metadata, err := receiver.FetchAuthorizationServerMetadata(endpoint, types.Oid4vci)
 		if err != nil {
@@ -268,9 +269,9 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -286,9 +287,9 @@ func TestOid4vciReceiver_FetchAuthorizationServerMetadata(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -386,7 +387,7 @@ func TestOid4vciReceiver_MetadataDiscovery_UrlPatterns(t *testing.T) {
 		},
 	}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

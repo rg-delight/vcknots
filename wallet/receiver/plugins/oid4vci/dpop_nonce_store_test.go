@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -123,7 +124,7 @@ func postOneCredentialRequest(t *testing.T, receiver *Oid4vciReceiver, key jose.
 // carries it.
 func TestNonceEndpointDPoPNonceSeedsTheFirstCredentialProof(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
@@ -155,7 +156,7 @@ func TestNonceEndpointDPoPNonceSeedsTheFirstCredentialProof(t *testing.T) {
 // a nonce, or reusing one from another server, would only be rejected.
 func TestNonceEndpointWithoutDPoPNonceLeavesTheProofNonceless(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	nonceResponse, err := receiver.RequestNonce(t.Context(), mustURIField(t, fixture.server.URL+"/nonce"))
@@ -185,7 +186,7 @@ func TestNonceEndpointWithoutDPoPNonceLeavesTheProofNonceless(t *testing.T) {
 func TestDPoPNonceStoreIsKeyedByServer(t *testing.T) {
 	issuer := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
 	other := newDPoPNonceTestServer(t, "")
-	receiver := &Oid4vciReceiver{HTTPClient: issuer.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: issuer.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	key := newDPoPNonceTestKey(t)
 
 	if _, err := receiver.RequestNonce(t.Context(), mustURIField(t, issuer.server.URL+"/nonce")); err != nil {
@@ -209,7 +210,7 @@ func TestDPoPNonceStoreIsKeyedByServer(t *testing.T) {
 // map cannot be allocated in a constructor. Run with -race.
 func TestDPoPNonceStoreIsRaceSafe(t *testing.T) {
 	fixture := newDPoPNonceTestServer(t, "server-dpop-nonce-1")
-	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: fixture.server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	endpoint := mustURIField(t, fixture.server.URL+"/nonce")
 
 	var wg sync.WaitGroup

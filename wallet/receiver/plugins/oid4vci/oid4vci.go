@@ -15,6 +15,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -32,8 +33,12 @@ type Oid4vciReceiver struct {
 	// HTTPClient sends every request; nil means a bounded default client.
 	// Redirects are never followed.
 	HTTPClient *http.Client
-	// AllowHTTP permits HTTP endpoints for a local test issuer. The zero value requires HTTPS.
-	AllowHTTP bool
+	// Experimental relaxes transport security for a local test issuer
+	// (experimental.Transport.AllowHTTP). Not specification-conforming; for
+	// testing only. The zero value requires HTTPS, as OpenID4VCI 1.0 Section
+	// 12.2 does, and a profile with ForbidInsecureTransports refuses any
+	// other value.
+	Experimental experimental.Transport
 	// AppendedMetadataPathFallback retries Credential Issuer Metadata at the
 	// OpenID4VCI Draft 13 Section 11.2.2 location, the well-known path appended
 	// to an identifier that has a path, when the Section 12.2.2 location
@@ -87,12 +92,12 @@ func (o *Oid4vciReceiver) profileOptions() (profile.Options, error) {
 	return o.Profile.Options(), nil
 }
 
-// requireSecureTransport rejects the test-only HTTP escape under
+// requireSecureTransport rejects the experimental HTTP escape under
 // Options.ForbidInsecureTransports (HAIP §4 requires TLS for issuer and
 // authorization server endpoints).
 func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error {
-	if options.ForbidInsecureTransports && o.AllowHTTP {
-		return fmt.Errorf("%w: HAIP profile does not permit AllowHTTP", common.ErrInvalidInput)
+	if options.ForbidInsecureTransports && o.Experimental != (experimental.Transport{}) {
+		return fmt.Errorf("%w: HAIP profile does not permit Experimental.Transport", common.ErrInvalidInput)
 	}
 	return nil
 }

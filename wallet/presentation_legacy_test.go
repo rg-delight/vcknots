@@ -113,9 +113,6 @@ func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
 }
 
 func TestController_ParsePresentationRequest_RejectsNonHTTPSResponseURI(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(false)
 	controller := createTestControllerWithDefaults(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
@@ -132,10 +129,7 @@ func TestController_ParsePresentationRequest_RejectsNonHTTPSResponseURI(t *testi
 }
 
 func TestController_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	dcqlQuery := url.QueryEscape(`{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 	uri := fmt.Sprintf(
@@ -234,10 +228,7 @@ func TestWallet_SelectCredentialsForConsent(t *testing.T) {
 }
 
 func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
-	httpAllowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	holderKey := &realSigningKeyEntry{id: "holder-key-1", key: holderPrivateKey}
@@ -576,8 +567,7 @@ func TestNewestCredentials_ReturnsEntriesInDescendingReceivedAtOrder(t *testing.
 func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry) {
 	t.Helper()
 	t.Setenv(env.DEBUG.String(), "")
-	t.Setenv(env.HTTP_ALLOWED.String(), "true")
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 	issuer, _, closeServer := newReceiveCredentialTestServer(t)
 	t.Cleanup(closeServer)
 	key := newMockKeyEntry()

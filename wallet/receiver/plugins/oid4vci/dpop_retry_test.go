@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -62,7 +63,7 @@ func TestTokenErrorWithDPoPNonceIsNotResent(t *testing.T) {
 		w.Header().Set("DPoP-Nonce", "fresh-nonce")
 		_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
 	})
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	proof := &countingProof{}
 
 	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1", TxCode: "1234"}, types.ClientAuthentication{DPoP: proof.factory})
@@ -89,7 +90,7 @@ func TestCredentialErrorWithDPoPNonceIsNotResent(t *testing.T) {
 				w.Header().Set("DPoP-Nonce", "fresh-nonce")
 				_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": code})
 			})
-			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+			receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 			proof := &countingProof{}
 
 			_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL+"/credential"), "access-1", []byte(`{"proofs":{"jwt":["key-proof"]}}`), "application/json", proof.factory)
@@ -110,7 +111,7 @@ func TestDraft13CredentialErrorWithDPoPNonceIsNotResent(t *testing.T) {
 		w.Header().Set("DPoP-Nonce", "fresh-nonce")
 		_ = mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 	})
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	proof := &countingProof{}
 
 	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
@@ -132,7 +133,7 @@ func TestUseDPoPNonceIsResentOnceWithTheFreshNonce(t *testing.T) {
 			w.Header().Set("DPoP-Nonce", "as-nonce")
 			useDPoPNonceTokenChallenge(w)
 		})
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		proof := &countingProof{}
 
 		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{DPoP: proof.factory})
@@ -151,7 +152,7 @@ func TestUseDPoPNonceIsResentOnceWithTheFreshNonce(t *testing.T) {
 			}
 			_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"credential": "vc"})
 		})
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		proof := &countingProof{}
 
 		if _, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL+"/credential"), "access-1", []byte(`{}`), "application/json", proof.factory); err != nil {
@@ -171,7 +172,7 @@ func TestUseDPoPNonceIsNotResentWhenNothingWouldChange(t *testing.T) {
 			w.Header().Set("DPoP-Nonce", "as-nonce")
 			useDPoPNonceTokenChallenge(w)
 		})
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{})
 
@@ -185,7 +186,7 @@ func TestUseDPoPNonceIsNotResentWhenNothingWouldChange(t *testing.T) {
 			w.Header().Set("DPoP-Nonce", "stale-nonce")
 			useDPoPNonceResourceChallenge(w)
 		})
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		endpoint := mustURIField(t, server.URL+"/credential")
 		receiver.rememberDPoPNonce(url.URL(endpoint), "stale-nonce")
 		proof := &countingProof{}
@@ -210,7 +211,7 @@ func TestTokenEndpointIsUsedVerbatim(t *testing.T) {
 		paths = append(paths, r.URL.Path)
 		_ = mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "Bearer"})
 	})
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	endpoint := mustURIField(t, server.URL+"/token/")
 
 	if _, err := receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{}); err != nil {

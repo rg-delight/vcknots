@@ -16,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -234,10 +233,7 @@ func TestController_ReceiveCredential_EmptyConfigurationIDs_Integration(t *testi
 }
 
 func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -271,10 +267,7 @@ func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
 }
 
 func TestController_ReceiveCredential_TxCodeProvided_Integration(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	credentialIssuer, tokenFormCh, closeServer := newReceiveCredentialTestServer(t)
 	defer closeServer()
@@ -438,10 +431,7 @@ func newCredentialIssuanceMockServer(t *testing.T, opts credentialIssuanceMockSe
 }
 
 func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	sdJwtCredential := createWalletTestSDJWT()
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
@@ -529,10 +519,7 @@ func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *
 }
 
 func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMethodsSupported(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -585,10 +572,7 @@ func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMetho
 }
 
 func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNilKey(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	issuerURL, capturedBody, handlerErrCh := newCredentialIssuanceMockServer(t, credentialIssuanceMockServerOptions{
 		credentialConfigurationsSupported: map[string]interface{}{
@@ -637,14 +621,11 @@ func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNil
 }
 
 func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	// Create mock HTTP server
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	// Parse server URL
 	serverURL, err := url.Parse(server.URL())
@@ -689,13 +670,10 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 }
 
 func TestController_FetchCredentialIssuerMetadata_WithMockServer(t *testing.T) {
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
 	server := createMockOID4VCIServer()
 	defer server.Close()
 
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	serverURL, _ := url.Parse(server.URL())
 
@@ -719,10 +697,7 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 	serverURL, err := url.Parse(server.URL())
 	require.NoError(t, err)
 
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	req := ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
@@ -745,10 +720,7 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 }
 
 func TestController_FetchCredentialIssuerMetadata_ErrorPaths_Integration(t *testing.T) {
-	http_allowed := strings.EqualFold(env.GetEnv(env.HTTP_ALLOWED), "true")
-	defer env.SetHTTPAllowed(http_allowed)
-	env.SetHTTPAllowed(true)
-	controller := createTestControllerWithDefaults(t)
+	controller := createTestControllerAllowingHTTP(t)
 
 	tests := []struct {
 		name         string

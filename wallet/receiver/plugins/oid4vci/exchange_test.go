@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -24,7 +25,7 @@ func TestResponseBodiesAreBounded(t *testing.T) {
 
 	t.Run("a credential response above the default limit is read", func(t *testing.T) {
 		server := serve(credentialSized)
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		response, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte(`{}`), "application/json", fixedProof("proof"))
 		if err != nil || len(response.Body) != len(credentialSized) {
 			t.Fatalf("response = %v, err = %v", response, err)
@@ -32,7 +33,7 @@ func TestResponseBodiesAreBounded(t *testing.T) {
 	})
 	t.Run("a credential response above the credential limit is refused", func(t *testing.T) {
 		server := serve(oversized)
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err := postCredentialBody(t.Context(), receiver, mustURIField(t, server.URL), "access-1", []byte(`{}`), "application/json", fixedProof("proof"))
 		if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 			t.Fatalf("err = %v, want ErrBodyTooLarge", err)
@@ -40,7 +41,7 @@ func TestResponseBodiesAreBounded(t *testing.T) {
 	})
 	t.Run("a token response above the default limit is refused", func(t *testing.T) {
 		server := serve(credentialSized)
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{})
 		if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 			t.Fatalf("err = %v, want ErrBodyTooLarge", err)
@@ -48,7 +49,7 @@ func TestResponseBodiesAreBounded(t *testing.T) {
 	})
 	t.Run("issuer metadata above the default limit is refused", func(t *testing.T) {
 		server := serve(credentialSized)
-		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err := receiver.FetchIssuerMetadata(mustURIField(t, server.URL), types.Oid4vci)
 		if !errors.Is(err, httpfetch.ErrBodyTooLarge) {
 			t.Fatalf("err = %v, want ErrBodyTooLarge", err)

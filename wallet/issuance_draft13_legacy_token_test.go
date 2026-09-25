@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -62,10 +61,6 @@ func TestWallet_obtainAccessToken_DPoPEnabledControlsProof(t *testing.T) {
 }
 
 func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	const (
 		dpopNonce        = "token-dpop-nonce"
 		accessTokenValue = "dpop-access-token"
@@ -125,7 +120,7 @@ func TestWallet_obtainAccessToken_DPoPNonceChallengeRetriesWithNonce(t *testing.
 	}
 	dpopKey, err := newInMemoryECKeyEntry()
 	require.NoError(t, err)
-	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	d, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{
 		receiver: d,
@@ -265,10 +260,6 @@ func TestWallet_obtainAccessToken_NoUsableMethodReturnsError(t *testing.T) {
 }
 
 func TestWallet_obtainAccessToken_PrivateKeyJwtEndToEndWithMockServer(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	key, publicJWK := newClientAuthKeyEntry(t, "client-key-1")
 	pubKey := publicJWK
 
@@ -311,7 +302,7 @@ func TestWallet_obtainAccessToken_PrivateKeyJwtEndToEndWithMockServer(t *testing
 	tokenEndpoint, err := common.ParseURIField(issuer.URL() + "/token")
 	require.NoError(t, err)
 
-	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	d, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{
 		receiver: d,
@@ -335,10 +326,6 @@ func TestWallet_obtainAccessToken_PrivateKeyJwtEndToEndWithMockServer(t *testing
 }
 
 func TestWallet_fetchCredentialMetadata_UsesCredentialIssuerAsAuthorizationServerWhenOmitted(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	key, _ := newClientAuthKeyEntry(t, "client-key-1")
 	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
 		KeyPair:                           mockserver.MustGenerateKeyPair("issuer-key-id"),
@@ -362,7 +349,7 @@ func TestWallet_fetchCredentialMetadata_UsesCredentialIssuerAsAuthorizationServe
 	issuerURL, err := url.Parse(issuer.URL())
 	require.NoError(t, err)
 
-	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	d, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{
 		receiver: d,
@@ -389,10 +376,6 @@ func TestWallet_fetchCredentialMetadata_UsesCredentialIssuerAsAuthorizationServe
 }
 
 func TestWallet_fetchCredentialMetadata_RejectsEmptyAuthorizationServers(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
 		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
 		PreAuthorizedGrantAnonymous: mockserver.BoolPtr(true),
@@ -411,7 +394,7 @@ func TestWallet_fetchCredentialMetadata_RejectsEmptyAuthorizationServers(t *test
 
 	issuerURL, err := url.Parse(issuer.URL())
 	require.NoError(t, err)
-	dispatcher, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	dispatcher, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{receiver: dispatcher}
 
@@ -428,10 +411,6 @@ func TestWallet_fetchCredentialMetadata_RejectsEmptyAuthorizationServers(t *test
 }
 
 func TestWallet_fetchCredentialMetadata_RejectsWhenNoUsableMethod(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
 		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
 		IssuerID:                    "test-issuer",
@@ -451,7 +430,7 @@ func TestWallet_fetchCredentialMetadata_RejectsWhenNoUsableMethod(t *testing.T) 
 	issuerURL, err := url.Parse(issuer.URL())
 	require.NoError(t, err)
 
-	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	d, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{receiver: d}
 
@@ -476,10 +455,6 @@ func TestWallet_fetchCredentialMetadata_RejectsWhenNoUsableMethod(t *testing.T) 
 // out, the OpenID conformance suite among them — so only an explicit false may stop the
 // pre-authorized code flow.
 func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	tests := []struct {
 		name            string
 		anonymousAccess *bool
@@ -511,7 +486,7 @@ func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *tes
 			issuerURL, err := url.Parse(issuer.URL())
 			require.NoError(t, err)
 
-			d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+			d, err := newHTTPTestReceiver()
 			require.NoError(t, err)
 			w := &Wallet{receiver: d}
 
@@ -541,10 +516,6 @@ func TestWallet_fetchCredentialMetadata_PreAuthorizedGrantAnonymousAccess(t *tes
 // what reached the server rather than on the returned token, because the failure this
 // guards against stopped the wallet before any request went out.
 func TestWallet_obtainAccessToken_OmittedAnonymousAccessSendsClientID(t *testing.T) {
-	httpAllowed := env.IsHTTPAllowed()
-	defer env.SetHTTPAllowed(httpAllowed)
-	env.SetHTTPAllowed(true)
-
 	issuer := mockserver.NewOID4VCIIssuerServer(&mockserver.OID4VCIIssuerConfig{
 		KeyPair:                     mockserver.MustGenerateKeyPair("issuer-key-id"),
 		IssuerID:                    "test-issuer",
@@ -569,7 +540,7 @@ func TestWallet_obtainAccessToken_OmittedAnonymousAccessSendsClientID(t *testing
 	issuerURL, err := url.Parse(issuer.URL())
 	require.NoError(t, err)
 
-	d, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	d, err := newHTTPTestReceiver()
 	require.NoError(t, err)
 	w := &Wallet{
 		receiver: d,

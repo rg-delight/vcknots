@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -26,7 +27,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 
 		parsed, err := url.Parse(server.URL)
 		require.NoError(t, err)
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 			ResponseType: "code",
 			ClientID:     "client-1",
@@ -48,7 +49,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestClientAssertion(t *testing.T) {
 
 		parsed, err := url.Parse(server.URL)
 		require.NoError(t, err)
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 		_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 			ResponseType: "code",
 			ClientID:     "client-1",
@@ -71,7 +72,7 @@ func TestOid4vciReceiver_PushAuthorizationRequestAuthorizationDetails(t *testing
 
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 	_, err = receiver.PushAuthorizationRequest(t.Context(), common.URIField(*parsed), types.PushedAuthorizationRequest{
 		ResponseType: "code",
 		ClientID:     "client-1",

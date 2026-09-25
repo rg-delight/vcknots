@@ -15,8 +15,6 @@ const _PREFIX = "VCKNOTS_WALLET_"
 const (
 	// DEBUG selects the VCKNOTS_WALLET_DEBUG environment variable.
 	DEBUG EnvKey = iota
-	// HTTP_ALLOWED selects the VCKNOTS_WALLET_HTTP_ALLOWED environment variable.
-	HTTP_ALLOWED
 	envKeyCount
 )
 
@@ -26,8 +24,6 @@ func (k EnvKey) String() string {
 	switch k {
 	case DEBUG:
 		postfix = "DEBUG"
-	case HTTP_ALLOWED:
-		postfix = "HTTP_ALLOWED"
 	}
 	return _PREFIX + postfix
 }
@@ -50,21 +46,4 @@ func SetDebugMode(value bool) {
 // IsDebugMode reports whether debug mode is enabled.
 func IsDebugMode() bool {
 	return strings.EqualFold(GetEnv(DEBUG), "true")
-}
-
-// SetHTTPAllowed enables or disables plain-HTTP endpoint allowance.
-func SetHTTPAllowed(value bool) {
-	if value {
-		os.Setenv(HTTP_ALLOWED.String(), "true")
-	} else {
-		os.Setenv(HTTP_ALLOWED.String(), "")
-	}
-}
-
-// IsHTTPAllowed reports whether plain-HTTP endpoints are explicitly allowed.
-//
-// It is true only when VCKNOTS_WALLET_HTTP_ALLOWED is set to "true". Debug mode
-// does not relax the HTTPS requirement.
-func IsHTTPAllowed() bool {
-	return strings.EqualFold(GetEnv(HTTP_ALLOWED), "true")
 }

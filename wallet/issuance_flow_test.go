@@ -22,6 +22,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -1243,8 +1244,8 @@ func TestIssuanceAgainstAStrictIssuer(t *testing.T) {
 	defer server.Close()
 
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{
-		HTTPClient: server.Client(),
-		AllowHTTP:  true,
+		HTTPClient:   server.Client(),
+		Experimental: experimental.Transport{AllowHTTP: true},
 	}))
 	require.NoError(t, err)
 	dpopKey, err := keystore.NewKeyEntryFromJWK(clientKey)

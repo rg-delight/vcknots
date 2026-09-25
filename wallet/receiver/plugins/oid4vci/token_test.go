@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -29,9 +30,9 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	endpoint := common.URIField(*serverURL)
 
 	t.Run("https is required", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = false
+		receiver.Experimental.AllowHTTP = false
 
 		_, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "test-code", "")
 		if err == nil {
@@ -40,9 +41,9 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Happy path", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		token, err := receiver.FetchAccessToken(types.Oid4vci, endpoint, "test-code", "")
 		if err != nil {
@@ -61,7 +62,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 		}
 	})
 	t.Run("Request includes tx_code when provided", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -104,7 +105,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("DPoP header is set when proof is provided", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -125,7 +126,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("DPoP header is absent when proof is nil", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -149,7 +150,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("DPoP header is absent when proof is empty string", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		captureServer := mockserver.NewMockServer()
 		defer captureServer.Close()
@@ -175,9 +176,9 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Server error", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		// Create a separate server for error testing
 		errorServer := mockserver.NewMockServer()
@@ -193,7 +194,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("use_dpop_nonce error includes nonce hint", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		nonceServer := mockserver.NewMockServer()
 		defer nonceServer.Close()
@@ -214,7 +215,7 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("bad request error field is surfaced", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 		errorServer := mockserver.NewMockServer()
 		defer errorServer.Close()
@@ -233,9 +234,9 @@ func TestOid4vciReceiver_FetchAccessToken(t *testing.T) {
 	})
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
-		receiver := &Oid4vciReceiver{AllowHTTP: true}
+		receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
-		receiver.AllowHTTP = true
+		receiver.Experimental.AllowHTTP = true
 
 		invalidJSONServer := mockserver.NewMockServer()
 		defer invalidJSONServer.Close()
@@ -289,7 +290,7 @@ func fetchAccessTokenRequestForm(t *testing.T, request types.TokenRequest) url.V
 
 	serverURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	_, err = receiver.FetchAccessToken(types.Oid4vci, common.URIField(*serverURL), request.PreAuthorizedCode, request.TxCode)
 	require.NoError(t, err)
 
@@ -299,7 +300,7 @@ func fetchAccessTokenRequestForm(t *testing.T, request types.TokenRequest) url.V
 func TestOid4vciReceiver_RequestTokenAuthorizationCode(t *testing.T) {
 	receiver := &Oid4vciReceiver{}
 
-	receiver.AllowHTTP = true
+	receiver.Experimental.AllowHTTP = true
 
 	attempts := 0
 	var attestationPops []string
@@ -367,7 +368,7 @@ func TestOid4vciReceiver_RequestTokenAuthorizationCode(t *testing.T) {
 }
 
 func TestOid4vciReceiver_FetchAccessToken_ClientAssertion(t *testing.T) {
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	t.Run("client_assertion form fields are sent when provided", func(t *testing.T) {
 
@@ -477,7 +478,7 @@ func withCountedTokenTransport(t *testing.T, receiver *Oid4vciReceiver) *countin
 }
 
 func TestOid4vciReceiver_FetchAccessToken_RefusesClientAssertionOverPlainHTTP(t *testing.T) {
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	// HTTP is allowed, which is what makes this worth testing: the assertion
 	// must still be refused on a host that is not this machine.
@@ -527,7 +528,7 @@ func TestOid4vciReceiver_FetchAccessToken_RefusesClientAssertionOverPlainHTTP(t 
 }
 
 func TestOid4vciReceiver_FetchAccessToken_PlainHTTPStaysAllowedWithoutAssertion(t *testing.T) {
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	// Without a client assertion the existing VCKNOTS_WALLET_HTTP_ALLOWED
 	// behaviour is unchanged, so the restriction stays scoped to the assertion.
@@ -543,7 +544,7 @@ func TestOid4vciReceiver_FetchAccessToken_PlainHTTPStaysAllowedWithoutAssertion(
 }
 
 func TestOid4vciReceiver_FetchAccessToken_RequiresClientIDWithAssertion(t *testing.T) {
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -572,7 +573,7 @@ func TestOid4vciReceiver_FetchAccessToken_RequiresClientIDWithAssertion(t *testi
 }
 
 func TestOid4vciReceiver_FetchAccessToken_DoesNotFollowRedirects(t *testing.T) {
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	// A 307 keeps the method and body, so following the redirect would replay
 	// the client_assertion against this second origin.
@@ -618,7 +619,7 @@ func TestOid4vciReceiver_RequestTokenClientAssertion(t *testing.T) {
 
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 	token, err := receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
 		GrantType:    types.AuthorizationCode,
 		Code:         "code-1",
@@ -653,7 +654,7 @@ func TestOid4vciReceiver_RequestTokenRetryRefreshesClientAssertion(t *testing.T)
 
 	parsed, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 
 	factoryCalls := 0
 	_, err = receiver.RequestToken(t.Context(), common.URIField(*parsed), types.TokenRequest{
@@ -718,7 +719,7 @@ func preAuthorizedAttestationIssuer(t *testing.T, configure func(*mockserver.OID
 // Endpoints that support client authentication".
 func TestRequestTokenPreAuthorizedCode_CarriesAttestationHeaders(t *testing.T) {
 	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, nil)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 	tokenEndpoint := issuer.URL() + "/token"
 
 	token, err := receiver.RequestToken(
@@ -748,7 +749,7 @@ func TestRequestTokenPreAuthorizedCode_RebuildsHeadersOnNonceChallenge(t *testin
 	issuer, clientKey, attesterKey := preAuthorizedAttestationIssuer(t, func(config *mockserver.OID4VCIIssuerConfig) {
 		config.TokenDPoPNonce = "token-nonce-1"
 	})
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 	tokenEndpoint := issuer.URL() + "/token"
 
 	token, err := receiver.RequestToken(
@@ -770,7 +771,7 @@ func TestRequestTokenPreAuthorizedCode_RebuildsHeadersOnNonceChallenge(t *testin
 // above evidence.
 func TestRequestTokenPreAuthorizedCode_IssuerRefusesMissingHeaders(t *testing.T) {
 	issuer, clientKey, _ := preAuthorizedAttestationIssuer(t, nil)
-	receiver := &Oid4vciReceiver{AllowHTTP: true}
+	receiver := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}}
 	tokenEndpoint := issuer.URL() + "/token"
 
 	_, err := receiver.RequestToken(

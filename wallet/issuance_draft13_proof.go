@@ -6,36 +6,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
-// ProofJWTContent is the header and claims of a key proof before it is
-// signed. Both maps are copies a transform may change. Header never carries
-// "alg": the algorithm belongs to the signing key.
-type ProofJWTContent struct {
-	Header map[string]any
-	Claims map[string]any
-}
-
-// ProofTransform rewrites a Draft 13 key proof, for testing how an issuer
-// handles a malformed one. Content runs before signing, so the result is
-// still correctly signed; Serialized runs on the compact JWS. A nil member is
-// not called, so the zero value leaves the proof unchanged. An error aborts
-// the issuance with ErrDraft13ProofTransformFailed.
-type ProofTransform struct {
-	Content    func(ProofJWTContent) (ProofJWTContent, error)
-	Serialized func(string) (string, error)
-}
-
-func (t ProofTransform) applyContent(content ProofJWTContent) (ProofJWTContent, error) {
+// applyProofContent runs the Content hook of t on content.
+func applyProofContent(t experimental.ProofTransform, content experimental.ProofJWTContent) (experimental.ProofJWTContent, error) {
 	if t.Content == nil {
 		return content, nil
 	}
 	transformed, err := t.Content(content)
 	if err != nil {
-		return ProofJWTContent{}, fmt.Errorf("%w: %w", ErrDraft13ProofTransformFailed, err)
+		return experimental.ProofJWTContent{}, fmt.Errorf("%w: %w", ErrDraft13ProofTransformFailed, err)
 	}
 	if transformed.Header == nil {
 		transformed.Header = map[string]any{}
@@ -46,7 +30,8 @@ func (t ProofTransform) applyContent(content ProofJWTContent) (ProofJWTContent, 
 	return transformed, nil
 }
 
-func (t ProofTransform) applySerialized(proof string) (string, error) {
+// applyProofSerialized runs the Serialized hook of t on proof.
+func applyProofSerialized(t experimental.ProofTransform, proof string) (string, error) {
 	if t.Serialized == nil {
 		return proof, nil
 	}
@@ -89,40 +74,40 @@ func resolveCredentialRequestProofBindingMethod(credentialConfiguration *receive
 // proofJWTContent builds the header and claims of a "jwt" key proof (Draft 13
 // Section 7.2.1.1). keyID is the kid of a kid-bound proof; a jwk-bound proof
 // carries the public key instead.
-func proofJWTContent(key IKeyEntry, keyID string, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod, now time.Time) (ProofJWTContent, error) {
+func proofJWTContent(key IKeyEntry, keyID string, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod, now time.Time) (experimental.ProofJWTContent, error) {
 	header := map[string]any{"typ": jwtproof.TypeKeyProof}
 	if binding == credentialRequestProofBindingMethodJWK {
 		alg, err := jwtproof.Algorithm(key)
 		if err != nil {
-			return ProofJWTContent{}, err
+			return experimental.ProofJWTContent{}, err
 		}
 		public, err := jwtproof.PublicJWK(key.PublicKey(), alg)
 		if err != nil {
-			return ProofJWTContent{}, err
+			return experimental.ProofJWTContent{}, err
 		}
 		header["jwk"] = public
 	} else {
 		if strings.TrimSpace(keyID) == "" {
-			return ProofJWTContent{}, fmt.Errorf("a key identifier is required for kid proof binding")
+			return experimental.ProofJWTContent{}, fmt.Errorf("a key identifier is required for kid proof binding")
 		}
 		header["kid"] = keyID
 	}
 	claims := map[string]any{"iat": now.Unix(), "aud": aud}
 	if clientID != nil {
 		if strings.TrimSpace(*clientID) == "" {
-			return ProofJWTContent{}, fmt.Errorf("clientID must be non-empty when provided")
+			return experimental.ProofJWTContent{}, fmt.Errorf("clientID must be non-empty when provided")
 		}
 		claims["iss"] = *clientID
 	}
 	if nonce != nil && *nonce != "" {
 		claims["nonce"] = *nonce
 	}
-	return ProofJWTContent{Header: header, Claims: claims}, nil
+	return experimental.ProofJWTContent{Header: header, Claims: claims}, nil
 }
 
 // generateJWTProofWithTransform builds a key proof and passes it through
 // transform. Without a DID a kid-bound proof cannot be built.
-func (w *Wallet) generateJWTProofWithTransform(ctx context.Context, key IKeyEntry, keyID string, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod, transform ProofTransform) (string, error) {
+func (w *Wallet) generateJWTProofWithTransform(ctx context.Context, key IKeyEntry, keyID string, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod, transform experimental.ProofTransform) (string, error) {
 	if key == nil {
 		return "", ErrDraft13HolderKeyMissing
 	}
@@ -130,7 +115,7 @@ func (w *Wallet) generateJWTProofWithTransform(ctx context.Context, key IKeyEntr
 	if err != nil {
 		return "", err
 	}
-	content, err = transform.applyContent(content)
+	content, err = applyProofContent(transform, content)
 	if err != nil {
 		return "", err
 	}
@@ -138,7 +123,7 @@ func (w *Wallet) generateJWTProofWithTransform(ctx context.Context, key IKeyEntr
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize JWT proof: %w", err)
 	}
-	return transform.applySerialized(proof)
+	return applyProofSerialized(transform, proof)
 }
 
 // generateJWTProof builds an untransformed key proof; a kid-bound proof is
@@ -154,7 +139,7 @@ func (w *Wallet) generateJWTProof(key IKeyEntry, did *idprofTypes.IdentityProfil
 		}
 		keyID = did.ID
 	}
-	return w.generateJWTProofWithTransform(context.Background(), key, keyID, nonce, aud, clientID, binding, ProofTransform{})
+	return w.generateJWTProofWithTransform(context.Background(), key, keyID, nonce, aud, clientID, binding, experimental.ProofTransform{})
 }
 
 // didKeyVerificationMethod returns the DID URL of a did:key's one

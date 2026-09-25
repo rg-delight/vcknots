@@ -22,6 +22,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/receiver"
@@ -216,7 +217,7 @@ func (f *draft13Fixture) newWallet(t *testing.T, extra ...func(*Config)) *Wallet
 // receiver is a receiving dispatcher whose OpenID4VCI plugin uses client.
 func (f *draft13Fixture) receiver(t *testing.T, client *http.Client) *receiver.ReceivingDispatcher {
 	t.Helper()
-	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: client, AllowHTTP: true})
+	plugin := receiverTypes.Receiver(&receiverOid4vci.Oid4vciReceiver{HTTPClient: client, Experimental: experimental.Transport{AllowHTTP: true}})
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	return receiving
@@ -531,8 +532,8 @@ func TestDraft13ReportsASecondInvalidProof(t *testing.T) {
 func TestDraft13KeyProofHookRewritesTheProofBeforeAndAfterSigning(t *testing.T) {
 	var seenNonce any
 	fixture := newDraft13Fixture(t, func(c *Config) {
-		c.TestHooks = &TestHooks{KeyProof: ProofTransform{
-			Content: func(content ProofJWTContent) (ProofJWTContent, error) {
+		c.Experimental.Hooks = experimental.Hooks{KeyProof: experimental.ProofTransform{
+			Content: func(content experimental.ProofJWTContent) (experimental.ProofJWTContent, error) {
 				seenNonce = content.Claims["nonce"]
 				content.Header["kid"] = "did:key:elsewhere#elsewhere"
 				content.Claims["nonce"] = "replayed"
@@ -571,18 +572,18 @@ func TestDraft13KeyProofHookRewritesTheProofBeforeAndAfterSigning(t *testing.T) 
 func TestDraft13ZeroProofTransformIsTheUntouchedProof(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	nonce := "nonce-1"
-	build := func(transform ProofTransform) (map[string]any, map[string]any) {
+	build := func(transform experimental.ProofTransform) (map[string]any, map[string]any) {
 		compact, err := fixture.wallet.generateJWTProofWithTransform(context.Background(), fixture.key, "did:key:zExample#zExample", &nonce, "https://issuer.example", nil, credentialRequestProofBindingMethodKID, transform)
 		require.NoError(t, err)
 		claims := draft13DecodeProof(t, compact, 1)
 		delete(claims, "iat")
 		return draft13DecodeProof(t, compact, 0), claims
 	}
-	identity := ProofTransform{
-		Content:    func(content ProofJWTContent) (ProofJWTContent, error) { return content, nil },
+	identity := experimental.ProofTransform{
+		Content:    func(content experimental.ProofJWTContent) (experimental.ProofJWTContent, error) { return content, nil },
 		Serialized: func(compact string) (string, error) { return compact, nil },
 	}
-	zeroHeader, zeroClaims := build(ProofTransform{})
+	zeroHeader, zeroClaims := build(experimental.ProofTransform{})
 	identityHeader, identityClaims := build(identity)
 	require.Equal(t, zeroHeader, identityHeader)
 	require.Equal(t, zeroClaims, identityClaims)
@@ -591,8 +592,8 @@ func TestDraft13ZeroProofTransformIsTheUntouchedProof(t *testing.T) {
 
 func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 	fixture := newDraft13Fixture(t, func(c *Config) {
-		c.TestHooks = &TestHooks{KeyProof: ProofTransform{Content: func(ProofJWTContent) (ProofJWTContent, error) {
-			return ProofJWTContent{}, io.ErrUnexpectedEOF
+		c.Experimental.Hooks = experimental.Hooks{KeyProof: experimental.ProofTransform{Content: func(experimental.ProofJWTContent) (experimental.ProofJWTContent, error) {
+			return experimental.ProofJWTContent{}, io.ErrUnexpectedEOF
 		}}}
 	})
 
@@ -601,12 +602,12 @@ func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 	require.Empty(t, fixture.credentials())
 }
 
-// TestHooks are refused when a HAIP wallet is constructed.
+// Experimental.Hooks are refused when a HAIP wallet is constructed.
 func TestDraft13KeyProofHookIsRefusedUnderHAIP(t *testing.T) {
 	_, err := NewWalletWithConfig(Config{
-		Profiles:  []profile.Profile{profile.HAIP()},
-		CredStore: newProfileCredStore(t),
-		TestHooks: &TestHooks{KeyProof: ProofTransform{}},
+		Profiles:     []profile.Profile{profile.HAIP()},
+		CredStore:    newProfileCredStore(t),
+		Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}},
 	})
 	draft13RequireCoded(t, err, ErrProfileForbidsDraft)
 }

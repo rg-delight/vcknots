@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -65,7 +66,7 @@ func TestRequestTokenRejectsInvalidRequestsBeforeSending(t *testing.T) {
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "Bearer"})
 	}))
 	t.Cleanup(server.Close)
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	assertion := func() (string, error) { return "assertion-jwt", nil }
 
 	cases := map[string]struct {
@@ -116,7 +117,7 @@ func TestRequestTokenSendsAuthorizationDetails(t *testing.T) {
 		mockserver.JSONResponse(w, http.StatusOK, map[string]string{"access_token": "access-1", "token_type": "Bearer"})
 	}))
 	t.Cleanup(server.Close)
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL), types.TokenRequest{
 		GrantType: types.AuthorizationCode,
@@ -151,7 +152,7 @@ func TestPushAuthorizationRequestRetriesDPoPNonceWithFreshCredentials(t *testing
 		mockserver.JSONResponse(w, http.StatusCreated, map[string]any{"request_uri": "urn:request:1", "expires_in": 60})
 	}))
 	t.Cleanup(server.Close)
-	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true}
+	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 
 	assertions := 0
 	response, err := receiver.PushAuthorizationRequest(t.Context(), mustURIField(t, server.URL), types.PushedAuthorizationRequest{

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -58,7 +59,7 @@ func (d *Draft13Issuance) AuthorizePreAuthorizedIssuance(ctx context.Context, re
 
 // RequestCredential sends the Draft 13 Credential Request (Section 7.2) with
 // one key proof, retrying once with the fresh c_nonce of an invalid_proof
-// error (Section 7.3.2). Config.TestHooks.KeyProof rewrites the proof. The
+// error (Section 7.3.2). Config.Experimental.Hooks.KeyProof rewrites the proof. The
 // credential is verified under Config.CredentialAcceptance and saved unless
 // the wallet is storeless.
 func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
@@ -555,7 +556,7 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 	if id := strings.TrimSpace(d.w.clientAuth.ClientID); id != "" {
 		clientID = &id
 	}
-	var transform ProofTransform
+	var transform experimental.ProofTransform
 	if d.w.testHooks != nil {
 		transform = d.w.testHooks.KeyProof
 	}

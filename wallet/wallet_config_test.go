@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
@@ -66,8 +67,8 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{Profile: profile.HAIP()})},
 			want:   ErrProfileMismatch,
 		},
-		"HAIP refuses test hooks": {
-			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, TestHooks: &TestHooks{}},
+		"HAIP refuses experimental hooks": {
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}},
 			want:   ErrProfileForbidsDraft,
 		},
 		"transaction data types with an injected presenter": {
@@ -76,6 +77,18 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		},
 		"a presenter plugin other than the bundled OpenID4VP presenter": {
 			config: Config{Storeless: true, Presenter: presenterWith(t, plainPresenter{})},
+			want:   ErrInvalidArgument,
+		},
+		"HAIP refuses an experimental transport": {
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}},
+			want:   ErrInvalidArgument,
+		},
+		"an experimental transport with an injected receiver": {
+			config: Config{Storeless: true, Receiver: receiverWith(t, &oid4vci.Oid4vciReceiver{}), Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}},
+			want:   ErrInvalidArgument,
+		},
+		"an experimental transport with an injected presenter": {
+			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{}), Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}},
 			want:   ErrInvalidArgument,
 		},
 		"a draft profile reported by a plugin": {
@@ -102,6 +115,25 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Receiver: receiverWith(t, plugin)})
 		require.ErrorIs(t, err, ErrProfileMismatch)
 		require.Equal(t, profile.Final(), plugin.Profile)
+	})
+
+	t.Run("the experimental transport reaches the plugins the wallet builds", func(t *testing.T) {
+		w, err := NewWalletWithConfig(Config{Storeless: true, Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}})
+		require.NoError(t, err)
+		require.True(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
+		for _, plugin := range w.presenter.Plugins() {
+			require.True(t, plugin.(*oid4vp.Oid4vpPresenter).AllowHTTP)
+		}
+	})
+
+	t.Run("the removed VCKNOTS_WALLET_HTTP_ALLOWED variable relaxes nothing", func(t *testing.T) {
+		t.Setenv("VCKNOTS_WALLET_HTTP_ALLOWED", "true")
+		w, err := NewWalletWithConfig(Config{Storeless: true})
+		require.NoError(t, err)
+		require.False(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
+		for _, plugin := range w.presenter.Plugins() {
+			require.False(t, plugin.(*oid4vp.Oid4vpPresenter).AllowHTTP)
+		}
 	})
 
 	t.Run("the default HAIP receiver holds only HAIP plugins", func(t *testing.T) {

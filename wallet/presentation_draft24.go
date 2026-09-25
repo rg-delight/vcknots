@@ -49,15 +49,9 @@ func (d *Draft24Presentation) ParsePresentationRequestObject(ctx context.Context
 	return admittedOID4VPRequest(d.w.presenter.ParseDraft24RequestObject(ctx, presenterTypes.Oid4vp, requestObject, src))
 }
 
-// Draft24ResponseTransform rewrites a Presentation Exchange response after
-// the library built and signed it and before it is sent, so a tester can see
-// how a Verifier handles a malformed one. A rewrite can break the proof. An
-// error stops the presentation and is reported wrapped in
-// ErrDraft24ResponseTransformFailed.
-type Draft24ResponseTransform func(vpToken []byte, submission presenterTypes.PresentationSubmission) ([]byte, presenterTypes.PresentationSubmission, error)
-
 // ErrDraft24ResponseTransformFailed reports that
-// TestHooks.PresentationExchangeResponse refused the response it was given.
+// Config.Experimental.Hooks.PresentationExchangeResponse refused the response
+// it was given.
 var ErrDraft24ResponseTransformFailed = common.NewCodedError("draft24_response_transform_failed", "response transform failed")
 
 // selectDraft24Credentials is the library's choice for a Presentation
