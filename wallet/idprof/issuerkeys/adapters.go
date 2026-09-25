@@ -37,19 +37,6 @@ func (res *Resolution) CandidateFor(key jose.JSONWebKey) (Candidate, bool) {
 // not reach a configured trust anchor, or does not name the issuer's host.
 const failureChainUntrusted = "certificate chain is not trusted"
 
-// markChainUntrusted records on the `x5c` rung's diagnostic that the chain it
-// reported was not trusted, so the diagnostics no longer claim it as usable.
-func markChainUntrusted(resolution *Resolution) {
-	for index := range resolution.Diagnostics {
-		diagnostic := &resolution.Diagnostics[index]
-		if diagnostic.Mechanism == RungX5C {
-			diagnostic.Attempted = false
-			diagnostic.CandidateCount = 0
-			diagnostic.Failure = failureChainUntrusted
-		}
-	}
-}
-
 // issuerCandidates returns the candidates attributable to issuer, the JWT
 // `iss`: those whose Candidate.Issuer equals it.
 func issuerCandidates(candidates []Candidate, issuer string) []Candidate {

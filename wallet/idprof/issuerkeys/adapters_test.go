@@ -19,7 +19,6 @@ import (
 type stubTransport struct {
 	mu        sync.Mutex
 	documents map[string]any
-	requests  []string
 }
 
 func newStubTransport() *stubTransport {
@@ -34,7 +33,6 @@ func (s *stubTransport) publish(url string, document any) {
 
 func (s *stubTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	s.mu.Lock()
-	s.requests = append(s.requests, request.URL.String())
 	document, ok := s.documents[request.URL.String()]
 	s.mu.Unlock()
 	if !ok {
@@ -51,12 +49,6 @@ func (s *stubTransport) RoundTrip(request *http.Request) (*http.Response, error)
 		ContentLength: int64(len(body)),
 		Request:       request,
 	}, nil
-}
-
-func (s *stubTransport) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.requests)
 }
 
 func TestResolutionCandidateFor(t *testing.T) {

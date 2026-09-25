@@ -447,8 +447,3 @@ func x5cOf(certificates ...testCertificate) []string {
 	}
 	return chain
 }
-
-// leafJWK is the public key of a certificate as a JWK.
-func leafJWK(certificate testCertificate, kid string) jose.JSONWebKey {
-	return jose.JSONWebKey{Key: certificate.certificate.PublicKey, KeyID: kid}
-}

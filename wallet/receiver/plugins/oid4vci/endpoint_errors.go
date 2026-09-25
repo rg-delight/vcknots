@@ -3,7 +3,6 @@ package oid4vci
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 )
 
@@ -166,10 +165,4 @@ func sanitizeErrorText(text string, max int) string {
 		sanitized.WriteRune(r)
 	}
 	return sanitized.String()
-}
-
-// isNotFound reports the status after which FetchIssuerMetadata may try the
-// Draft 13 metadata location.
-func (e *httpStatusError) isNotFound() bool {
-	return e != nil && e.statusCode == http.StatusNotFound
 }
