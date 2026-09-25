@@ -11,9 +11,9 @@
 //
 //  1. reading the reference out of the credential (ParseReference),
 //  2. fetching the Status List Token from the URI it names,
-//  3. authenticating that token — its type, its `iss` bound to the credential's
-//     issuer, its signature under a key of that issuer, and the claims
-//     Section 5.1 makes REQUIRED,
+//  3. authenticating that token — its type, its signature under a key of the
+//     credential's issuer (or of a Status Issuer the caller accepts), and the
+//     claims Section 5.1 makes REQUIRED,
 //  4. reading the one entry the index points at (ReadValue).
 //
 // The meaning of an entry's value is deliberately not interpreted here.
@@ -22,11 +22,24 @@
 // person decides what to do with the number, while this package's contract is
 // that the number it reports is the one the issuer signed.
 //
-// Key resolution is a hook rather than a policy. Which keys speak for a Status
-// List Token issuer is a trust decision — issuer metadata, a JWKS, an x5c chain
-// to a configured anchor — and it belongs to the integrator that knows which
-// issuers it trusts and how. The Checker only insists that whatever the hook
-// returns is a public key the signature actually verifies under.
+// The token is bound to the credential by its key, not by a claim.
+// draft-ietf-oauth-status-list-21 Section 5.1 defines no `iss` for a Status
+// List Token (the equality requirement between the token's `iss` and the
+// Referenced Token's was removed in draft -04), and Section 11.3 describes the
+// binding instead: the Status List Token is signed with the key of the
+// Referenced Token's issuer — the same x5c, or a key found by the same
+// web-based resolution. The Checker therefore resolves keys for the issuer of
+// the credential being checked, and a token's `iss`, when it carries one, is
+// consulted only to let the caller accept an external Status Issuer
+// (Section 13.5, Checker.AcceptStatusIssuer).
+//
+// Key resolution is a hook rather than a policy. Which keys speak for an
+// issuer is a trust decision — an x5c chain to a configured anchor, JWT VC
+// Issuer Metadata, a DID bound to the issuer's origin — and it belongs to the
+// integrator that knows which issuers it trusts and how
+// (issuerkeys.Resolver.StatusListKeyFunc implements the library's rules). The
+// Checker only insists that whatever the hook returns is a public key the
+// signature actually verifies under.
 package statuslist
 
 import (
@@ -103,9 +116,14 @@ type Status struct {
 	// assigns 0x00 "VALID", 0x01 "INVALID" and 0x02 "SUSPENDED"; other values
 	// are application specific and are reported unchanged.
 	Value int
-	// TokenIssuer is the token's `iss` claim: the credential issuer, or the
-	// Status Issuer Checker.AcceptStatusIssuer accepted.
+	// TokenIssuer is the token's `iss` claim, or empty when the token carries
+	// none (draft-ietf-oauth-status-list-21 Section 5.1 defines no `iss`). It
+	// is reported as the token states it; StatusIssuer is whose key verified.
 	TokenIssuer string
+	// StatusIssuer is the issuer whose keys the token was verified under: the
+	// credential issuer passed to Check, or the Status Issuer
+	// Checker.AcceptStatusIssuer accepted.
+	StatusIssuer string
 	// TokenSubject is the token's `sub` claim, which equals URI.
 	TokenSubject string
 	// TokenSHA256 is the unpadded base64url SHA-256 digest of the compact JWT
@@ -133,8 +151,11 @@ type Status struct {
 
 // ResolveIssuerKeysFunc returns the candidate public keys of a Status List
 // Token issuer. issuer is the credential issuer the caller passed to Check, or
-// the Status Issuer that Checker.AcceptStatusIssuer accepted; the token's `iss`
-// already equals it. header is the token's decoded protected header (JSON
+// the Status Issuer that Checker.AcceptStatusIssuer accepted. It is empty when
+// the credential carries no `iss`, whose Issuer is then the subject of its x5c
+// leaf certificate (SD-JWT VC -19 Section 2.5): the hook must then bind the
+// token to that certificate subject itself. It is never taken from the token
+// alone. header is the token's decoded protected header (JSON
 // numbers appear as float64); it is unauthenticated at the time of the call and
 // must be treated as a hint for selecting keys, never as a fact. Returning no
 // key, or an error, makes the check fail with ErrStatusListIssuerKeyUnresolved.
@@ -174,12 +195,17 @@ type Checker struct {
 	// ErrStatusListIssuerKeyUnresolved.
 	ResolveIssuerKeys ResolveIssuerKeysFunc
 	// AcceptStatusIssuer decides whether a Status List Token whose `iss` is
-	// tokenIssuer may speak for a credential issued by credentialIssuer. It is
-	// called only when the two differ, before any key is resolved; returning
-	// nil accepts the delegation, and the token must then verify under a key
-	// of tokenIssuer. A nil hook means the token's `iss` must equal the
-	// credential issuer, and any other token fails with
-	// ErrStatusListIssuerMismatch.
+	// tokenIssuer may speak for a credential issued by credentialIssuer: the
+	// external Status Issuer of draft-ietf-oauth-status-list-21 Section 13.5,
+	// whose key and trust management the two parties agree on out of band. It
+	// is called only when the token carries an `iss` that differs from the
+	// credential issuer, before any key is resolved. Returning nil accepts the
+	// delegation, and the token must then verify under a key of tokenIssuer;
+	// an error fails the check with ErrStatusListIssuerMismatch.
+	//
+	// A nil hook accepts no external Status Issuer: every token is verified
+	// under the credential issuer's keys, whatever `iss` it states, because
+	// Section 11.3 binds the token to the Referenced Token by key.
 	AcceptStatusIssuer func(ctx context.Context, credentialIssuer, tokenIssuer string) error
 	// AllowHTTP permits a cleartext Status List endpoint for a local test.
 	// Status List Tokens are signed, so cleartext does not let a network
@@ -226,10 +252,12 @@ func ParseReference(status map[string]any) (*Reference, error) {
 // the reference, fetches and authenticates the Status List Token it names, and
 // reads the referenced entry.
 //
-// credentialIssuer is the `iss` of the credential that carries status. The
-// token must be issued by it (or by a Status Issuer that
-// Checker.AcceptStatusIssuer accepts): a token of another issuer, however
-// trusted, says nothing about this credential.
+// credentialIssuer is the Issuer of the credential that carries status: its
+// `iss` (or, for ldp_vc, its `issuer`), or empty for an SD-JWT VC without
+// `iss`, whose Issuer is the subject of its x5c leaf certificate (SD-JWT VC
+// -19 Section 2.5). The token must verify under a key of that issuer (or of a
+// Status Issuer that Checker.AcceptStatusIssuer accepts): a token signed by
+// another issuer, however trusted, says nothing about this credential.
 func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map[string]any) (*Status, error) {
 	reference, err := ParseReference(status)
 	if err != nil {
@@ -249,9 +277,6 @@ func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map
 // step would have rejected anyway, and a hostile endpoint never reaches a stage
 // its token had not yet earned.
 func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, reference Reference) (*Status, error) {
-	if credentialIssuer == "" {
-		return nil, fmt.Errorf("%w: the credential issuer is empty", ErrStatusListIssuerMismatch)
-	}
 	endpoint, err := parseStatusListURI(reference.URI, c.AllowHTTP)
 	if err != nil {
 		return nil, err
@@ -291,15 +316,16 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 	if len(signed.Signatures) != 1 || string(signed.Signatures[0].Protected.Algorithm) != algorithm || signed.Signatures[0].Protected.KeyID != keyID {
 		return nil, fmt.Errorf("%w: protected header is ambiguous", ErrStatusListTokenInvalid)
 	}
-	// The `iss` read here comes from an unverified payload. It is bound to the
-	// credential issuer before any key is resolved, and the keys are then
-	// resolved for that issuer, so a signature can only verify under a key of
-	// the issuer the credential names (or of an accepted Status Issuer).
-	issuer, err := unverifiedIssuer(signed)
+	// Keys are resolved for the credential issuer, so a signature can only
+	// verify under a key of the issuer the credential names. The token's own
+	// `iss`, read here from an unverified payload, only lets the caller name
+	// an accepted external Status Issuer instead.
+	tokenIssuer, err := unverifiedIssuer(signed)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.bindIssuer(ctx, credentialIssuer, issuer); err != nil {
+	issuer, err := c.statusIssuer(ctx, credentialIssuer, tokenIssuer)
+	if err != nil {
 		return nil, err
 	}
 	keys, err := c.resolveIssuerKeys(ctx, issuer, header)
@@ -340,6 +366,7 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 		Bits:           claims.bits,
 		Value:          value,
 		TokenIssuer:    claims.issuer,
+		StatusIssuer:   issuer,
 		TokenSubject:   claims.subject,
 		TokenSHA256:    base64.RawURLEncoding.EncodeToString(digest[:]),
 		TokenIssuedAt:  claims.issuedAt,
@@ -350,19 +377,17 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 	}, nil
 }
 
-// bindIssuer refuses a token whose `iss` is not the credential issuer, unless
-// AcceptStatusIssuer accepts tokenIssuer as a Status Issuer for it.
-func (c *Checker) bindIssuer(ctx context.Context, credentialIssuer, tokenIssuer string) error {
-	if tokenIssuer == credentialIssuer {
-		return nil
-	}
-	if c.AcceptStatusIssuer == nil {
-		return fmt.Errorf("%w: token iss %q is not the credential issuer %q", ErrStatusListIssuerMismatch, tokenIssuer, credentialIssuer)
+// statusIssuer returns the issuer whose keys the token must verify under: the
+// credential issuer, unless the token names another `iss` and
+// AcceptStatusIssuer accepts it as an external Status Issuer.
+func (c *Checker) statusIssuer(ctx context.Context, credentialIssuer, tokenIssuer string) (string, error) {
+	if tokenIssuer == "" || tokenIssuer == credentialIssuer || c.AcceptStatusIssuer == nil {
+		return credentialIssuer, nil
 	}
 	if err := c.AcceptStatusIssuer(ctx, credentialIssuer, tokenIssuer); err != nil {
-		return fmt.Errorf("%w: token iss %q is not accepted for the credential issuer %q: %w", ErrStatusListIssuerMismatch, tokenIssuer, credentialIssuer, err)
+		return "", fmt.Errorf("%w: token iss %q is not accepted for the credential issuer %q: %w", ErrStatusListIssuerMismatch, tokenIssuer, credentialIssuer, err)
 	}
-	return nil
+	return tokenIssuer, nil
 }
 
 func (c *Checker) now() time.Time {

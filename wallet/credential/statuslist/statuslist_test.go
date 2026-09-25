@@ -196,6 +196,7 @@ func TestCheckReferenceReportsTheVerifiedEntryAndItsEvidence(t *testing.T) {
 		Bits:           1,
 		Value:          0,
 		TokenIssuer:    testIssuer,
+		StatusIssuer:   testIssuer,
 		TokenSubject:   h.uri,
 		TokenSHA256:    base64.RawURLEncoding.EncodeToString(digest[:]),
 		TokenIssuedAt:  time.Unix(testIssuedAt, 0).UTC(),
@@ -657,7 +658,6 @@ func TestCheckReferenceRefusesTokensBeforeResolvingKeys(t *testing.T) {
 			want:           ErrStatusListTokenInvalid,
 			hookMustNotRun: true,
 		},
-		{name: "iss missing", token: claimsWith(func(c map[string]any) { delete(c, "iss") }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 		{name: "iss empty", token: claimsWith(func(c map[string]any) { c["iss"] = "" }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 		{name: "iss not a string", token: claimsWith(func(c map[string]any) { c["iss"] = 7 }), want: ErrStatusListTokenInvalid, hookMustNotRun: true},
 	})

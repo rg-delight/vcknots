@@ -37,10 +37,11 @@ var (
 	// ErrStatusListTokenInvalid reports that the token is not a well-formed
 	// Status List Token: it is not a compact JWS (RFC 7515 Section 7.1), its
 	// payload is not a JSON object, it omits a claim
-	// draft-ietf-oauth-status-list Section 5.1 makes REQUIRED (`iss`, `sub`,
-	// `iat`, `status_list`), its `sub` does not name the URI it was fetched
-	// from, or `status_list.bits`, `status_list.lst` or `ttl` is outside the
-	// values that section defines.
+	// draft-ietf-oauth-status-list Section 5.1 makes REQUIRED (`sub`, `iat`,
+	// `status_list`), its `sub` does not name the `uri` the credential
+	// references, an `iss` it carries is not a non-empty string, or
+	// `status_list.bits`, `status_list.lst` or `ttl` is outside the values
+	// that section defines.
 	ErrStatusListTokenInvalid = common.NewCodedError("status_list_token_invalid", "status list token is not a well-formed status list token")
 	// ErrStatusListSignatureInvalid reports that none of the issuer keys
 	// resolved for the token verified its signature. The verdict a Status List
@@ -53,11 +54,12 @@ var (
 	// ErrStatusListSignatureInvalid, because it describes the caller's
 	// configuration or connectivity, not a fault of the issuer.
 	ErrStatusListIssuerKeyUnresolved = common.NewCodedError("status_list_issuer_key_unresolved", "status list token issuer keys could not be resolved")
-	// ErrStatusListIssuerMismatch reports that the token's `iss` is not the
-	// issuer of the credential being checked, and Checker.AcceptStatusIssuer
-	// did not accept it as a Status Issuer for that credential, or that no
-	// credential issuer was given. It is decided before any key is resolved.
-	ErrStatusListIssuerMismatch = common.NewCodedError("status_list_issuer_mismatch", "status list token issuer is not the credential issuer")
+	// ErrStatusListIssuerMismatch reports that the token names, in its `iss`,
+	// an external Status Issuer (draft-ietf-oauth-status-list-21 Section 13.5)
+	// that Checker.AcceptStatusIssuer refused to accept for the credential. It
+	// is decided before any key is resolved. Without that hook no token fails
+	// this way: the token is verified under the credential issuer's keys.
+	ErrStatusListIssuerMismatch = common.NewCodedError("status_list_issuer_mismatch", "status list token issuer is not accepted for the credential issuer")
 	// ErrStatusListTokenExpired reports that the token's `exp`
 	// (RFC 7519 Section 4.1.4) has passed, after the configured clock skew is
 	// allowed for. draft-ietf-oauth-status-list Section 10.1 lets a Status List

@@ -157,17 +157,31 @@ func decodePayloadObject(payload []byte) (map[string]any, error) {
 	return claims, nil
 }
 
-// unverifiedIssuer reads `iss` from a payload whose signature has not been
-// checked yet. The value is only ever a hint for the key resolution hook;
-// parseTokenClaims reads `iss` again from the verified payload.
+// unverifiedIssuer reads the optional `iss` from a payload whose signature has
+// not been checked yet, returning the empty string when the token carries
+// none. The value only selects an external Status Issuer for
+// Checker.AcceptStatusIssuer to judge; parseTokenClaims reads `iss` again from
+// the verified payload.
 func unverifiedIssuer(signed *jose.JSONWebSignature) (string, error) {
 	claims, err := decodePayloadObject(signed.UnsafePayloadWithoutVerification())
 	if err != nil {
 		return "", err
 	}
-	issuer, isString := claims["iss"].(string)
+	return optionalIssuer(claims)
+}
+
+// optionalIssuer reads `iss`. draft-ietf-oauth-status-list-21 Section 5.1
+// defines no `iss` for a Status List Token, so its absence is not an error;
+// when present it is the RFC 7519 Section 4.1.1 StringOrURI, and a value of
+// another type, or an empty string, is refused rather than treated as absent.
+func optionalIssuer(claims map[string]any) (string, error) {
+	raw, present := claims["iss"]
+	if !present {
+		return "", nil
+	}
+	issuer, isString := raw.(string)
 	if !isString || issuer == "" {
-		return "", fmt.Errorf("%w: iss must be a non-empty string", ErrStatusListTokenInvalid)
+		return "", fmt.Errorf("%w: iss, when present, must be a non-empty string", ErrStatusListTokenInvalid)
 	}
 	return issuer, nil
 }
@@ -267,7 +281,8 @@ func verifySignature(signed *jose.JSONWebSignature, keys []jose.JSONWebKey, head
 // parseTokenClaims reads the claims draft-ietf-oauth-status-list Section 5.1
 // defines out of a verified Status List Token payload.
 //
-// `iss` must be a non-empty string, `sub` must equal expectedSubject exactly,
+// `iss` is optional and, when present, a non-empty string; `sub` must equal
+// expectedSubject exactly,
 // `iat` is REQUIRED and numeric, `exp` and `nbf` are optional and numeric,
 // `ttl` is optional and a positive finite number (not necessarily an integer),
 // and `status_list` must be an object carrying `bits` (1, 2, 4 or 8) and a
@@ -279,9 +294,9 @@ func parseTokenClaims(payload []byte, expectedSubject string) (*tokenClaims, err
 	if err != nil {
 		return nil, err
 	}
-	issuer, isString := claims["iss"].(string)
-	if !isString || issuer == "" {
-		return nil, fmt.Errorf("%w: iss must be a non-empty string", ErrStatusListTokenInvalid)
+	issuer, err := optionalIssuer(claims)
+	if err != nil {
+		return nil, err
 	}
 	subject, isString := claims["sub"].(string)
 	if !isString || subject != expectedSubject {
