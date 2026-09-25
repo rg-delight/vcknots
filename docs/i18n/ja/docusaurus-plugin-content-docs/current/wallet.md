@@ -1156,6 +1156,130 @@ Request Object がどう届いたかはライブラリが観測するもので�
 値で渡された Request Object は、常に値で届いたものとして扱います。
 そのため HAIP では、`ParsePresentationRequestObject` と `request` パラメータを、通信の前に `ErrHAIPRequestURIRequired` で拒否します。
 
+### Verifier の認証 {#verifier-authentication}
+
+`oid4vp.Oid4vpPresenter` は Client Identifier Prefix に応じて Verifier を認証します。
+
+| Prefix | 認証 |
+| --- | --- |
+| `x509_san_dns`、`x509_hash` | 署名付き Request Object が必須です。`x5c` チェーンは `RequestObjectValidation.TrustAnchors` / `RootCAs`（または `X509TrustChainRoots`）に届かなければならず、CRL で失効を確認します。`x509_san_dns` は DNS SAN と応答エンドポイントを、`x509_hash` は leaf 証明書のハッシュを束縛します。HAIP は `x509_hash` を要求します。 |
+| `redirect_uri` | 署名なしのみです。応答エンドポイントを識別子に束縛しますが、誰も認証しません。 |
+| なし（pre-registered） | client は `PreRegisteredClients` にあるか、`ResolvePreRegisteredClient` で見つからなければなりません（`oid4vp.ErrPreRegisteredClientUnknown`）。登録された `Metadata` が要求のメタデータに代わり、その `Metadata.RedirectURIs` だけが応答エンドポイントとして受け入れられます。これがない登録はどの要求も受け入れません。署名付き Request Object は登録された `JWKS` で検証し、`RequireSignedRequestObject` は署名なしの要求を拒否します。 |
+| `verifier_attestation` | 署名付き Request Object が必須です。Verifier Attestation JWT は `RequestObjectValidation.VerifierAttestationIssuers` のいずれかが発行したものでなければならず、Request Object はその `cnf` 鍵で署名されていなければなりません。 |
+| `openid_federation` | 署名付き Request Object が必須です（OpenID Federation 1.0 §12.1.1）。`RequestObjectValidation.Federation.TrustAnchors` への Trust Chain で認証し、Request Object は、導出した `openid_credential_verifier` メタデータが `jwks`、`signed_jwks_uri`（Verifier の Federation Entity Key で署名されたもの）、`jwks_uri` で公開する鍵で検証します。Federation Entity Key そのものでは検証しません（§12.1.1.1.2、§5.2.1。`federation.ErrVerifierKeysUnavailable`）。 |
+| `decentralized_identifier` | 拒否します。 |
+| `origin` | 拒否します（`ErrClientIDPrefixReserved`）。 |
+
+署名を要求する prefix の要求がプレーンなパラメータで届いた場合は、`ErrRequestObjectSignatureRequired` で拒否します。
+解析済み要求の `RequestObjectVerification` は、認証した内容（証明書のフィンガープリントと `Certificate` の要約、失効確認の件数、echo された `WalletNonce`、`Delivery`、`ExpiresAt`、`VerifierAttestation` または `Federation` の証跡）を記録します。
+要求のパラメータからこの値を設定することはできません。
+
+`client_metadata.jwks` のすべての要素は、他の要素と重ならない `kid` を持たなければなりません（OpenID4VP 1.0 §5.1。`ErrClientMetadataJWKKeyIDMissing`、`ErrClientMetadataJWKKeyIDDuplicate`）。
+`RequestObjectValidationOptions.RequestURIPolicy(clientID, requestURI)` を使うと、trust framework の中の wallet は `request_uri` を `client_id` に結び付けられます。
+これは取得の前に呼ばれ（封をした受理の再受理では、記録した `request_uri` に対して呼ばれ）、拒否は `ErrRequestURINotAssociated` になります。
+
+`RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロはどのプロファイルでも無制限です）、`Now`、`ClockSkew` を持ちます。
+`iat` が未来の Request Object は拒否するので、受け入れる Verifier の時計のずれに合わせて `ClockSkew` を設定してください。
+`X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。
+`RequestObjectValidation` のアンカーと併用はできません。
+
+`Oid4vpPresenter.Experimental`（`experimental.Presenter`）は、どの仕様も認めない緩和を持ちます。
+ローカルの Verifier や実験のためだけのものです。
+`Transport.AllowHTTP` は平文 HTTP の Verifier エンドポイントを受け入れます。
+`InsecureSkipX509Verify` は Draft 24 の `x509_san_dns` の Request Object を束縛と署名だけで確かめ、`RequestObjectVerification` なしで受け付けます。これを設定している間、OpenID4VP 1.0 の経路はすべての署名付き Request Object を拒否します。
+`AcceptClientMetadataJWKsWithoutKeyID` は `kid` の規則を緩めます。
+ゼロ値は何も緩めません。HAIP の presenter は、どの入口でもこれらのいずれも拒否します。
+
+### DCQL
+
+`SelectCredentials` は、`credential_sets`（`options`、`required`）、`claims`、`claim_sets`、`values`、nested と array の claim path（OpenID4VP 1.0 §7）、`multiple`、`meta`（`vct_values`、`type_values`）、`aki` と `openid_federation` 種別の `trusted_authorities` を評価します。`openid_federation` の値は、Credential の issuer から `RequestObjectValidation.Federation` の Trust Anchor への Trust Chain（その設定の下で解決）がその値を含むときに一致します（OpenID4VP 1.0 §6.1.1.3）。Trust Anchor が設定されていなければ何にも一致しません。`oid4vp.DCQLCredentialCandidate` を自分で組み立てる呼び出し側は、`Issuer` を設定し、照合の前に `AdmittedRequest.ResolveFederationTrustedAuthorities` を呼びます。
+必須の各 credential query について、それを満たす Credential を、満たせる最初の claim set とともに選びます。
+ストアが答えられない要求は、コード `access_denied` の `*oid4vp.AuthorizationRequestError` になります。
+holder binding を要求する query からは、holder binding のない Credential を除外します。
+`jwt_vc_json` と `ldp_vc` の claim path は Credential を起点にします（`["credentialSubject","given_name"]`）。
+
+holder が候補から選ぶ wallet は `oid4vp.ResolveDCQLClaimSets` と `oid4vp.ValidateDCQLMatches` を使います。
+`SubmitPresentation` は渡された選択に同じ検証を適用します（`oid4vp.ErrDCQLSelectionUnsatisfied`）。
+
+### `transaction_data`
+
+`Config.SupportedTransactionDataTypes`（注入した presenter では `Oid4vpPresenter.SupportedTransactionDataTypes`）は、wallet が処理する `transaction_data` の type を列挙します。
+リストが空の場合、`transaction_data` を含む要求はすべて `invalid_transaction_data` で拒否します。
+各 entry は要求内の credential query を参照しなければなりません。
+transaction data を運ぶのは Key Binding JWT 付きの `dc+sd-jwt` の提示だけです。
+参照される `dc+sd-jwt` の query は holder binding を要求していなければならず、他の形式に割り当てられた entry は何かを送る前に失敗します。
+各 entry は提示する Credential の 1 つに束縛され（§5.1）、ハッシュアルゴリズムは entry の `transaction_data_hashes_alg` から決まります（既定は `sha-256`）。
+Draft 24 の要求も同じ規則に従います。
+`credential_ids` は input descriptor（または Draft 24 の credential query）を指し、それぞれ SD-JWT VC（`vc+sd-jwt`）を受け付けなければなりません。
+
+### 応答モードと暗号化
+
+リクエスト URI と Request Object は `direct_post` か `direct_post.jwt` を使い、DC API の要求は `dc_api` か `dc_api.jwt` を使います。
+それぞれの経路は他方のモードを拒否します。
+HAIP は `direct_post.jwt` を、DC API では `dc_api.jwt` を要求します。
+`direct_post.jwt` と `dc_api.jwt` には `client_metadata.jwks` の暗号化鍵が必要です（`ErrResponseEncryptionKeyMissing`）。
+鍵は `alg` を持たなければならず、それが JWE の `alg` になります（OpenID4VP 1.0 §8.3）。
+`authorization_encrypted_response_alg` がその代わりになることはありません。
+応答は ECDH-ES 系の JWE で、`enc` は `encrypted_response_enc_values_supported` から wallet の優先順（A256GCM が先。一覧がなければ A128GCM）で選びます。
+HAIP では鍵が P-256 の ECDH-ES でなければならず、Verifier は A128GCM と A256GCM の両方を列挙していなければなりません（`ErrResponseEncryptionEncMissing`）。
+これらの検査は同意の前、解析時に行います。
+
+応答の POST と `request_uri` の取得はリダイレクトに従いません。
+2xx 以外の応答は `*oid4vp.VerifierResponseError` になります。
+
+### エラー応答
+
+`DeclinePresentation` は受け付けた要求にエラー応答を返し、Verifier のメタデータが許せば `direct_post.jwt` で暗号化します（§8.3.1）。
+受け付けに失敗した要求には、既定では応答しません。
+そのエンドポイントは認証されていない要求が指定したものだからです。
+`AuthorizationRequestError.SendErrorResponse(ctx, client)` は、`ResponseURI()` が設定された署名なしの `redirect_uri` 要求の拒否についてエラー応答を送ります。
+`Oid4vpPresenter.SendParseErrorResponses` を設定すると、presenter が解析時にこれを行います。
+
+### Digital Credentials API
+
+`ParseDCAPIRequest` は W3C Digital Credentials API の呼出し（`openid4vp-v1-unsigned`、`openid4vp-v1-signed`、`openid4vp-v1-multisigned`）を受け付けます。
+platform が認証した origin は呼出し側が渡し、要求の中から読むことはありません。
+受け付けた要求は、それを `Request().Origin` として持ちます。
+署名なしの要求には Client Identifier がありません。
+その `client_id` と `expected_origins` は無視し、`ClientID` は空のままです（Appendix A.2）。
+署名付きの要求は、`x509_san_dns` または `x509_hash` の Client Identifier の `x5c` チェーンで認証します。
+`expected_origins` は origin を完全一致で含まなければなりません。
+`aud` はなくてもよく、ある場合は wallet を指していなければなりません。
+multi-signed の要求では、すべての署名が `oauth-authz-req+jwt` で型付けされていなければなりません。
+`SubmitPresentation` は HTTP 呼出しを行わず、platform に返すオブジェクトを返します。
+`dc_api` では `{"vp_token": {...}}`、`dc_api.jwt` では `{"response": <JWE>}` です。
+Key Binding JWT の `aud` は `origin:<origin>` です（OpenID4VP 1.0 Appendix A.4）。
+
+```go
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/trustknots/vcknots/wallet"
+	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+)
+
+func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data json.RawMessage, origin string,
+	holderKey wallet.IKeyEntry) (*presenterTypes.DCAPIResponse, error) {
+	request, err := w.ParseDCAPIRequest(ctx, presenterTypes.DCAPIInvocation{
+		Request: presenterTypes.DCAPIRequest{Protocol: protocol, Data: data},
+		Origin:  origin, // authenticated by the platform
+	})
+	if err != nil {
+		return nil, err
+	}
+	selections, err := w.SelectCredentials(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := w.SubmitPresentation(ctx, request, wallet.Presentation{Key: holderKey, Credentials: selections})
+	if err != nil {
+		return nil, err
+	}
+	return result.DCAPIResponse, nil
+}
+```
+
 ### Draft 24
 
 `w.Draft24().ParsePresentationRequest` と `ParsePresentationRequestObject` は、Presentation Exchange の `presentation_definition` を持つ OpenID4VP Draft 24 の要求を受け付けます。
