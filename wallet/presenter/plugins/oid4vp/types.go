@@ -140,6 +140,12 @@ type CredentialPresentationRequest struct {
 	// with so the response echoes it (OID4VP 1.0 Appendix A.4). Empty for
 	// non-DC-API requests.
 	DCAPIProtocol string `json:"-"`
+	// Origin is the platform-authenticated Origin of a DC API request, as the
+	// caller passed it in types.DCAPIInvocation. An unsigned DC API request
+	// has no Client Identifier (ClientID is empty, OID4VP 1.0 Appendix A.2),
+	// so the Origin is what identifies the Verifier. Empty for non-DC-API
+	// requests.
+	Origin string `json:"-"`
 }
 
 // responseEndpoint is the endpoint the Authorization Response reaches:

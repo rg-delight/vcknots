@@ -17,11 +17,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// OID4VPClientIDPrefixWebOrigin is the effective Client Identifier Prefix the
-// Wallet assigns to an unsigned DC API request, from the platform-authenticated
-// Origin (OID4VP 1.0 Appendix A.2). It is never accepted from a request.
-const OID4VPClientIDPrefixWebOrigin OID4VPClientIDPrefix = "web-origin"
-
 // dcapiSignatureVerifier verifies one DC API request object signature with the
 // authenticated leaf certificate's public key and returns the signed claims.
 type dcapiSignatureVerifier func(publicKey any) (map[string]any, error)
@@ -39,7 +34,7 @@ func (p *Oid4vpPresenter) newDCAPIRequestBuilder(ctx context.Context, profileOpt
 // ParseDCAPIRequest authenticates and admits one platform DC API invocation
 // (OID4VP 1.0 Appendix A.3). The Origin is supplied by the platform and is
 // never read from the request. Unsigned requests are accepted without a
-// signature using web-origin:<origin> as the effective identifier; signed and
+// signature and without a Client Identifier (Appendix A.2); signed and
 // multi-signed requests are authenticated exactly like a signed Request
 // Object. The result is an *AdmittedRequest whose response SubmitDCQLResponse
 // returns as SubmitResult.DCAPIResponse.
@@ -79,6 +74,7 @@ func (p *Oid4vpPresenter) parseDCAPIRequest(ctx context.Context, invocation type
 	// aud value in a Key Binding JWT) MUST be the Origin, prefixed with
 	// origin:". This is the case even for signed requests.
 	request.ResponseAudience = dcapiOriginAudience(origin)
+	request.Origin = origin
 	request.DCAPIProtocol = invocation.Request.Protocol
 	return request, nil
 }
@@ -116,9 +112,10 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(ctx context.Context, invocation typ
 	// expected_origins: "This parameter is not for use in unsigned requests and
 	// therefore a Wallet MUST ignore this parameter if it is present in an
 	// unsigned request."
+	// The request therefore has no Client Identifier; the Origin the platform
+	// authenticated is carried in CredentialPresentationRequest.Origin.
 	delete(params, "client_id")
 	delete(params, "expected_origins")
-	params["client_id"] = dcapiWebOriginClientID(origin)
 
 	b := p.newDCAPIRequestBuilder(ctx, profileOptions)
 	b.requestSource = sourceDCAPIUnsigned
@@ -242,6 +239,12 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(ctx context.Context, invocation 
 			lastErr = headerErr
 			continue
 		}
+		// Every signature protects the payload as a Request Object (RFC 9101
+		// §10.8, OID4VP 1.0 §5), so each protected header is typed as one.
+		if typ, _ := header["typ"].(string); typ != "oauth-authz-req+jwt" {
+			lastErr = fmt.Errorf("DC API multi-signed request 'typ' header must be 'oauth-authz-req+jwt': %w", ErrRequestObjectTypInvalid)
+			continue
+		}
 		clientID, _ := header["client_id"].(string)
 		if clientID == "" {
 			lastErr = errors.New("DC API multi-signed signature is missing client_id")
@@ -333,7 +336,12 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 		return nil, err
 	}
 	now := requestObjectNow(options)
-	if err := validateRequestObjectClaims(commonJOSE.Claims(verified), b.resolveClaimPolicy(options, now)); err != nil {
+	policy := b.resolveClaimPolicy(options, now)
+	// OID4VP 1.0 Appendix A.3.2: the Request Objects of the DC API examples
+	// carry no aud, and the Origin binding of expected_origins stands in for
+	// it; an aud that is present must still identify this Wallet.
+	policy.AudienceIfPresent = true
+	if err := validateRequestObjectClaims(commonJOSE.Claims(verified), policy); err != nil {
 		return nil, fmt.Errorf("JWT standard claims validation failed: %w", err)
 	}
 	b.setParamsWithAnyMap(verified)
@@ -413,7 +421,9 @@ func validateDCAPIExpectedOrigins(claims map[string]any, origin string) error {
 		if !ok {
 			return newAuthorizationRequestError(InvalidRequestError, "expected_origins must contain only strings")
 		}
-		if candidate == origin || strings.TrimRight(candidate, "/") == strings.TrimRight(origin, "/") {
+		// An Origin has no path, so "https://verifier.example/" is not the
+		// Origin "https://verifier.example"; the comparison is exact.
+		if candidate == origin {
 			return nil
 		}
 	}
@@ -450,10 +460,6 @@ func decodeDCAPIProtectedHeader(encoded string) (map[string]any, error) {
 		return nil, err
 	}
 	return header, nil
-}
-
-func dcapiWebOriginClientID(origin string) string {
-	return string(OID4VPClientIDPrefixWebOrigin) + ":" + origin
 }
 
 func dcapiOriginAudience(origin string) string {

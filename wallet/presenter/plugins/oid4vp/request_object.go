@@ -209,10 +209,13 @@ type requestObjectClaimPolicy struct {
 	Audiences []string
 	// AudienceOptional skips the aud check (the Draft 24 contract).
 	AudienceOptional bool
-	Now              time.Time
-	ClockSkew        time.Duration
-	RequireExpiry    bool
-	MaxAge           time.Duration
+	// AudienceIfPresent accepts a Request Object without aud and checks an
+	// aud that is present (the Digital Credentials API).
+	AudienceIfPresent bool
+	Now               time.Time
+	ClockSkew         time.Duration
+	RequireExpiry     bool
+	MaxAge            time.Duration
 }
 
 // authenticateFinalRequestObject authenticates an OpenID4VP 1.0 Request
@@ -317,6 +320,9 @@ func validateRequestObjectAudience(claims commonJOSE.Claims, policy requestObjec
 			return nil
 		}
 		audiences = []string{"https://self-issued.me/v2"}
+	}
+	if _, present := claims["aud"]; !present && policy.AudienceIfPresent {
+		return nil
 	}
 	var actual []string
 	switch aud := claims["aud"].(type) {

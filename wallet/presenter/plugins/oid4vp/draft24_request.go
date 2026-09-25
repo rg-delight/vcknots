@@ -71,7 +71,7 @@ func parseDraft24ClientID(clientID string) (*OID4VPClientID, error) {
 		return &OID4VPClientID{original: original, prefix: OID4VPClientIDPrefix(scheme)}, nil
 	case "did", "x509_san_uri":
 		return nil, fmt.Errorf("%w: the Draft 24 Client Identifier Scheme %q is not supported", ErrRequestObjectClientAuthUnsupported, scheme)
-	case string(OID4VPClientIDPrefixWebOrigin):
+	case "web-origin":
 		// Draft 24 §5.10.4: "The Wallet MUST NOT accept this Client
 		// Identifier Scheme if the request is not sent via the Digital
 		// Credentials API."

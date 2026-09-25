@@ -33,7 +33,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	b.req.ResponseType = getParam("response_type", true)
-	b.req.ClientID = strings.TrimSpace(getParam("client_id", true))
+	// OID4VP 1.0 Appendix A.2: "The client_id parameter MUST be omitted in
+	// unsigned requests"; parseDCAPIUnsigned has already discarded it.
+	b.req.ClientID = strings.TrimSpace(getParam("client_id", b.requestSource != sourceDCAPIUnsigned))
 	if b.expectedClientID != "" && b.req.ClientID != b.expectedClientID {
 		b.errValidation = fmt.Errorf("outer client_id does not match request object client_id: %s != %s: %w", b.expectedClientID, b.req.ClientID, ErrRequestObjectClientIDMismatch)
 		return
@@ -42,8 +44,6 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	redirectURIFromParam := getParam("redirect_uri", false)
 	redirectURIFromClientID := ""
 	if cid := b.req.ClientID; cid != "" {
-		// Only the unsigned DC API path may carry the Wallet-synthesised
-		// web-origin identifier (Appendix A.2).
 		parsedCID, err := b.parseClientID(cid)
 		if err != nil {
 			b.errValidation = fmt.Errorf("invalid client_id: %w", err)
@@ -54,9 +54,6 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 			redirectURIFromClientID = parsedCID.original
 		case OID4VPClientIDPrefixX509SanDNS, OID4VPClientIDPrefixX509Hash:
 			// Bound to the signing certificate, not to a redirect URI.
-		case OID4VPClientIDPrefixWebOrigin:
-			// The DC API effective client identifier uses the platform
-			// Origin; no redirect URI is derived (OID4VP 1.0 Appendix A.2).
 		case OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
 			// OID4VP 1.0 §5.9.3: the response endpoints are constrained by
 			// what authenticates the Verifier (Trust Chain metadata, or the

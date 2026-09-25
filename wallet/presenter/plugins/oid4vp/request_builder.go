@@ -76,7 +76,7 @@ func (b *requestBuilder) validate() error {
 		// presents vp_token only and rejects the others as invalid_request.
 		return newAuthorizationRequestError(InvalidRequestError, "response_type must be vp_token, got %q", b.req.ResponseType)
 	}
-	if b.req.ClientID == "" {
+	if b.req.ClientID == "" && b.requestSource != sourceDCAPIUnsigned {
 		return newAuthorizationRequestError(InvalidRequestError, "client_id is required")
 	}
 

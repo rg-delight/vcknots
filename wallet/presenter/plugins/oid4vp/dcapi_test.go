@@ -52,14 +52,17 @@ func TestParseDCAPIRequestUnsigned(t *testing.T) {
 	}
 	request, err := parseDCAPIForTest(p, invocation)
 	require.NoError(t, err)
-	require.Equal(t, "web-origin:https://verifier.example", request.ClientID)
+	// Appendix A.2: an unsigned request has no Client Identifier; the Wallet
+	// does not synthesise one, and the Origin is carried on its own.
+	require.Empty(t, request.ClientID)
+	require.Equal(t, "https://verifier.example", request.Origin)
 	require.Equal(t, "origin:https://verifier.example", request.ResponseAudience)
 	require.Equal(t, DCAPIProtocolUnsigned, request.DCAPIProtocol)
 }
 
 func TestParseDCAPIRequestUnsignedIgnoresClientIDAndOrigins(t *testing.T) {
 	// A.2: the Wallet MUST ignore client_id and expected_origins in unsigned
-	// requests and use the platform Origin as the effective identifier.
+	// requests.
 	p := &Oid4vpPresenter{}
 	invocation := types.DCAPIInvocation{
 		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
@@ -70,7 +73,8 @@ func TestParseDCAPIRequestUnsignedIgnoresClientIDAndOrigins(t *testing.T) {
 	}
 	request, err := parseDCAPIForTest(p, invocation)
 	require.NoError(t, err)
-	require.Equal(t, "web-origin:https://verifier.example", request.ClientID)
+	require.Empty(t, request.ClientID)
+	require.Equal(t, "https://verifier.example", request.Origin)
 }
 
 func TestParseDCAPIRequestRejectsResponseURI(t *testing.T) {
@@ -554,4 +558,81 @@ func TestDCAPIResponseModeRefusedOutsideTheDCAPI(t *testing.T) {
 	delete(claims, "response_uri")
 	_, err := f.parseRequest(t, claims, requestFixtureOptions{Delivery: deliverByReference})
 	assertAuthzErrorCode(t, err, InvalidRequestError)
+}
+
+// multiSignedDCAPIInvocation is a JWS JSON Serialization request (Appendix
+// A.3.2.2) with one signature of f, whose protected header options sets.
+func multiSignedDCAPIInvocation(t *testing.T, f *requestObjectFixture, options *jose.SignerOptions) types.DCAPIInvocation {
+	t.Helper()
+	claims := signedDCAPIClaims(f)
+	delete(claims, "client_id")
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: f.key}, options.
+		WithHeader("x5c", []string{base64.StdEncoding.EncodeToString(f.leaf.Raw)}).
+		WithHeader("client_id", f.clientID()))
+	require.NoError(t, err)
+	signed, err := signer.Sign(payload)
+	require.NoError(t, err)
+	compact, err := signed.CompactSerialize()
+	require.NoError(t, err)
+	parts := strings.Split(compact, ".")
+	return types.DCAPIInvocation{
+		Request: types.DCAPIRequest{Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": map[string]any{
+			"payload":    parts[1],
+			"signatures": []any{map[string]any{"protected": parts[0], "signature": parts[2]}},
+		}})},
+		Origin: "https://verifier.example",
+	}
+}
+
+// TestParseDCAPIRequestMultiSignedChecksEachTyp: every signature of a
+// multi-signed request protects a Request Object, so its protected header is
+// typed oauth-authz-req+jwt like a compact one (RFC 9101 §10.8, OID4VP 1.0 §5).
+func TestParseDCAPIRequestMultiSignedChecksEachTyp(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	_, err := parseDCAPIForTest(f.presenter(), multiSignedDCAPIInvocation(t, f, (&jose.SignerOptions{}).WithType("JWT")))
+	require.ErrorIs(t, err, ErrRequestObjectTypInvalid)
+	_, err = parseDCAPIForTest(f.presenter(), multiSignedDCAPIInvocation(t, f, &jose.SignerOptions{}))
+	require.ErrorIs(t, err, ErrRequestObjectTypInvalid)
+	_, err = parseDCAPIForTest(f.presenter(), multiSignedDCAPIInvocation(t, f, (&jose.SignerOptions{}).WithType("oauth-authz-req+jwt")))
+	require.NoError(t, err)
+}
+
+// TestParseDCAPIRequestSignedAudienceIsOptional: the signed Request Objects of
+// OID4VP 1.0 Appendix A carry no aud, so the DC API accepts one without it;
+// an aud that is present must still identify this Wallet.
+func TestParseDCAPIRequestSignedAudienceIsOptional(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	parse := func(claims map[string]any) error {
+		_, err := parseDCAPIForTest(f.presenter(), types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": f.sign(t, claims, nil)})},
+			Origin:  "https://verifier.example",
+		})
+		return err
+	}
+	claims := signedDCAPIClaims(f)
+	delete(claims, "aud")
+	require.NoError(t, parse(claims))
+	claims["aud"] = "another-wallet"
+	require.ErrorIs(t, parse(claims), ErrRequestObjectAudienceMismatch)
+}
+
+// TestParseDCAPIRequestExpectedOriginsMatchExactly: Appendix A.2 compares the
+// Origin with each expected_origins entry, and an Origin has no path, so a
+// trailing slash is a different value.
+func TestParseDCAPIRequestExpectedOriginsMatchExactly(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	for _, tc := range []struct{ expected, origin string }{
+		{"https://verifier.example/", "https://verifier.example"},
+		{"https://verifier.example", "https://verifier.example/"},
+	} {
+		claims := signedDCAPIClaims(f)
+		claims["expected_origins"] = []any{tc.expected}
+		_, err := parseDCAPIForTest(f.presenter(), types.DCAPIInvocation{
+			Request: types.DCAPIRequest{Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": f.sign(t, claims, nil)})},
+			Origin:  tc.origin,
+		})
+		require.ErrorContains(t, err, "does not match any expected_origins entry", "expected %q, origin %q", tc.expected, tc.origin)
+	}
 }

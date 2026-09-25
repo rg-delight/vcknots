@@ -89,13 +89,15 @@ func TestParseDraft24OID4VPClientIDAcceptsOnlyDraft24Schemes(t *testing.T) {
 	}
 }
 
-// TestParseOID4VPClientIDReservedPrefixes keeps the two Wallet-only prefixes
-// refused with a code a caller can branch on.
+// TestParseOID4VPClientIDReservedPrefixes keeps the reserved origin prefix
+// (§5.9.3) refused with a code a caller can branch on. web-origin is not an
+// OpenID4VP 1.0 prefix at all, and the Wallet never mints one.
 func TestParseOID4VPClientIDReservedPrefixes(t *testing.T) {
-	for _, clientID := range []string{"origin:https://verifier.example", "web-origin:https://verifier.example"} {
-		if _, err := ParseOID4VPClientID(clientID); !errors.Is(err, ErrClientIDPrefixReserved) {
-			t.Fatalf("ParseOID4VPClientID(%q) error = %v, want ErrClientIDPrefixReserved", clientID, err)
-		}
+	if _, err := ParseOID4VPClientID("origin:https://verifier.example"); !errors.Is(err, ErrClientIDPrefixReserved) {
+		t.Fatalf("ParseOID4VPClientID(origin) error = %v, want ErrClientIDPrefixReserved", err)
+	}
+	if _, err := ParseOID4VPClientID("web-origin:https://verifier.example"); err == nil || !strings.Contains(err.Error(), "is not a supported Client Identifier Prefix") {
+		t.Fatalf("ParseOID4VPClientID(web-origin) error = %v, want an unknown prefix", err)
 	}
 }
 
