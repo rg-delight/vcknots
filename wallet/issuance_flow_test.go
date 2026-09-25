@@ -177,9 +177,10 @@ func TestIssuanceOfferRestrictsRequestFields(t *testing.T) {
 // ---------------------------------------------------------------------------
 // The acceptance policy is required before anything is sent or stored.
 // ---------------------------------------------------------------------------
-
-// The 1.0 flow must authenticate the credential it receives, so a wallet
-// without Config.CredentialAcceptance fails at the first stage.
+// RequestCredential needs an acceptance policy, the request's own or
+// Config.CredentialAcceptance, and sends nothing without one: an issuer the
+// wallet cannot authenticate is not asked for a credential. The stages before
+// it do not require one, since each request may bring its own.
 func TestIssuanceFailsWithoutAcceptancePolicy(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.noAcceptancePolicy = true
@@ -188,14 +189,39 @@ func TestIssuanceFailsWithoutAcceptancePolicy(t *testing.T) {
 	result, err := fixture.receive(fixture.issuanceRequest())
 	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
 	require.Nil(t, result)
-	require.Equal(t, 0, fixture.issuerMetadataCalls)
+	require.Zero(t, fixture.credentialCalls)
 	entries, _, listErr := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
 	require.NoError(t, listErr)
 	require.Empty(t, entries)
 }
 
-// Every later stage checks the policy too, so a state resumed in a wallet
-// without one sends nothing.
+// CredentialRequest.Acceptance configures the acceptance of one issuance, so a
+// wallet without Config.CredentialAcceptance issues under it, and the
+// Deferred state it returns carries it.
+func TestIssuanceAcceptsUnderTheRequestPolicy(t *testing.T) {
+	t.Run("an immediate issuance", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+			f.noAcceptancePolicy = true
+		})
+		request := fixture.credentialRequest()
+		request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+		result, err := fixture.receiveWith(fixture.issuanceRequest(), request)
+		require.NoError(t, err)
+		require.Len(t, result.Credentials, 1)
+		require.NotEmpty(t, result.Credentials[0].Verification.Mechanism)
+	})
+
+	t.Run("a policy for another issuer key refuses the credential", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t)
+		request := fixture.credentialRequest()
+		request.Acceptance = acceptIssuerKeyPolicy(mustP256Key())
+		_, err := fixture.receiveWith(fixture.issuanceRequest(), request)
+		require.ErrorIs(t, err, acceptance.ErrIssuerSignatureInvalid)
+	})
+}
+
+// A resumed Deferred state needs a policy too: a wallet without one sends
+// nothing, and DeferredIssuance.Acceptance supplies one.
 func TestIssuanceLaterStagesFailWithoutAcceptancePolicy(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.includeDeferredEndpoint = true
@@ -209,22 +235,24 @@ func TestIssuanceLaterStagesFailWithoutAcceptancePolicy(t *testing.T) {
 	require.NoError(t, err)
 	grant, err := fixture.wallet.AuthorizeIssuance(ctx, authorization, location)
 	require.NoError(t, err)
-	result, err := fixture.wallet.RequestCredential(ctx, grant, fixture.credentialRequest())
+	request := fixture.credentialRequest()
+	request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+	result, err := fixture.wallet.RequestCredential(ctx, grant, request)
 	require.NoError(t, err)
 	require.NotNil(t, result.Deferred)
+	require.Same(t, request.Acceptance, result.Deferred.Acceptance)
 
 	fixture.noAcceptancePolicy = true
 	unprotected := fixture.newWallet(t)
-	tokenCalls, credentialCalls := fixture.tokenCalls, fixture.credentialCalls
+	credentialCalls := fixture.credentialCalls
 
-	_, err = unprotected.AuthorizeIssuance(ctx, authorization, location)
-	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
 	_, err = unprotected.RequestCredential(ctx, grant, fixture.credentialRequest())
 	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
-	_, err = unprotected.RequestDeferredCredential(ctx, result.Deferred)
+	stored := *result.Deferred
+	stored.Acceptance = nil
+	_, err = unprotected.RequestDeferredCredential(ctx, &stored)
 	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
 
-	require.Equal(t, tokenCalls, fixture.tokenCalls)
 	require.Equal(t, credentialCalls, fixture.credentialCalls)
 	require.Equal(t, 0, fixture.deferredCalls)
 	entries, _, listErr := unprotected.GetCredentialEntries(GetCredentialEntriesRequest{})

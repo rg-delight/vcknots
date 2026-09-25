@@ -1,8 +1,9 @@
 // Package acceptance decides whether a received credential may be stored: it
-// authenticates the issuer key (X.509 x5c chain or a caller-supplied resolver),
-// verifies the issuer signature (for an ldp_vc, its eddsa-rdfc-2022 Data
-// Integrity proof), checks the cnf holder binding, the validity period and
-// SD-JWT disclosure integrity. It needs no wallet or credential store.
+// authenticates the issuer key by a mechanism the specifications define for
+// the credential's issuer identifier, verifies the issuer signature (for an
+// ldp_vc, its eddsa-rdfc-2022 Data Integrity proof), checks the cnf holder
+// binding, the validity period and SD-JWT disclosure integrity. It needs no
+// wallet or credential store.
 package acceptance
 
 import (
@@ -23,42 +24,53 @@ import (
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
 // Policy decides how the issuer of a credential is authenticated and which
-// further checks apply. A deployment that accepts unauthenticated issuers says
-// so with UnverifiedIssuer.
+// further checks apply.
+//
+// The issuer key is established by the mechanism that the credential's
+// issuer identifier and its x5c header select (SD-JWT VC -19 §2.5 and §7.3:
+// "for any given iss value, an attacker cannot influence the type of
+// verification process used"). The policy only says which of those
+// mechanisms it permits; a mechanism it does not permit refuses the
+// credential, and no other mechanism is tried in its place:
+//
+//   - An x5c header is authenticated by the certificate chain alone
+//     (IssuerX509). A chain that is not trusted refuses the credential. With
+//     no iss, the Issuer is the leaf certificate's subject.
+//   - Otherwise an https iss is authenticated by JWT VC Issuer Metadata
+//     (SD-JWT VC -19 §4, SD-JWT VC only; IssuerKeys) or by the keys of an
+//     OpenID Federation Trust Chain for that Entity (Federation).
+//   - Otherwise a DID iss is authenticated by its DID document, bound to the
+//     Credential Issuer's origin by a DIF Well Known DID Configuration
+//     (OpenID4VCI 1.0 §14.4; IssuerKeys).
+//   - A credential with neither an x5c nor an https or DID iss is refused.
+//
+// Under a profile with IssuerX5C.Require (HAIP 1.0 §6.1.1) an SD-JWT VC must
+// carry x5c.
 type Policy struct {
-	// IssuerX509 authenticates the issuer key from the credential's x5c
-	// header. HAIP requires it for SD-JWT VC (HAIP §6.1.1).
+	// IssuerX509 permits the x5c mechanism (SD-JWT VC -19 §2.5, "Inline X.509
+	// Certificates") and says which chains are trusted. Nil refuses every
+	// credential that carries x5c.
 	IssuerX509 *IssuerX509TrustOptions
-	// ResolveIssuerKeys returns candidate issuer keys (JWKS, DID or a static
-	// registry). header is the unauthenticated issuer JWT header. It is not
-	// called when x5c is present and IssuerX509 is set, unless
-	// ResolveIssuerKeysWhenX5CUntrusted applies. Keys whose use is not "sig"
-	// or whose alg differs from the JWS alg are ignored.
-	ResolveIssuerKeys func(issuer string, header map[string]any) ([]jose.JSONWebKey, error)
-	// ResolveIssuerKeysFromClaims replaces ResolveIssuerKeys when set, for a
-	// resolver that also reads the (unauthenticated) payload, such as the JWT
-	// VC vc.issuer member. For an ldp_vc, header holds the proof's
-	// verificationMethod as kid and "EdDSA" as alg, and claims is the
-	// credential document.
-	ResolveIssuerKeysFromClaims func(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error)
-	// ResolveIssuerKeysWhenX5CUntrusted lets the resolver establish the key
-	// when the x5c chain reaches none of IssuerX509's anchors
-	// (commonX509.ErrNoTrustAnchor). Every other chain failure still refuses
-	// the credential. It never applies to an SD-JWT VC under HAIP.
-	ResolveIssuerKeysWhenX5CUntrusted bool
+	// IssuerKeys permits the JWT VC Issuer Metadata and DID mechanisms that its
+	// Mechanisms switch on. The acceptor fills the issuerkeys.Request itself:
+	// Issuer, KeyID and Algorithm from the credential, CredentialFormat from
+	// the serialization, CredentialIssuer from Options.CredentialIssuer. Nil
+	// permits neither.
+	IssuerKeys *issuerkeys.Resolver
+	// Federation permits OpenID Federation for an https iss equal to its
+	// Entity Identifier: the keys of the openid_credential_issuer metadata a
+	// validated Trust Chain derives. Build it with NewFederationIssuerKeys.
+	Federation *FederationIssuerKeys
 	// RequireHolderBinding refuses a credential without cnf, and one with cnf
 	// when no holder key is supplied to compare it with.
 	RequireHolderBinding bool
-	// UnverifiedIssuer accepts the credential without authenticating the
-	// issuer. It applies only when neither IssuerX509 nor a resolver is set;
-	// the other checks still run. Under HAIP an SD-JWT VC is refused instead.
-	UnverifiedIssuer bool
 	// SigningAlgorithms lists the JWS algs an issuer may use. Empty means
 	// DefaultSigningAlgorithms(). A verifier plugin must also implement the
 	// algorithm. An ldp_vc is verified with eddsa-rdfc-2022 only.
@@ -82,8 +94,11 @@ type IssuerX509TrustOptions struct {
 	CertificateKeyUsages        []x509.ExtKeyUsage // optional ecosystem EKU policy
 	CRL                         commonX509.CRLCheckerOptions
 	AllowUnadvertisedRevocation bool // see commonX509.SigningChainPolicy.AllowUnadvertisedRevocation
-	// RequireIssuerDNSBinding is ecosystem policy, not an SD-JWT VC rule: an
-	// https iss must equal a dNSName SAN of the leaf certificate.
+	// RequireIssuerDNSBinding is ecosystem policy, not an SD-JWT VC rule: the
+	// credential must carry an https iss whose host is a dNSName SAN of the
+	// leaf certificate. A credential without iss, or with an iss that is not
+	// an https URL (a DID, an http URL), names no host a certificate could be
+	// bound to and is refused.
 	RequireIssuerDNSBinding bool
 	HTTPClient              *http.Client // CRL fetches; nil uses a bounded default
 }
@@ -96,6 +111,11 @@ type Options struct {
 	// HolderKey is compared with cnf.jwk. Without it a cnf cannot be checked,
 	// so Policy.RequireHolderBinding refuses the credential.
 	HolderKey *jose.JSONWebKey
+	// CredentialIssuer is the OpenID4VCI Credential Issuer Identifier of the
+	// issuance the credential came from. The DID mechanism binds a DID iss to
+	// its origin through a DID Configuration (OpenID4VCI 1.0 §14.4), so a DID
+	// issuer is refused without it. The wallet sets it from the issuance.
+	CredentialIssuer string
 }
 
 // Verification records what was verified.
@@ -106,8 +126,38 @@ type Verification struct {
 	RevocationUnadvertised int
 	HolderBound            bool // cnf present and matched the holder key
 	// IssuerKey is the public key the signature verified under; nil when no
-	// issuer was authenticated (UnverifiedIssuer, Parse).
+	// issuer was authenticated (Parse).
 	IssuerKey *jose.JSONWebKey
+	// Issuer is the authenticated credential's Issuer: its iss, or, for an
+	// x5c credential without iss, the leaf certificate's subject (SD-JWT VC
+	// -19 §2.5). Empty after Parse.
+	Issuer string
+	// Mechanism names how the issuer key was established:
+	// issuerkeys.MechanismX5CTrustedChain, MechanismJWTVCIssuerMetadata,
+	// MechanismDIDConfigurationBinding or MechanismOpenIDFederation. Empty
+	// after Parse.
+	Mechanism issuerkeys.Mechanism
+	// IssuerCertificateSubject is the leaf certificate's subject and subject
+	// alternative names for the x5c mechanism; nil otherwise.
+	IssuerCertificateSubject *CertificateSubject
+	// IssuerDNSBound reports that the https iss host was matched against a
+	// dNSName of the leaf certificate (IssuerX509TrustOptions.RequireIssuerDNSBinding).
+	IssuerDNSBound bool
+	// DID is the DID the issuer key came from, for the DID mechanism.
+	DID string
+	// FederationTrustAnchor is the Entity Identifier of the Trust Anchor the
+	// Trust Chain ended at, for the OpenID Federation mechanism.
+	FederationTrustAnchor string
+}
+
+// CertificateSubject is the identity an X.509 certificate states.
+type CertificateSubject struct {
+	// Subject is the subject distinguished name in RFC 4514 form.
+	Subject string
+	// DNSNames, URIs and EmailAddresses are the subject alternative names.
+	DNSNames       []string
+	URIs           []string
+	EmailAddresses []string
 }
 
 // DefaultSigningAlgorithms returns the issuer algorithms accepted when
@@ -128,9 +178,12 @@ func AcceptedSDAlgorithms() []string {
 type Acceptor struct {
 	x5c profile.X5CRules
 	// draft13 admits the SD-JWT VC typ of OpenID4VCI Draft 13, vc+sd-jwt.
-	draft13    bool
-	serializer *serializer.SerializationDispatcher
-	verifier   *verifier.VerificationDispatcher
+	draft13 bool
+	// forbidInsecure refuses an IssuerKeys resolver with AllowHTTP
+	// (profile.Options.ForbidInsecureTransports).
+	forbidInsecure bool
+	serializer     *serializer.SerializationDispatcher
+	verifier       *verifier.VerificationDispatcher
 }
 
 // NewAcceptor builds an Acceptor that applies the credential rules of p, the
@@ -146,13 +199,24 @@ func NewAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *ve
 	if v == nil {
 		return nil, fmt.Errorf("%w: acceptance requires a verification dispatcher", common.ErrInvalidInput)
 	}
-	return &Acceptor{x5c: p.Options().IssuerX5C, draft13: p == profile.Draft13(), serializer: s, verifier: v}, nil
+	options := p.Options()
+	return &Acceptor{
+		x5c:            options.IssuerX5C,
+		draft13:        p == profile.Draft13(),
+		forbidInsecure: options.ForbidInsecureTransports,
+		serializer:     s,
+		verifier:       v,
+	}, nil
 }
 
 // Verify applies policy to raw and returns the parsed credential and what was
 // verified. It stores nothing. ctx bounds CRL retrieval. Failures wrap the
 // sentinels of this package.
 func (a *Acceptor) Verify(ctx context.Context, raw []byte, policy Policy, opts Options) (*credential.Credential, *Verification, error) {
+	if a.forbidInsecure && policy.IssuerKeys != nil && policy.IssuerKeys.AllowHTTP {
+		// SD-JWT VC -19 §3 and HAIP 1.0 §4: key material over TLS only.
+		return nil, nil, fmt.Errorf("%w: the profile forbids an issuer key resolver with AllowHTTP", common.ErrInvalidInput)
+	}
 	return a.run(ctx, raw, opts, &policy)
 }
 
@@ -171,7 +235,7 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 		flavor = inferredFlavor(raw)
 	}
 	if flavor == credential.LdpVc {
-		return a.runDataIntegrity(raw, opts, policy)
+		return a.runDataIntegrity(ctx, raw, opts, policy)
 	}
 	header, err := IssuerSignedJOSEHeader(flavor, raw)
 	if err != nil {
@@ -249,7 +313,8 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 		now = policy.Now()
 	}
 	issuer, _ := payload["iss"].(string)
-	if err := a.authenticateIssuer(ctx, parsed, policy, header, payload, issuer, now, requireX5C, verification); err != nil {
+	subject := issuerSubject{issuer: issuer, credentialIssuer: opts.CredentialIssuer, format: a.issuerKeyFormat(flavor, header)}
+	if err := a.authenticateIssuer(ctx, parsed, policy, header, subject, now, requireX5C, verification); err != nil {
 		return nil, nil, err
 	}
 	if err := checkValidity(payload, now, policy.ClockSkew); err != nil {
@@ -280,6 +345,21 @@ func (a *Acceptor) checkSDJWTVCType(header, payload map[string]any) error {
 		return fmt.Errorf("%w: SD-JWT VC vct claim is required", ErrCredentialTypInvalid)
 	}
 	return nil
+}
+
+// issuerKeyFormat is the issuerkeys format identifier of a serialization.
+func (a *Acceptor) issuerKeyFormat(flavor credential.SupportedSerializationFlavor, header map[string]any) string {
+	switch flavor {
+	case credential.SDJwtVC:
+		if typ, _ := header["typ"].(string); a.draft13 && strings.EqualFold(typ, "vc+sd-jwt") {
+			return issuerkeys.FormatSDJWTVCDraft
+		}
+		return issuerkeys.FormatSDJWTVC
+	case credential.LdpVc:
+		return issuerkeys.FormatLDPVC
+	default:
+		return issuerkeys.FormatJWTVCJSON
+	}
 }
 
 // signingAlgorithms resolves the issuer algorithms one run accepts.

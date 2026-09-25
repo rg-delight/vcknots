@@ -88,7 +88,7 @@ func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry,
 	require.NoError(t, err)
 	presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{HTTPClient: server.Client()}))
 	require.NoError(t, err)
-	controller, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving, Presenter: presenting})
+	controller, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving, Presenter: presenting, CredentialAcceptance: acceptIssuerPolicyFor(server.URL, issuerKey)})
 	require.NoError(t, err)
 	issuer, err := url.Parse(server.URL)
 	require.NoError(t, err)

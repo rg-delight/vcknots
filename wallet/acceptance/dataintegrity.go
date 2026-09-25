@@ -1,6 +1,7 @@
 package acceptance
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -10,11 +11,12 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 )
 
 // runDataIntegrity is run for an ldp_vc: a W3C VC secured with an embedded
 // eddsa-rdfc-2022 Data Integrity proof. A nil policy means Parse.
-func (a *Acceptor) runDataIntegrity(raw []byte, opts Options, policy *Policy) (*credential.Credential, *Verification, error) {
+func (a *Acceptor) runDataIntegrity(ctx context.Context, raw []byte, opts Options, policy *Policy) (*credential.Credential, *Verification, error) {
 	var document map[string]any
 	if err := json.Unmarshal(raw, &document); err != nil || document == nil {
 		return nil, nil, fmt.Errorf("%w: a Data Integrity credential must be a JSON object", ErrCredentialParse)
@@ -35,7 +37,8 @@ func (a *Acceptor) runDataIntegrity(raw []byte, opts Options, policy *Policy) (*
 	if policy.Now != nil {
 		now = policy.Now()
 	}
-	if err := authenticateDataIntegrityIssuer(document, parsed.Issuer, policy, now, verification); err != nil {
+	subject := issuerSubject{issuer: parsed.Issuer, credentialIssuer: opts.CredentialIssuer, format: issuerkeys.FormatLDPVC}
+	if err := authenticateDataIntegrityIssuer(ctx, document, subject, policy, now, verification); err != nil {
 		return nil, nil, err
 	}
 	if period := parsed.ValidPeriod; period != nil {
@@ -50,28 +53,24 @@ func (a *Acceptor) runDataIntegrity(raw []byte, opts Options, policy *Policy) (*
 }
 
 // authenticateDataIntegrityIssuer verifies the issuer's assertionMethod proof
-// under a key the policy's resolver returns. The resolver receives the
-// proof's verificationMethod as the kid and "EdDSA" as the alg of header. The
+// under a key the mechanism of the credential's issuer establishes (see
+// Policy): for a DID issuer its DID document bound by a DID Configuration, for
+// an https issuer the keys of Policy.Federation. The proof's
 // verificationMethod must be a fragment of the issuer identifier, so a key
 // another party controls cannot sign for the issuer. An ldp_vc has no x5c, so
 // IssuerX509 alone authenticates nothing.
-func authenticateDataIntegrityIssuer(document map[string]any, issuer string, policy *Policy, now time.Time, verification *Verification) error {
-	if !policy.resolvesIssuerKeys() {
-		if policy.IssuerX509 == nil && policy.UnverifiedIssuer {
-			return nil
-		}
-		return fmt.Errorf("%w: a Data Integrity credential needs an issuer key resolver", ErrIssuerKeyUnresolved)
-	}
+func authenticateDataIntegrityIssuer(ctx context.Context, document map[string]any, subject issuerSubject, policy *Policy, now time.Time, verification *Verification) error {
 	method, err := dataIntegrityVerificationMethod(document["proof"])
 	if err != nil {
 		return err
 	}
+	issuer := subject.issuer
 	controller, _, _ := strings.Cut(method, "#")
 	if issuer == "" || controller != issuer {
 		return fmt.Errorf("%w: verificationMethod %q is not controlled by issuer %q", ErrIssuerSignatureInvalid, method, issuer)
 	}
 	header := map[string]any{"alg": string(jose.EdDSA), "kid": method}
-	keys, err := resolveIssuerKeyCandidates(policy, issuer, header, document)
+	candidates, err := resolveIssuerKeys(ctx, policy, subject, header, now)
 	if err != nil {
 		return err
 	}
@@ -82,17 +81,17 @@ func authenticateDataIntegrityIssuer(document map[string]any, issuer string, pol
 		ClockSkew:          policy.ClockSkew,
 	}
 	var lastErr error
-	for i := range keys {
-		publicKey, ok := keys[i].Key.(ed25519.PublicKey)
+	for _, candidate := range candidates {
+		publicKey, ok := candidate.key.Key.(ed25519.PublicKey)
 		if !ok {
 			continue
 		}
 		if lastErr = dataintegrity.VerifyEddsaRdfc2022WithOptions(document, policy.DataIntegrityContexts, publicKey, options); lastErr != nil {
 			continue
 		}
+		verification.Issuer = issuer
 		verification.IssuerKeyID = method
-		verified := keys[i].Public()
-		verification.IssuerKey = &verified
+		recordCandidate(candidate, verification)
 		return nil
 	}
 	if lastErr != nil {

@@ -28,8 +28,9 @@ import (
 // for grant with one key proof per holder key, a key attestation when the
 // issuer requires one or the request includes one (Appendix D), and response
 // encryption per Config.Issuance.CredentialEncryption with an ephemeral key.
-// The credentials are verified under Config.CredentialAcceptance and saved
-// unless the wallet is storeless.
+// The credentials are verified under req.Acceptance, or else
+// Config.CredentialAcceptance, and saved unless the wallet is storeless. With
+// neither policy nothing is sent (ErrCredentialAcceptancePolicyRequired).
 //
 // A key attestation that neither the request nor Config.Attestation.Key
 // supplies stops the call before anything is sent, with
@@ -46,6 +47,10 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
+		return nil, err
+	}
+	policy, err := w.acceptancePolicy(req.Acceptance)
+	if err != nil {
 		return nil, err
 	}
 	if err := w.checkGrantToken(grant.AccessToken); err != nil {
@@ -209,17 +214,19 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 				HolderKeys:                holderKeys,
 				ResponseDecryptionKey:     decryptionKey,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
+				Acceptance:                req.Acceptance,
 				cache:                     w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil
 	}
-	return w.acceptCredentialResponse(ctx, md, grant.CredentialConfigurationID, grant.AccessToken, grant.DPoPKeyThumbprint, response, holderKeys)
+	return w.acceptCredentialResponse(ctx, policy, md, grant.CredentialConfigurationID, grant.AccessToken, grant.DPoPKeyThumbprint, response, holderKeys)
 }
 
 // acceptCredentialResponse verifies and stores the credentials of response.
 // On refusal the result carries the notification for credential_failure.
 func (w *Wallet) acceptCredentialResponse(
 	ctx context.Context,
+	policy *acceptance.Policy,
 	md *receiverTypes.CredentialIssuerMetadata,
 	configurationID string,
 	token *receiverTypes.CredentialIssuanceAccessToken,
@@ -237,7 +244,7 @@ func (w *Wallet) acceptCredentialResponse(
 			DPoPKeyThumbprint: dpopThumbprint,
 		}
 	}
-	saved, err := w.storeCredentialResponse(ctx, response, md, configurationID, holderKeys)
+	saved, err := w.storeCredentialResponse(ctx, policy, response, md, configurationID, holderKeys)
 	if err != nil {
 		return result, err
 	}
@@ -363,9 +370,10 @@ func validateCredentialResponse(r *receiverTypes.CredentialResponse, maxCredenti
 	return nil
 }
 
-// storeCredentialResponse verifies each credential against the holder key its
-// cnf names and saves them all, or nothing when one fails acceptance.
-func (w *Wallet) storeCredentialResponse(ctx context.Context, response *receiverTypes.CredentialResponse, md *receiverTypes.CredentialIssuerMetadata, configurationID string, holderKeys []jose.JSONWebKey) ([]*SavedCredential, error) {
+// storeCredentialResponse verifies each credential under policy against the
+// holder key its cnf names and saves them all, or nothing when one fails
+// acceptance.
+func (w *Wallet) storeCredentialResponse(ctx context.Context, policy *acceptance.Policy, response *receiverTypes.CredentialResponse, md *receiverTypes.CredentialIssuerMetadata, configurationID string, holderKeys []jose.JSONWebKey) ([]*SavedCredential, error) {
 	mimeType := mimeTypeForCredentialConfiguration(md, configurationID)
 	flavor, err := (&credstoreTypes.CredentialEntry{MimeType: mimeType}).SerializationFlavor()
 	if err != nil {
@@ -385,7 +393,7 @@ func (w *Wallet) storeCredentialResponse(ctx context.Context, response *receiver
 		if err != nil {
 			return nil, err
 		}
-		parsed, verification, err := w.verifyCredentialForAcceptanceContext(ctx, raw, flavor, holderKey, true)
+		parsed, verification, err := w.verifyCredentialUnder(ctx, w.profile, policy, raw, flavor, holderKey, md.CredentialIssuer)
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify credential: %w", err)
 		}

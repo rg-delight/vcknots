@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -55,12 +55,10 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 	wire := []byte(buildWire(t, testWire{signingKey: signer, kid: "issuer-key-1"}))
 
 	t.Run("a kid-matching key that does not verify does not refuse the credential", func(t *testing.T) {
-		policy := Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{
-				{Key: &stale.PublicKey, KeyID: "issuer-key-1"},
-				{Key: &signer.PublicKey, KeyID: "issuer-key-2"},
-			}, nil
-		}}
+		policy := resolving(
+			jose.JSONWebKey{Key: &stale.PublicKey, KeyID: "issuer-key-1"},
+			jose.JSONWebKey{Key: &signer.PublicKey, KeyID: "issuer-key-2"},
+		)
 		_, verification, err := acceptor.Verify(t.Context(), wire, policy, Options{})
 		require.NoError(t, err)
 		require.Equal(t, "issuer-key-2", verification.IssuerKeyID)
@@ -70,12 +68,10 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 	t.Run("the kid-matching key is tried before the others", func(t *testing.T) {
 		// Both entries hold the signing key, so whichever is tried first is
 		// the one reported: the kid match wins although it is listed last.
-		policy := Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{
-				{Key: &signer.PublicKey, KeyID: "other-name"},
-				{Key: &signer.PublicKey, KeyID: "issuer-key-1"},
-			}, nil
-		}}
+		policy := resolving(
+			jose.JSONWebKey{Key: &signer.PublicKey, KeyID: "other-name"},
+			jose.JSONWebKey{Key: &signer.PublicKey, KeyID: "issuer-key-1"},
+		)
 		_, verification, err := acceptor.Verify(t.Context(), wire, policy, Options{})
 		require.NoError(t, err)
 		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
@@ -84,12 +80,10 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 
 	t.Run("without a kid every resolved key is tried in order", func(t *testing.T) {
 		unnamed := []byte(buildWire(t, testWire{signingKey: signer}))
-		policy := Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{
-				{Key: &stale.PublicKey, KeyID: "stale"},
-				{Key: &signer.PublicKey, KeyID: "current"},
-			}, nil
-		}}
+		policy := resolving(
+			jose.JSONWebKey{Key: &stale.PublicKey, KeyID: "stale"},
+			jose.JSONWebKey{Key: &signer.PublicKey, KeyID: "current"},
+		)
 		_, verification, err := acceptor.Verify(t.Context(), unnamed, policy, Options{})
 		require.NoError(t, err)
 		require.Equal(t, "current", verification.IssuerKeyID)
@@ -97,9 +91,7 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 	})
 
 	t.Run("no resolved key verifying is still a signature failure", func(t *testing.T) {
-		policy := Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{{Key: &stale.PublicKey, KeyID: "issuer-key-1"}}, nil
-		}}
+		policy := resolving(jose.JSONWebKey{Key: &stale.PublicKey, KeyID: "issuer-key-1"})
 		_, _, err := acceptor.Verify(t.Context(), wire, policy, Options{})
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 	})
@@ -112,11 +104,6 @@ func TestCredentialAcceptorIgnoresKeysNotForThisSignature(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final())
 	signer := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: signer}))
-	resolving := func(keys ...jose.JSONWebKey) Policy {
-		return Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return keys, nil
-		}}
-	}
 
 	for name, key := range map[string]jose.JSONWebKey{
 		"encryption key":          {Key: &signer.PublicKey, Use: "enc"},
@@ -139,28 +126,25 @@ func TestCredentialAcceptorIgnoresKeysNotForThisSignature(t *testing.T) {
 	})
 }
 
-func TestResolveIssuerKeyCandidatesOrdersByKid(t *testing.T) {
-	keys := []jose.JSONWebKey{{KeyID: "a"}, {KeyID: "b"}, {KeyID: "c"}, {KeyID: "b"}}
-	policy := &Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-		return keys, nil
-	}}
-	kids := func(ordered []jose.JSONWebKey) []string {
+func TestFilterCandidatesOrdersByKid(t *testing.T) {
+	candidates := []candidateKey{{key: jose.JSONWebKey{KeyID: "a"}}, {key: jose.JSONWebKey{KeyID: "b"}}, {key: jose.JSONWebKey{KeyID: "c"}}, {key: jose.JSONWebKey{KeyID: "b"}}}
+	kids := func(ordered []candidateKey) []string {
 		names := make([]string, 0, len(ordered))
-		for _, key := range ordered {
-			names = append(names, key.KeyID)
+		for _, candidate := range ordered {
+			names = append(names, candidate.key.KeyID)
 		}
 		return names
 	}
 
-	ordered, err := resolveIssuerKeyCandidates(policy, "https://issuer.example.test", map[string]any{"kid": "b"}, nil)
+	ordered, err := filterCandidates(candidates, map[string]any{"kid": "b"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"b", "b", "a", "c"}, kids(ordered))
 
-	ordered, err = resolveIssuerKeyCandidates(policy, "https://issuer.example.test", map[string]any{"kid": "unknown"}, nil)
+	ordered, err = filterCandidates(candidates, map[string]any{"kid": "unknown"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b", "c", "b"}, kids(ordered))
 
-	ordered, err = resolveIssuerKeyCandidates(policy, "https://issuer.example.test", map[string]any{}, nil)
+	ordered, err = filterCandidates(candidates, map[string]any{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b", "c", "b"}, kids(ordered))
 }
@@ -215,67 +199,54 @@ func revokedIssuerChain(t *testing.T) (testIssuerChain, *http.Client) {
 	return testIssuerChain{caCert: caCert, caKey: caKey, leafCert: leafCert, leafKey: leafKey}, server.Client()
 }
 
-// TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted pins when key
-// resolution may take over from an x5c chain: only when the chain reaches none
-// of the configured anchors, never when the chain says something about the
-// signer such as a revoked certificate.
-func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
+// TestX5CChainIsTheOnlyMechanismForAnX5CCredential pins SD-JWT VC -19 §2.5
+// and §7.3 and the owner decision of 2026-09-25: a credential that carries x5c
+// is authenticated by its chain alone. A chain that is not trusted refuses the
+// credential, even when a mechanism the policy also permits (here JWT VC
+// Issuer Metadata publishing the leaf key) would have produced a verifying
+// key: no mechanism takes over from an untrusted chain.
+func TestX5CChainIsTheOnlyMechanismForAnX5CCredential(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final())
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	unrelated := newTestIssuerChain(t, []string{"issuer.example.test"})
 	untrustedWire := []byte(buildWire(t, testWire{signingKey: chain.leafKey, x5c: chain.x5c(), kid: "issuer-key-1"}))
 	leafJWK := jose.JSONWebKey{Key: &chain.leafKey.PublicKey, KeyID: "issuer-key-1"}
 
-	type resolution struct {
-		calls int
-		keys  []jose.JSONWebKey
-		err   error
-	}
-	policy := func(anchors []*x509.Certificate, fallback bool, resolved *resolution) Policy {
+	// policy trusts anchors for x5c and also permits JWT VC Issuer Metadata,
+	// which publishes the leaf key.
+	policy := func(anchors []*x509.Certificate, network *keyNetwork) Policy {
+		network.publishIssuerMetadata(testCredentialIssuer, leafJWK)
 		return Policy{
 			IssuerX509: &IssuerX509TrustOptions{TrustAnchors: anchors, AllowUnadvertisedRevocation: true},
-			ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-				resolved.calls++
-				return resolved.keys, resolved.err
-			},
-			ResolveIssuerKeysWhenX5CUntrusted: fallback,
+			IssuerKeys: network.resolver(issuerkeys.Mechanisms{JWTVCIssuerMetadata: true}),
 		}
 	}
 
-	t.Run("an unanchored chain hands over to the resolved key", func(t *testing.T) {
-		resolved := &resolution{keys: []jose.JSONWebKey{leafJWK}}
-		_, verification, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved), Options{})
-		require.NoError(t, err)
-		require.Equal(t, 1, resolved.calls)
-		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
-		require.Nil(t, verification.CertificateSHA256, "an unanchored chain must not be reported as verified")
-		requireIssuerKey(t, verification, chain.leafKey)
-	})
-
-	t.Run("without the flag an unanchored chain is refused", func(t *testing.T) {
-		resolved := &resolution{keys: []jose.JSONWebKey{leafJWK}}
-		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), false, resolved), Options{})
+	t.Run("an unanchored chain is refused and the metadata is never read", func(t *testing.T) {
+		network := newKeyNetwork()
+		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), network), Options{})
 		require.Error(t, err)
 		requireChainErrorCode(t, err, "x509_chain_untrusted")
 		require.ErrorIs(t, err, commonX509.ErrNoTrustAnchor)
-		require.Zero(t, resolved.calls)
+		require.Zero(t, network.requestCount())
 	})
 
-	t.Run("an anchored chain is still verified through x5c with the flag on", func(t *testing.T) {
-		resolved := &resolution{keys: []jose.JSONWebKey{leafJWK}}
-		_, verification, err := acceptor.Verify(t.Context(), untrustedWire, policy(chain.anchors(), true, resolved), Options{})
+	t.Run("an anchored chain is verified through x5c", func(t *testing.T) {
+		network := newKeyNetwork()
+		_, verification, err := acceptor.Verify(t.Context(), untrustedWire, policy(chain.anchors(), network), Options{})
 		require.NoError(t, err)
-		require.Zero(t, resolved.calls)
+		require.Zero(t, network.requestCount())
 		require.Len(t, verification.CertificateSHA256, 2)
 		require.Equal(t, verification.CertificateSHA256[0], verification.IssuerKeyID)
+		require.Equal(t, issuerkeys.MechanismX5CTrustedChain, verification.Mechanism)
 		requireIssuerKey(t, verification, chain.leafKey)
 	})
 
-	t.Run("a revoked leaf is refused and never falls back to key resolution", func(t *testing.T) {
+	t.Run("a revoked leaf is refused", func(t *testing.T) {
 		revoked, crlClient := revokedIssuerChain(t)
 		wire := []byte(buildWire(t, testWire{signingKey: revoked.leafKey, x5c: revoked.x5c()}))
-		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &revoked.leafKey.PublicKey, KeyID: "issuer-key-1"}}}
-		revokingPolicy := policy(revoked.anchors(), true, resolved)
+		network := newKeyNetwork()
+		revokingPolicy := policy(revoked.anchors(), network)
 		revokingPolicy.IssuerX509.HTTPClient = crlClient
 
 		_, _, err := acceptor.Verify(t.Context(), wire, revokingPolicy, Options{})
@@ -285,10 +256,10 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 		require.ErrorAs(t, err, &revocation)
 		require.Equal(t, commonX509.CRLErrorRevoked, revocation.Kind)
 		require.NotErrorIs(t, err, ErrIssuerKeyUnresolved)
-		require.Zero(t, resolved.calls)
+		require.Zero(t, network.requestCount())
 	})
 
-	t.Run("a self-signed leaf is refused and never falls back to key resolution", func(t *testing.T) {
+	t.Run("a self-signed leaf that is no anchor is refused", func(t *testing.T) {
 		signerKey := testutil.NewP256Key(t)
 		template := &x509.Certificate{
 			SerialNumber: big.NewInt(9), Subject: pkix.Name{CommonName: "Self-signed Issuer"},
@@ -298,46 +269,21 @@ func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
 		der, err := x509.CreateCertificate(rand.Reader, template, template, &signerKey.PublicKey, signerKey)
 		require.NoError(t, err)
 		wire := []byte(buildWire(t, testWire{signingKey: signerKey, x5c: []string{base64.StdEncoding.EncodeToString(der)}}))
-		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &signerKey.PublicKey}}}
+		network := newKeyNetwork()
 
-		_, _, err = acceptor.Verify(t.Context(), wire, policy(unrelated.anchors(), true, resolved), Options{})
+		_, _, err = acceptor.Verify(t.Context(), wire, policy(unrelated.anchors(), network), Options{})
 		require.Error(t, err)
-		require.NotErrorIs(t, err, commonX509.ErrNoTrustAnchor)
-		require.Zero(t, resolved.calls)
+		require.Zero(t, network.requestCount())
 	})
 
-	t.Run("an expired leaf is refused and never falls back to key resolution", func(t *testing.T) {
-		resolved := &resolution{keys: []jose.JSONWebKey{leafJWK}}
-		expired := policy(unrelated.anchors(), true, resolved)
+	t.Run("an expired leaf is refused", func(t *testing.T) {
+		network := newKeyNetwork()
+		expired := policy(chain.anchors(), network)
 		expired.Now = func() time.Time { return time.Now().Add(48 * time.Hour) }
 
 		_, _, err := acceptor.Verify(t.Context(), untrustedWire, expired, Options{})
 		requireChainErrorCode(t, err, "x509_chain_untrusted")
-		require.NotErrorIs(t, err, commonX509.ErrNoTrustAnchor)
-		require.Zero(t, resolved.calls)
-	})
-
-	t.Run("an unanchored chain with no resolved key is unresolved", func(t *testing.T) {
-		resolved := &resolution{}
-		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved), Options{})
-		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
-		require.Equal(t, 1, resolved.calls)
-	})
-
-	t.Run("an unanchored chain whose resolver fails is unresolved", func(t *testing.T) {
-		resolverFailure := errors.New("issuer JWKS unavailable")
-		resolved := &resolution{err: resolverFailure}
-		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved), Options{})
-		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
-		require.ErrorIs(t, err, resolverFailure)
-		require.Equal(t, 1, resolved.calls)
-	})
-
-	t.Run("an unanchored chain whose resolved key does not verify is a signature failure", func(t *testing.T) {
-		stranger := testutil.NewP256Key(t)
-		resolved := &resolution{keys: []jose.JSONWebKey{{Key: &stranger.PublicKey, KeyID: "issuer-key-1"}}}
-		_, _, err := acceptor.Verify(t.Context(), untrustedWire, policy(unrelated.anchors(), true, resolved), Options{})
-		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
+		require.Zero(t, network.requestCount())
 	})
 }
 
@@ -358,33 +304,21 @@ func TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly(t *testing.T) {
 	unrelated := newTestIssuerChain(t, []string{"issuer.example.test"})
 	leafOnly := []string{base64.StdEncoding.EncodeToString(chain.leafCert.Raw)}
 	wire := []byte(buildWire(t, testWire{signingKey: chain.leafKey, x5c: leafOnly}))
-	calls := 0
-	resolve := func(string, map[string]any) ([]jose.JSONWebKey, error) {
-		calls++
-		return []jose.JSONWebKey{{Key: &chain.leafKey.PublicKey}}, nil
-	}
+	unsigned := []byte(buildWire(t, testWire{signingKey: chain.leafKey}))
+	metadata := resolving(jose.JSONWebKey{Key: &chain.leafKey.PublicKey})
 
 	t.Run("key resolution alone does not authenticate the issuer", func(t *testing.T) {
-		calls = 0
-		_, _, err := haip.Verify(t.Context(), wire, Policy{ResolveIssuerKeys: resolve}, Options{})
+		_, _, err := haip.Verify(t.Context(), wire, metadata, Options{})
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
-		require.Zero(t, calls)
-	})
-
-	t.Run("UnverifiedIssuer does not waive the x5c check", func(t *testing.T) {
-		_, _, err := haip.Verify(t.Context(), wire, Policy{UnverifiedIssuer: true}, Options{})
-		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+		_, _, err = haip.Verify(t.Context(), unsigned, metadata, Options{})
+		require.ErrorIs(t, err, ErrHAIPX5CRequired)
 	})
 
 	t.Run("an unanchored chain never falls back to key resolution", func(t *testing.T) {
-		calls = 0
-		_, _, err := haip.Verify(t.Context(), wire, Policy{
-			IssuerX509:                        &IssuerX509TrustOptions{TrustAnchors: unrelated.anchors(), AllowUnadvertisedRevocation: true},
-			ResolveIssuerKeys:                 resolve,
-			ResolveIssuerKeysWhenX5CUntrusted: true,
-		}, Options{})
+		policy := metadata
+		policy.IssuerX509 = &IssuerX509TrustOptions{TrustAnchors: unrelated.anchors(), AllowUnadvertisedRevocation: true}
+		_, _, err := haip.Verify(t.Context(), wire, policy, Options{})
 		require.ErrorIs(t, err, commonX509.ErrNoTrustAnchor)
-		require.Zero(t, calls)
 	})
 
 	t.Run("an anchored chain is accepted", func(t *testing.T) {

@@ -110,7 +110,7 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 	require.NoError(t, err)
 	presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, &oid4vp.Oid4vpPresenter{HTTPClient: server.Client()}))
 	require.NoError(t, err)
-	controller, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving, Presenter: presenting})
+	controller, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving, Presenter: presenting, CredentialAcceptance: acceptIssuerPolicyFor(server.URL, issuerKey)})
 	require.NoError(t, err)
 	issue := func(vct string, boundKey *jose.JSONWebKey, mandatory, selective map[string]any) {
 		t.Helper()

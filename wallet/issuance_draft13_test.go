@@ -1028,25 +1028,24 @@ func TestDraft13AuthorizeIssuanceRequiresAuthorizationDetailsItAskedFor(t *testi
 	require.Empty(t, fixture.credentials())
 }
 
-// Every Draft 13 stage requires Config.CredentialAcceptance before it sends
-// anything.
+// A Draft 13 Credential Request needs an acceptance policy, the request's
+// own or Config.CredentialAcceptance, before it sends anything.
 func TestDraft13RequiresAnAcceptancePolicy(t *testing.T) {
 	fixture := newDraft13Fixture(t, draft13RegisteredClient)
 	ctx := context.Background()
-	grant := fixture.preAuthorize(t, fixture.wallet)
-	tokens := len(fixture.tokens())
 	unverified := fixture.newWallet(t, func(c *Config) { c.CredentialAcceptance = nil })
+	grant := fixture.preAuthorize(t, unverified)
 
-	_, err := unverified.Draft13().AuthorizePreAuthorizedIssuance(ctx, fixture.preAuthorizedRequest())
+	_, err := unverified.Draft13().RequestCredential(ctx, grant, fixture.holder())
 	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
-	_, err = unverified.Draft13().BeginIssuance(ctx, IssuanceRequest{CredentialOffer: fixture.authorizationCodeOffer()})
-	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
-	_, err = unverified.Draft13().RequestCredential(ctx, grant, fixture.holder())
-	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
-
-	require.Len(t, fixture.tokens(), tokens)
 	require.Empty(t, fixture.credentials())
 	require.Zero(t, draft13StoredCount(t, unverified))
+
+	request := fixture.holder()
+	request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+	result, err := unverified.Draft13().RequestCredential(ctx, grant, request)
+	require.NoError(t, err)
+	require.Len(t, result.Credentials, 1)
 }
 
 // draft13States returns a complete state of each stage for issuer, stamped

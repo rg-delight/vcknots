@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore/types"
@@ -34,9 +35,10 @@ func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType 
 }
 
 // ReceiveCredential runs a Pre-Authorized Code issuance through the receiver
-// plugin's Receiver methods and stores the credential. Without
-// Config.CredentialAcceptance the credential is parsed but its issuer is not
-// authenticated. It is OpenID4VCI Draft 13 and returns ErrProfileForbidsDraft
+// plugin's Receiver methods and stores the credential once it passes
+// req.Acceptance, or else Config.CredentialAcceptance. Without either the
+// credential is parsed but its issuer is not authenticated. It is OpenID4VCI
+// Draft 13 and returns ErrProfileForbidsDraft
 // unless Config.Profiles enables profile.Draft13; new code uses
 // AuthorizePreAuthorizedIssuance and RequestCredential.
 func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
@@ -51,6 +53,10 @@ func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 	preAuthCode, err := w.validateCredentialOffer(req.CredentialOffer)
 	if err != nil {
 		return nil, keepMessage(ErrInvalidArgument, err)
+	}
+	policy := req.Acceptance
+	if policy == nil {
+		policy = w.credentialAcceptance
 	}
 
 	issuerMetadata, authMetadata, err := w.fetchCredentialMetadata(req)
@@ -80,7 +86,7 @@ func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 		holderKey = &publicKey
 	}
 
-	return w.storeAndParseCredential(context.Background(), credentialJWT, serializationFlavor, holderKey, false)
+	return w.storeAndParseCredential(context.Background(), policy, issuerMetadata.CredentialIssuer, credentialJWT, serializationFlavor, holderKey)
 }
 
 // validateCredentialOffer validates the credential offer and extracts pre-authorization code.
@@ -489,15 +495,27 @@ func (w *Wallet) requestCredential(
 	return credentialJWT, nil
 }
 
-// storeAndParseCredential verifies the credential for acceptance, stores it and
-// parses it for return. Nothing is stored when verification fails.
-// requirePolicy makes Config.CredentialAcceptance mandatory for this call.
-func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*SavedCredential, error) {
+// storeAndParseCredential verifies the credential under policy, stores it and
+// parses it for return. Nothing is stored when verification fails. A nil
+// policy only parses the credential.
+func (w *Wallet) storeAndParseCredential(ctx context.Context, policy *acceptance.Policy, credentialIssuer string, credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*SavedCredential, error) {
 	if serializationFlavor == "" {
 		serializationFlavor = credential.JwtVc
 	}
 
-	parsedCredential, verification, verificationErr := w.verifyCredentialUnder(ctx, profile.Draft13(), []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
+	var parsedCredential *credential.Credential
+	var verification *acceptance.Verification
+	var verificationErr error
+	if policy == nil {
+		// Without a policy the credential is only parsed.
+		var acceptor *acceptance.Acceptor
+		acceptor, verificationErr = acceptance.NewAcceptor(profile.Draft13(), w.serializer, w.verifier)
+		if verificationErr == nil {
+			parsedCredential, verification, verificationErr = acceptor.Parse([]byte(*credentialJWT), acceptance.Options{Flavor: serializationFlavor, HolderKey: holderKey})
+		}
+	} else {
+		parsedCredential, verification, verificationErr = w.verifyCredentialUnder(ctx, profile.Draft13(), policy, []byte(*credentialJWT), serializationFlavor, holderKey, credentialIssuer)
+	}
 	if verificationErr != nil {
 		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}

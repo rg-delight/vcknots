@@ -49,14 +49,12 @@ func (i ldpTestIssuer) did() string {
 	return did
 }
 
-// policy verifies the issuer's proof with its key and the pinned context.
+// policy authenticates the issuer's did:key through a DID Configuration the
+// Credential Issuer's origin serves, with the issuer's context pinned.
 func (i ldpTestIssuer) policy() *acceptance.Policy {
-	return &acceptance.Policy{
-		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{{Key: i.key.Public(), Algorithm: string(jose.EdDSA)}}, nil
-		},
-		DataIntegrityContexts: i.contexts,
-	}
+	policy := acceptDIDIssuerPolicy(i.did(), i.method, jose.EdDSA, i.key)
+	policy.DataIntegrityContexts = i.contexts
+	return policy
 }
 
 // credential returns a signed credential whose subject is subjectID.
@@ -129,20 +127,6 @@ func TestDraft13IssuesAnLdpVC(t *testing.T) {
 	}, request["credential_definition"])
 }
 
-// UnverifiedIssuer accepts an ldp_vc exactly as it accepts the other formats.
-func TestDraft13AcceptsAnUnverifiedLdpVC(t *testing.T) {
-	issuer := newLdpTestIssuer(t)
-	fixture := newLdpDraft13Fixture(t, issuer, func(holder jose.JSONWebKey) map[string]any {
-		return issuer.credential(t, didKeyOf(t, holder))
-	}, func(c *Config) { c.CredentialAcceptance = &acceptance.Policy{UnverifiedIssuer: true} })
-
-	result, err := fixture.receivePreAuthorized(t)
-	require.NoError(t, err)
-	require.Len(t, result.Credentials, 1)
-	require.Nil(t, result.Credentials[0].Verification.IssuerKey)
-	require.Equal(t, "Computer Science", (*result.Credentials[0].Credential.Claims)["degreeName"])
-}
-
 // A policy that cannot verify the proof, a tampered credential and a
 // credential bound to another holder are refused and not stored.
 func TestDraft13RefusesAnLdpVCItCannotAccept(t *testing.T) {
@@ -152,16 +136,16 @@ func TestDraft13RefusesAnLdpVCItCannotAccept(t *testing.T) {
 		policy *acceptance.Policy
 		want   error
 	}{
-		"resolved keys do not verify the proof": {
+		"a DID the Credential Issuer's origin does not link": {
 			issued: func(holder jose.JSONWebKey) map[string]any { return issuer.credential(t, didKeyOf(t, holder)) },
-			policy: &acceptance.Policy{
-				ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-					other := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-					return []jose.JSONWebKey{{Key: other.Public()}}, nil
-				},
-				DataIntegrityContexts: issuer.contexts,
-			},
-			want: acceptance.ErrIssuerSignatureInvalid,
+			policy: func() *acceptance.Policy {
+				other := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+				otherDID := didKeyOf(t, jose.JSONWebKey{Key: other.Public()})
+				policy := acceptDIDIssuerPolicy(otherDID, otherDID, jose.EdDSA, other)
+				policy.DataIntegrityContexts = issuer.contexts
+				return policy
+			}(),
+			want: acceptance.ErrIssuerKeyUnresolved,
 		},
 		"a tampered claim": {
 			issued: func(holder jose.JSONWebKey) map[string]any {
@@ -176,12 +160,12 @@ func TestDraft13RefusesAnLdpVCItCannotAccept(t *testing.T) {
 			issued: func(jose.JSONWebKey) map[string]any {
 				return issuer.credential(t, didKeyOf(t, newPrivateJWKForFinalVCITest(t, "other")))
 			},
-			policy: &acceptance.Policy{UnverifiedIssuer: true},
+			policy: issuer.policy(),
 			want:   acceptance.ErrHolderBindingMismatch,
 		},
 		"bound to no holder": {
 			issued: func(jose.JSONWebKey) map[string]any { return issuer.credential(t, "did:example:holder") },
-			policy: &acceptance.Policy{UnverifiedIssuer: true},
+			policy: issuer.policy(),
 			want:   acceptance.ErrHolderBindingMissing,
 		},
 	} {
