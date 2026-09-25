@@ -213,10 +213,16 @@ type DeferredIssuance struct {
 	ResponseDecryptionKey *jose.JSONWebKey `json:"response_decryption_key,omitempty"`
 	DPoPKeyThumbprint     string           `json:"dpop_key_thumbprint,omitempty"`
 	// Acceptance is the CredentialRequest.Acceptance this issuance was
-	// requested with. It is not serialized: a caller that stores the state
-	// sets it again, or the credentials are accepted under
-	// Config.CredentialAcceptance.
+	// requested with. A policy holds functions and trust material, so it is
+	// not serialized: a caller that stores the state sets it again before
+	// RequestDeferredCredential.
 	Acceptance *acceptance.Policy `json:"-"`
+	// AcceptanceOverridden records that the issuance was requested with a
+	// CredentialRequest.Acceptance, and is serialized. While it is set,
+	// RequestDeferredCredential refuses a DeferredIssuance whose Acceptance is
+	// nil with ErrCredentialAcceptancePolicyRequired, before anything is sent,
+	// instead of accepting the credentials under Config.CredentialAcceptance.
+	AcceptanceOverridden bool `json:"acceptance_overridden,omitempty"`
 
 	cache *issuanceMetadataCache
 }

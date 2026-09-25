@@ -15,7 +15,9 @@ import (
 // Request (Section 9) for d. While the issuer has not issued the credentials,
 // the result's Deferred is d with the interval the issuer asked for; the
 // library does not wait or retry. Issued credentials are accepted as in
-// RequestCredential, under d.Acceptance or else Config.CredentialAcceptance.
+// RequestCredential, under d.Acceptance or else Config.CredentialAcceptance;
+// a d that records a per-request policy (AcceptanceOverridden) needs
+// d.Acceptance set again.
 func (w *Wallet) RequestDeferredCredential(ctx context.Context, d *DeferredIssuance) (*IssuanceResult, error) {
 	result, err := w.requestDeferredCredential(ctx, d)
 	return result, classify(err)
@@ -28,7 +30,7 @@ func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssua
 	if err := w.requireFinalIssuance(ctx); err != nil {
 		return nil, err
 	}
-	policy, err := w.acceptancePolicy(d.Acceptance)
+	policy, err := w.deferredAcceptancePolicy(d)
 	if err != nil {
 		return nil, err
 	}

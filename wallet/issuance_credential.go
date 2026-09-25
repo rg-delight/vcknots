@@ -216,6 +216,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 				ResponseDecryptionKey:     decryptionKey,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
 				Acceptance:                req.Acceptance,
+				AcceptanceOverridden:      req.Acceptance != nil,
 				cache:                     w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil

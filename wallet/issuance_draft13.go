@@ -529,6 +529,7 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 				HolderKeys:                holderKeys,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
 				Acceptance:                req.Acceptance,
+				AcceptanceOverridden:      req.Acceptance != nil,
 				cache:                     d.w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil
@@ -659,7 +660,7 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err := checkDeferred(deferred, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
-	policy, err := d.w.acceptancePolicy(deferred.Acceptance)
+	policy, err := d.w.deferredAcceptancePolicy(deferred)
 	if err != nil {
 		return nil, err
 	}

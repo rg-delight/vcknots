@@ -727,6 +727,7 @@ Credential Configuration の `format` が発行の OpenID4VCI バージョンの
 
 `RequestCredential` と `RequestDeferredCredential` は受理ポリシーを要求し、なければ何も送りません。
 ポリシーは `CredentialRequest.Acceptance`（`DeferredIssuance.Acceptance` に引き継がれます。JSON には含まれません）か `Config.CredentialAcceptance` です。
+`DeferredIssuance` は、発行ごとのポリシーがあったことを、シリアライズされる `AcceptanceOverridden` に記録します。読み戻した後に `Acceptance` を設定し直さなければ、`Config.CredentialAcceptance` に置き換えずに `ErrCredentialAcceptancePolicyRequired` で失敗します。
 HAIP では、各段階が `Config.DPoP.Key` を要求し、PAR または token エンドポイントを呼ぶ段階（`BeginIssuance`、`AuthorizeIssuance`、`AuthorizePreAuthorizedIssuance`）はクライアント認証の手段（`private_key_jwt` または `Config.Attestation.Client`、HAIP §4.4.1）も要求します。
 
 ### Authorization Code Flow

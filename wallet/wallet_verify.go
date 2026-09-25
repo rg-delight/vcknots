@@ -94,6 +94,19 @@ func (w *Wallet) acceptancePolicy(override *acceptance.Policy) (*acceptance.Poli
 	return nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 }
 
+// deferredAcceptancePolicy is acceptancePolicy for a deferred issuance. An
+// issuance requested with its own policy records that in
+// AcceptanceOverridden, which survives serialization while the policy does
+// not; such a DeferredIssuance without its policy fails with
+// ErrCredentialAcceptancePolicyRequired rather than silently falling back to
+// Config.CredentialAcceptance.
+func (w *Wallet) deferredAcceptancePolicy(d *DeferredIssuance) (*acceptance.Policy, error) {
+	if d.AcceptanceOverridden && d.Acceptance == nil {
+		return nil, fmt.Errorf("the issuance was requested with its own acceptance policy; set DeferredIssuance.Acceptance again: %w", ErrCredentialAcceptancePolicyRequired)
+	}
+	return w.acceptancePolicy(d.Acceptance)
+}
+
 // verifyCredentialUnder applies policy to raw under issuance profile p: the
 // wallet's 1.0 profile for OpenID4VCI 1.0, and profile.Draft13 for a Draft 13
 // credential. credentialIssuer is the Credential Issuer Identifier of the

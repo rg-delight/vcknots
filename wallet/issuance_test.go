@@ -86,3 +86,47 @@ func TestIssuanceStatesSurviveJSONInAnotherWallet(t *testing.T) {
 	require.Len(t, issued.Credentials, 1)
 	require.Equal(t, "tx-1", fixture.lastDeferredBody["transaction_id"])
 }
+
+// Review of 2026-09-25 (finding 5): a per-request acceptance policy does not
+// survive serialization, and a deferred issuance read back without it was
+// accepted under Config.CredentialAcceptance instead. The override is now
+// recorded, and its absence refuses the Deferred Credential Request before
+// anything is sent.
+func TestDeferredIssuanceKeepsTheFactOfAPerRequestPolicy(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeDeferredEndpoint = true
+		f.credentialHandler = func(w http.ResponseWriter, _ *http.Request) {
+			mockserver.JSONResponse(w, http.StatusAccepted, map[string]any{"transaction_id": "tx-1"})
+		}
+	})
+	ctx := context.Background()
+	grant, err := fixture.authorize(fixture.issuanceRequest())
+	require.NoError(t, err)
+	perRequest := fixture.wallet.credentialAcceptance
+	require.NotNil(t, perRequest)
+	request := fixture.credentialRequest()
+	request.Acceptance = perRequest
+	result, err := fixture.wallet.RequestCredential(ctx, grant, request)
+	require.NoError(t, err)
+	require.True(t, result.Deferred.AcceptanceOverridden)
+
+	var stored DeferredIssuance
+	requireJSONRoundTrip(t, result.Deferred, &stored)
+	require.True(t, stored.AcceptanceOverridden)
+	require.Nil(t, stored.Acceptance)
+	_, err = fixture.newWallet(t).RequestDeferredCredential(ctx, &stored)
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Nil(t, fixture.lastDeferredBody, "nothing is sent without the policy")
+
+	stored.Acceptance = perRequest
+	issued, err := fixture.newWallet(t).RequestDeferredCredential(ctx, &stored)
+	require.NoError(t, err)
+	require.Len(t, issued.Credentials, 1)
+
+	// Without a per-request policy the wallet's own policy applies, as before.
+	plain, err := fixture.authorize(fixture.issuanceRequest())
+	require.NoError(t, err)
+	result, err = fixture.wallet.RequestCredential(ctx, plain, fixture.credentialRequest())
+	require.NoError(t, err)
+	require.False(t, result.Deferred.AcceptanceOverridden)
+}
