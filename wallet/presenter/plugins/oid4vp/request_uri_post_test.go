@@ -182,3 +182,53 @@ func TestFinalRequestURIGETIgnoresWalletNonceClaim(t *testing.T) {
 		t.Fatalf("GET must record no sent nonce: %+v", req.RequestObjectVerification)
 	}
 }
+
+// TestFinalRequestURIPostCanOmitWalletNonce covers the Wallet's choice OID4VP
+// 1.0 §5.10 leaves open: wallet_nonce is OPTIONAL. With OmitWalletNonce the
+// POST carries no wallet_nonce, the generator is never called, and §5.10.1
+// checks no echo ("if the Wallet passed a wallet_nonce"), so a Request Object
+// with an unrelated wallet_nonce claim, or none, is admitted.
+func TestFinalRequestURIPostCanOmitWalletNonce(t *testing.T) {
+	cases := map[string]func(string) string{
+		"no claim":        func(string) string { return "" },
+		"unrelated claim": func(string) string { return "nonce-from-elsewhere" },
+	}
+	for name, claim := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRequestObjectFixture(t)
+			captured := &capturedRequestURIForm{}
+			f.setRequestObjectHandler(func(w http.ResponseWriter, r *http.Request) {
+				captured.set(r)
+				claims := f.claims()
+				if value := claim(r.Form.Get("wallet_nonce")); value != "" {
+					claims["wallet_nonce"] = value
+				}
+				w.Header().Set("Content-Type", "application/oauth-authz-req+jwt")
+				_, _ = w.Write([]byte(f.sign(t, claims, nil)))
+			})
+
+			p := f.presenter()
+			p.OmitWalletNonce = true
+			p.RequestURINonce = func() (string, error) {
+				t.Fatal("RequestURINonce must not be called when the wallet_nonce is omitted")
+				return "", nil
+			}
+			p.WalletMetadata = map[string]any{"vp_formats_supported": map[string]any{}}
+
+			req, err := f.parseRequestURIPost(t, p)
+			if err != nil {
+				t.Fatalf("ParsePresentationRequest: %v", err)
+			}
+			got := captured.snapshot()
+			if got.method != http.MethodPost || got.nonce != "" {
+				t.Fatalf("POST body = %+v, want a POST without wallet_nonce", got)
+			}
+			if !got.hasMetadata {
+				t.Fatal("wallet_metadata must still be sent when the wallet_nonce is omitted")
+			}
+			if proof := req.RequestObjectVerification; proof == nil || proof.WalletNonce != "" || proof.Delivery != "reference" {
+				t.Fatalf("verification = %+v, want delivery by reference and no sent wallet_nonce", proof)
+			}
+		})
+	}
+}

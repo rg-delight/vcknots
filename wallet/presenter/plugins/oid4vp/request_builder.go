@@ -21,8 +21,7 @@ type requestBuilder struct {
 // builderPolicy is the part of the presenter configuration a requestBuilder
 // reads.
 type builderPolicy struct {
-	walletMetadata  map[string]any
-	requestURINonce func() (string, error)
+	requestURIPost requestURIPostSettings
 	// supportedTransactionDataTypes lists the transaction_data types the
 	// wallet processes (OID4VP 1.0 §5.1).
 	supportedTransactionDataTypes []string
@@ -150,7 +149,7 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	if b.errValidation != nil {
 		return b
 	}
-	body, err := b.fetchRequestObjectByReference(uri, method, b.settings().walletMetadata, b.settings().requestURINonce, "application/oauth-authz-req+jwt")
+	body, err := b.fetchRequestObjectByReference(uri, method, b.settings().requestURIPost, "application/oauth-authz-req+jwt")
 	if err != nil {
 		b.errValidation = err
 		return b

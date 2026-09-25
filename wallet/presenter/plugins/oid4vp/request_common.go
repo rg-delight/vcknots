@@ -262,13 +262,24 @@ func (c *requestCore) fetchRequestObject(uri string, method RequestURIMethod, fo
 	return body, nil
 }
 
+// requestURIPostSettings are the parameters of a request_uri POST (OID4VP 1.0
+// §5.10, Draft 24 §5.11): the wallet_metadata to send (nil omits it), the
+// wallet_nonce generator (nil uses defaultRequestURINonce) and whether the
+// wallet_nonce is omitted altogether.
+type requestURIPostSettings struct {
+	walletMetadata map[string]any
+	newNonce       func() (string, error)
+	omitNonce      bool
+}
+
 // fetchRequestObjectByReference fetches the Request Object of a request_uri
 // (OID4VP 1.0 §5.10, Draft 24 §5.11) and records that this parse observed
 // delivery by reference. RequestObjectValidationOptions.RequestURIPolicy
-// decides first whether the request_uri belongs to the outer client_id. A POST carries a fresh wallet_nonce, which the
-// Request Object must echo (§5.10.1), and walletMetadata as wallet_metadata
-// when it is non-nil.
-func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestURIMethod, walletMetadata map[string]any, newNonce func() (string, error), accept string) ([]byte, error) {
+// decides first whether the request_uri belongs to the outer client_id. A POST
+// carries a fresh wallet_nonce, which the Request Object must echo (§5.10.1),
+// unless post.omitNonce leaves it out; it carries post.walletMetadata as
+// wallet_metadata when that is non-nil.
+func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestURIMethod, post requestURIPostSettings, accept string) ([]byte, error) {
 	if c.requestObjectValidation != nil && c.requestObjectValidation.RequestURIPolicy != nil {
 		if err := c.requestObjectValidation.RequestURIPolicy(c.expectedClientID, uri); err != nil {
 			return nil, newAuthorizationRequestError(InvalidRequestError, "%w: %w", ErrRequestURINotAssociated, err)
@@ -276,20 +287,23 @@ func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestUR
 	}
 	form := url.Values{}
 	if method == RequestURIMethodPOST {
-		if newNonce == nil {
-			newNonce = defaultRequestURINonce
+		if !post.omitNonce {
+			newNonce := post.newNonce
+			if newNonce == nil {
+				newNonce = defaultRequestURINonce
+			}
+			nonce, err := newNonce()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate wallet_nonce: %w", err)
+			}
+			if nonce == "" {
+				return nil, errors.New("failed to generate wallet_nonce: the generator returned an empty value")
+			}
+			c.sentWalletNonce = nonce
+			form.Set("wallet_nonce", nonce)
 		}
-		nonce, err := newNonce()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate wallet_nonce: %w", err)
-		}
-		if nonce == "" {
-			return nil, errors.New("failed to generate wallet_nonce: the generator returned an empty value")
-		}
-		c.sentWalletNonce = nonce
-		form.Set("wallet_nonce", nonce)
-		if walletMetadata != nil {
-			metadataJSON, err := json.Marshal(walletMetadata)
+		if post.walletMetadata != nil {
+			metadataJSON, err := json.Marshal(post.walletMetadata)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal wallet_metadata: %w", err)
 			}

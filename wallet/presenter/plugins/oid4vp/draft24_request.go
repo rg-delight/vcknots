@@ -18,10 +18,9 @@ type draft24RequestBuilder struct {
 	// supportedTransactionDataTypes lists the transaction_data types the
 	// wallet processes (Draft 24 Section 5.1).
 	supportedTransactionDataTypes []string
-	// walletMetadata and requestURINonce are the presenter's request_uri POST
-	// settings (Draft 24 Section 5.11).
-	walletMetadata  map[string]any
-	requestURINonce func() (string, error)
+	// requestURIPost are the presenter's request_uri POST settings (Draft 24
+	// Section 5.11).
+	requestURIPost requestURIPostSettings
 }
 
 func newDraft24RequestBuilder() *draft24RequestBuilder {
@@ -181,7 +180,7 @@ func (b *draft24RequestBuilder) WithRequestObjectURI(uri string, method RequestU
 		// application/oauth-authz-req+jwt".
 		accept = "application/oauth-authz-req+jwt"
 	}
-	body, err := b.fetchRequestObjectByReference(uri, method, b.walletMetadata, b.requestURINonce, accept)
+	body, err := b.fetchRequestObjectByReference(uri, method, b.requestURIPost, accept)
 	if err != nil {
 		b.errValidation = err
 		return b

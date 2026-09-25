@@ -39,6 +39,13 @@ type Oid4vpPresenter struct {
 	// RequestURINonce generates the wallet_nonce sent with a request_uri POST.
 	// A nil value uses 32 random bytes, base64url-encoded without padding.
 	RequestURINonce func() (string, error)
+	// OmitWalletNonce sends a request_uri POST without wallet_nonce. OID4VP 1.0
+	// §5.10 makes the parameter OPTIONAL for the Wallet, and §5.10.1 requires
+	// the Request Object to echo it only "if the Wallet passed a wallet_nonce",
+	// so no echo is checked either; replay protection then rests on the
+	// Verifier. The zero value sends it (Draft 24 §5.11 alike). RequestURINonce
+	// is not called.
+	OmitWalletNonce bool
 	// SupportedTransactionDataTypes lists the transaction_data "type" values the
 	// wallet can process. A nil or empty list means the wallet supports no
 	// transaction_data type, so any request carrying transaction_data is
@@ -236,6 +243,15 @@ func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) 
 	}
 }
 
+// requestURIPostSettings are the presenter's request_uri POST parameters.
+func (p *Oid4vpPresenter) requestURIPostSettings() requestURIPostSettings {
+	return requestURIPostSettings{
+		walletMetadata: p.WalletMetadata,
+		newNonce:       p.RequestURINonce,
+		omitNonce:      p.OmitWalletNonce,
+	}
+}
+
 // newRequestBuilder creates the builder of one OpenID4VP 1.0 parse with the
 // presenter's transport, trust and protocol policy.
 func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilder, error) {
@@ -252,8 +268,7 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 	builder.options = options
 	p.configureCore(ctx, &builder.requestCore)
 	builder.policy = &builderPolicy{
-		walletMetadata:                p.WalletMetadata,
-		requestURINonce:               p.RequestURINonce,
+		requestURIPost:                p.requestURIPostSettings(),
 		supportedTransactionDataTypes: p.SupportedTransactionDataTypes,
 	}
 	return builder, nil

@@ -183,6 +183,23 @@ func TestDraft24RequestURIPostSendsWalletNonceAndMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("OmitWalletNonce sends no wallet_nonce and checks no echo", func(t *testing.T) {
+		captured := &capturedRequestURIForm{}
+		f := draft24PostFixture(t, captured, "")
+		p := f.presenter()
+		p.OmitWalletNonce = true
+		request, err := parseDraft24ForTest(p, draft24RequestURIPost(f))
+		if err != nil {
+			t.Fatalf("ParseDraft24Request: %v", err)
+		}
+		if got := captured.snapshot(); got.method != http.MethodPost || got.nonce != "" {
+			t.Fatalf("POST body = %+v, want a POST without wallet_nonce", got)
+		}
+		if proof := request.RequestObjectVerification; proof == nil || proof.WalletNonce != "" {
+			t.Fatalf("no wallet_nonce was sent, so none is recorded: %+v", proof)
+		}
+	})
+
 	t.Run("a Request Object that does not echo the nonce is refused", func(t *testing.T) {
 		captured := &capturedRequestURIForm{}
 		f := draft24PostFixture(t, captured, "another-nonce")
