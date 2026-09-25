@@ -274,5 +274,10 @@ func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*Credenti
 		}
 		return nil, fmt.Errorf("failed to build CredentialPresentationRequest: %w", err)
 	}
-	return p.admit(req, wire, core.requestObject)
+	handle, err := p.admit(req, wire, core.requestObject)
+	if err != nil {
+		return nil, err
+	}
+	handle.recordAdmission(core, p.admissionProfile(wire))
+	return handle, nil
 }

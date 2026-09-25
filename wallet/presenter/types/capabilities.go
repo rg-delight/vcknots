@@ -39,6 +39,26 @@ type RequestParser interface {
 	ParseRequestObject(ctx context.Context, requestObject string, src RequestObjectSource) (AdmittedRequest, error)
 }
 
+// SealedAdmission is the versioned, HMAC-sealed record of an admission in
+// which the presenter fetched the Request Object from request_uri itself
+// (oid4vp.AdmittedRequest.Seal). It is opaque to the caller, who may store it
+// with a request that spans several stateless calls and hand it back to the
+// presenter that re-admits it. It carries the Request Object, so it is as
+// sensitive as the Request Object is.
+type SealedAdmission string
+
+// RequestReadmitter re-admits an OpenID4VP 1.0 request from a sealed
+// admission.
+type RequestReadmitter interface {
+	ReadmitRequest(ctx context.Context, sealed SealedAdmission, key []byte) (AdmittedRequest, error)
+}
+
+// Draft24RequestReadmitter re-admits an OpenID4VP Draft 24 request from a
+// sealed admission.
+type Draft24RequestReadmitter interface {
+	ReadmitDraft24Request(ctx context.Context, sealed SealedAdmission, key []byte) (AdmittedRequest, error)
+}
+
 // DCAPIRequestParser parses and admits OpenID4VP 1.0 Appendix A requests
 // delivered through the W3C Digital Credentials API.
 type DCAPIRequestParser interface {

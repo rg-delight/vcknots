@@ -86,7 +86,13 @@ type requestCore struct {
 	// sentWalletNonce is the wallet_nonce this parse sent with a request_uri
 	// POST, which the Request Object must echo (OID4VP 1.0 §5.10.1).
 	sentWalletNonce string
-	requestSource   requestSource
+	// admittedAt is the instant this parse authenticates the Request Object
+	// at, pinned by the first requestObjectValidationOptions call so every
+	// check of the parse reads the same clock. readmitAt, when set, is the
+	// instant of the sealed admission a re-admission replays.
+	admittedAt    time.Time
+	readmitAt     time.Time
+	requestSource requestSource
 	// requestObject is the Request Object the request was read from, "" for
 	// plain parameters.
 	requestObject string
@@ -358,6 +364,14 @@ func (c *requestCore) requestObjectValidationOptions() (RequestObjectValidationO
 	if options.ClockSkew < 0 {
 		return options, errors.New("request object clock skew cannot be negative")
 	}
+	if c.admittedAt.IsZero() {
+		c.admittedAt = c.readmitAt
+		if c.admittedAt.IsZero() {
+			c.admittedAt = requestObjectNow(options)
+		}
+	}
+	admittedAt := c.admittedAt
+	options.Now = func() time.Time { return admittedAt }
 	return options, nil
 }
 

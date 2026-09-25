@@ -258,6 +258,14 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			_, err := newSDJWTPresentationFixture(t).wallet.ParsePresentationRequestObject(ctx, "not a JWS", presenterTypes.RequestObjectSource{ClientID: "x509_san_dns:verifier.example"})
 			return err
 		},
+		"Wallet.ReadmitPresentationRequest: not a sealed admission": func(t *testing.T) error {
+			_, err := newSDJWTPresentationFixture(t).wallet.ReadmitPresentationRequest(ctx, "not sealed", testSealKey)
+			return err
+		},
+		"Wallet.ReadmitPresentationRequest: short key": func(t *testing.T) error {
+			_, err := newSDJWTPresentationFixture(t).wallet.ReadmitPresentationRequest(ctx, "v1.a.b", []byte("short"))
+			return err
+		},
 		"Wallet.ParseDCAPIRequest: empty invocation": func(t *testing.T) error {
 			_, err := newSDJWTPresentationFixture(t).wallet.ParseDCAPIRequest(ctx, presenterTypes.DCAPIInvocation{})
 			return err
@@ -318,6 +326,14 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Draft24Presentation.ParsePresentationRequestObject: HAIP": func(t *testing.T) error {
 			_, err := newHAIPIssuanceFixture(t).wallet.Draft24().ParsePresentationRequestObject(ctx, "a.b.c", presenterTypes.RequestObjectSource{})
+			return err
+		},
+		"Draft24Presentation.ReadmitPresentationRequest: HAIP": func(t *testing.T) error {
+			_, err := newHAIPIssuanceFixture(t).wallet.Draft24().ReadmitPresentationRequest(ctx, "v1.a.b", testSealKey)
+			return err
+		},
+		"Draft24Presentation.ReadmitPresentationRequest: not a sealed admission": func(t *testing.T) error {
+			_, err := newSDJWTPresentationFixture(t).wallet.Draft24().ReadmitPresentationRequest(ctx, "not sealed", testSealKey)
 			return err
 		},
 		"Draft24Presentation.ParsePresentationRequestObject: not a JWS": func(t *testing.T) error {

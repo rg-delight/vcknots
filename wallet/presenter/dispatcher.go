@@ -202,6 +202,34 @@ func (d *PresentationDispatcher) ParseDraft24RequestObject(ctx context.Context, 
 	return req, nil
 }
 
+// ReadmitRequest re-admits an OpenID4VP 1.0 request from a sealed admission
+// through the plugin registered for protocol.
+func (d *PresentationDispatcher) ReadmitRequest(ctx context.Context, protocol types.SupportedPresentationProtocol, sealed types.SealedAdmission, key []byte) (types.AdmittedRequest, error) {
+	readmitter, err := capability[types.RequestReadmitter](d, protocol, "readmit_request")
+	if err != nil {
+		return nil, err
+	}
+	req, err := readmitter.ReadmitRequest(ctx, sealed, key)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "readmit_request", err)
+	}
+	return req, nil
+}
+
+// ReadmitDraft24Request re-admits an OpenID4VP Draft 24 request from a sealed
+// admission through the plugin registered for protocol.
+func (d *PresentationDispatcher) ReadmitDraft24Request(ctx context.Context, protocol types.SupportedPresentationProtocol, sealed types.SealedAdmission, key []byte) (types.AdmittedRequest, error) {
+	readmitter, err := capability[types.Draft24RequestReadmitter](d, protocol, "readmit_draft24_request")
+	if err != nil {
+		return nil, err
+	}
+	req, err := readmitter.ReadmitDraft24Request(ctx, sealed, key)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "readmit_draft24_request", err)
+	}
+	return req, nil
+}
+
 // SubmitDCQLResponse answers an admitted request with vp_token through the
 // plugin registered for the request's protocol.
 func (d *PresentationDispatcher) SubmitDCQLResponse(ctx context.Context, req types.AdmittedRequest, vpToken map[string][]string) (*types.SubmitResult, error) {

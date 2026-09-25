@@ -63,6 +63,20 @@ func (w *Wallet) ParsePresentationRequestObject(ctx context.Context, requestObje
 	return admittedOID4VPRequest(w.presenter.ParseRequestObject(ctx, presenterTypes.Oid4vp, requestObject, src))
 }
 
+// ReadmitPresentationRequest re-admits an OpenID4VP 1.0 request from the
+// sealed admission h.Seal(key) returned for a handle this wallet's presenter
+// admitted by fetching its request_uri, so a caller whose calls are stateless
+// can answer the request after the Holder's consent. The seal must verify
+// under key and name the wallet's profile; the Request Object is then
+// authenticated again as delivered by reference, with the wallet_nonce sent
+// for it, on the clock of the first admission. Under a profile that requires
+// delivery by reference (HAIP) this is how a later call answers the request:
+// ParsePresentationRequestObject refuses a Request Object passed by value
+// there. See oid4vp.Oid4vpPresenter.ReadmitRequest.
+func (w *Wallet) ReadmitPresentationRequest(ctx context.Context, sealed presenterTypes.SealedAdmission, key []byte) (*oid4vp.AdmittedRequest, error) {
+	return admittedOID4VPRequest(w.presenter.ReadmitRequest(ctx, presenterTypes.Oid4vp, sealed, key))
+}
+
 // ParseDCAPIRequest parses and admits an OpenID4VP 1.0 request delivered
 // through the Digital Credentials API (Appendix A). SubmitPresentation answers
 // it with SubmitResult.DCAPIResponse instead of an HTTP call.

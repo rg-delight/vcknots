@@ -523,9 +523,9 @@ Token endpoint client authentication: `Method` (`""` means none, or `receiverTyp
 | Credential checks | `VerifyCredential`, `VerifyCredentialForAcceptance` |
 | OpenID4VCI 1.0 | `ResolveCredentialOffer`, `BeginIssuance`, `AuthorizeIssuance`, `AuthorizePreAuthorizedIssuance`, `RequestCredential`, `RequestDeferredCredential`, `NotifyIssuer` |
 | OpenID4VCI one-call and metadata | `ReceiveCredential`, `FetchCredentialIssuerMetadata` |
-| OpenID4VP 1.0 | `ParsePresentationRequest`, `ParsePresentationRequestObject`, `ParseDCAPIRequest`, `SelectCredentials`, `SubmitPresentation`, `DeclinePresentation` |
+| OpenID4VP 1.0 | `ParsePresentationRequest`, `ParsePresentationRequestObject`, `ReadmitPresentationRequest`, `ParseDCAPIRequest`, `SelectCredentials`, `SubmitPresentation`, `DeclinePresentation` |
 | OpenID4VP one-call | `PresentCredential`, `PresentCredentialWithOptions` |
-| Draft views | `Draft13()` (`BeginIssuance`, `AuthorizeIssuance`, `AuthorizePreAuthorizedIssuance`, `RequestCredential`, `RequestDeferredCredential`, `NotifyIssuer`), `Draft24()` (`ParsePresentationRequest`, `ParsePresentationRequestObject`) |
+| Draft views | `Draft13()` (`BeginIssuance`, `AuthorizeIssuance`, `AuthorizePreAuthorizedIssuance`, `RequestCredential`, `RequestDeferredCredential`, `NotifyIssuer`), `Draft24()` (`ParsePresentationRequest`, `ParsePresentationRequestObject`, `ReadmitPresentationRequest`) |
 
 The methods that take a `context.Context` stop when it is canceled. Every error a method returns carries a code (see [Error codes](#error-codes)).
 
@@ -907,6 +907,7 @@ A presentation request is parsed and admitted once, then answered through the ha
 | --- | --- |
 | `ParsePresentationRequest(ctx, uri)` | Parse and admit an Authorization Request URI, fetching `request_uri` itself. |
 | `ParsePresentationRequestObject(ctx, requestObject, src)` | Authenticate a Request Object the caller already holds, as one passed by value. HAIP refuses it (`ErrHAIPRequestURIRequired`). |
+| `ReadmitPresentationRequest(ctx, sealed, key)` | Re-admit a request from the sealed admission `h.Seal(key)` returned (see [Parsing now and presenting later](#parsing-now-and-presenting-later)). |
 | `ParseDCAPIRequest(ctx, invocation)` | Admit a Digital Credentials API request. |
 | `SelectCredentials(ctx, h)` | The library's own choice of stored credentials. |
 | `SubmitPresentation(ctx, h, Presentation)` | Check, serialize and send the response. |
@@ -945,9 +946,53 @@ func presentWithConsent(ctx context.Context, w *wallet.Wallet, uri string, holde
 
 `Presentation` holds the default holder `Key`, the `Credentials` and optional `SerializeOptions`. Each `CredentialSelection` names a stored credential by `CredentialID` or carries it by value in `Credential` (required on a storeless wallet), lists the DCQL `QueryIDs` it answers, and may set `DisclosedClaims` (the disclosure names the holder kept; nil keeps every claim the request asks for) and its own `Key`. `SubmitPresentation` sends nothing when the selection does not answer the request. `SubmitResult` carries the verifier's `RedirectURI`, the `DCAPIResponse` for a DC API request, and `Encrypted`.
 
-### Parsing now and presenting later
+### Parsing now and presenting later {#parsing-now-and-presenting-later}
 
-The handle is not serializable. A wallet that shows a consent screen in one request and presents in another keeps the Request Object (`h.RequestObject()`) and parses it again; the second parse authenticates the Request Object again, including its `exp`.
+The handle is not serializable, and only the presenter that admitted a request answers it. A wallet that shows a consent screen in one call and presents in another, with no state kept in memory between them, carries the admission across in one of two ways.
+
+**Sealed admission.** `h.Seal(key)` returns a `presenterTypes.SealedAdmission`: a record of what the first admission observed, sealed with HMAC-SHA256 under a key the caller holds. The record holds the Request Object as the library fetched it from `request_uri`, the delivery by reference, the `wallet_nonce` the library sent, the outer `client_id`, the instant the Request Object was authenticated at, and the name of the profile it was admitted under. `w.ReadmitPresentationRequest(ctx, sealed, key)` (`w.Draft24().ReadmitPresentationRequest` for a Draft 24 request) accepts the record only when the seal verifies under the same key and the record names the wallet's profile and the protocol version of the method, and then authenticates the Request Object again: its signature, the client authentication its Client Identifier Prefix selects, the `wallet_nonce` echo and every profile option, as the Request Object delivered by reference, on the clock of the first admission. It does not fetch `request_uri` again. The result is an ordinary handle, answered by `SubmitPresentation` or `DeclinePresentation`, and can be sealed again.
+
+This is how a HAIP wallet answers in a later call: HAIP (`Options.RequireSignedRequestByReference`, §5.1) refuses a Request Object handed over by value, and a sealed admission is not one, since only the holder of the key can make a record the library accepts. Nothing changes on the wire.
+
+```go
+import (
+	"context"
+
+	"github.com/trustknots/vcknots/wallet"
+	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+)
+
+// admit parses the request for the consent screen and seals the admission;
+// the caller stores sealed with its pending presentation.
+func admit(ctx context.Context, w *wallet.Wallet, uri string, key []byte) (presenterTypes.SealedAdmission, error) {
+	request, err := w.ParsePresentationRequest(ctx, uri)
+	if err != nil {
+		return "", err
+	}
+	return request.Seal(key)
+}
+
+// answer re-admits the sealed request after the Holder's consent and sends
+// the presentation, from a wallet built for this call.
+func answer(ctx context.Context, w *wallet.Wallet, sealed presenterTypes.SealedAdmission, key []byte,
+	p wallet.Presentation) (*presenterTypes.SubmitResult, error) {
+	request, err := w.ReadmitPresentationRequest(ctx, sealed, key)
+	if err != nil {
+		return nil, err
+	}
+	return w.SubmitPresentation(ctx, request, p)
+}
+```
+
+The rules:
+
+* **Key.** At least `oid4vp.MinSealKeyBytes` (32) bytes, random, and secret to the wallet deployment; a shorter key is `oid4vp.ErrSealKeyTooShort`. The library does not store it. Rotating it invalidates the admissions sealed under the old key.
+* **What can be sealed.** Only a request whose Request Object the library fetched from `request_uri` (`RequestObjectVerification.Delivery == "reference"`). A Request Object passed by value, plain parameters and a DC API request are `oid4vp.ErrAdmissionNotSealable`: they have no delivery fact to carry.
+* **Refusals.** A malformed record, a version other than `v1`, an altered record or tag, another key, or a record for another profile or protocol version is `oid4vp.ErrSealedAdmissionInvalid` (code `sealed_admission_invalid`), decided before anything is authenticated or fetched.
+* **Clock.** The re-admission judges `iat`, `exp`, `nbf` and the certificate validity at the instant of the first admission, so a consent that outlasts the Request Object's `exp` does not refuse the response. `RequestObjectVerification.ExpiresAt` reports `exp` for a wallet that wants its own limit. A revocation list is still fetched again.
+* **Format.** `v1.` + base64url(JSON record) + `.` + base64url(HMAC-SHA256 tag). The tag covers a label naming the version and the record. The record is readable to whoever holds it: the seal protects its integrity, not its confidentiality, so store it where the Request Object may be stored.
+
+**Kept Request Object.** Where the profile allows a Request Object passed by value (not under HAIP), the wallet may instead keep the Request Object (`h.RequestObject()`) and parse it again; the second parse authenticates the Request Object again, including its `exp` on the current clock.
 
 ```go
 import (
@@ -968,7 +1013,7 @@ func presentLater(ctx context.Context, w *wallet.Wallet, requestObject, clientID
 }
 ```
 
-A request in plain parameters has no Request Object (`RequestObject()` is empty); parse its URI again instead. `RequestObjectSource` carries only the outer `client_id`: how a Request Object reached the wallet is something the library observes, never something a caller states. `RequestObjectVerification.Delivery` is `"reference"` only when the library fetched `request_uri` itself, and `WalletNonce` is set only for the `wallet_nonce` it sent in that POST; a Request Object passed by value is always delivered by value. Under HAIP (`Options.RequireSignedRequestByReference`, HAIP §5.1) `ParsePresentationRequestObject` and the `request` parameter are therefore refused with `ErrHAIPRequestURIRequired` before any network access. A HAIP wallet that answers later from a kept Request Object parses it with a presenter and wallet whose profile leaves out `RequireSignedRequestByReference`, having checked `Delivery == "reference"` on the first parse itself.
+A request in plain parameters has no Request Object (`RequestObject()` is empty); parse its URI again instead. `RequestObjectSource` carries only the outer `client_id`: how a Request Object reached the wallet is something the library observes, never something a caller states. `RequestObjectVerification.Delivery` is `"reference"` only when the library fetched `request_uri` itself (or re-admitted a sealed admission of such a fetch), and `WalletNonce` is set only for the `wallet_nonce` it sent in that POST; a Request Object passed by value is always delivered by value. Under HAIP `ParsePresentationRequestObject` and the `request` parameter are therefore refused with `ErrHAIPRequestURIRequired` before any network access.
 
 ### Verifier authentication {#verifier-authentication}
 
@@ -1048,7 +1093,7 @@ func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data js
 
 ### Draft 24
 
-`w.Draft24().ParsePresentationRequest` and `ParsePresentationRequestObject` admit OpenID4VP Draft 24 requests carrying a Presentation Exchange `presentation_definition`. The handle is answered with `SubmitPresentation` (a `vp_token` and `presentation_submission`) and `DeclinePresentation`. `SelectCredentials` picks the newest credential for every input descriptor, and `QueryIDs` name input descriptor ids. On an SD-JWT VC, key binding is always required and a non-nil `DisclosedClaims` limits disclosure. `Config.Experimental.Hooks.PresentationExchangeResponse` rewrites the response for testing.
+`w.Draft24().ParsePresentationRequest` and `ParsePresentationRequestObject` admit OpenID4VP Draft 24 requests carrying a Presentation Exchange `presentation_definition`. `w.Draft24().ReadmitPresentationRequest` re-admits a sealed admission of a Draft 24 request. The handle is answered with `SubmitPresentation` (a `vp_token` and `presentation_submission`) and `DeclinePresentation`. `SelectCredentials` picks the newest credential for every input descriptor, and `QueryIDs` name input descriptor ids. On an SD-JWT VC, key binding is always required and a non-nil `DisclosedClaims` limits disclosure. `Config.Experimental.Hooks.PresentationExchangeResponse` rewrites the response for testing.
 
 The Draft 24 entry points apply the Draft 24 rules, not the 1.0 ones:
 

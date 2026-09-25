@@ -49,6 +49,15 @@ func (d *Draft24Presentation) ParsePresentationRequestObject(ctx context.Context
 	return admittedOID4VPRequest(d.w.presenter.ParseDraft24RequestObject(ctx, presenterTypes.Oid4vp, requestObject, src))
 }
 
+// ReadmitPresentationRequest re-admits a Draft 24 request from a sealed
+// admission, as Wallet.ReadmitPresentationRequest does for OpenID4VP 1.0.
+func (d *Draft24Presentation) ReadmitPresentationRequest(ctx context.Context, sealed presenterTypes.SealedAdmission, key []byte) (*oid4vp.AdmittedRequest, error) {
+	if err := d.w.requireDraft24(); err != nil {
+		return nil, err
+	}
+	return admittedOID4VPRequest(d.w.presenter.ReadmitDraft24Request(ctx, presenterTypes.Oid4vp, sealed, key))
+}
+
 // ErrDraft24ResponseTransformFailed reports that
 // Config.Experimental.Hooks.PresentationExchangeResponse refused the response
 // it was given.

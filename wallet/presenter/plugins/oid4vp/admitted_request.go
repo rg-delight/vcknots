@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
@@ -24,8 +25,11 @@ var ErrResponseTypeMismatch = common.NewCodedError("presentation_response_type_m
 // AdmittedRequest is an Authorization Request this presenter parsed and
 // admitted under its trust policy. Only the presenter that admitted it
 // answers it, at the response endpoint the request named. It is built only by
-// the parse methods of Oid4vpPresenter and is not serializable; a caller that
-// presents later keeps RequestObject and parses it again.
+// the parse methods of Oid4vpPresenter and is not serializable. A caller that
+// presents later, in another process or another stateless call, seals the
+// admission (Seal) and re-admits it (ReadmitRequest, ReadmitDraft24Request),
+// or keeps RequestObject and parses it again as a Request Object passed by
+// value where the profile allows that.
 type AdmittedRequest struct {
 	req           *CredentialPresentationRequest
 	endpoint      *url.URL
@@ -33,6 +37,32 @@ type AdmittedRequest struct {
 	dcapiOrigin   string
 	requestObject string
 	admittedBy    *Oid4vpPresenter
+	// admission holds the facts Seal records; its source is zero for a
+	// Digital Credentials API request, which is not sealable.
+	admission admissionFacts
+}
+
+// admissionFacts are what a parse observed about the Request Object's
+// arrival: how it came, the outer client_id it was bound to, the wallet_nonce
+// sent for it, the instant it was authenticated at and the profile it was
+// admitted under.
+type admissionFacts struct {
+	source        requestSource
+	outerClientID string
+	walletNonce   string
+	admittedAt    time.Time
+	profile       string
+}
+
+// recordAdmission copies the facts of core's parse onto the handle.
+func (r *AdmittedRequest) recordAdmission(core *requestCore, profileName string) {
+	r.admission = admissionFacts{
+		source:        core.requestSource,
+		outerClientID: core.expectedClientID,
+		walletNonce:   core.sentWalletNonce,
+		admittedAt:    core.admittedAt,
+		profile:       profileName,
+	}
 }
 
 var _ types.AdmittedRequest = (*AdmittedRequest)(nil)
