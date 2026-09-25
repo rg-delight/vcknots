@@ -366,6 +366,15 @@ cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 ```
 
+### Issuer の認証
+
+wallet は、受け取った Credential の Issuer を規格に定められた方式で認証してから保存します（`common.SampleIssuerAcceptance`）。
+ローカルのサンプルサーバーは `/.well-known/jwt-vc-issuer` に JWT VC Issuer Metadata を公開しているので、その SD-JWT VC はこれで認証します。
+`x5c` を持つ Credential は、証明書チェーンだけで認証します。
+`VCKNOTS_ISSUER_CA_PATH` に Issuer の認証局の PEM ファイルを指定してください（`conformance_sdjwt` では conformance suite の Issuer のもの）。
+JWT VC Issuer Metadata は SD-JWT VC にしか定義されていないので、`jwt_vc_json` の Credential（`server_integration_jwtvc`）には `x5c`、DID Configuration で束縛された DID、OpenID Federation のいずれかが必要です。
+どれもなければ拒否します。
+
 ### Wallet 実行時の環境変数
 
 `VCKNOTS_CERT_PATH` に加えて、wallet の実行時挙動は `wallet/env/env.go` で定義された環境変数で制御されます。

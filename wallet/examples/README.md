@@ -365,6 +365,10 @@ cd /path/to/vcknots/wallet/examples/server_integration_jwtvc
 VCKNOTS_CERT_PATH=/path/to/custom/cert.pem go run server_integration_jwtvc.go
 ```
 
+### Issuer authentication
+
+The wallet stores a received credential only once its issuer is authenticated by a mechanism the specifications define (`common.SampleIssuerAcceptance`). The local sample server publishes JWT VC Issuer Metadata at `/.well-known/jwt-vc-issuer`, which authenticates its SD-JWT VCs. A credential that carries `x5c` is authenticated by its certificate chain only: set `VCKNOTS_ISSUER_CA_PATH` to a PEM file of the issuer's certificate authorities (the conformance suite's issuer, for `conformance_sdjwt`). JWT VC Issuer Metadata is defined for SD-JWT VC only, so a `jwt_vc_json` credential (`server_integration_jwtvc`) needs `x5c`, a DID bound by a DID Configuration, or OpenID Federation; without one it is refused.
+
 ### Wallet Runtime Environment Variables
 
 In addition to `VCKNOTS_CERT_PATH`, the wallet runtime behavior is controlled by environment variables defined in `wallet/env/env.go`.
