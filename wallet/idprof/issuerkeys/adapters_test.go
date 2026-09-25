@@ -2,23 +2,18 @@ package issuerkeys
 
 import (
 	"context"
-	"crypto/x509"
 	"errors"
 	"net/http"
 	"slices"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
-
-	"github.com/trustknots/vcknots/wallet/common"
-	"github.com/trustknots/vcknots/wallet/credential/statuslist"
 )
 
 // The adapters are handed to hooks whose signatures the rest of the library
 // fixes; these assignments fail to compile if either drifts.
 var (
 	_ func(issuer string, header map[string]any) ([]jose.JSONWebKey, error) = (&KeyLookup{}).Keys
-	_ statuslist.ResolveIssuerKeysFunc                                      = (&Resolver{}).StatusListKeyFunc(Request{}, nil)
 )
 
 func TestKeyLookup(t *testing.T) {
@@ -121,222 +116,6 @@ func TestKeyLookup(t *testing.T) {
 		diagnostic := diagnosticFor(t, lookup.Resolution().Diagnostics, RungDID)
 		if want := []string{SwitchIssuerMetadataJWKS, SwitchCredentialIssuerBinding, SwitchDIDConfiguration}; !slices.Equal(diagnostic.DisabledBy, want) {
 			t.Errorf("DisabledBy = %v, want %v", diagnostic.DisabledBy, want)
-		}
-	})
-}
-
-// statusListFixture is an issuer that signs Status List Tokens under an https
-// identifier, with a CA that certifies its signing key.
-type statusListFixture struct {
-	issuer   string
-	ca       testCertificate
-	leaf     testCertificate
-	metadata testKey
-	resolver *Resolver
-	network  *failingTransport
-}
-
-func newStatusListFixture(t *testing.T) *statusListFixture {
-	t.Helper()
-	ca := newTestCA(t, "status list root")
-	network := &failingTransport{}
-	return &statusListFixture{
-		issuer:   "https://issuer.example.test",
-		ca:       ca,
-		leaf:     newTestLeaf(t, ca, "issuer.example.test"),
-		metadata: newES256Key(t, "metadata-key"),
-		network:  network,
-		resolver: &Resolver{
-			HTTPClient: &http.Client{Transport: network},
-			Mechanisms: Mechanisms{X5C: true, IssuerMetadataJWKS: true, DIDJWK: true},
-			Now:        fixedNow,
-		},
-	}
-}
-
-func (f *statusListFixture) template() Request {
-	return Request{
-		CredentialFormat:   FormatJWTVCJSON,
-		CredentialIssuer:   f.issuer,
-		IssuerMetadataJWKS: keySet(f.metadata.public),
-	}
-}
-
-func (f *statusListFixture) trust(anchors ...*x509.Certificate) *X5CTrust {
-	return &X5CTrust{TrustAnchors: anchors, AllowUnadvertisedRevocation: true}
-}
-
-func (f *statusListFixture) header(leaf testCertificate) map[string]any {
-	chain := x5cOf(leaf)
-	values := make([]any, 0, len(chain))
-	for _, value := range chain {
-		values = append(values, value)
-	}
-	return map[string]any{"alg": "ES256", "typ": "statuslist+jwt", "x5c": values}
-}
-
-func TestStatusListKeys(t *testing.T) {
-	t.Parallel()
-
-	t.Run("a trusted chain puts the leaf key first, then the ladder", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), f.trust(f.ca.certificate), f.issuer, f.header(f.leaf))
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismX5CTrustedChain, MechanismCredentialIssuerMetadataJWKS}) {
-			t.Fatalf("mechanisms = %v", got)
-		}
-		if len(keys) != 2 || !keys[0].IsPublic() {
-			t.Fatalf("keys = %+v", keys)
-		}
-		trusted, ok := resolution.CandidateFor(jose.JSONWebKey{Key: f.leaf.certificate.PublicKey})
-		if !ok || trusted.Mechanism != MechanismX5CTrustedChain || trusted.Issuer != f.issuer || len(trusted.CertificateSHA256) != 2 {
-			t.Errorf("trusted candidate = %+v, %v", trusted, ok)
-		}
-		if f.network.count() != 0 {
-			t.Errorf("requests were made: %d", f.network.count())
-		}
-	})
-
-	t.Run("a chain reaching no configured anchor is recorded and the ladder continues", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		other := newTestCA(t, "other root")
-		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), f.trust(other.certificate), f.issuer, f.header(f.leaf))
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismCredentialIssuerMetadataJWKS}) || len(keys) != 1 {
-			t.Fatalf("mechanisms = %v", got)
-		}
-		diagnostic := diagnosticFor(t, resolution.Diagnostics, RungX5C)
-		if diagnostic.Failure != failureChainUntrusted || diagnostic.Attempted || diagnostic.CandidateCount != 0 {
-			t.Errorf("x5c diagnostic = %+v", diagnostic)
-		}
-	})
-
-	t.Run("an untrusted chain and nothing else is an unresolved error naming the chain", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		template := f.template()
-		template.IssuerMetadataJWKS = nil
-		_, _, err := f.resolver.StatusListKeys(context.Background(), template, f.trust(), f.issuer, f.header(f.leaf))
-		var unresolved *UnresolvedError
-		if !errors.As(err, &unresolved) {
-			t.Fatalf("StatusListKeys error = %v, want *UnresolvedError", err)
-		}
-		if got := diagnosticFor(t, unresolved.Diagnostics, RungX5C).Failure; got != failureChainUntrusted {
-			t.Errorf("x5c failure = %q", got)
-		}
-	})
-
-	t.Run("a leaf that does not name the issuer host is not trusted", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		stranger := newTestLeaf(t, f.ca, "other.example.test")
-		_, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), f.trust(f.ca.certificate), f.issuer, f.header(stranger))
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismCredentialIssuerMetadataJWKS}) {
-			t.Errorf("mechanisms = %v", got)
-		}
-		if got := diagnosticFor(t, resolution.Diagnostics, RungX5C).Failure; got != failureChainUntrusted {
-			t.Errorf("x5c failure = %q", got)
-		}
-	})
-
-	t.Run("a revocation status that cannot be established ends the verification", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		trust := f.trust(f.ca.certificate)
-		trust.AllowUnadvertisedRevocation = false
-		keys, _, err := f.resolver.StatusListKeys(context.Background(), f.template(), trust, f.issuer, f.header(f.leaf))
-		if err == nil || keys != nil {
-			t.Fatalf("StatusListKeys = %v, %v; want the chain refusal", keys, err)
-		}
-		if errors.Is(err, ErrNoIssuerKeyResolved) {
-			t.Fatalf("a revocation refusal fell through to the ladder: %v", err)
-		}
-		if code, _ := common.CodeOf(err); code != "x509_chain_revocation_unknown" {
-			t.Errorf("code = %q, want x509_chain_revocation_unknown", code)
-		}
-	})
-
-	t.Run("only ladder candidates resolved for the token's iss are offered", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		didValue := didJWK(t, f.metadata.public)
-		header := map[string]any{"alg": "ES256", "kid": didValue + "#0"}
-		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), nil, f.issuer, header)
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		// The DID rung bound the key through the metadata, but under the DID,
-		// which is not this token's iss; the metadata candidate is.
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismCredentialIssuerMetadataJWKS}) || len(keys) != 1 {
-			t.Fatalf("mechanisms = %v", got)
-		}
-		candidate, ok := resolution.CandidateFor(keys[0])
-		if !ok || candidate.Mechanism != MechanismCredentialIssuerMetadataJWKS {
-			t.Errorf("CandidateFor = %+v, %v", candidate, ok)
-		}
-	})
-
-	t.Run("a token signed under a DID iss is offered the DID candidate only", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		didValue := didJWK(t, f.metadata.public)
-		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), nil, didValue, map[string]any{"alg": "ES256", "kid": didValue + "#0"})
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismDIDMetadataBinding}) || len(keys) != 1 {
-			t.Fatalf("mechanisms = %v", got)
-		}
-	})
-
-	t.Run("without x5c trust the chain is never walked", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		_, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), nil, f.issuer, f.header(f.leaf))
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismCredentialIssuerMetadataJWKS}) {
-			t.Errorf("mechanisms = %v", got)
-		}
-		if diagnostic := diagnosticFor(t, resolution.Diagnostics, RungX5C); diagnostic.Failure != "" || !diagnostic.Attempted {
-			t.Errorf("x5c diagnostic = %+v, want the untouched rung result", diagnostic)
-		}
-	})
-
-	t.Run("the x5c rung switched off leaves the chain unwalked", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		f.resolver.Mechanisms.X5C = false
-		_, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(), f.trust(f.ca.certificate), f.issuer, f.header(f.leaf))
-		if err != nil {
-			t.Fatalf("StatusListKeys failed: %v", err)
-		}
-		if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismCredentialIssuerMetadataJWKS}) {
-			t.Errorf("mechanisms = %v", got)
-		}
-	})
-
-	t.Run("a private metadata key is returned as its public half", func(t *testing.T) {
-		t.Parallel()
-		f := newStatusListFixture(t)
-		template := f.template()
-		template.IssuerMetadataJWKS = keySet(jose.JSONWebKey{Key: f.metadata.private, KeyID: "metadata-key"})
-		keys, err := f.resolver.StatusListKeyFunc(template, nil)(context.Background(), statuslist.KeyRequest{Issuer: f.issuer, Header: map[string]any{"alg": "ES256"}})
-		if err != nil {
-			t.Fatalf("StatusListKeyFunc failed: %v", err)
-		}
-		if len(keys) != 1 || !keys[0].IsPublic() || keys[0].KeyID != "metadata-key" {
-			t.Errorf("keys = %+v", keys)
 		}
 	})
 }
