@@ -126,22 +126,27 @@ func AcceptedSDAlgorithms() []string {
 
 // Acceptor runs the acceptance checks. It is safe for concurrent use.
 type Acceptor struct {
-	x5c        profile.X5CRules
+	x5c profile.X5CRules
+	// draft13 admits the SD-JWT VC typ of OpenID4VCI Draft 13, vc+sd-jwt.
+	draft13    bool
 	serializer *serializer.SerializationDispatcher
 	verifier   *verifier.VerificationDispatcher
 }
 
-// NewAcceptor builds an Acceptor that applies the credential rules of
-// options, the Options of the wallet's profile: IssuerX5C (HAIP 1.0 §6.1.1).
-// The serializer and verifier are required.
-func NewAcceptor(options profile.Options, s *serializer.SerializationDispatcher, v *verifier.VerificationDispatcher) (*Acceptor, error) {
+// NewAcceptor builds an Acceptor that applies the credential rules of p, the
+// profile the credential is issued under: the Options of an OpenID4VCI 1.0
+// profile (IssuerX5C, HAIP 1.0 §6.1.1), and for profile.Draft13 the SD-JWT VC
+// typ vc+sd-jwt that Draft 13 issuers use. Under every other profile an
+// SD-JWT VC must carry typ dc+sd-jwt (SD-JWT VC -19 §2.2.1). The serializer
+// and verifier are required.
+func NewAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *verifier.VerificationDispatcher) (*Acceptor, error) {
 	if s == nil {
 		return nil, fmt.Errorf("%w: acceptance requires a serialization dispatcher", common.ErrInvalidInput)
 	}
 	if v == nil {
 		return nil, fmt.Errorf("%w: acceptance requires a verification dispatcher", common.ErrInvalidInput)
 	}
-	return &Acceptor{x5c: options.IssuerX5C, serializer: s, verifier: v}, nil
+	return &Acceptor{x5c: p.Options().IssuerX5C, draft13: p == profile.Draft13(), serializer: s, verifier: v}, nil
 }
 
 // Verify applies policy to raw and returns the parsed credential and what was
@@ -185,9 +190,8 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 	}
 
 	if flavor == credential.SDJwtVC {
-		typ, _ := header["typ"].(string)
-		if !strings.EqualFold(typ, "dc+sd-jwt") && !strings.EqualFold(typ, "vc+sd-jwt") {
-			return nil, nil, fmt.Errorf("%w: SD-JWT VC typ header must be dc+sd-jwt or vc+sd-jwt, got %q", ErrCredentialTypInvalid, typ)
+		if err := a.checkSDJWTVCType(header, payload); err != nil {
+			return nil, nil, err
 		}
 	}
 	if policy != nil && policy.ExpectedSDJWTVCType != "" {
@@ -257,6 +261,25 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 		}
 	}
 	return parsed, verification, nil
+}
+
+// checkSDJWTVCType applies the SD-JWT VC typ header (-19 §2.2.1: "The typ
+// value MUST use dc+sd-jwt"; Draft 13 issuers use the earlier vc+sd-jwt) and
+// the vct claim (§2.2.2.3: "vct: REQUIRED", a string).
+func (a *Acceptor) checkSDJWTVCType(header, payload map[string]any) error {
+	typ, _ := header["typ"].(string)
+	switch {
+	case strings.EqualFold(typ, "dc+sd-jwt"):
+	case a.draft13 && strings.EqualFold(typ, "vc+sd-jwt"):
+	case a.draft13:
+		return fmt.Errorf("%w: SD-JWT VC typ header must be dc+sd-jwt or vc+sd-jwt, got %q", ErrCredentialTypInvalid, typ)
+	default:
+		return fmt.Errorf("%w: SD-JWT VC typ header must be dc+sd-jwt, got %q", ErrCredentialTypInvalid, typ)
+	}
+	if vct, ok := payload["vct"].(string); !ok || vct == "" {
+		return fmt.Errorf("%w: SD-JWT VC vct claim is required", ErrCredentialTypInvalid)
+	}
+	return nil
 }
 
 // signingAlgorithms resolves the issuer algorithms one run accepts.

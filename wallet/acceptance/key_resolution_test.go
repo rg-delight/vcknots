@@ -351,7 +351,7 @@ func TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly(t *testing.T) {
 	require.NoError(t, err)
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
-	haip, err := NewAcceptor(profile.HAIPOptions(), serialization, verification)
+	haip, err := NewAcceptor(profile.HAIP(), serialization, verification)
 	require.NoError(t, err)
 
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})

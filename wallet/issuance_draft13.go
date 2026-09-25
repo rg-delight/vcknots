@@ -591,7 +591,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 	if err != nil {
 		return result, err
 	}
-	parsed, verification, err := d.w.verifyCredentialUnder(ctx, profile.Draft13().Options(), raw, flavor, holderKey, true)
+	parsed, verification, err := d.w.verifyCredentialUnder(ctx, profile.Draft13(), raw, flavor, holderKey, true)
 	if err != nil {
 		return result, fmt.Errorf("failed to verify credential: %w", err)
 	}

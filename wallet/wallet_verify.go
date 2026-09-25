@@ -38,19 +38,19 @@ func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, raw []byte, 
 // verifyCredentialForAcceptanceContext applies Config.CredentialAcceptance to
 // raw under the Options of the wallet's 1.0 profile.
 func (w *Wallet) verifyCredentialForAcceptanceContext(ctx context.Context, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *acceptance.Verification, error) {
-	return w.verifyCredentialUnder(ctx, w.options(), raw, flavor, holderKey, requirePolicy)
+	return w.verifyCredentialUnder(ctx, w.profile, raw, flavor, holderKey, requirePolicy)
 }
 
 // verifyCredentialUnder applies Config.CredentialAcceptance to raw under
-// options: the wallet's 1.0 profile for OpenID4VCI 1.0, and the options of
-// profile.Draft13 (none) for a Draft 13 credential. With no policy it fails
+// issuance profile p: the wallet's 1.0 profile for OpenID4VCI 1.0, and
+// profile.Draft13 for a Draft 13 credential. With no policy it fails
 // closed when requirePolicy is set, and otherwise runs only
 // acceptance.Acceptor.Parse: ReceiveCredential stores without a policy.
-func (w *Wallet) verifyCredentialUnder(ctx context.Context, options profile.Options, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *acceptance.Verification, error) {
+func (w *Wallet) verifyCredentialUnder(ctx context.Context, p profile.Profile, raw []byte, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey, requirePolicy bool) (*credential.Credential, *acceptance.Verification, error) {
 	if w.credentialAcceptance == nil && requirePolicy {
 		return nil, nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
-	acceptor, err := acceptance.NewAcceptor(options, w.serializer, w.verifier)
+	acceptor, err := acceptance.NewAcceptor(p, w.serializer, w.verifier)
 	if err != nil {
 		return nil, nil, err
 	}

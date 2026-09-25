@@ -497,7 +497,7 @@ func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *str
 		serializationFlavor = credential.JwtVc
 	}
 
-	parsedCredential, verification, verificationErr := w.verifyCredentialUnder(ctx, profile.Draft13().Options(), []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
+	parsedCredential, verification, verificationErr := w.verifyCredentialUnder(ctx, profile.Draft13(), []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
 	if verificationErr != nil {
 		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}

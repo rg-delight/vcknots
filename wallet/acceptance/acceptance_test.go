@@ -367,7 +367,7 @@ func TestVerifyTypedFailures(t *testing.T) {
 		sentinel error
 	}{
 		{"parse", profile.Final(), resolvingPolicy, signed(testWire{}), "this-is-not-a-credential", ErrCredentialParse},
-		{"typ", profile.Final(), resolvingPolicy, signed(testWire{typ: "vc+sd-jwt"}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
+		{"typ", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
 		{"alg", profile.Final(), resolvingPolicy, signed(testWire{}), unsignedWire(t, "none"), ErrCredentialAlgUnsupported},
 		{"holder binding missing", profile.Final(), bindingPolicy, signed(testWire{}), buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1"}), ErrHolderBindingMissing},
 		{"holder binding mismatch", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{cnf: &otherHolder}), ErrHolderBindingMismatch},
@@ -509,11 +509,11 @@ func TestNewAcceptorValidatesInputs(t *testing.T) {
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
 
-	_, err = NewAcceptor(profile.Options{}, nil, verification)
+	_, err = NewAcceptor(profile.Final(), nil, verification)
 	require.ErrorContains(t, err, "serialization dispatcher")
-	_, err = NewAcceptor(profile.Options{}, serialization, nil)
+	_, err = NewAcceptor(profile.Final(), serialization, nil)
 	require.ErrorContains(t, err, "verification dispatcher")
-	acceptor, err := NewAcceptor(profile.HAIP().Options(), serialization, verification)
+	acceptor, err := NewAcceptor(profile.HAIP(), serialization, verification)
 	require.NoError(t, err)
 	require.Equal(t, profile.HAIPOptions().IssuerX5C, acceptor.x5c)
 }
