@@ -9,6 +9,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/profile"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // VerifyCredential reports whether the credential's proof verifies under
@@ -47,6 +48,15 @@ type CredentialAcceptanceRequest struct {
 	IssuanceVersion IssuanceVersion
 	// Acceptance overrides Config.CredentialAcceptance for this credential.
 	Acceptance *acceptance.Policy
+	// CredentialConfiguration is the Credential Configuration the credential
+	// was issued under, as the issuer metadata describes it. When it lists
+	// cryptographic_binding_methods_supported the credential must carry a
+	// cnf.jwk that HolderKey matches (OpenID4VCI 1.0 Section 12.2.4, and HAIP
+	// 1.0 Section 6.1: the jwk member "MUST" be included "if the corresponding
+	// Credential Configuration requires cryptographic holder binding"),
+	// whatever the policy's RequireHolderBinding says, as RequestCredential
+	// requires. Nil applies the policy as it is.
+	CredentialConfiguration *receiverTypes.CredentialConfiguration
 }
 
 // VerifyCredentialForAcceptance runs the check issuance runs before storing a
@@ -76,6 +86,11 @@ func (w *Wallet) verifyCredentialForAcceptanceRequest(ctx context.Context, req C
 	policy, err := w.acceptancePolicy(req.Acceptance)
 	if err != nil {
 		return nil, nil, err
+	}
+	if req.CredentialConfiguration != nil && configurationRequiresBinding(*req.CredentialConfiguration) && !policy.RequireHolderBinding {
+		bound := *policy
+		bound.RequireHolderBinding = true
+		policy = &bound
 	}
 	return w.verifyCredentialUnder(ctx, issuanceProfile, policy, req.Raw, req.Flavor, req.HolderKey, req.CredentialIssuer)
 }

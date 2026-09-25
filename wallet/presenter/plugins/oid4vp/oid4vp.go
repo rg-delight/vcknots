@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/experimental"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -99,7 +100,7 @@ func (p *Oid4vpPresenter) httpClient() *http.Client {
 	if p.HTTPClient != nil {
 		return p.HTTPClient
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return httpfetch.NewDefaultClient(30 * time.Second)
 }
 
 // ProtocolProfile reports the OpenID4VP 1.0 profile this presenter enforces.

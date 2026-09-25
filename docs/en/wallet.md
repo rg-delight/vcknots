@@ -612,7 +612,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 
 ### VerifyCredentialForAcceptance
 
-Runs the check issuance runs before storing over a raw credential, under `req.Acceptance` or else `Config.CredentialAcceptance`, and stores nothing. It is the second step for a caller that receives on a storeless wallet and persists later, or that re-checks a credential it holds. `CredentialIssuer` is the Credential Issuer Identifier of the issuance (a DID issuer is bound to its origin), and `IssuanceVersion` selects the profile (`IssuanceVersionDraft13` admits the SD-JWT VC `typ` `vc+sd-jwt`).
+Runs the check issuance runs before storing over a raw credential, under `req.Acceptance` or else `Config.CredentialAcceptance`, and stores nothing. It is the second step for a caller that receives on a storeless wallet and persists later, or that re-checks a credential it holds. `CredentialIssuer` is the Credential Issuer Identifier of the issuance (a DID issuer is bound to its origin), and `IssuanceVersion` selects the profile (`IssuanceVersionDraft13` admits the SD-JWT VC `typ` `vc+sd-jwt`). `CredentialConfiguration`, when set, is the configuration the credential was issued under: if it lists `cryptographic_binding_methods_supported`, the credential must carry a `cnf.jwk` that `HolderKey` matches (OpenID4VCI 1.0 §12.2.4; HAIP 1.0 §6.1), as `RequestCredential` requires.
 
 ```go
 type CredentialAcceptanceRequest struct {
@@ -622,6 +622,9 @@ type CredentialAcceptanceRequest struct {
 	CredentialIssuer string
 	IssuanceVersion  IssuanceVersion
 	Acceptance       *acceptance.Policy
+	// CredentialConfiguration, when it lists cryptographic_binding_methods_supported,
+	// requires a cnf.jwk that HolderKey matches.
+	CredentialConfiguration *receiverTypes.CredentialConfiguration
 }
 
 func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, req CredentialAcceptanceRequest) (*credential.Credential, *acceptance.Verification, error)
@@ -1172,6 +1175,8 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 * `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
 `SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `Experimental.Transport` (on the wallet, the receiver, the issuer key resolver and the Status List checker) and any non-zero `Experimental` on the presenter, on every entry point, are refused.
+
+`w.StatusListChecker(base)` returns a copy of a `statuslist.Checker` with the wallet's 1.0 profile in `Profile` when `base` leaves it zero, so a HAIP wallet's Status List checks apply HAIP 1.0 §6.1 (the token key in `x5c`, no trust anchor in it, no self-signed leaf) without the caller naming the profile again. A checker naming another profile is refused (`ErrProfileMismatch`), and under HAIP one that sets `Experimental` is refused (`statuslist.ErrStatusListInsecureTransportForbidden`). Every HTTP client the library creates by default (the receiver's, the presenter's, the Federation resolver's, the issuer key resolver's, the Status List checker's and the CRL fetches') negotiates TLS 1.2 or later (FAPI 2.0 Security Profile §5.2.1, which HAIP 1.0 §4 applies; BCP 195); a client the caller injects keeps its own TLS configuration.
 
 ## Error codes {#error-codes}
 

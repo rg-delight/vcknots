@@ -17,7 +17,7 @@ import (
 // defaultHTTPClient is used when the Resolver carries none. It is shared, which
 // is what net/http intends: a Client is safe for concurrent use and pools its
 // connections.
-var defaultHTTPClient = &http.Client{Timeout: httpfetch.DefaultTimeout}
+var defaultHTTPClient = httpfetch.NewDefaultClient(httpfetch.DefaultTimeout)
 
 func (r *Resolver) maxDocumentBytes() int64 {
 	if r.MaxDocumentBytes > 0 {

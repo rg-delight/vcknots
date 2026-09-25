@@ -15,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/credential/statuslist"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -212,6 +214,16 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Wallet.VerifyCredentialForAcceptance: not a credential": func(t *testing.T) error {
 			_, _, err := newFinalIssuanceFixture(t).wallet.VerifyCredentialForAcceptance(ctx, CredentialAcceptanceRequest{Raw: []byte("not a credential"), Flavor: credential.SDJwtVC})
+			return err
+		},
+		"Wallet.StatusListChecker: another profile": func(t *testing.T) error {
+			_, err := newFinalIssuanceFixture(t).wallet.StatusListChecker(statuslist.Checker{Profile: profile.HAIP()})
+			return err
+		},
+		"Wallet.StatusListChecker: experimental under HAIP": func(t *testing.T) error {
+			w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
+			require.NoError(t, err)
+			_, err = w.StatusListChecker(statuslist.Checker{Experimental: experimental.Transport{AllowHTTP: true}})
 			return err
 		},
 		"Wallet.GenerateDID: not a DID type": func(t *testing.T) error {

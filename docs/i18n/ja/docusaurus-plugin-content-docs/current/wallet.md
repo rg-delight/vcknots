@@ -664,6 +664,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 storeless の wallet で受け取って後で保存する呼び出し側や、保持している Credential を検査し直す呼び出し側のための 2 段目です。
 `CredentialIssuer` は発行の Credential Issuer Identifier です（DID の Issuer はこの origin と束縛します）。
 `IssuanceVersion` はプロファイルを選びます（`IssuanceVersionDraft13` は SD-JWT VC の `typ` `vc+sd-jwt` を受け付けます）。
+`CredentialConfiguration` を設定すると、それは Credential を発行した Configuration です。`cryptographic_binding_methods_supported` を列挙していれば、`RequestCredential` と同じく、Credential は `HolderKey` と一致する `cnf.jwk` を持たなければなりません（OpenID4VCI 1.0 §12.2.4、HAIP 1.0 §6.1）。
 
 ```go
 type CredentialAcceptanceRequest struct {
@@ -673,6 +674,9 @@ type CredentialAcceptanceRequest struct {
 	CredentialIssuer string
 	IssuanceVersion  IssuanceVersion
 	Acceptance       *acceptance.Policy
+	// CredentialConfiguration, when it lists cryptographic_binding_methods_supported,
+	// requires a cnf.jwk that HolderKey matches.
+	CredentialConfiguration *receiverTypes.CredentialConfiguration
 }
 
 func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, req CredentialAcceptanceRequest) (*credential.Credential, *acceptance.Verification, error)
@@ -1374,6 +1378,12 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 plugin のフィールドは登録後に変更してはなりません。
 HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
 `Experimental.Transport`（wallet、receiver、Issuer の鍵の resolver、Status List の checker）と、presenter のゼロ値でない `Experimental` は、すべての入口で拒否します。
+
+`w.StatusListChecker(base)` は `statuslist.Checker` の複製を返し、`base` の `Profile` がゼロ値なら wallet の 1.0 プロファイルを設定します。
+そのため HAIP の wallet の Status List の確認は、呼出し側がプロファイルを渡し直さなくても HAIP 1.0 §6.1（token の鍵を `x5c` に含める、トラストアンカーを含めない、自己署名の leaf を使わない）を適用します。
+別のプロファイルを名指す checker は拒否し（`ErrProfileMismatch`）、HAIP では `Experimental` を設定した checker を拒否します（`statuslist.ErrStatusListInsecureTransportForbidden`）。
+ライブラリが既定で作る HTTP client（receiver、presenter、Federation の resolver、Issuer の鍵の resolver、Status List の checker、CRL の取得）は、すべて TLS 1.2 以上で接続します（HAIP 1.0 §4 が適用する FAPI 2.0 Security Profile §5.2.1、BCP 195）。
+呼出し側が注入した client は、その TLS 設定のままです。
 
 ## エラーコード {#error-codes}
 

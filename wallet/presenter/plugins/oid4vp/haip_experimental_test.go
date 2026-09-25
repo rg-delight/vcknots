@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/trustknots/vcknots/wallet/experimental"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -85,4 +86,10 @@ func TestHAIPPresenterRefusesExperimentalOnEveryEntryPoint(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The presenter's default client negotiates TLS 1.2 or later (FAPI 2.0
+// Security Profile §5.2.1; HAIP 1.0 §4).
+func TestPresenterDefaultClientHasTheTLSFloor(t *testing.T) {
+	require.Equal(t, httpfetch.Transport(), (&Oid4vpPresenter{}).httpClient().Transport)
 }

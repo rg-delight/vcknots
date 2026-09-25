@@ -13,6 +13,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/idprof/types"
+	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 )
 
 // IDProfileTypeID is the identity profile type handled by JWKSPlugin.
@@ -42,9 +43,7 @@ type JWKSProfileUpdateOptions struct {
 // NewJWKSPlugin creates a new JWKS plugin
 func NewJWKSPlugin() *JWKSPlugin {
 	return &JWKSPlugin{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient: httpfetch.NewDefaultClient(30 * time.Second),
 	}
 }
 

@@ -82,7 +82,7 @@ type Resolver struct {
 func (r *Resolver) client() *http.Client {
 	base := r.HTTPClient
 	if base == nil {
-		base = &http.Client{Timeout: DefaultHTTPTimeout}
+		base = httpfetch.NewDefaultClient(DefaultHTTPTimeout)
 	}
 	return httpfetch.NoRedirect(base)
 }

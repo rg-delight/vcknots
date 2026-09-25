@@ -7,6 +7,7 @@
 package httpfetch
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"mime"
@@ -33,10 +34,41 @@ const (
 // than the caller's limit.
 var ErrBodyTooLarge = common.NewCodedError("response_body_too_large", "response body exceeds the size limit")
 
-// NewClient returns a client with DefaultTimeout that does not follow
-// redirects.
+// MinTLSVersion is the lowest TLS version a client this package creates
+// negotiates: TLS 1.2. FAPI 2.0 Security Profile Section 5.2.1, which HAIP 1.0
+// Section 4 applies to issuance, requires TLS 1.2 or later, and BCP 195
+// (RFC 8996) forbids TLS 1.0 and 1.1 everywhere the OpenID4VC specifications
+// require TLS. crypto/tls already defaults to TLS 1.2 for a client; the floor
+// is set explicitly so no GODEBUG or change of default can lower it.
+const MinTLSVersion = tls.VersionTLS12
+
+// defaultTransport is http.DefaultTransport's configuration with the
+// MinTLSVersion floor. It is shared by every client this package creates, so
+// they pool connections.
+var defaultTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: MinTLSVersion}
+	return transport
+}()
+
+// Transport returns the round tripper of the clients this package creates:
+// http.DefaultTransport's configuration with the MinTLSVersion floor. A
+// library default client that needs its own timeout or redirect policy uses
+// it too, so every default client negotiates TLS 1.2 or later.
+func Transport() http.RoundTripper {
+	return defaultTransport
+}
+
+// NewDefaultClient returns a client with timeout over Transport. It follows
+// redirects as net/http does; wrap it in NoRedirect where a fetch must not.
+func NewDefaultClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: defaultTransport}
+}
+
+// NewClient returns a client with DefaultTimeout over Transport that does not
+// follow redirects.
 func NewClient() *http.Client {
-	return &http.Client{Timeout: DefaultTimeout, CheckRedirect: refuseRedirect}
+	return &http.Client{Timeout: DefaultTimeout, CheckRedirect: refuseRedirect, Transport: defaultTransport}
 }
 
 // NoRedirect returns a copy of client that does not follow redirects: the

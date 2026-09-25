@@ -522,6 +522,37 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	})
 }
 
+// Review of 2026-09-25 (HAIP 1.0 §6.1): a credential verified apart from the
+// issuance is held to the holder binding its Credential Configuration asks
+// for, as RequestCredential holds it.
+func TestVerifyCredentialForAcceptanceAppliesTheConfigurationsHolderBinding(t *testing.T) {
+	holder := newMockKeyEntry().PublicKey()
+	issuerKey := testutil.NewP256Key(t)
+	unbound := []byte(buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1"}))
+	methods := []string{"jwk"}
+	bindingConfiguration := &receiverTypes.CredentialConfiguration{Format: "dc+sd-jwt", CryptographicBindingMethodsSupported: &methods}
+	w, _ := newAcceptanceWallet(t, profile.Final(), acceptIssuerKeyPolicy(issuerKey))
+	request := CredentialAcceptanceRequest{Raw: unbound, Flavor: credential.SDJwtVC, HolderKey: &holder, CredentialIssuer: testIssuerIdentifier}
+
+	_, _, err := w.VerifyCredentialForAcceptance(context.Background(), request)
+	require.NoError(t, err, "without the configuration the policy alone decides")
+
+	request.CredentialConfiguration = bindingConfiguration
+	_, _, err = w.VerifyCredentialForAcceptance(context.Background(), request)
+	require.ErrorIs(t, err, acceptance.ErrHolderBindingMissing)
+
+	request.CredentialConfiguration = &receiverTypes.CredentialConfiguration{Format: "dc+sd-jwt"}
+	_, _, err = w.VerifyCredentialForAcceptance(context.Background(), request)
+	require.NoError(t, err, "a configuration without binding methods asks for none")
+
+	bound := request
+	bound.Raw = []byte(buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey, kid: "issuer-key-1"}))
+	bound.CredentialConfiguration = bindingConfiguration
+	_, verification, err := w.VerifyCredentialForAcceptance(context.Background(), bound)
+	require.NoError(t, err)
+	require.True(t, verification.HolderBound)
+}
+
 func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
