@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -311,6 +312,11 @@ func (w *Wallet) finalCredentialConfiguration(transport receiverTypes.OID4VCITra
 	config, err := credentialConfiguration(md, id)
 	if err != nil {
 		return config, err
+	}
+	// OpenID4VCI 1.0 Appendix A: a format outside the 1.0 table is refused
+	// before any request, not guessed.
+	if _, err := receiverOid4vci.CredentialFormatFlavor(w.profile, config.Format); err != nil {
+		return config, fmt.Errorf("credential configuration %q: %w", id, err)
 	}
 	validator, _ := transport.(oid4vciProfileValidator)
 	if w.options().ValidatesCredentialConfigurations() && validator == nil {

@@ -55,8 +55,7 @@ func resolveCredentialRequestProofBindingMethod(credentialConfiguration *receive
 	if credentialConfiguration == nil {
 		return credentialRequestProofBindingMethodKID
 	}
-	format := strings.ToLower(strings.TrimSpace(credentialConfiguration.Format))
-	if format == "jwt_vc_json" || format == "jwt_vc" || credentialConfiguration.CryptographicBindingMethodsSupported == nil {
+	if credentialConfiguration.Format == "jwt_vc_json" || credentialConfiguration.CryptographicBindingMethodsSupported == nil {
 		return credentialRequestProofBindingMethodKID
 	}
 	for _, method := range *credentialConfiguration.CryptographicBindingMethodsSupported {

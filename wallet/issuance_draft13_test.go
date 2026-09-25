@@ -1276,3 +1276,18 @@ func TestDraft13DiscoversMetadataAtTheDraft13LocationOnly(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, []string{"/tenant/.well-known/openid-credential-issuer"}, paths)
 }
+
+// Draft 13 Appendix A is the format table of a Draft 13 issuance: the 1.0
+// identifier dc+sd-jwt and unknown identifiers are refused before the Token
+// Request.
+func TestDraft13RefusesFormatsOutsideTheDraft13Table(t *testing.T) {
+	for _, format := range []string{"dc+sd-jwt", "jwt_vc", "application/vc+jwt", "unknown-format"} {
+		t.Run(format, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			fixture.set(func(f *draft13Fixture) { f.configuration["format"] = format })
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), fixture.preAuthorizedRequest())
+			draft13RequireCoded(t, err, receiverOid4vci.ErrCredentialFormatUnsupported)
+			require.Empty(t, fixture.tokens())
+		})
+	}
+}

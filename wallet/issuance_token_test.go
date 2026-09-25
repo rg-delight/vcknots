@@ -771,3 +771,17 @@ func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
 	require.Equal(t, 0, fixture.credentialCalls)
 	require.Equal(t, 0, fixture.deferredCalls)
 }
+
+// OpenID4VCI 1.0 Appendix A is the format table of a 1.0 issuance: Draft 13's
+// vc+sd-jwt, pre-Draft 13 aliases, serialization flavor names and unknown
+// identifiers are refused before the Token Request, not read as JWT VC.
+func TestAuthorizePreAuthorizedIssuanceRefusesFormatsOutsideTheFinalTable(t *testing.T) {
+	for _, format := range []string{"vc+sd-jwt", "jwt_vc", "application/vc+jwt", "vc+jwt", "mso_mdoc", "unknown-format"} {
+		t.Run(format, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) { f.credentialFormat = format })
+			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+			requireCoded(t, err, oid4vci.ErrCredentialFormatUnsupported)
+			require.Zero(t, fixture.tokenCalls)
+		})
+	}
+}

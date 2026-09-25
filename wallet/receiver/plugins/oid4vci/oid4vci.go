@@ -14,7 +14,6 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/common/observe"
-	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -92,22 +91,6 @@ func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error 
 // would replay the body and the Authorization, DPoP and client attestation
 // headers to an origin the response chose.
 var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
-
-// OID4VCICredentialFormatToSerializationFlavor maps OID4VCI credential format
-// identifiers to wallet serialization flavors. SD-JWT VC is "dc+sd-jwt" in
-// OpenID4VCI 1.0 Appendix A.3 and "vc+sd-jwt" in Draft 13 Appendix A.3.
-func OID4VCICredentialFormatToSerializationFlavor(format string) (credential.SupportedSerializationFlavor, error) {
-	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "jwt_vc_json", "jwt_vc", string(credential.JwtVc):
-		return credential.JwtVc, nil
-	case "dc+sd-jwt", "vc+sd-jwt", string(credential.SDJwtVC):
-		return credential.SDJwtVC, nil
-	case "ldp_vc", string(credential.LdpVc):
-		return credential.LdpVc, nil
-	default:
-		return "", fmt.Errorf("unsupported credential format: %q", format)
-	}
-}
 
 // ReceiveCredential performs a Draft 13 credential request. It is a
 // types.Receiver method and carries no context; it binds its request to

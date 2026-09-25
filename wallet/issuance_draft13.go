@@ -167,6 +167,11 @@ func selectDraft13Configuration(offer *CredentialOffer, requested string, md *re
 	if !ok {
 		return "", receiverTypes.CredentialConfiguration{}, fmt.Errorf("credential configuration %q: %w", id, ErrDraft13CredentialConfigurationUnknown)
 	}
+	// Draft 13 Appendix A: a format outside the Draft 13 table is refused
+	// before any request.
+	if _, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format); err != nil {
+		return "", receiverTypes.CredentialConfiguration{}, fmt.Errorf("credential configuration %q: %w", id, err)
+	}
 	return id, config, nil
 }
 
@@ -600,7 +605,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 			DPoPKeyThumbprint: thumbprint,
 		}
 	}
-	flavor, err := receiverOid4vci.OID4VCICredentialFormatToSerializationFlavor(config.Format)
+	flavor, err := receiverOid4vci.CredentialFormatFlavor(profile.Draft13(), config.Format)
 	if err != nil {
 		return result, fmt.Errorf("unsupported credential format %q: %w: %w", config.Format, acceptance.ErrCredentialParse, err)
 	}
