@@ -242,10 +242,16 @@ func (c *requestCore) fetchRequestObject(uri string, method RequestURIMethod, fo
 
 // fetchRequestObjectByReference fetches the Request Object of a request_uri
 // (OID4VP 1.0 §5.10, Draft 24 §5.10) and records that this parse observed
-// delivery by reference. A POST carries a fresh wallet_nonce, which the
+// delivery by reference. RequestObjectValidationOptions.RequestURIPolicy
+// decides first whether the request_uri belongs to the outer client_id. A POST carries a fresh wallet_nonce, which the
 // Request Object must echo (§5.10.1), and walletMetadata as wallet_metadata
 // when it is non-nil.
 func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestURIMethod, walletMetadata map[string]any, newNonce func() (string, error), accept string) ([]byte, error) {
+	if c.requestObjectValidation != nil && c.requestObjectValidation.RequestURIPolicy != nil {
+		if err := c.requestObjectValidation.RequestURIPolicy(c.expectedClientID, uri); err != nil {
+			return nil, newAuthorizationRequestError(InvalidRequestError, "%w: %w", ErrRequestURINotAssociated, err)
+		}
+	}
 	form := url.Values{}
 	if method == RequestURIMethodPOST {
 		if newNonce == nil {

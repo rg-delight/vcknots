@@ -18,6 +18,12 @@ var (
 	// Wallet sent. OpenID4VP 1.0 Section 5.10.1: "If it does not, the Wallet
 	// MUST terminate request processing."
 	ErrRequestObjectWalletNonceMismatch = common.NewCodedError("request_object_wallet_nonce_mismatch", "request object wallet_nonce does not match the one the wallet sent")
+	// ErrRequestURINotAssociated reports a request_uri that
+	// RequestObjectValidationOptions.RequestURIPolicy did not associate with
+	// the Client Identifier. OpenID4VP 1.0, "Authorization Requests with
+	// Request URI": "If the link cannot be
+	// established in those cases, the Wallet MUST refuse the request."
+	ErrRequestURINotAssociated = common.NewCodedError("request_uri_not_associated", "request_uri is not associated with the client_id")
 	// ErrTransactionDataTypeUnsupported reports a transaction_data entry whose
 	// type this Wallet does not support. OpenID4VP 1.0 Section 5.1: "If the
 	// Wallet does not support this transaction data type, it SHOULD reject the

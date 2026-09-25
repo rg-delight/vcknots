@@ -54,6 +54,20 @@ type RequestObjectValidationOptions struct {
 	// openid_federation Client Identifier. A nil value refuses every such
 	// Client Identifier.
 	Federation *FederationTrustOptions
+	// RequestURIPolicy decides whether requestURI belongs to the Verifier
+	// named by clientID, the outer client_id of the Authorization Request
+	// (empty when it carries none). OpenID4VP 1.0, "Establishing Trust in the
+	// Request URI": a Wallet operating within a trust framework "SHOULD
+	// validate that the Request URI is properly associated with the Client
+	// Identifier"; "Authorization Requests with Request URI": "If the link
+	// cannot be established in those cases, the Wallet MUST refuse the
+	// request". It runs before request_uri
+	// is fetched, and a non-nil error refuses the request with
+	// ErrRequestURINotAssociated. The Request Object's own client_id must
+	// then equal clientID and is authenticated as usual, so the association
+	// holds for the authenticated Verifier. A nil policy accepts every
+	// request_uri.
+	RequestURIPolicy func(clientID, requestURI string) error
 }
 
 // RequestObjectVerification records the authentication performed by this

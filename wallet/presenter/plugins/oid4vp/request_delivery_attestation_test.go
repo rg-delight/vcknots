@@ -203,3 +203,65 @@ func TestDraft24RequestURIPostSendsWalletNonceAndMetadata(t *testing.T) {
 		assertAuthzErrorCode(t, err, InvalidRequestURIMethodError)
 	})
 }
+
+// TestRequestURIPolicy covers RequestObjectValidationOptions.RequestURIPolicy:
+// the Wallet associates request_uri with the Client Identifier before it
+// contacts the endpoint, and refuses the request when the link cannot be
+// established (OpenID4VP 1.0, "Authorization Requests with Request URI").
+func TestRequestURIPolicy(t *testing.T) {
+	type call struct{ clientID, requestURI string }
+	for _, draft24 := range []bool{false, true} {
+		name := "final"
+		if draft24 {
+			name = "draft24"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRequestObjectFixture(t, "verifier.example")
+			var fetched atomic.Int32
+			f.setRequestObjectHandler(func(w http.ResponseWriter, _ *http.Request) {
+				fetched.Add(1)
+				claims := f.claims()
+				if draft24 {
+					claims = draft24X509Claims(f)
+				}
+				_, _ = w.Write([]byte(f.sign(t, claims, nil)))
+			})
+			clientID := f.clientID()
+			if draft24 {
+				clientID = "x509_san_dns:verifier.example"
+			}
+			requestURI := f.server.URL + "/request-object"
+			uri := "openid4vp://authorize?" + url.Values{"client_id": {clientID}, "request_uri": {requestURI}}.Encode()
+			parse := func(policy func(string, string) error) error {
+				options := f.options()
+				options.RequestURIPolicy = policy
+				p := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
+				if draft24 {
+					_, err := p.ParseDraft24Request(context.Background(), uri)
+					return err
+				}
+				_, err := p.ParseRequest(context.Background(), uri)
+				return err
+			}
+
+			var seen []call
+			if err := parse(func(clientID, requestURI string) error {
+				seen = append(seen, call{clientID, requestURI})
+				return nil
+			}); err != nil {
+				t.Fatalf("an associated request_uri must be accepted: %v", err)
+			}
+			if len(seen) != 1 || seen[0] != (call{clientID, requestURI}) {
+				t.Fatalf("policy saw %+v, want the outer client_id and request_uri", seen)
+			}
+			before := fetched.Load()
+			err := parse(func(string, string) error { return errors.New("not this verifier's endpoint") })
+			if !errors.Is(err, ErrRequestURINotAssociated) {
+				t.Fatalf("want ErrRequestURINotAssociated, got %v", err)
+			}
+			if fetched.Load() != before {
+				t.Fatal("a request_uri the policy refused must not be fetched")
+			}
+		})
+	}
+}
