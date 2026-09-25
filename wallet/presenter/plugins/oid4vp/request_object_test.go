@@ -16,6 +16,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -217,7 +218,7 @@ func TestFinalRequestObjectRejectsUntrustedOrUnprovenAuthentication(t *testing.T
 	claims := f.claims()
 	uri := "openid4vp://authorize?" + url.Values{"client_id": []string{f.clientID()}, "request": []string{f.sign(t, claims, nil)}}.Encode()
 	for _, insecure := range []bool{false, true} {
-		p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, ExperimentalOptions{InsecureSkipX509Verify: insecure})
+		p := withExperimental(&Oid4vpPresenter{HTTPClient: f.server.Client()}, experimental.Presenter{InsecureSkipX509Verify: insecure})
 		if _, err := p.ParsePresentationRequest(uri); err == nil {
 			t.Fatalf("untrusted leaf accepted with insecure=%v", insecure)
 		}

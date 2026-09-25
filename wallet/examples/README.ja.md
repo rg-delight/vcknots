@@ -384,7 +384,7 @@ JWT VC Issuer Metadata は SD-JWT VC にしか定義されていないので、`
 | `VCKNOTS_WALLET_DEBUG` | `false`（未設定/空） | デバッグログのみを有効化します。HTTPS 必須要件は緩和されません。 |
 
 平文 HTTP を許可する環境変数はありません。
-ローカルサーバー統合テストモードのサンプルは `common.NewOID4VPRuntime(certPath, true)` で wallet を構築し、OpenID4VCI の receiver に `experimental.Transport{AllowHTTP: true}` を、OpenID4VP の presenter に `AllowHTTP` を設定します。
+ローカルサーバー統合テストモードのサンプルは `common.NewOID4VPRuntime(certPath, true)` で wallet を構築し、OpenID4VCI の receiver と Issuer の鍵の resolver に `experimental.Transport{AllowHTTP: true}` を、OpenID4VP の presenter に `experimental.Presenter{Transport: ...}` を設定します。
 パッケージ `github.com/trustknots/vcknots/wallet/experimental` は、こうした規格から外れる試験専用の設定をすべて持ちます。
 client assertion を平文 HTTP で送るのは、引き続きループバックホスト宛てに限られます。
 

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
@@ -19,10 +20,10 @@ func admittedRequest(handle types.AdmittedRequest, err error) (*CredentialPresen
 	return handle.(*AdmittedRequest).req, nil
 }
 
-// withExperimental applies options to p, for a test that needs a local http
+// withExperimental sets p.Experimental, for a test that needs a local http
 // verifier or another experimental relaxation.
-func withExperimental(p *Oid4vpPresenter, options ExperimentalOptions) *Oid4vpPresenter {
-	p.SetExperimentalOptions(options)
+func withExperimental(p *Oid4vpPresenter, options experimental.Presenter) *Oid4vpPresenter {
+	p.Experimental = options
 	return p
 }
 

@@ -17,7 +17,7 @@ import (
 // kid. Metadata without jwks carries no key the rule applies to.
 //
 // The OpenID4VP 1.0 entry points always run it, unless the caller relaxed it
-// with ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID; the Draft 24
+// with Experimental.AcceptClientMetadataJWKsWithoutKeyID; the Draft 24
 // entry points never do, since Draft 24 has no such rule.
 func validateClientMetadataJWKKeyIDs(rawMetadata []byte) error {
 	var metadata struct {

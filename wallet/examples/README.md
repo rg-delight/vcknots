@@ -377,7 +377,7 @@ In addition to `VCKNOTS_CERT_PATH`, the wallet reads the environment variables d
 | :---- | :---- | :---- |
 | `VCKNOTS_WALLET_DEBUG` | `false` (unset/empty) | Enables debug logging only. It does not relax the HTTPS requirement. |
 
-No environment variable allows plain HTTP. The local server integration test mode samples build their wallet with `common.NewOID4VPRuntime(certPath, true)`, which sets `experimental.Transport{AllowHTTP: true}` on the OpenID4VCI receiver and `AllowHTTP` on the OpenID4VP presenter. The package `github.com/trustknots/vcknots/wallet/experimental` holds every such test-only departure from the specifications. A client assertion is still sent over plain HTTP only to a loopback host.
+No environment variable allows plain HTTP. The local server integration test mode samples build their wallet with `common.NewOID4VPRuntime(certPath, true)`, which sets `experimental.Transport{AllowHTTP: true}` on the OpenID4VCI receiver and the issuer key resolver, and `experimental.Presenter{Transport: ...}` on the OpenID4VP presenter. The package `github.com/trustknots/vcknots/wallet/experimental` holds every such test-only departure from the specifications. A client assertion is still sent over plain HTTP only to a loopback host.
 
 > ⚠️ **Security warning**: Do not allow plain HTTP in production. HAIP refuses it.
 

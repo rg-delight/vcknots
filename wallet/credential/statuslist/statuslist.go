@@ -58,6 +58,7 @@ import (
 
 	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -172,6 +173,12 @@ type KeyRequest struct {
 	// ErrStatusListCertificateRejected. Under Require the hook must return
 	// only the leaf key of a chain it validated.
 	X5C profile.X5CRules
+	// ForbidInsecureTransports is profile.Options.ForbidInsecureTransports of
+	// the Checker's profile (HAIP 1.0 Section 4). A hook whose own
+	// resolution carries an experimental transport relaxation must refuse it
+	// then, with an error wrapping ErrStatusListInsecureTransportForbidden,
+	// rather than resolve over it.
+	ForbidInsecureTransports bool
 }
 
 // ResolveIssuerKeysFunc returns the candidate public keys of a Status List
@@ -226,12 +233,14 @@ type Checker struct {
 	// under the credential issuer's keys, whatever `iss` it states, because
 	// Section 11.3 binds the token to the Referenced Token by key.
 	AcceptStatusIssuer func(ctx context.Context, credentialIssuer, tokenIssuer string) error
-	// AllowHTTP permits a cleartext Status List endpoint for a local test.
-	// Status List Tokens are signed, so cleartext does not let a network
-	// attacker forge a verdict, but it does let one observe which credential is
-	// being checked; it stays off outside a test. A Profile whose options
-	// carry ForbidInsecureTransports ignores it.
-	AllowHTTP bool
+	// Experimental.AllowHTTP permits a cleartext Status List endpoint for a
+	// local test (package experimental). Status List Tokens are signed, so
+	// cleartext does not let a network attacker forge a verdict, but it does
+	// let one observe which credential is being checked; the zero value
+	// requires https. A Profile whose options carry ForbidInsecureTransports
+	// (HAIP) refuses a Checker that sets it with
+	// ErrStatusListInsecureTransportForbidden before anything is fetched.
+	Experimental experimental.Transport
 	// Profile is the protocol profile the check runs under. The zero value is
 	// profile.Final(), which adds nothing to draft-ietf-oauth-status-list.
 	// Its Options().StatusListTokenX5C applies HAIP 1.0 Section 6.1: "The
@@ -311,6 +320,9 @@ func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map
 // its token had not yet earned.
 func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, reference Reference) (*Status, error) {
 	options := c.Profile.Options()
+	if options.ForbidInsecureTransports && c.Experimental != (experimental.Transport{}) {
+		return nil, fmt.Errorf("%w: the profile does not permit Checker.Experimental", ErrStatusListInsecureTransportForbidden)
+	}
 	endpoint, err := parseStatusListURI(reference.URI, c.allowHTTP())
 	if err != nil {
 		return nil, err
@@ -366,7 +378,12 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 	if err != nil {
 		return nil, err
 	}
-	keys, err := c.resolveIssuerKeys(ctx, KeyRequest{Issuer: issuer, Header: header, X5C: options.StatusListTokenX5C})
+	keys, err := c.resolveIssuerKeys(ctx, KeyRequest{
+		Issuer:                   issuer,
+		Header:                   header,
+		X5C:                      options.StatusListTokenX5C,
+		ForbidInsecureTransports: options.ForbidInsecureTransports,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -433,10 +450,10 @@ func (c *Checker) statusIssuer(ctx context.Context, credentialIssuer, tokenIssue
 	return tokenIssuer, nil
 }
 
-// allowHTTP reports whether a cleartext endpoint is permitted: AllowHTTP,
-// unless the profile forbids the test-only transport escapes.
+// allowHTTP reports whether a cleartext endpoint is permitted. CheckReference
+// has already refused Experimental under a profile that forbids it.
 func (c *Checker) allowHTTP() bool {
-	return c.AllowHTTP && !c.Profile.Options().ForbidInsecureTransports
+	return c.Experimental.AllowHTTP
 }
 
 func (c *Checker) now() time.Time {
@@ -463,7 +480,7 @@ func (c *Checker) maxTokenBytes() int64 {
 // parseStatusListURI validates the `uri` member as a Status List endpoint.
 //
 // The URI must be absolute and https — http is permitted only for a local test
-// through Checker.AllowHTTP — and must carry no fragment. A query is part of
+// through Checker.Experimental — and must carry no fragment. A query is part of
 // the resource the URI names and is sent as it is written: the token's `sub`
 // is compared with the `uri` member exactly as the credential spells it
 // (draft-ietf-oauth-status-list Section 5.1), so a query cannot make one
@@ -544,7 +561,7 @@ func (c *Checker) fetchToken(ctx context.Context, endpoint *url.URL) (string, er
 // signature of its issuer. What Section 11.4 and RFC 9110 Section 15.4 ask of
 // the client is bounded work, so at most maxStatusListRedirects redirects are
 // followed. Every target is held to the rules of the original URI — absolute,
-// https (http only under Checker.AllowHTTP), no user information — so a
+// https (http only under Checker.Experimental), no user information — so a
 // redirect cannot downgrade the transport or smuggle credentials; its
 // fragment, which is not sent, is dropped. Only the redirects that repeat the
 // request (301, 302, 303, 307, 308) are followed; any other 3xx is an answer

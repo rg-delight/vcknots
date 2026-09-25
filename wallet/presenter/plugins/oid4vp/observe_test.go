@@ -11,6 +11,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common/observe"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/observetest"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 )
@@ -82,7 +83,7 @@ func TestObserveLabelsAuthorizationResponse(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			recorder := &observetest.Recorder{}
-			p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client()}, ExperimentalOptions{AllowHTTP: true})
+			p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client()}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 			observePresenterClient(p, recorder)
 			request, err := p.ParseRequest(context.Background(), "openid4vp://authorize?"+url.Values{
 				"client_id":       {"redirect_uri:" + server.URL + "/response"},

@@ -7,7 +7,7 @@ import (
 // withRequestObject authenticates a Draft 24 Request Object and loads its
 // claims. The key that verifies it comes from what the Client Identifier
 // Scheme names (Draft 24 §5.10.4): the x5c chain for x509_san_dns, which
-// ExperimentalOptions.InsecureSkipX509Verify reduces to the binding and
+// Experimental.InsecureSkipX509Verify reduces to the binding and
 // signature checks, the attestation for verifier_attestation, the Trust Chain
 // for an https Entity Identifier, and the registration for a pre-registered
 // client. Draft 24 §5.1

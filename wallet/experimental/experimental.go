@@ -1,7 +1,8 @@
 // Package experimental holds every setting of the wallet library that departs
-// from the OpenID4VC specifications. They exist to test a peer — a local
-// issuer or verifier without TLS, or how an issuer or verifier handles a
-// malformed message — and are not for production use.
+// from the OpenID4VC specifications and the specifications they build on.
+// They exist to test a peer — a local issuer or verifier without TLS, a
+// verifier whose certificate chain cannot be validated, or how an issuer or
+// verifier handles a malformed message — and are not for production use.
 //
 // Design. The rest of the library conforms to the specifications and has no
 // switch that turns a MUST off. A departure is reachable only through a type
@@ -10,7 +11,13 @@
 //   - wallet.Config.Experimental (Options) for the wallet and the plugins it
 //     builds;
 //   - oid4vci.Oid4vciReceiver.Experimental (Transport) for an injected
-//     OpenID4VCI receiver.
+//     OpenID4VCI receiver;
+//   - oid4vp.Oid4vpPresenter.Experimental (Presenter) for an injected
+//     OpenID4VP presenter;
+//   - issuerkeys.Resolver.Experimental (Transport) for the issuer key
+//     resolution of the credential acceptor and of the Status List checker;
+//   - statuslist.Checker.Experimental (Transport) for the Status List Token
+//     retrieval.
 //
 // Code that relaxes a rule therefore imports this package, which makes the
 // departure visible in review and searchable. The rules are:
@@ -19,17 +26,12 @@
 //   - Nothing here is read from the environment or from global state; a
 //     setting takes effect only where a caller sets it.
 //   - A profile that forbids a departure refuses it rather than ignoring it:
-//     profile.Options.ForbidInsecureTransports (HAIP) refuses Transport, and
-//     Hooks, which rewrite draft protocol messages, are refused unless a draft
-//     profile is enabled.
+//     profile.Options.ForbidInsecureTransports (HAIP) refuses Transport
+//     wherever it is carried and Presenter's InsecureSkipX509Verify, and
+//     Hooks, which rewrite draft protocol messages, are refused unless a
+//     draft profile is enabled.
 //   - A new departure is added as a field of one of these types (or a new
 //     type in this package), never as a field of a stable configuration type.
-//     The OpenID4VP presenter's transport escapes (AllowHTTP,
-//     InsecureSkipX509Verify) follow the same pattern: a Transport-like type
-//     here, taken by an Experimental field of oid4vp.Oid4vpPresenter.
-//
-// This package imports no other wallet package except presenter/types, so any
-// wallet package can depend on it.
 package experimental
 
 import (
@@ -58,6 +60,34 @@ type Transport struct {
 	// with ForbidInsecureTransports (HAIP) refuses it. A client assertion is
 	// still sent over plain http only to a loopback host.
 	AllowHTTP bool
+}
+
+// Presenter relaxes the OpenID4VP presenter
+// (oid4vp.Oid4vpPresenter.Experimental). Each field makes the presenter
+// accept requests a conforming Wallet refuses. Not specification-conforming;
+// for testing only.
+type Presenter struct {
+	// Transport.AllowHTTP accepts http for request_uri and for the Response
+	// URI or Redirect URI of a local test verifier. OpenID4VP 1.0 Section 5.10
+	// and Draft 24 Section 5.11 require https for a request_uri POST, and HAIP
+	// 1.0 Section 5 requires TLS; a profile with ForbidInsecureTransports
+	// refuses it.
+	Transport Transport
+	// InsecureSkipX509Verify authenticates a Draft 24 x509_san_dns Request
+	// Object by its binding and signature only, without verifying the
+	// certificate chain; the request is admitted without a
+	// RequestObjectVerification. Draft 24 Section 5.10.4 has the Wallet
+	// "validate the signature and the trust chain of the X.509 certificate".
+	// The OpenID4VP 1.0 entry points refuse every signed Request Object while
+	// it is set, and a profile with ForbidInsecureTransports refuses it.
+	InsecureSkipX509Verify bool
+	// AcceptClientMetadataJWKsWithoutKeyID accepts a client_metadata.jwks
+	// member without a kid, or with a kid another member repeats, on the
+	// OpenID4VP 1.0 entry points. OpenID4VP 1.0 Section 5.1 states "Each JWK
+	// in the set MUST have a kid (Key ID) parameter that uniquely identifies
+	// the key within the context of the request". Draft 24 has no such rule,
+	// and its entry points never check kid.
+	AcceptClientMetadataJWKsWithoutKeyID bool
 }
 
 // Hooks rewrite messages after the library built them, so a tester can see

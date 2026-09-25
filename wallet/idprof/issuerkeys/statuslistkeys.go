@@ -13,6 +13,7 @@ import (
 
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential/statuslist"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -76,7 +77,7 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 // never by the header alone, and a mechanism that applies but fails is the
 // answer: nothing falls back to another mechanism.
 //
-//   - An https issuer (http only under AllowHTTP): when the header carries an
+//   - An https issuer (http only under Experimental.AllowHTTP): when the header carries an
 //     x5c, the chain is the only source. It must reach one of
 //     trust.TrustAnchors and its leaf must name the issuer's host as a
 //     dNSName, or the token is refused (MechanismX5CTrustedChain). Without
@@ -94,6 +95,10 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 //     carries the subject of trust.IssuerCertificate.
 //   - Any other identifier is not resolved.
 //
+// A Resolver with Experimental set is refused, with an error wrapping
+// statuslist.ErrStatusListInsecureTransportForbidden, when
+// request.ForbidInsecureTransports says the Checker's profile forbids it.
+//
 // request.X5C carries the profile's rules (HAIP 1.0 Section 6.1): Require
 // refuses every source other than the x5c chain, ExcludeAnchor a chain that
 // carries a trust anchor, RejectSelfSigned a self-signed leaf. Those refusals
@@ -109,6 +114,11 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 // are exactly the returned keys, so Resolution.CandidateFor answers for the
 // key that verified.
 func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *X5CTrust, request statuslist.KeyRequest) ([]jose.JSONWebKey, *Resolution, error) {
+	if request.ForbidInsecureTransports && r.Experimental != (experimental.Transport{}) {
+		// HAIP 1.0 Section 4: the profile refuses the experimental transport
+		// relaxation rather than resolving over it.
+		return nil, nil, fmt.Errorf("%w: the profile does not permit Resolver.Experimental", statuslist.ErrStatusListInsecureTransportForbidden)
+	}
 	lookup := requestFromHeader(template, request.Issuer, request.Header)
 	chain := x5cChain(lookup.X5C)
 	resolution := &Resolution{}

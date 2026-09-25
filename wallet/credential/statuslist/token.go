@@ -202,6 +202,9 @@ func (c *Checker) resolveIssuerKeys(ctx context.Context, request KeyRequest) ([]
 		return nil, fmt.Errorf("%w: no issuer key resolver is configured", ErrStatusListIssuerKeyUnresolved)
 	}
 	keys, err := c.ResolveIssuerKeys(ctx, request)
+	if errors.Is(err, ErrStatusListInsecureTransportForbidden) {
+		return nil, fmt.Errorf("%w: issuer %q: %w", ErrStatusListInsecureTransportForbidden, issuer, err)
+	}
 	if errors.Is(err, ErrStatusListCertificateRejected) {
 		return nil, fmt.Errorf("%w: issuer %q: %w", ErrStatusListCertificateRejected, issuer, err)
 	}

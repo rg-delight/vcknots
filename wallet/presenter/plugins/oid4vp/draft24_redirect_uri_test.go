@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/trustknots/vcknots/wallet/experimental"
 )
 
 // draft24RedirectURIValues is a Draft24 direct_post request from a
@@ -78,7 +80,7 @@ func TestDraft24RedirectURIClientIDMismatchAnswersTheClientIdentifier(t *testing
 	attacker := newCountingResponseServer(t)
 	verifier := newCountingResponseServer(t)
 	values := draft24RedirectURIValues(verifier.server.URL+"/response", attacker.server.URL+"/post")
-	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 	_, err := parseDraft24ForTest(p, finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseURIClientIDMismatch), "want ErrResponseURIClientIDMismatch, got %v", err)
 	require.Equal(t, int32(0), attacker.calls.Load(), "the foreign response_uri must receive nothing")

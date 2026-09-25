@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -174,15 +175,44 @@ func TestCheckReferenceAppliesTheHAIPStatusListTokenX5CRules(t *testing.T) {
 }
 
 // TestCheckReferenceForbidsCleartextUnderAProfileThatForbidsIt covers
-// profile.Options.ForbidInsecureTransports (HAIP 1.0 Section 4): AllowHTTP is
-// a test-only escape the profile refuses.
+// profile.Options.ForbidInsecureTransports (HAIP 1.0 Section 4): the
+// experimental transport is a test-only escape the profile refuses rather than
+// ignores, for an https reference too, and before anything is fetched.
 func TestCheckReferenceForbidsCleartextUnderAProfileThatForbidsIt(t *testing.T) {
+	for name, uri := range map[string]func(h *harness) string{
+		"http reference":  func(*harness) string { return "http://issuer.example.test/status/1" },
+		"https reference": func(h *harness) string { return h.reference(0).URI },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			checker := haipChecker(h)
+			checker.Experimental = experimental.Transport{AllowHTTP: true}
+			_, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri(h)})
+			assertSentinel(t, err, ErrStatusListInsecureTransportForbidden)
+			if h.requests.Load() != 0 {
+				t.Fatal("the endpoint was requested")
+			}
+		})
+	}
+}
+
+// TestCheckReferencePassesTheTransportRuleToTheHook: a hook learns that the
+// profile forbids experimental transports, and its refusal keeps its sentinel.
+func TestCheckReferencePassesTheTransportRuleToTheHook(t *testing.T) {
+	caKey := testutil.NewP256Key(t)
+	ca, _ := issueCertificate(t, caKey, nil, nil, true)
 	h := newHarness(t)
+	_, leaf := issueCertificate(t, h.key, ca, caKey, false)
+	h.serveToken(signES256(t, h.key, x5cHeader(leaf), defaultClaims(h.uri)))
 	checker := haipChecker(h)
-	checker.AllowHTTP = true
-	_, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: "http://issuer.example.test/status/1"})
-	assertSentinel(t, err, ErrStatusReferenceInvalid)
-	if h.requests.Load() != 0 {
-		t.Fatal("the endpoint was requested")
+	var seen KeyRequest
+	checker.ResolveIssuerKeys = func(_ context.Context, request KeyRequest) ([]jose.JSONWebKey, error) {
+		seen = request
+		return nil, fmt.Errorf("%w: resolver relaxes http", ErrStatusListInsecureTransportForbidden)
+	}
+	_, err := checker.CheckReference(context.Background(), testIssuer, h.reference(0))
+	assertSentinel(t, err, ErrStatusListInsecureTransportForbidden)
+	if !seen.ForbidInsecureTransports {
+		t.Fatal("the hook was not told the profile forbids experimental transports")
 	}
 }

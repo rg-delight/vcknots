@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
@@ -332,7 +333,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 	t.Run("encrypted", func(t *testing.T) {
 		server, captured := newServer(t)
 		defer server.Close()
-		p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client(), SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+		p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client(), SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, metadata()))
 		require.Error(t, err)
 		token := captured.Get("response")
@@ -347,7 +348,7 @@ func TestFinalEncryptedErrorResponse(t *testing.T) {
 		defer server.Close()
 		md := metadata()
 		md.Jwks = jose.JSONWebKeySet{}
-		p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client(), SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+		p := withExperimental(&Oid4vpPresenter{HTTPClient: server.Client(), SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 		_, err := p.ParsePresentationRequest(newURI(t, server.URL, md))
 		require.Error(t, err)
 		require.Empty(t, captured.Get("response"))
@@ -459,7 +460,7 @@ func TestRedirectURIClientIDRejectsForeignResponseURI(t *testing.T) {
 		"nonce":         {"n"},
 		"dcql_query":    {finalDcqlParam},
 	})
-	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client(), SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 	_, err := p.ParsePresentationRequest(uri)
 	assertAuthzErrorCode(t, err, InvalidRequestError)
 	require.ErrorContains(t, err, "response_uri does not match the redirect_uri Client Identifier")

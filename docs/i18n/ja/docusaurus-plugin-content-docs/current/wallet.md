@@ -124,8 +124,7 @@ pnpm -F @trustknots/server start
 * **ローカルテストでの HTTP 許可:** wallet は、OpenID4VCI 1.0 §12.2 と OpenID4VP 1.0 のとおり、Issuer と Verifier のエンドポイントに HTTPS を要求します。
 ローカルのサンプルサーバーは HTTP で動作するため、テスト用の wallet を構築するコードで明示的に HTTP を許可してください。
 平文 HTTP は規格から外れるので、[`experimental`](#experimental) パッケージを通してだけ設定できます。
-wallet が構築する plugin には `Config.Experimental.Transport` を、自分で構築する receiver には `Oid4vciReceiver.Experimental` を使います。
-自分で構築する OpenID4VP の presenter は、`SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` を呼んだときだけ受け入れます。
+wallet が構築する plugin には `Config.Experimental.Transport` を、自分で構築する plugin にはその `Experimental` フィールド（`Oid4vciReceiver.Experimental`、`Oid4vpPresenter.Experimental`、Issuer の鍵の解決には `issuerkeys.Resolver.Experimental`）を使います。
 環境変数で緩和することはできません。
 
 > ⚠️ **セキュリティ警告**: 本番環境では HTTP を許可しないでください。HAIP は拒否します。
@@ -231,10 +230,10 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
 		X509TrustChainRoots: certPool,
+		// The local sample server speaks plain HTTP, which OpenID4VP does not
+		// allow; opt in explicitly, and never in production.
+		Experimental: experimental.Presenter{Transport: experimental.Transport{AllowHTTP: allowHTTP}},
 	}
-	// The local sample server speaks plain HTTP, which OpenID4VP does not
-	// allow; opt in explicitly, and never in production.
-	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: allowHTTP})
 	presenterDisp, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)
@@ -999,7 +998,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 `IssuerKeys` は `*issuerkeys.Resolver` です。
 その `Mechanisms` で JWT VC Issuer Metadata（と `jwks_uri`）、DID の各 method、DID Configuration による束縛を有効にします。
 `issuerkeys.Request` は acceptor が自分で埋めます。
-`Resolver.AllowHTTP` は実験用です。SD-JWT VC -19 §3 はすべての取得に HTTPS を求めており、`ForbidInsecureTransports` を持つプロファイル（HAIP）はこれを設定したポリシーを拒否します。
+平文 HTTP で取得できるのは `Resolver.Experimental`（`experimental.Transport`）を設定したときだけです。SD-JWT VC -19 §3 はすべての取得に HTTPS を求めており、`ForbidInsecureTransports` を持つプロファイル（HAIP）は、これを設定した resolver を持つポリシーを拒否します。
 
 `acceptance.Verification`（`SavedCredential.Verification` も同じ）は、Issuer をどう認証したかを記録します。
 `Issuer`、`Mechanism`（`issuerkeys.MechanismX5CTrustedChain`、`MechanismJWTVCIssuerMetadata`、`MechanismDIDConfigurationBinding`、`MechanismOpenIDFederation`）、Issuer の鍵、証明書のフィンガープリントと `IssuerCertificateSubject`、`IssuerDNSBound`、`DID`、`FederationTrustAnchor`、失効確認の件数、holder binding の結果です。
@@ -1127,12 +1126,12 @@ Request Object がどう届いたかはライブラリが観測するもので�
 `X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。
 `RequestObjectValidation` のアンカーと併用はできません。
 
-`Oid4vpPresenter.SetExperimentalOptions` は、どの仕様も認めない緩和である `oid4vp.ExperimentalOptions` を適用します。
+`Oid4vpPresenter.Experimental`（`experimental.Presenter`）は、どの仕様も認めない緩和を持ちます。
 ローカルの Verifier や実験のためだけのものです。
-`AllowHTTP` は平文 HTTP の Verifier エンドポイントを受け入れます。
+`Transport.AllowHTTP` は平文 HTTP の Verifier エンドポイントを受け入れます。
 `InsecureSkipX509Verify` は Draft 24 の `x509_san_dns` の Request Object を束縛と署名だけで確かめ、`RequestObjectVerification` なしで受け付けます。これを設定している間、OpenID4VP 1.0 の経路はすべての署名付き Request Object を拒否します。
 `AcceptClientMetadataJWKsWithoutKeyID` は `kid` の規則を緩めます。
-これらは struct literal では設定できず、HAIP は前の 2 つを拒否します。
+ゼロ値は何も緩めず、HAIP は前の 2 つを拒否します。
 
 ### DCQL
 
@@ -1313,7 +1312,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 `SetReceiver` も同じ plugin の確認を行います。
 plugin のフィールドは登録後に変更してはなりません。
 HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
-`Experimental.Transport`（wallet と receiver の両方）と、presenter の実験用の `AllowHTTP`、`InsecureSkipX509Verify`（`oid4vp.ExperimentalOptions`）は拒否します。
+`Experimental.Transport`（wallet、receiver、Issuer の鍵の resolver、Status List の checker）と、presenter の `Experimental.Transport`、`Experimental.InsecureSkipX509Verify` は拒否します。
 
 ## エラーコード {#error-codes}
 
@@ -1415,12 +1414,13 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 | 設定 | 渡す場所 | 効果 |
 | --- | --- | --- |
-| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport`（wallet が構築する plugin）、`oid4vci.Oid4vciReceiver.Experimental` | ローカルのテスト用 Issuer のために、平文 HTTP のエンドポイントと識別子を受け付けます。wallet が構築する presenter にも `AllowHTTP` を設定します。client assertion を平文 HTTP で送るのは、引き続き loopback ホストに対してだけです。 |
+| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport`（wallet が構築する plugin）、`oid4vci.Oid4vciReceiver.Experimental`、`issuerkeys.Resolver.Experimental`、`statuslist.Checker.Experimental` | ローカルのテスト用 Issuer のために、平文 HTTP のエンドポイント、識別子、メタデータ、Status List のエンドポイントを受け付けます。wallet が構築する presenter にも設定します。client assertion を平文 HTTP で送るのは、引き続き loopback ホストに対してだけです。 |
+| `experimental.Presenter{Transport, InsecureSkipX509Verify, AcceptClientMetadataJWKsWithoutKeyID}` | `oid4vp.Oid4vpPresenter.Experimental` | 平文 HTTP の Verifier エンドポイント、チェーンを検証しない Draft 24 の `x509_san_dns` の Request Object、1.0 の経路での `kid` が一意でない `client_metadata.jwks`（OpenID4VP 1.0 §5.1）を受け付けます。 |
 | `experimental.Hooks{KeyProof, PresentationExchangeResponse}` | `Config.Experimental.Hooks` | Draft 13 の key proof（`ProofTransform`、`ProofJWTContent`）と Draft 24 の応答（`Draft24ResponseTransform`）を構築後に書き換えます。 |
 
 どの型もゼロ値が規格どおりの挙動です。
 環境変数からは何も読みません。
-規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は `Transport` を拒否し、`Hooks` には Draft のプロファイルが必要です。
+規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は、どこに渡した `Transport` も、`Presenter.InsecureSkipX509Verify` も拒否します（Status List の checker は `statuslist.ErrStatusListInsecureTransportForbidden`、ほかは不正な入力または `invalid_request` のエラーです）。`Hooks` には Draft のプロファイルが必要です。
 
 ## 環境変数
 
@@ -1458,7 +1458,8 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 * `oid4vci.OID4VCICredentialFormatToSerializationFlavor` は非推奨になり、`oid4vci.CredentialFormatFlavor` に置き換わりました。受け付けるのは `jwt_vc_json`、`ldp_vc`、`dc+sd-jwt`、`vc+sd-jwt` の完全一致だけで、`jwt_vc`、シリアライゼーション flavor の名前、未知の値は `oid4vci.ErrCredentialFormatUnsupported` で拒否します。`ReceiveCredential` は未知の形式を JWT VC として保存しなくなりました。
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
 * `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
-* `Oid4vpPresenter.AllowHTTP` と `InsecureSkipX509Verify` を削除しました。`SetExperimentalOptions(oid4vp.ExperimentalOptions{...})` で明示的に適用します。`NewWallet` と `presenter.WithDefaultConfig` が構築する presenter は `VCKNOTS_WALLET_HTTP_ALLOWED` を読まなくなりました。`Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` を削除しました。OpenID4VP 1.0 の入口は、`ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID` を設定しない限り、重複のない `kid` を常に要求します。`requestBuilder.WithHTTPAllowed` を削除しました。
+* `Oid4vpPresenter.AllowHTTP` と `InsecureSkipX509Verify` を削除しました。`Oid4vpPresenter.Experimental`（`experimental.Presenter`）で明示的に設定します。`NewWallet` と `presenter.WithDefaultConfig` が構築する presenter は `VCKNOTS_WALLET_HTTP_ALLOWED` を読まなくなりました。`Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` を削除しました。OpenID4VP 1.0 の入口は、`Experimental.AcceptClientMetadataJWKsWithoutKeyID` を設定しない限り、重複のない `kid` を常に要求します。`requestBuilder.WithHTTPAllowed` を削除しました。
+* `issuerkeys.Resolver.AllowHTTP` と `statuslist.Checker.AllowHTTP` を `Experimental experimental.Transport` に置き換えました。プロファイルが `ForbidInsecureTransports` を持つ `statuslist.Checker` は、`Experimental` を無視せず `statuslist.ErrStatusListInsecureTransportForbidden` で拒否し、その規則を `KeyRequest.ForbidInsecureTransports` で鍵の hook に渡します。`Resolver.StatusListKeys` はそれを resolver 自身の `Experimental` に適用します。
 * `presenterTypes.RequestObjectSource.DeliveredByReference`、`RequestObjectSource.WalletNonce`、`oid4vp.RequestObjectVerification.DeliveryAttested` を削除しました。ライブラリは自ら観測した配送と自ら送った `wallet_nonce` を記録し、HAIP は値で渡された Request Object を拒否します。
 * `oid4vp.FederationTrustOptions.AllowUnsignedRequests` を削除しました。署名なしの `openid_federation` の要求は常に拒否します。federation の Request Object は、Federation Entity Key ではなく `openid_credential_verifier` メタデータの鍵で検証します。
 * `oid4vp.OID4VPClientIDPrefixWebOrigin` を削除しました。署名なしの DC API の要求は `ClientID` が空のままで、platform の Origin は `CredentialPresentationRequest.Origin` が持ちます。OpenID4VP 1.0 は JWK の `alg` を常に要求するので、`profile.ResponseEncryptionRules.RequireJWKAlg` を削除しました。
@@ -1482,13 +1483,13 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
     - `credstore.WithDefaultConfig()` は `<ユーザー設定ディレクトリ>/vcknots/wallet/.local_credstore.db` に Credential を永続化します。プロセスがこのディレクトリを作成し、書き込めるようにしてください。
 
 4. **HTTPS の強制:**
-    - wallet は Issuer と Verifier のエンドポイントに HTTPS を要求します。Issuer への [`experimental.Transport`](#experimental)、Verifier への `oid4vp.ExperimentalOptions.AllowHTTP` による緩和は、ローカル開発に限ってください。
+    - wallet は Issuer と Verifier のエンドポイントに HTTPS を要求します。Issuer への [`experimental.Transport`](#experimental)、Verifier への `experimental.Presenter` による緩和は、ローカル開発に限ってください。
 
 5. **OpenID4VP `client_id` の厳格な検証:**
     - wallet は `client_id` を厳格に検証します。重複した prefix（例: `x509_san_dns:x509_san_dns:...`）、不正な形式、wallet 専用の prefix は拒否します。
     - `x509_san_dns` では、Request Object の `x5c` ヘッダーから証明書を取り出し、その DNS Subject Alternative Name のいずれかが `client_id` の値と一致しなければなりません。
 
-6. **`oid4vp.ExperimentalOptions.InsecureSkipX509Verify`:**
+6. **`experimental.Presenter.InsecureSkipX509Verify`:**
     - Draft 24 の入口で証明書チェーンの検証を省略し、束縛と署名だけを確認します。これを設定している間、OpenID4VP 1.0 の経路は署名付き Request Object を拒否し、HAIP はこの設定を拒否します。
     - ⚠️ コンフォーマンステストかローカル開発でのみ使ってください。
 
@@ -1501,7 +1502,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
   * **A:** Issuer/Verifier サーバーが起動していません。`pnpm -F @trustknots/server start` で起動し、http://localhost:8080 が応答することを確認してください。
 
 * **Q: 受領が `credential issuer must use https scheme` で失敗する。**
-  * **A:** wallet は HTTPS を要求します。HTTP のローカルサンプルサーバーに対しては、`Config.Experimental.Transport.AllowHTTP` を設定するか、自分で構築する receiver に `Experimental` を設定し、presenter で `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` を呼んでください（[experimental](#experimental) を参照）。
+  * **A:** wallet は HTTPS を要求します。HTTP のローカルサンプルサーバーに対しては、`Config.Experimental.Transport.AllowHTTP` を設定するか、自分で構築する receiver、presenter、Issuer の鍵の resolver の `Experimental` フィールドを設定してください（[experimental](#experimental) を参照）。
 
 * **Q: 受領が `issuer_metadata_fetch_failed` で失敗する。**
   * **A:** `curl http://localhost:8080/.well-known/openid-credential-issuer` を実行して JSON メタデータが返ること、その `credential_issuer` が Offer の識別子と一致することを確認してください。識別子がパスを持つとき、1.0 の発行は `/.well-known/openid-credential-issuer/<パス>` を、Draft 13 の発行は `<パス>/.well-known/openid-credential-issuer` を読み、ほかの位置は試しません。

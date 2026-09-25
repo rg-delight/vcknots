@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -78,7 +79,7 @@ func TestDirectPostJWTRefusedAtParseWithoutUsableEncryption(t *testing.T) {
 				require.NoError(t, err)
 				values.Set("client_metadata", string(encoded))
 			}
-			p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{AllowHTTP: true})
+			p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 			req, err := p.ParsePresentationRequest(finalQueryURI(values))
 			if tt.want == nil {
 				require.NoError(t, err)
@@ -99,7 +100,7 @@ func TestDraft24DirectPostJWTRefusedAtParseWithoutEncryptionKey(t *testing.T) {
 	responseURI := verifier.server.URL + "/response"
 	values := draft24RedirectURIValues(responseURI, responseURI)
 	values.Set("response_mode", "direct_post.jwt")
-	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{AllowHTTP: true})
+	p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 	_, err := parseDraft24ForTest(p, finalQueryURI(values))
 	require.True(t, errors.Is(err, ErrResponseEncryptionKeyMissing), "want ErrResponseEncryptionKeyMissing, got %v", err)
 	require.Equal(t, int32(0), verifier.calls.Load(), "a response encryption refusal must not be POSTed")

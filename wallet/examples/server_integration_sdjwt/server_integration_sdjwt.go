@@ -371,10 +371,10 @@ func main() {
 	certPool := buildCertPool(isConformanceMode)
 	p := &oid4vp.Oid4vpPresenter{
 		X509TrustChainRoots: certPool,
+		// The local sample server listens on plain http, which is outside
+		// OpenID4VP and opted into explicitly; the conformance suite does not.
+		Experimental: experimental.Presenter{Transport: experimental.Transport{AllowHTTP: !isConformanceMode}},
 	}
-	// A local verifier listens on plain http; that is outside OpenID4VP and
-	// is opted into explicitly.
-	p.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: !isConformanceMode})
 	presenterDisp, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenter.Oid4vp, p))
 	if err != nil {
 		panic(err)

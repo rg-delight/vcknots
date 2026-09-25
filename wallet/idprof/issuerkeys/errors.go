@@ -17,8 +17,8 @@ import (
 // same vocabulary as the ladder.
 var (
 	// ErrIssuerURLNotAllowed reports a URL the resolver refuses to request:
-	// one that does not parse, that is not https (nor http while AllowHTTP is
-	// set), or that carries a query or a fragment. A metadata location is a
+	// one that does not parse, that is not https (nor http while Experimental.AllowHTTP
+	// is set), or that carries a query or a fragment. A metadata location is a
 	// fixed, well-known path; a query or fragment on it is a sign the value
 	// was built from something other than the issuer identifier.
 	ErrIssuerURLNotAllowed = common.NewCodedError("issuer_keys_url_not_allowed", "issuer key metadata URL is not allowed")

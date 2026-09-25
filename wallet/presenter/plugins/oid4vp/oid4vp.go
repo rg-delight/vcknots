@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
@@ -62,9 +63,11 @@ type Oid4vpPresenter struct {
 	// answer it calls AuthorizationRequestError.SendErrorResponse itself.
 	SendParseErrorResponses bool
 
-	// experimental holds the non-conforming relaxations of
-	// SetExperimentalOptions; the zero value applies none.
-	experimental ExperimentalOptions
+	// Experimental relaxes the presenter beyond OpenID4VP for a local test
+	// verifier (package experimental). The zero value applies none. A profile
+	// with ForbidInsecureTransports (HAIP) refuses Transport and
+	// InsecureSkipX509Verify.
+	Experimental experimental.Presenter
 }
 
 var _ profile.Carrier = (*Oid4vpPresenter)(nil)
@@ -218,13 +221,13 @@ func (p *Oid4vpPresenter) profileOptions() (profile.Options, error) {
 func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) {
 	core.ctx = ctx
 	core.httpClient = p.httpClient()
-	core.allowHTTP = p.experimental.AllowHTTP
+	core.allowHTTP = p.Experimental.Transport.AllowHTTP
 	core.x509TrustChainRoots = p.X509TrustChainRoots
-	core.insecureSkipX509Verify = p.experimental.InsecureSkipX509Verify
+	core.insecureSkipX509Verify = p.Experimental.InsecureSkipX509Verify
 	// OID4VP 1.0 §5.1: "Each JWK in the set MUST have a kid (Key ID)
 	// parameter that uniquely identifies the key within the context of the
 	// request." The Draft 24 builder clears it: Draft 24 has no such rule.
-	core.requireClientMetadataJWKKeyIDs = !p.experimental.AcceptClientMetadataJWKsWithoutKeyID
+	core.requireClientMetadataJWKKeyIDs = !p.Experimental.AcceptClientMetadataJWKsWithoutKeyID
 	if p.PreRegisteredClients != nil || p.ResolvePreRegisteredClient != nil {
 		core.preRegistry = &preRegisteredRegistry{clients: p.PreRegisteredClients, resolve: p.ResolvePreRegisteredClient}
 	}
@@ -240,10 +243,10 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 	if err != nil {
 		return nil, err
 	}
-	if options.ForbidInsecureTransports && (p.experimental.AllowHTTP || p.experimental.InsecureSkipX509Verify) {
+	if options.ForbidInsecureTransports && (p.Experimental.Transport != (experimental.Transport{}) || p.Experimental.InsecureSkipX509Verify) {
 		// HAIP §5: the profile requires TLS verifier endpoints and verified
 		// X.509 request signing; the experimental escapes must not weaken it.
-		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify")
+		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit Experimental.Transport or Experimental.InsecureSkipX509Verify")
 	}
 	builder := NewRequestBuilder()
 	builder.options = options

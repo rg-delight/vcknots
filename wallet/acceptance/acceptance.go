@@ -24,6 +24,7 @@ import (
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -179,7 +180,7 @@ type Acceptor struct {
 	x5c profile.X5CRules
 	// draft13 admits the SD-JWT VC typ of OpenID4VCI Draft 13, vc+sd-jwt.
 	draft13 bool
-	// forbidInsecure refuses an IssuerKeys resolver with AllowHTTP
+	// forbidInsecure refuses an IssuerKeys resolver with Experimental set
 	// (profile.Options.ForbidInsecureTransports).
 	forbidInsecure bool
 	serializer     *serializer.SerializationDispatcher
@@ -213,9 +214,9 @@ func NewAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *ve
 // verified. It stores nothing. ctx bounds CRL retrieval. Failures wrap the
 // sentinels of this package.
 func (a *Acceptor) Verify(ctx context.Context, raw []byte, policy Policy, opts Options) (*credential.Credential, *Verification, error) {
-	if a.forbidInsecure && policy.IssuerKeys != nil && policy.IssuerKeys.AllowHTTP {
+	if a.forbidInsecure && policy.IssuerKeys != nil && policy.IssuerKeys.Experimental != (experimental.Transport{}) {
 		// SD-JWT VC -19 §3 and HAIP 1.0 §4: key material over TLS only.
-		return nil, nil, fmt.Errorf("%w: the profile forbids an issuer key resolver with AllowHTTP", common.ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: the profile forbids an issuer key resolver with Experimental.Transport", common.ErrInvalidInput)
 	}
 	return a.run(ctx, raw, opts, &policy)
 }

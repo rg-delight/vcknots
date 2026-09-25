@@ -49,7 +49,7 @@ func (r *Resolver) httpClient() *http.Client {
 //
 // Every location the ladder reads is a well-known path derived from an issuer
 // identifier, so the rules are narrow on purpose: the URL must parse with a
-// host, it must be https - or http while AllowHTTP is set, which exists for a
+// host, it must be https - or http while Experimental.AllowHTTP is set, which exists for a
 // local test origin - and it must carry neither a query nor a fragment, since
 // neither can be part of a well-known location.
 func (r *Resolver) allowedURL(raw string) (*url.URL, error) {
@@ -60,7 +60,7 @@ func (r *Resolver) allowedURL(raw string) (*url.URL, error) {
 	switch parsed.Scheme {
 	case "https":
 	case "http":
-		if !r.AllowHTTP {
+		if !r.Experimental.AllowHTTP {
 			return nil, newMechanismError(ErrIssuerURLNotAllowed, "issuer identifier is not https")
 		}
 	default:

@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
@@ -164,7 +165,7 @@ func TestParseRequestRejectsInvalidOuterClientIDBeforeFetch(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer server.Close()
-	p := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
+	p := withExperimental(&Oid4vpPresenter{}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 	_, err := p.ParsePresentationRequest("openid4vp://present?client_id=origin:https://verifier.example&request_uri=" + url.QueryEscape(server.URL))
 	require.Error(t, err)
 	select {

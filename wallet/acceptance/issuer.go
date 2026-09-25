@@ -201,13 +201,13 @@ func resolverCandidates(ctx context.Context, resolver *issuerkeys.Resolver, subj
 }
 
 // isWebIssuer reports whether issuer is an https URL, or an http URL that an
-// experimental AllowHTTP resolver admits.
+// experimental resolver (Resolver.Experimental.AllowHTTP) admits.
 func isWebIssuer(issuer string, resolver *issuerkeys.Resolver) bool {
 	parsed, err := url.Parse(issuer)
 	if err != nil || parsed.Host == "" {
 		return false
 	}
-	return parsed.Scheme == "https" || (parsed.Scheme == "http" && resolver != nil && resolver.AllowHTTP)
+	return parsed.Scheme == "https" || (parsed.Scheme == "http" && resolver != nil && resolver.Experimental.AllowHTTP)
 }
 
 // isSDJWTVCFormat reports whether format is an SD-JWT VC format identifier,

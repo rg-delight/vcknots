@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -226,7 +227,7 @@ func (f *requestObjectFixture) presenterWith(opts requestFixtureOptions) *Oid4vp
 		RequestObjectValidation: &validation,
 		Profile:                 opts.Profile,
 	}
-	presenter.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: opts.AllowHTTP, InsecureSkipX509Verify: opts.Insecure})
+	presenter.Experimental = experimental.Presenter{Transport: experimental.Transport{AllowHTTP: opts.AllowHTTP}, InsecureSkipX509Verify: opts.Insecure}
 	return presenter
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
@@ -558,8 +559,6 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 		"registered-client": {},
 	}}
 
-	p.SetExperimentalOptions(ExperimentalOptions{})
-
 	tests := []struct {
 		name    string
 		uri     string
@@ -657,7 +656,7 @@ func TestOid4vpPresenter_ParsePresentationRequest_DirectPostJWTWithDCQL(t *testi
 }
 
 func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
-	p := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+	p := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 
 	newErrorCapturingServer := func(t *testing.T) (*httptest.Server, *url.Values) {
 		t.Helper()
@@ -802,7 +801,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 			server, captured := newErrorCapturingServer(t)
 			defer server.Close()
 
-			presenter := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, ExperimentalOptions{AllowHTTP: true})
+			presenter := withExperimental(&Oid4vpPresenter{SendParseErrorResponses: true}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 			if unbound.register {
 				presenter.PreRegisteredClients = map[string]PreRegisteredClient{unbound.clientID: {}}
 			}
@@ -832,7 +831,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 		server, captured := newErrorCapturingServer(t)
 		defer server.Close()
 
-		presenter := withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AllowHTTP: true})
+		presenter := withExperimental(&Oid4vpPresenter{}, experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}})
 		_, err := presenter.ParsePresentationRequest(baseURI(server.URL, "&dcql_query=%7B%22credentials%22%3A%5B%5D%7D"))
 		var authzErr *AuthorizationRequestError
 		if !errors.As(err, &authzErr) || authzErr.Code != InvalidRequestError {
@@ -890,7 +889,7 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 func TestOid4vpPresenter_ParsePresentationRequest_AllowsNonHTTPSResponseURI_WhenValidationDisabled(t *testing.T) {
 	p := &Oid4vpPresenter{}
 
-	p.SetExperimentalOptions(ExperimentalOptions{AllowHTTP: true})
+	p.Experimental = experimental.Presenter{Transport: experimental.Transport{AllowHTTP: true}}
 
 	uri := "openid4vp://present?client_id=redirect_uri:http://example.com/response&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=http://example.com/response"
 	req, err := p.ParsePresentationRequest(uri)

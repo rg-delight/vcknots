@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+
+	"github.com/trustknots/vcknots/wallet/experimental"
 )
 
 // Credential formats this package knows how to resolve keys for. They decide
@@ -254,18 +256,20 @@ type Resolver struct {
 	// MaxDocumentBytes bounds every retrieved document. A value of zero or less
 	// uses 64 KiB.
 	MaxDocumentBytes int64
-	// AllowHTTP admits plain http metadata URLs. It is experimental and off
-	// by default: SD-JWT VC -19 §3 says "All URLs dereferenced according to
-	// this specification MUST use the HTTPS scheme", so it exists only for a
-	// local test origin. The credential acceptor refuses a Resolver with
-	// AllowHTTP under a profile that sets
-	// profile.Options.ForbidInsecureTransports (HAIP).
+	// Experimental.AllowHTTP admits plain http metadata URLs for a local test
+	// origin (package experimental). The zero value conforms: SD-JWT VC -19
+	// §3 says "All URLs dereferenced according to this specification MUST use
+	// the HTTPS scheme". A profile with
+	// profile.Options.ForbidInsecureTransports (HAIP) refuses a Resolver that
+	// sets it: the credential acceptor (acceptance.NewAcceptor) and
+	// StatusListKeys under a Status List checker of such a profile fail
+	// instead of resolving.
 	//
 	// The resolver checks the scheme and the shape of every URL it requests,
 	// not where the host resolves to: which networks an outbound request may
 	// reach (public addresses only, say) is a property of the deployment and
 	// belongs in HTTPClient's dialer.
-	AllowHTTP bool
+	Experimental experimental.Transport
 	// Now reports the current time, for the validity window of a DID
 	// Configuration's Domain Linkage Credential. A nil value uses time.Now.
 	Now func() time.Time

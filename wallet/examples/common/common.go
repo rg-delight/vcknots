@@ -70,7 +70,7 @@ func SampleIssuerAcceptance(issuerCAPath string, allowHTTP bool) (*acceptance.Po
 			JWTVCIssuerMetadata: true, RemoteJWKS: true,
 			DIDKey: true, DIDJWK: true, DIDWeb: true, DIDConfiguration: true,
 		},
-		AllowHTTP: allowHTTP,
+		Experimental: experimental.Transport{AllowHTTP: allowHTTP},
 	}}
 	if issuerCAPath == "" {
 		return policy, nil
@@ -194,10 +194,10 @@ func NewOID4VPRuntime(certPath string, allowHTTP bool) (*Runtime, error) {
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
 		X509TrustChainRoots: certPool,
+		// The sample verifier listens on plain http; that is outside
+		// OpenID4VP and is opted into explicitly.
+		Experimental: experimental.Presenter{Transport: experimental.Transport{AllowHTTP: allowHTTP}},
 	}
-	// The sample verifier listens on plain http; that is outside OpenID4VP
-	// and is opted into explicitly.
-	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: allowHTTP})
 	presenterDispatcher, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)

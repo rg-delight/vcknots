@@ -15,6 +15,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/credential/statuslist"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -262,6 +263,31 @@ func TestStatusListKeysHAIPRules(t *testing.T) {
 				t.Fatalf("StatusListKeys = %v, %v; want ErrStatusListCertificateRejected", keys, err)
 			}
 		})
+	}
+}
+
+// TestStatusListKeysRefusesAnExperimentalResolverWhereForbidden covers HAIP
+// 1.0 Section 4 as the checker hands it to the hook in
+// KeyRequest.ForbidInsecureTransports: a resolver with the experimental
+// transport is refused, not used over plain http, and it still resolves where
+// the profile allows it.
+func TestStatusListKeysRefusesAnExperimentalResolverWhereForbidden(t *testing.T) {
+	t.Parallel()
+	f := newStatusListFixture(t)
+	f.resolver.Experimental = experimental.Transport{AllowHTTP: true}
+	request := keyRequest(f.issuer, statusListHeader(f.leaf))
+	request.ForbidInsecureTransports = true
+	keys, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), f.trust(f.ca.certificate), request)
+	if keys != nil || !errors.Is(err, statuslist.ErrStatusListInsecureTransportForbidden) {
+		t.Fatalf("StatusListKeys = %v, %v; want ErrStatusListInsecureTransportForbidden", keys, err)
+	}
+	if f.network.count() != 0 {
+		t.Fatalf("requests were made: %d", f.network.count())
+	}
+
+	request.ForbidInsecureTransports = false
+	if _, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), f.trust(f.ca.certificate), request); err != nil {
+		t.Fatalf("StatusListKeys without the rule: %v", err)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 )
@@ -503,7 +504,7 @@ func TestCheckReferenceRefusesUnusableReferences(t *testing.T) {
 		{name: "not a URL", uri: uri("not a valid URL"), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "empty", uri: uri(""), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "relative", uri: uri("/status/1"), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
-		{name: "http without AllowHTTP", uri: func(h *harness) string {
+		{name: "http without Experimental.AllowHTTP", uri: func(h *harness) string {
 			return strings.Replace(h.uri, "https://", "http://", 1)
 		}, want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
 		{name: "other scheme", uri: uri("ftp://issuer.example.test/status"), want: ErrStatusReferenceInvalid, fetchMustNotRun: true},
@@ -923,7 +924,7 @@ func TestCheckReferenceAllowsCleartextOnlyWhenEnabled(t *testing.T) {
 	_, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri, Index: 0})
 	assertSentinel(t, err, ErrStatusReferenceInvalid)
 
-	checker.AllowHTTP = true
+	checker.Experimental = experimental.Transport{AllowHTTP: true}
 	status, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri, Index: 0})
 	if err != nil {
 		t.Fatal(err)

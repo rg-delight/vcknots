@@ -41,7 +41,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Fatalf("Final must accept AllowHTTP test policy: %v", err)
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, AllowHTTP: true})
-		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify") {
+		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit Experimental.Transport or Experimental.InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject AllowHTTP: %v", err)
 		}
 	})
@@ -55,7 +55,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Log("Final rejected insecure verify for its own reason")
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, Insecure: true})
-		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit the experimental AllowHTTP or InsecureSkipX509Verify") {
+		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit Experimental.Transport or Experimental.InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject InsecureSkipX509Verify: %v", err)
 		}
 	})

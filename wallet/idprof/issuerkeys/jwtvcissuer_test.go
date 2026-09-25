@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/trustknots/vcknots/wallet/experimental"
 )
 
 func TestJWTVCIssuerMetadataRung(t *testing.T) {
@@ -330,7 +332,7 @@ func TestJWTVCIssuerMetadataOverPlainHTTP(t *testing.T) {
 		t.Fatalf("an http origin was requested without AllowHTTP")
 	}
 
-	allowing := &Resolver{HTTPClient: origin.server.Client(), Mechanisms: allMechanisms(), AllowHTTP: true}
+	allowing := &Resolver{HTTPClient: origin.server.Client(), Mechanisms: allMechanisms(), Experimental: experimental.Transport{AllowHTTP: true}}
 	resolution, err := allowing.Resolve(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Resolve with AllowHTTP failed: %v", err)

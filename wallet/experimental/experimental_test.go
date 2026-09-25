@@ -39,4 +39,7 @@ func TestZeroValuesConform(t *testing.T) {
 	if (experimental.Options{}).Hooks.Set() {
 		t.Fatal("the zero Options set a hook")
 	}
+	if zero := (experimental.Presenter{}); zero.Transport.AllowHTTP || zero.InsecureSkipX509Verify || zero.AcceptClientMetadataJWKsWithoutKeyID {
+		t.Fatal("the zero Presenter relaxes something")
+	}
 }

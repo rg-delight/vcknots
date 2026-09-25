@@ -14,6 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/acceptance"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
@@ -54,7 +55,7 @@ func acceptDIDIssuerPolicy(did, kid string, algorithm jose.SignatureAlgorithm, k
 		HTTPClient: &http.Client{Transport: network},
 		Mechanisms: issuerkeys.Mechanisms{DIDKey: true, DIDJWK: true, DIDConfiguration: true},
 		// The issuance fixtures run their Credential Issuer on plain http.
-		AllowHTTP: true,
+		Experimental: experimental.Transport{AllowHTTP: true},
 	}}
 }
 

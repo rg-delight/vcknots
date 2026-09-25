@@ -113,7 +113,7 @@ The server exposes the endpoints used in this tutorial:
 * `POST /callback` — the verifier's response endpoint
 * `GET /.well-known/openid-credential-issuer`, `GET /.well-known/oauth-authorization-server` — metadata endpoints
 
-* **Allowing HTTP for local testing:** The wallet rejects non-HTTPS issuer and verifier endpoints, as OpenID4VCI 1.0 §12.2 and OpenID4VP 1.0 require. Because the local sample server runs on plain HTTP, allow HTTP explicitly in the code that builds the wallet for the test. Plain HTTP departs from the specifications, so it is reachable only through the [`experimental`](#experimental) package: `Config.Experimental.Transport` for the plugins the wallet builds, or `Oid4vciReceiver.Experimental` on a receiver you construct. An OpenID4VP presenter you construct accepts it only after `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})`. No environment variable relaxes it.
+* **Allowing HTTP for local testing:** The wallet rejects non-HTTPS issuer and verifier endpoints, as OpenID4VCI 1.0 §12.2 and OpenID4VP 1.0 require. Because the local sample server runs on plain HTTP, allow HTTP explicitly in the code that builds the wallet for the test. Plain HTTP departs from the specifications, so it is reachable only through the [`experimental`](#experimental) package: `Config.Experimental.Transport` for the plugins the wallet builds, or the `Experimental` field of a plugin you construct (`Oid4vciReceiver.Experimental`, `Oid4vpPresenter.Experimental`, and `issuerkeys.Resolver.Experimental` for issuer key resolution). No environment variable relaxes it.
 
 > ⚠️ **Security warning:** Do not allow HTTP in production. HAIP refuses it.
 
@@ -215,10 +215,10 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
 		X509TrustChainRoots: certPool,
+		// The local sample server speaks plain HTTP, which OpenID4VP does not
+		// allow; opt in explicitly, and never in production.
+		Experimental: experimental.Presenter{Transport: experimental.Transport{AllowHTTP: allowHTTP}},
 	}
-	// The local sample server speaks plain HTTP, which OpenID4VP does not
-	// allow; opt in explicitly, and never in production.
-	oid4vpPresenter.SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: allowHTTP})
 	presenterDisp, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
 	)
@@ -886,7 +886,7 @@ The checks are:
 * **Validity.** The signature, `exp` / `nbf` (with `ClockSkew`), SD-JWT disclosure integrity, an `_sd_alg` the wallet implements (RFC 9901 §4.1.1, §7.1), no Disclosure of `iss`, `nbf`, `exp`, `cnf`, `vct`, `vct#integrity`, `aka_vcts` or `status` (SD-JWT VC -19 §2.2.2.3), and `ExpectedSDJWTVCType` when set.
 * **`ldp_vc`.** The `eddsa-rdfc-2022` Data Integrity proof is verified with a key of the credential's `issuer`, established as above (a DID through a DID Configuration, an `https` issuer through `Federation`), over the JSON-LD contexts pinned in `Policy.DataIntegrityContexts`. The `verificationMethod` must belong to the `issuer`, the validity period is `validFrom` / `validUntil`, and an issuance binds the holder through a `did:key` or `did:jwk` `credentialSubject.id`. `IssuerX509` does not apply.
 
-`IssuerKeys` is an `*issuerkeys.Resolver`: its `Mechanisms` switch on JWT VC Issuer Metadata (and `jwks_uri`), the DID methods and the DID Configuration binding. The acceptor fills the `issuerkeys.Request` itself. `Resolver.AllowHTTP` is experimental: SD-JWT VC -19 §3 requires HTTPS for every retrieval, and a profile with `ForbidInsecureTransports` (HAIP) refuses a policy that sets it.
+`IssuerKeys` is an `*issuerkeys.Resolver`: its `Mechanisms` switch on JWT VC Issuer Metadata (and `jwks_uri`), the DID methods and the DID Configuration binding. The acceptor fills the `issuerkeys.Request` itself. `Resolver.Experimental` (`experimental.Transport`) is the only way to fetch over plain HTTP: SD-JWT VC -19 §3 requires HTTPS for every retrieval, and a profile with `ForbidInsecureTransports` (HAIP) refuses a policy whose resolver sets it.
 
 `acceptance.Verification` (also `SavedCredential.Verification`) records how the issuer was authenticated: `Issuer`, `Mechanism` (`issuerkeys.MechanismX5CTrustedChain`, `MechanismJWTVCIssuerMetadata`, `MechanismDIDConfigurationBinding` or `MechanismOpenIDFederation`), the issuer key, the certificate fingerprints and `IssuerCertificateSubject`, `IssuerDNSBound`, `DID`, `FederationTrustAnchor`, revocation counters and the holder-binding outcome. Failures wrap the sentinels of package `acceptance` (`ErrIssuerKeyUnresolved`, `ErrIssuerSignatureInvalid`, `ErrHolderBindingMismatch`, …); a failed resolution also carries the `*issuerkeys.UnresolvedError` or `*issuerkeys.DIDOnlyTrustError` with its diagnostics, and an untrusted or revoked chain arrives as `*x509.SigningChainError` or `*x509.CRLCheckError` of package `common/x509`.
 
@@ -990,7 +990,7 @@ Every `client_metadata.jwks` member must carry a `kid` that no other member repe
 
 `RequestObjectValidationOptions` holds the relying-party policy: `TrustAnchors` or `RootCAs`, `CRL`, `AllowUnadvertisedRevocation`, `CertificateKeyUsages`, `WalletAudience`, `SigningAlgorithms` (default ES256 and RS256), `RequireExpiry`, `MaxAge` (zero is unbounded in every profile), `Now` and `ClockSkew`. A Request Object whose `iat` lies in the future is refused, so set `ClockSkew` to the clock difference the verifiers you accept may have. `X509TrustChainRoots` alone accepts certificates that publish no revocation information; it cannot be combined with anchors in `RequestObjectValidation`.
 
-`Oid4vpPresenter.SetExperimentalOptions` applies `oid4vp.ExperimentalOptions`, relaxations no specification allows, for local verifiers and experiments only: `AllowHTTP` (plain HTTP verifier endpoints), `InsecureSkipX509Verify` (a Draft 24 `x509_san_dns` Request Object checked by binding and signature only, admitted without `RequestObjectVerification`; the OpenID4VP 1.0 path then refuses every signed Request Object) and `AcceptClientMetadataJWKsWithoutKeyID`. They cannot be set in a struct literal, and HAIP refuses the first two.
+`Oid4vpPresenter.Experimental` (`experimental.Presenter`) carries relaxations no specification allows, for local verifiers and experiments only: `Transport.AllowHTTP` (plain HTTP verifier endpoints), `InsecureSkipX509Verify` (a Draft 24 `x509_san_dns` Request Object checked by binding and signature only, admitted without `RequestObjectVerification`; the OpenID4VP 1.0 path then refuses every signed Request Object) and `AcceptClientMetadataJWKsWithoutKeyID`. The zero value applies none, and HAIP refuses the first two.
 
 ### DCQL
 
@@ -1125,7 +1125,7 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 * `Attestation.ClientKeyFromDPoP` without a DPoP key or together with `Attestation.ClientKey` is refused (`ErrInvalidArgument`).
 * `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
-`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `Experimental.Transport` (on the wallet and on the receiver) and the presenter's experimental `AllowHTTP` and `InsecureSkipX509Verify` (`oid4vp.ExperimentalOptions`) are refused.
+`SetReceiver` applies the same plugin checks. Plugin fields must not change after the plugin is registered. HAIP further requires, each through its `profile.Options` field, among others: PAR, DPoP-bound access tokens, a client authentication mechanism, `scope` on every Credential Configuration, a Nonce Endpoint when a key attestation is needed, `x509_hash`, signed requests delivered by `request_uri`, the encrypted response modes, SD-JWT VC issuer `x5c`, and a Key Binding JWT for every SD-JWT VC that carries `cnf`. `Experimental.Transport` (on the wallet, the receiver, the issuer key resolver and the Status List checker) and the presenter's `Experimental.Transport` and `Experimental.InsecureSkipX509Verify` are refused.
 
 ## Error codes {#error-codes}
 
@@ -1207,10 +1207,11 @@ Package `experimental` holds every setting that departs from the OpenID4VC speci
 
 | Setting | Where | Effect |
 | --- | --- | --- |
-| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport` (plugins the wallet builds), `oid4vci.Oid4vciReceiver.Experimental` | Accepts plain HTTP issuer endpoints and identifiers for a local test issuer; the presenter the wallet builds gets `AllowHTTP` too. A client assertion still goes over plain HTTP only to a loopback host. |
+| `experimental.Transport{AllowHTTP}` | `Config.Experimental.Transport` (plugins the wallet builds), `oid4vci.Oid4vciReceiver.Experimental`, `issuerkeys.Resolver.Experimental`, `statuslist.Checker.Experimental` | Accepts plain HTTP issuer endpoints and identifiers, metadata and Status List endpoints of a local test issuer; the presenter the wallet builds gets it too. A client assertion still goes over plain HTTP only to a loopback host. |
+| `experimental.Presenter{Transport, InsecureSkipX509Verify, AcceptClientMetadataJWKsWithoutKeyID}` | `oid4vp.Oid4vpPresenter.Experimental` | Plain HTTP verifier endpoints; a Draft 24 `x509_san_dns` Request Object without chain validation; `client_metadata.jwks` members without a unique `kid` on the 1.0 path (OpenID4VP 1.0 §5.1). |
 | `experimental.Hooks{KeyProof, PresentationExchangeResponse}` | `Config.Experimental.Hooks` | Rewrites Draft 13 key proofs (`ProofTransform`, `ProofJWTContent`) and Draft 24 responses (`Draft24ResponseTransform`) after they were built. |
 
-The zero value of every type is the conforming behavior. Nothing is read from the environment. A profile that forbids a departure refuses it rather than ignoring it: HAIP refuses `Transport`, and `Hooks` need a draft profile.
+The zero value of every type is the conforming behavior. Nothing is read from the environment. A profile that forbids a departure refuses it rather than ignoring it: HAIP refuses `Transport` wherever it is carried and `Presenter.InsecureSkipX509Verify` (the Status List checker with `statuslist.ErrStatusListInsecureTransportForbidden`, the others with an invalid-input or `invalid_request` error), and `Hooks` need a draft profile.
 
 ## Environment variables
 
@@ -1245,7 +1246,8 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 * `oid4vci.OID4VCICredentialFormatToSerializationFlavor` is deprecated in favor of `oid4vci.CredentialFormatFlavor`. It accepts exactly `jwt_vc_json`, `ldp_vc`, `dc+sd-jwt` and `vc+sd-jwt`, compared exactly; `jwt_vc`, serialization flavor names and unknown values are refused with `oid4vci.ErrCredentialFormatUnsupported`. `ReceiveCredential` no longer stores an unknown format as JWT VC.
 * The receiver plugin refuses every HTTP redirect (`ErrHTTPRedirectNotAllowed`), bounds response bodies, and refuses Credential Issuer Metadata whose `credential_issuer` is not the requested identifier and authorization server metadata whose `issuer` is not the requested one.
 * `Oid4vpPresenter.ParsePresentationRequest` authenticates the verifier as described in [Verifier authentication](#verifier-authentication): signed Request Objects are verified by the prefix's own mechanism and never with keys from `client_metadata`, `x509_*` prefixes require a signed Request Object, a colon-less `client_id` is a pre-registered client that must be registered, and a future `iat` is refused. `X509TrustChainRoots` keeps accepting certificates without revocation information.
-* `Oid4vpPresenter.AllowHTTP` and `InsecureSkipX509Verify` were removed; `SetExperimentalOptions(oid4vp.ExperimentalOptions{...})` applies them explicitly. The presenter `NewWallet` and `presenter.WithDefaultConfig` build no longer reads `VCKNOTS_WALLET_HTTP_ALLOWED`. `Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` was removed: the OpenID4VP 1.0 entry points always require a unique `kid` unless `ExperimentalOptions.AcceptClientMetadataJWKsWithoutKeyID` is set. `requestBuilder.WithHTTPAllowed` was removed.
+* `Oid4vpPresenter.AllowHTTP` and `InsecureSkipX509Verify` were removed; `Oid4vpPresenter.Experimental` (`experimental.Presenter`) sets them explicitly. The presenter `NewWallet` and `presenter.WithDefaultConfig` build no longer reads `VCKNOTS_WALLET_HTTP_ALLOWED`. `Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` was removed: the OpenID4VP 1.0 entry points always require a unique `kid` unless `Experimental.AcceptClientMetadataJWKsWithoutKeyID` is set. `requestBuilder.WithHTTPAllowed` was removed.
+* `issuerkeys.Resolver.AllowHTTP` and `statuslist.Checker.AllowHTTP` were replaced by `Experimental experimental.Transport`. A `statuslist.Checker` whose profile has `ForbidInsecureTransports` now refuses `Experimental` with `statuslist.ErrStatusListInsecureTransportForbidden` instead of ignoring it, and passes the rule to its key hook in `KeyRequest.ForbidInsecureTransports`, which `Resolver.StatusListKeys` applies to the resolver's own `Experimental`.
 * `presenterTypes.RequestObjectSource.DeliveredByReference`, `RequestObjectSource.WalletNonce` and `oid4vp.RequestObjectVerification.DeliveryAttested` were removed: the library records the delivery and the `wallet_nonce` it observed itself, and HAIP refuses a Request Object passed by value.
 * `oid4vp.FederationTrustOptions.AllowUnsignedRequests` was removed; an unsigned `openid_federation` request is always refused. A federation Request Object is verified with the `openid_credential_verifier` metadata keys, not the Federation Entity Keys.
 * `oid4vp.OID4VPClientIDPrefixWebOrigin` was removed. An unsigned DC API request keeps an empty `ClientID`, and `CredentialPresentationRequest.Origin` carries the platform Origin. `profile.ResponseEncryptionRules.RequireJWKAlg` was removed, since OpenID4VP 1.0 always requires the JWK `alg`.
@@ -1269,13 +1271,13 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
     - `credstore.WithDefaultConfig()` persists credentials to `<user config dir>/vcknots/wallet/.local_credstore.db`. The process must be able to create and write this directory.
 
 4. **HTTPS enforcement:**
-    - The wallet requires HTTPS for issuer and verifier endpoints. [`experimental.Transport`](#experimental) relaxes it for the issuer, and `oid4vp.ExperimentalOptions.AllowHTTP` for the verifier, for local development only.
+    - The wallet requires HTTPS for issuer and verifier endpoints. [`experimental.Transport`](#experimental) relaxes it for the issuer and `experimental.Presenter` for the verifier, for local development only.
 
 5. **Strict validation of OpenID4VP `client_id`:**
     - The wallet validates `client_id` strictly. Duplicate prefixes (for example `x509_san_dns:x509_san_dns:...`), malformed values and the wallet-only prefixes are rejected.
     - For `x509_san_dns`, the certificate is taken from the `x5c` header of the Request Object and one of its DNS Subject Alternative Names must equal the `client_id` value.
 
-6. **`oid4vp.ExperimentalOptions.InsecureSkipX509Verify`:**
+6. **`experimental.Presenter.InsecureSkipX509Verify`:**
     - It skips certificate chain validation on the Draft 24 entry points, where only the binding and the signature are checked. The OpenID4VP 1.0 path refuses signed Request Objects while it is set, and HAIP refuses it.
     - ⚠️ Use it only for conformance testing or local development.
 
@@ -1288,7 +1290,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
   * **A:** The Issuer/Verifier server is not running. Start it with `pnpm -F @trustknots/server start` and confirm that http://localhost:8080 responds.
 
 * **Q: Receiving fails with `credential issuer must use https scheme`.**
-  * **A:** The wallet requires HTTPS. For the local HTTP sample server, set `Config.Experimental.Transport.AllowHTTP`, or `Experimental` on the receiver you construct and `SetExperimentalOptions(oid4vp.ExperimentalOptions{AllowHTTP: true})` on the presenter (see [experimental](#experimental)).
+  * **A:** The wallet requires HTTPS. For the local HTTP sample server, set `Config.Experimental.Transport.AllowHTTP`, or the `Experimental` field of the receiver, presenter and issuer key resolver you construct (see [experimental](#experimental)).
 
 * **Q: Receiving fails with `issuer_metadata_fetch_failed`.**
   * **A:** Run `curl http://localhost:8080/.well-known/openid-credential-issuer` and confirm that JSON metadata is returned, and that its `credential_issuer` equals the identifier in the offer. For an identifier with a path, a 1.0 issuance reads `/.well-known/openid-credential-issuer/<path>` and a Draft 13 issuance `<path>/.well-known/openid-credential-issuer`; no other location is tried.

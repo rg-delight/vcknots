@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
 )
 
@@ -68,7 +69,7 @@ func clientMetadataWithKeys(keys []any) map[string]any {
 // its client_metadata as a query parameter, on both wire contracts. OpenID4VP
 // 1.0 Section 5.1 requires the kid, so the 1.0 entry points refuse at parse
 // with the typed sentinel inside an invalid_request unless the caller relaxed
-// the rule with ExperimentalOptions. Draft 24 has no such rule.
+// the rule with Experimental.AcceptClientMetadataJWKsWithoutKeyID. Draft 24 has no such rule.
 func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 	wires := []struct {
 		name   string
@@ -114,8 +115,8 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 					encoded, err := json.Marshal(clientMetadataWithKeys(keySet.keys))
 					require.NoError(t, err)
 					values.Set("client_metadata", string(encoded))
-					p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, ExperimentalOptions{
-						AllowHTTP:                            true,
+					p := withExperimental(&Oid4vpPresenter{HTTPClient: verifier.server.Client()}, experimental.Presenter{
+						Transport:                            experimental.Transport{AllowHTTP: true},
 						AcceptClientMetadataJWKsWithoutKeyID: relaxed,
 					})
 
@@ -164,7 +165,7 @@ func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
 				clientID = draft24X509ClientID
 			}
 
-			relaxed := withExperimental(f.presenter(), ExperimentalOptions{AcceptClientMetadataJWKsWithoutKeyID: true})
+			relaxed := withExperimental(f.presenter(), experimental.Presenter{AcceptClientMetadataJWKsWithoutKeyID: true})
 			request, err := entry.parse(relaxed, requestObject, clientID)
 			require.NoError(t, err)
 			require.NotNil(t, request.RequestObjectVerification)
@@ -202,6 +203,6 @@ func TestClientMetadataJWKKeyIDsOnDCAPIRequests(t *testing.T) {
 	_, err := parseDCAPIForTest((&Oid4vpPresenter{}), invocation)
 	require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
 
-	_, err = parseDCAPIForTest(withExperimental(&Oid4vpPresenter{}, ExperimentalOptions{AcceptClientMetadataJWKsWithoutKeyID: true}), invocation)
+	_, err = parseDCAPIForTest(withExperimental(&Oid4vpPresenter{}, experimental.Presenter{AcceptClientMetadataJWKsWithoutKeyID: true}), invocation)
 	require.NoError(t, err)
 }

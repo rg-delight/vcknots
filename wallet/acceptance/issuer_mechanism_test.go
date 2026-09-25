@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
@@ -137,7 +138,7 @@ func TestVerifyMechanismFollowsTheIssuerIdentifier(t *testing.T) {
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 	})
 
-	t.Run("an http iss is refused without the experimental AllowHTTP", func(t *testing.T) {
+	t.Run("an http iss is refused without the experimental transport", func(t *testing.T) {
 		network := newKeyNetwork()
 		network.publishIssuerMetadata("http://issuer.example.test", issuerJWK)
 		policy := Policy{IssuerKeys: network.resolver(issuerkeys.Mechanisms{JWTVCIssuerMetadata: true})}
@@ -145,7 +146,7 @@ func TestVerifyMechanismFollowsTheIssuerIdentifier(t *testing.T) {
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 		require.Zero(t, network.requestCount())
 
-		policy.IssuerKeys.AllowHTTP = true
+		policy.IssuerKeys.Experimental = experimental.Transport{AllowHTTP: true}
 		_, verification, err := acceptor.Verify(t.Context(), withIssuer("http://issuer.example.test"), policy, sdJWT(&holder))
 		require.NoError(t, err)
 		require.Equal(t, issuerkeys.MechanismJWTVCIssuerMetadata, verification.Mechanism)
@@ -208,12 +209,12 @@ func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 }
 
 // HAIP 1.0 §4 and SD-JWT VC -19 §3: key material over TLS only (CR-15).
-func TestVerifyRefusesAnAllowHTTPResolverUnderForbidInsecureTransports(t *testing.T) {
+func TestVerifyRefusesAnExperimentalResolverUnderForbidInsecureTransports(t *testing.T) {
 	holder := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	policy := x509Trust(chain.anchors(), false)
 	policy.IssuerKeys = newKeyNetwork().resolver(issuerkeys.Mechanisms{JWTVCIssuerMetadata: true})
-	policy.IssuerKeys.AllowHTTP = true
+	policy.IssuerKeys.Experimental = experimental.Transport{AllowHTTP: true}
 	_, _, err := newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), x5cClaims(t, chain, holder, ptr(testCredentialIssuer)), policy, sdJWT(&holder))
 	require.ErrorIs(t, err, common.ErrInvalidInput)
 
