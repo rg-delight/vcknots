@@ -26,8 +26,11 @@ type exchange struct {
 	accept string
 	// body builds the request body; nil sends none.
 	body func() ([]byte, error)
-	// header adds request headers, such as the client attestation; nil adds none.
+	// header adds request headers; nil adds none.
 	header func(http.Header) error
+	// attestation builds the OAuth-Client-Attestation headers for the
+	// Challenge the attempt carries. A nil Headers sends none.
+	attestation types.ClientAttestationProver
 	// accessToken, when set, is sent in the Authorization header with the
 	// scheme its token_type names.
 	accessToken *types.CredentialIssuanceAccessToken
@@ -67,14 +70,21 @@ func (r *exchangeResponse) statusError() *httpStatusError {
 
 // do performs ex and returns the response of the last attempt, whatever its
 // status; only transport failures, refused redirects and oversized bodies are
-// errors. Every DPoP-Nonce a response carries is remembered for the server.
+// errors. Every DPoP-Nonce and OAuth-Client-Attestation-Challenge a response
+// carries is remembered for the server and key.
 //
-// A request is resent at most once, and only when all of these hold:
-//   - the attempt carried a DPoP proof built by ex.dpop;
-//   - the server answered use_dpop_nonce: the `error` member of an RFC 9449
-//     Section 8 authorization server response, or the error parameter of a
-//     Section 9 `WWW-Authenticate: DPoP` challenge;
-//   - it supplied a DPoP-Nonce other than the one the proof carried.
+// A request is resent at most once for each of these conditions, and never
+// otherwise:
+//   - the attempt carried a DPoP proof built by ex.dpop, the server answered
+//     use_dpop_nonce (the `error` member of an RFC 9449 Section 8
+//     authorization server response, or the error parameter of a Section 9
+//     `WWW-Authenticate: DPoP` challenge), and it supplied a DPoP-Nonce other
+//     than the one the proof carried;
+//   - the attempt carried client attestation headers, the authorization
+//     server answered HTTP 400 use_attestation_challenge, and it supplied an
+//     OAuth-Client-Attestation-Challenge other than the one the PoP carried
+//     (draft-ietf-oauth-attestation-based-client-auth-07 Section 6.2, -11
+//     Section 6: "retry the request once").
 //
 // No other refusal is resent: invalid_grant, invalid_proof, invalid_nonce
 // (whose c_nonce refresh is RequestCredential's job),
@@ -83,36 +93,61 @@ func (o *Oid4vciReceiver) do(ctx context.Context, ex exchange) (*exchangeRespons
 	if err := o.requireEndpointScheme(ex.url); err != nil {
 		return nil, err
 	}
-	dpopNonce := o.dpopNonceFor(ex)
-	for attempt := 0; ; attempt++ {
-		proofSent, response, err := o.send(ctx, ex, dpopNonce)
+	attempt := attemptState{dpopNonce: o.dpopNonceFor(ex), challenge: o.attestationChallengeFor(ex)}
+	dpopRetried, challengeRetried := false, false
+	for {
+		sent, response, err := o.send(ctx, ex, attempt)
 		if err != nil {
 			return nil, err
 		}
-		if response.ok() || attempt > 0 || !proofSent || !isUseDPoPNonce(response) {
+		if response.ok() {
 			return response, nil
 		}
-		fresh := strings.TrimSpace(response.header.Get("DPoP-Nonce"))
-		if fresh == "" || fresh == dpopNonce {
-			return response, nil
+		if !dpopRetried && sent.dpop && isUseDPoPNonce(response) {
+			if fresh := strings.TrimSpace(response.header.Get("DPoP-Nonce")); fresh != "" && fresh != attempt.dpopNonce {
+				attempt.dpopNonce = fresh
+				dpopRetried = true
+				continue
+			}
 		}
-		dpopNonce = fresh
+		if !challengeRetried && sent.attestation {
+			if fresh := freshAttestationChallenge(response, attempt.challenge); fresh != "" {
+				attempt.challenge = fresh
+				challengeRetried = true
+				continue
+			}
+		}
+		return response, nil
 	}
 }
 
-// send performs one attempt of ex with a proof built for dpopNonce.
-func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce string) (bool, *exchangeResponse, error) {
+// attemptState is the server-provided freshness one attempt carries.
+type attemptState struct {
+	dpopNonce string
+	challenge string
+}
+
+// sentProofs reports which server-freshness-bearing proofs an attempt sent.
+type sentProofs struct {
+	dpop        bool
+	attestation bool
+}
+
+// send performs one attempt of ex with a DPoP proof built for
+// state.dpopNonce and client attestation headers for state.challenge.
+func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, state attemptState) (sentProofs, *exchangeResponse, error) {
+	var sent sentProofs
 	var body io.Reader
 	if ex.body != nil {
 		built, err := ex.body()
 		if err != nil {
-			return false, nil, err
+			return sent, nil, err
 		}
 		body = bytes.NewReader(built)
 	}
 	request, err := http.NewRequestWithContext(ctx, ex.method, ex.url.String(), body)
 	if err != nil {
-		return false, nil, err
+		return sent, nil, err
 	}
 	accept := ex.accept
 	if accept == "" {
@@ -124,32 +159,40 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce strin
 	}
 	if ex.header != nil {
 		if err := ex.header(request.Header); err != nil {
-			return false, nil, err
+			return sent, nil, err
 		}
+	}
+	if ex.attestation.Headers != nil {
+		headers, err := ex.attestation.Headers(state.challenge)
+		if err != nil {
+			return sent, nil, err
+		}
+		setAttestationHeaders(request.Header, headers)
+		sent.attestation = headers.ClientAttestationPop != ""
 	}
 	if ex.accessToken != nil {
 		request.Header.Set("Authorization", authorizationScheme(ex.accessToken.TokenType)+" "+ex.accessToken.Token)
 	}
-	proofSent := false
 	if ex.dpop.Proof != nil {
-		proof, err := ex.dpop.Proof(dpopNonce)
+		proof, err := ex.dpop.Proof(state.dpopNonce)
 		if err != nil {
-			return false, nil, err
+			return sent, nil, err
 		}
 		if proof != "" {
 			request.Header.Set("DPoP", proof)
-			proofSent = true
+			sent.dpop = true
 		}
 	}
 
 	response, err := httpfetch.NoRedirect(o.HTTPClient).Do(request)
 	if err != nil {
-		return false, nil, err
+		return sent, nil, err
 	}
 	defer response.Body.Close()
 	o.rememberDPoPNonce(ex, response.Header.Get("DPoP-Nonce"))
+	o.rememberAttestationChallenge(ex, response.Header)
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		return false, nil, fmt.Errorf("OID4VCI endpoint answered HTTP %d: %w", response.StatusCode, ErrHTTPRedirectNotAllowed)
+		return sent, nil, fmt.Errorf("OID4VCI endpoint answered HTTP %d: %w", response.StatusCode, ErrHTTPRedirectNotAllowed)
 	}
 	limit := ex.limit
 	if limit == 0 {
@@ -157,9 +200,9 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce strin
 	}
 	responseBody, err := httpfetch.ReadLimited(response, limit)
 	if err != nil {
-		return false, nil, err
+		return sent, nil, err
 	}
-	return proofSent, &exchangeResponse{statusCode: response.StatusCode, header: response.Header, body: responseBody}, nil
+	return sent, &exchangeResponse{statusCode: response.StatusCode, header: response.Header, body: responseBody}, nil
 }
 
 // requireEndpointScheme refuses a non-https endpoint unless

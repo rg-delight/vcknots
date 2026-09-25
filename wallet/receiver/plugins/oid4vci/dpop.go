@@ -50,19 +50,6 @@ func (ex exchange) dpopNonceKey() (key dpopNonceKey, ok bool) {
 // a DPoP nonce for.
 const maxDPoPNonceServers = 32
 
-type dpopNonceEntry struct {
-	nonce    string
-	lastUsed uint64
-}
-
-// dpopNonceCache holds the latest RFC 9449 Section 8.2 DPoP nonce of each
-// dpopNonceKey, bounded to maxDPoPNonceServers entries (least recently used
-// evicted).
-type dpopNonceCache struct {
-	entries map[dpopNonceKey]dpopNonceEntry
-	clock   uint64
-}
-
 // rememberDPoPNonce records the DPoP-Nonce a response to ex carried (RFC 9449
 // Section 8.2) so the next proof ex's key builds for the same server role
 // carries it. An empty value is ignored: a response without the header does
@@ -76,7 +63,10 @@ func (o *Oid4vciReceiver) rememberDPoPNonce(ex exchange, nonce string) {
 	}
 	o.dpopNonceMu.Lock()
 	defer o.dpopNonceMu.Unlock()
-	o.storeDPoPNonceLocked(key, nonce)
+	if o.dpopNonces == nil {
+		o.dpopNonces = newRecentValues[dpopNonceKey](maxDPoPNonceServers)
+	}
+	o.dpopNonces.put(key, nonce)
 }
 
 // dpopNonceFor returns the latest DPoP nonce held for ex's key, or "" when
@@ -93,44 +83,74 @@ func (o *Oid4vciReceiver) dpopNonceFor(ex exchange) string {
 	if o.dpopNonces == nil {
 		return ""
 	}
-	cache := o.dpopNonces
-	if entry, found := cache.entries[key]; found {
-		cache.clock++
-		entry.lastUsed = cache.clock
-		cache.entries[key] = entry
-		return entry.nonce
+	if nonce, found := o.dpopNonces.get(key); found {
+		return nonce
 	}
 	unattributed := key
 	unattributed.keyThumbprint = ""
-	entry, found := cache.entries[unattributed]
+	nonce, found := o.dpopNonces.take(unattributed)
 	if !found {
 		return ""
 	}
-	delete(cache.entries, unattributed)
-	o.storeDPoPNonceLocked(key, entry.nonce)
-	return entry.nonce
+	o.dpopNonces.put(key, nonce)
+	return nonce
 }
 
-// storeDPoPNonceLocked stores a nonce as the most recently used entry and
-// evicts the least recently used one beyond maxDPoPNonceServers.
-func (o *Oid4vciReceiver) storeDPoPNonceLocked(key dpopNonceKey, nonce string) {
-	if o.dpopNonces == nil {
-		o.dpopNonces = &dpopNonceCache{entries: make(map[dpopNonceKey]dpopNonceEntry)}
+// recentValues holds the latest value of each key, bounded to limit entries
+// with the least recently used evicted first. It is not safe for concurrent
+// use; the receiver guards it with a mutex.
+type recentValues[K comparable] struct {
+	entries map[K]recentValue
+	clock   uint64
+	limit   int
+}
+
+type recentValue struct {
+	value    string
+	lastUsed uint64
+}
+
+func newRecentValues[K comparable](limit int) *recentValues[K] {
+	return &recentValues[K]{entries: make(map[K]recentValue), limit: limit}
+}
+
+// get returns the value of key and marks it used.
+func (c *recentValues[K]) get(key K) (string, bool) {
+	entry, found := c.entries[key]
+	if !found {
+		return "", false
 	}
-	cache := o.dpopNonces
-	cache.clock++
-	cache.entries[key] = dpopNonceEntry{nonce: nonce, lastUsed: cache.clock}
-	if len(cache.entries) <= maxDPoPNonceServers {
+	c.clock++
+	entry.lastUsed = c.clock
+	c.entries[key] = entry
+	return entry.value, true
+}
+
+// take returns the value of key and removes it.
+func (c *recentValues[K]) take(key K) (string, bool) {
+	entry, found := c.entries[key]
+	if found {
+		delete(c.entries, key)
+	}
+	return entry.value, found
+}
+
+// put stores value as the most recently used entry and evicts the least
+// recently used one beyond the limit.
+func (c *recentValues[K]) put(key K, value string) {
+	c.clock++
+	c.entries[key] = recentValue{value: value, lastUsed: c.clock}
+	if len(c.entries) <= c.limit {
 		return
 	}
-	var oldest dpopNonceKey
+	var oldest K
 	found := false
-	for candidate, entry := range cache.entries {
-		if !found || entry.lastUsed < cache.entries[oldest].lastUsed {
+	for candidate, entry := range c.entries {
+		if !found || entry.lastUsed < c.entries[oldest].lastUsed {
 			oldest, found = candidate, true
 		}
 	}
-	delete(cache.entries, oldest)
+	delete(c.entries, oldest)
 }
 
 // requireDPoPTokenType applies Options.RequireDPoP (HAIP Section 4,

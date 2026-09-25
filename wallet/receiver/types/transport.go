@@ -18,11 +18,16 @@ import (
 // conditions and never otherwise:
 //   - RFC 9449 Section 8: a server answering with the "use_dpop_nonce" error
 //     and a DPoP-Nonce header is asked again with a proof for that nonce.
+//   - draft-ietf-oauth-attestation-based-client-auth (-07 Section 6.2, -11
+//     Sections 6 and 7.4): an authorization server answering with the
+//     "use_attestation_challenge" error and a fresh
+//     OAuth-Client-Attestation-Challenge header is asked again with a PoP
+//     carrying that Challenge.
 //   - OpenID4VCI 1.0 Section 8.3.1.2: a Credential Endpoint answering
 //     "invalid_nonce" is asked again after a fresh c_nonce is fetched from the
 //     Nonce Endpoint and the body is rebuilt for it.
 //
-// Every factory (DPoPProver.Proof, OAuthClientAttestationHeadersFactory,
+// Every factory (DPoPProver.Proof, ClientAttestationProver.Headers,
 // ClientAssertionFactory, CredentialRequestBodyFactory) is called once per
 // HTTP attempt, so nothing carrying a jti is ever replayed.
 
@@ -51,7 +56,7 @@ type ClientAuthentication struct {
 	DPoP DPoPProver
 	// ClientAttestation builds the OAuth-Client-Attestation and
 	// OAuth-Client-Attestation-PoP headers.
-	ClientAttestation OAuthClientAttestationHeadersFactory
+	ClientAttestation ClientAttestationProver
 	// ClientAssertion builds the RFC 7523 private_key_jwt client_assertion; the
 	// plugin sends it with the jwt-bearer client_assertion_type.
 	ClientAssertion ClientAssertionFactory

@@ -248,18 +248,8 @@ func (o *Oid4vciReceiver) postForm(ctx context.Context, endpoint url.URL, formDa
 			setClientAssertionForm(attempt, assertion)
 			return []byte(attempt.Encode()), nil
 		},
-		header: func(header http.Header) error {
-			if auth.ClientAttestation == nil {
-				return nil
-			}
-			headers, err := auth.ClientAttestation()
-			if err != nil {
-				return err
-			}
-			setAttestationHeaders(header, headers)
-			return nil
-		},
-		dpop: auth.DPoP,
+		attestation: auth.ClientAttestation,
+		dpop:        auth.DPoP,
 	}, target)
 }
 

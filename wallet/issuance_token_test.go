@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"testing"
@@ -804,4 +805,83 @@ func TestAuthorizationServerDPoPNonceDoesNotReachTheCredentialEndpoint(t *testin
 	claims, err := jwsClaims(fixture.credentialHeaders.Get("DPoP"))
 	require.NoError(t, err)
 	require.NotContains(t, claims, "nonce")
+}
+
+// draft-ietf-oauth-attestation-based-client-auth-07 Section 6.2 (-11 Sections
+// 6.1 and 7.4): a use_attestation_challenge error carries a fresh Challenge in
+// OAuth-Client-Attestation-Challenge, and the client retries once with a PoP
+// carrying it.
+func TestClientAttestationUseAttestationChallengeIsRetriedOnce(t *testing.T) {
+	t.Run("the retry carries the fresh Challenge", func(t *testing.T) {
+		var pops []string
+		fixture, _ := tokenTestHAIPAttestationFixture(t, func(f *finalIssuanceFixture) {
+			f.tokenHandler = func(w http.ResponseWriter, r *http.Request) {
+				pops = append(pops, r.Header.Get("OAuth-Client-Attestation-PoP"))
+				if len(pops) == 1 {
+					w.Header().Set("OAuth-Client-Attestation-Challenge", "challenge-from-error")
+					mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_attestation_challenge"})
+					return
+				}
+				mockserver.JSONResponse(w, http.StatusOK, f.tokenResponseValue())
+			}
+		})
+		_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+		require.NoError(t, err)
+		require.Len(t, pops, 2)
+		first, err := jwsClaims(pops[0])
+		require.NoError(t, err)
+		require.NotContains(t, first, "challenge")
+		second, err := jwsClaims(pops[1])
+		require.NoError(t, err)
+		require.Equal(t, "challenge-from-error", second["challenge"])
+	})
+
+	t.Run("a second refusal is reported, not retried", func(t *testing.T) {
+		calls := 0
+		fixture, _ := tokenTestHAIPAttestationFixture(t, func(f *finalIssuanceFixture) {
+			f.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.Header().Set("OAuth-Client-Attestation-Challenge", fmt.Sprintf("challenge-%d", calls))
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_attestation_challenge"})
+			}
+		})
+		_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+		require.Error(t, err)
+		require.Equal(t, 2, calls)
+	})
+
+	t.Run("an error without a fresh Challenge is not retried", func(t *testing.T) {
+		calls := 0
+		fixture, _ := tokenTestHAIPAttestationFixture(t, func(f *finalIssuanceFixture) {
+			f.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				mockserver.JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "use_attestation_challenge"})
+			}
+		})
+		_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+		require.Error(t, err)
+		require.Equal(t, 1, calls)
+	})
+}
+
+// -07 Section 8.1 (-11 Section 6.2): a Challenge the authorization server
+// provides on any response is the one the next PoP carries: the PAR response's
+// Challenge reaches the token request's PoP.
+func TestClientAttestationChallengeFromAPreviousResponseIsUsed(t *testing.T) {
+	fixture, _ := tokenTestHAIPAttestationFixture(t)
+	inner := fixture.server.Config.Handler
+	fixture.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/par" {
+			w.Header().Set("OAuth-Client-Attestation-Challenge", "challenge-from-par")
+		}
+		inner.ServeHTTP(w, r)
+	})
+	_, err := fixture.authorize(fixture.issuanceRequest())
+	require.NoError(t, err)
+	parPoP, err := jwsClaims(fixture.parHeaders.Get("OAuth-Client-Attestation-PoP"))
+	require.NoError(t, err)
+	require.NotContains(t, parPoP, "challenge")
+	tokenPoP, err := jwsClaims(fixture.tokenHeaders.Get("OAuth-Client-Attestation-PoP"))
+	require.NoError(t, err)
+	require.Equal(t, "challenge-from-par", tokenPoP["challenge"])
 }

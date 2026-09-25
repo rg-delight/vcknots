@@ -353,12 +353,12 @@ func (w *Wallet) checkPrivateKeyJWT(as *receiverTypes.AuthorizationServerMetadat
 // when neither is used. DPoP is left to the caller.
 func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTypes.AuthorizationTransport, discovery *issuanceDiscovery, preAuthorized bool) (receiverTypes.ClientAuthentication, error) {
 	var auth receiverTypes.ClientAuthentication
-	attestationHeaders, err := w.clientAttestationFactory(ctx, transport, discovery.asMetadata, discovery.authorizationServer)
+	attestationProver, err := w.clientAttestationFactory(ctx, transport, discovery.asMetadata, discovery.authorizationServer)
 	if err != nil {
 		return auth, err
 	}
-	if attestationHeaders != nil {
-		auth.ClientAttestation = attestationHeaders
+	if attestationProver.Headers != nil {
+		auth.ClientAttestation = attestationProver
 		return auth, nil
 	}
 	method, ok := resolveClientAuthMethod(w.clientAuth, discovery.asMetadata)

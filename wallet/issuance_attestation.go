@@ -51,27 +51,35 @@ func (w *Wallet) clientAttestationKey() IKeyEntry {
 
 // clientAttestationFactory obtains and authenticates the Client Attestation
 // for the authorization server asIssuer (OpenID4VCI 1.0 Appendix E) and
-// returns the header factory, which signs a fresh PoP for every attempt. It
-// returns nil when no Config.Attestation.Client is configured.
+// returns the prover, which signs a fresh PoP for every attempt carrying the
+// Challenge the receiver hands it. It fetches a Challenge from the
+// challenge_endpoint when the server advertises one, which is then the most
+// recently received Challenge (draft-ietf-oauth-attestation-based-client-auth-07
+// Section 8, -11 Section 6). It returns the zero prover when no
+// Config.Attestation.Client is configured.
 func (w *Wallet) clientAttestationFactory(
 	ctx context.Context,
 	transport receiverTypes.AuthorizationTransport,
 	asMetadata *receiverTypes.AuthorizationServerMetadata,
 	asIssuer string,
-) (receiverTypes.OAuthClientAttestationHeadersFactory, error) {
+) (receiverTypes.ClientAttestationProver, error) {
 	provider := w.attestationSettings().Client
 	if provider == nil {
-		return nil, nil
+		return receiverTypes.ClientAttestationProver{}, nil
 	}
 	key := w.clientAttestationKey()
 	if key == nil {
-		return nil, invalidArgument("a client attestation needs Config.Attestation.ClientKey or Config.DPoP.Key")
+		return receiverTypes.ClientAttestationProver{}, invalidArgument("a client attestation needs Config.Attestation.ClientKey or Config.DPoP.Key")
 	}
 	clientID := w.clientAuth.ClientID
 	if clientID == "" {
-		return nil, invalidArgument("a client attestation needs Config.ClientAuth.ClientID")
+		return receiverTypes.ClientAttestationProver{}, invalidArgument("a client attestation needs Config.ClientAuth.ClientID")
 	}
 	clientKey := key.PublicKey()
+	thumbprint, err := jwkThumbprint(clientKey)
+	if err != nil {
+		return receiverTypes.ClientAttestationProver{}, fmt.Errorf("client instance key: %w", err)
+	}
 	request := attestation.ClientRequest{
 		ClientID:            clientID,
 		ClientKey:           clientKey.Public(),
@@ -81,30 +89,34 @@ func (w *Wallet) clientAttestationFactory(
 	// carries it.
 	clientAttestation, err := provider.ClientAttestation(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to obtain client attestation: %w", withCode(attestation.ErrClientAttestationInvalid, err))
+		return receiverTypes.ClientAttestationProver{}, fmt.Errorf("failed to obtain client attestation: %w", withCode(attestation.ErrClientAttestationInvalid, err))
 	}
 	if err := attestation.ValidateClientAttestation(ctx, clientAttestation, request, w.attestationPolicyFor(provider)); err != nil {
-		return nil, err
+		return receiverTypes.ClientAttestationProver{}, err
 	}
 	challenge := ""
 	if asMetadata.ChallengeEndpoint != nil {
 		response, err := transport.FetchClientAttestationChallenge(ctx, *asMetadata.ChallengeEndpoint)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch client attestation challenge: %w", err)
+			return receiverTypes.ClientAttestationProver{}, fmt.Errorf("failed to fetch client attestation challenge: %w", err)
 		}
 		challenge = response.AttestationChallenge
 	}
-	return func() (receiverTypes.OAuthClientAttestationHeaders, error) {
-		pop, err := jwtproof.ClientAttestationPoP(ctx, key, jwtproof.ClientAttestationPoPOptions{
-			ClientID:  clientID,
-			Audience:  asIssuer,
-			Challenge: challenge,
-			Lifetime:  clientAttestationPoPLifetime,
-		})
-		if err != nil {
-			return receiverTypes.OAuthClientAttestationHeaders{}, err
-		}
-		return receiverTypes.OAuthClientAttestationHeaders{ClientAttestation: clientAttestation.JWT, ClientAttestationPop: pop}, nil
+	return receiverTypes.ClientAttestationProver{
+		KeyThumbprint: thumbprint,
+		Challenge:     challenge,
+		Headers: func(challenge string) (receiverTypes.OAuthClientAttestationHeaders, error) {
+			pop, err := jwtproof.ClientAttestationPoP(ctx, key, jwtproof.ClientAttestationPoPOptions{
+				ClientID:  clientID,
+				Audience:  asIssuer,
+				Challenge: challenge,
+				Lifetime:  clientAttestationPoPLifetime,
+			})
+			if err != nil {
+				return receiverTypes.OAuthClientAttestationHeaders{}, err
+			}
+			return receiverTypes.OAuthClientAttestationHeaders{ClientAttestation: clientAttestation.JWT, ClientAttestationPop: pop}, nil
+		},
 	}, nil
 }
 

@@ -63,9 +63,9 @@ func TestEndpointErrorNamesTheFailedStage(t *testing.T) {
 	_, err = receiver.RequestToken(t.Context(), endpoint, types.TokenRequest{GrantType: types.AuthorizationCode, Code: "code-1"}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: testProver(noopProofFactory)})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 
-	_, err = receiver.RequestToken(context.Background(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+	_, err = receiver.RequestToken(context.Background(), endpoint, types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 		return types.OAuthClientAttestationHeaders{}, nil
-	}, DPoP: testProver(noopProofFactory)})
+	}}, DPoP: testProver(noopProofFactory)})
 	requireEndpointError(t, err, StageToken, status, "temporarily_unavailable")
 }
 

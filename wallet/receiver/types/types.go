@@ -866,8 +866,32 @@ type DPoPProver struct {
 type CredentialRequestBodyFactory func(cNonce string) (body []byte, contentType string, err error)
 
 // OAuthClientAttestationHeadersFactory builds the client attestation headers
-// for one HTTP attempt.
-type OAuthClientAttestationHeadersFactory func() (OAuthClientAttestationHeaders, error)
+// for one HTTP attempt. challenge is the Challenge the Client Attestation PoP
+// carries in its challenge claim, or "" when the server provided none
+// (draft-ietf-oauth-attestation-based-client-auth-07 Sections 5.2 and 8).
+type OAuthClientAttestationHeadersFactory func(challenge string) (OAuthClientAttestationHeaders, error)
+
+// ClientAttestationProver builds the OAuth-Client-Attestation headers of one
+// request with one Client Instance Key. The zero value sends none.
+//
+// The PoP carries the most recently received Challenge
+// (draft-ietf-oauth-attestation-based-client-auth-07 Section 8.1, -11
+// Section 6): Challenge when set, else the OAuth-Client-Attestation-Challenge
+// header of the latest response the receiver saw from the server for the same
+// key, else none. A use_attestation_challenge error with a fresh Challenge is
+// retried once with it (-07 Section 6.2, -11 Sections 6 and 7.4).
+type ClientAttestationProver struct {
+	// KeyThumbprint is the base64url RFC 7638 SHA-256 thumbprint of the Client
+	// Instance Key. It scopes the Challenges a receiver keeps from earlier
+	// responses, so a Challenge is never presented with another key, which
+	// would link the two keys. With an empty KeyThumbprint none is kept.
+	KeyThumbprint string
+	// Challenge is a Challenge obtained for this request from the challenge
+	// endpoint; empty uses the one kept from an earlier response.
+	Challenge string
+	// Headers builds the headers for one attempt; nil sends none.
+	Headers OAuthClientAttestationHeadersFactory
+}
 
 // CredentialEndpointHTTPResponse is the body and Content-Type of a successful
 // Credential or Deferred Credential Endpoint response, before decoding.

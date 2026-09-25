@@ -340,13 +340,13 @@ func TestOid4vciReceiver_RequestTokenAuthorizationCode(t *testing.T) {
 		RedirectURI:  "openid-credential-offer://callback",
 		CodeVerifier: "verifier-1",
 		ClientID:     "client-1",
-	}, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
+	}, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 		headerFactoryCalls++
 		return types.OAuthClientAttestationHeaders{
 			ClientAttestation:    "attestation-jwt",
 			ClientAttestationPop: fmt.Sprintf("attestation-pop-jwt-%d", headerFactoryCalls),
 		}, nil
-	}, DPoP: testProver(func(nonce string) (string, error) {
+	}}, DPoP: testProver(func(nonce string) (string, error) {
 		proofNonces = append(proofNonces, nonce)
 		return "proof:" + nonce, nil
 	})})
@@ -783,15 +783,18 @@ func TestRequestTokenPreAuthorizedCode_IssuerRefusesMissingHeaders(t *testing.T)
 
 // attestationHeadersFactory mints a Client Attestation once and a fresh PoP for
 // every attempt, the way a wallet holding a Client Attestation provider does.
-func attestationHeadersFactory(t *testing.T, clientKey, attesterKey jose.JSONWebKey, authorizationServer string) types.OAuthClientAttestationHeadersFactory {
+func attestationHeadersFactory(t *testing.T, clientKey, attesterKey jose.JSONWebKey, authorizationServer string) types.ClientAttestationProver {
 	t.Helper()
 	attestation, err := signClientAttestation(clientKey, attesterKey, "https://client-attester.example", "client-1")
 	require.NoError(t, err)
-	return func() (types.OAuthClientAttestationHeaders, error) {
-		pop, err := signClientAttestationPoP(clientKey, "client-1", authorizationServer, "")
-		if err != nil {
-			return types.OAuthClientAttestationHeaders{}, err
-		}
-		return types.OAuthClientAttestationHeaders{ClientAttestation: attestation, ClientAttestationPop: pop}, nil
+	return types.ClientAttestationProver{
+		KeyThumbprint: testClientKeyThumbprint,
+		Headers: func(challenge string) (types.OAuthClientAttestationHeaders, error) {
+			pop, err := signClientAttestationPoP(clientKey, "client-1", authorizationServer, challenge)
+			if err != nil {
+				return types.OAuthClientAttestationHeaders{}, err
+			}
+			return types.OAuthClientAttestationHeaders{ClientAttestation: attestation, ClientAttestationPop: pop}, nil
+		},
 	}
 }

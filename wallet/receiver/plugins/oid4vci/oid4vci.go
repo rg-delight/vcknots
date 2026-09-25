@@ -47,11 +47,12 @@ type Oid4vciReceiver struct {
 	// see IssuerMetadataSigningOptions for the defaults each field takes.
 	IssuerMetadataSigning *IssuerMetadataSigningOptions
 
-	// dpopNonceMu guards dpopNonces.
+	// dpopNonceMu guards dpopNonces and attestationChallenges.
 	dpopNonceMu sync.Mutex
-	// dpopNonces is created on first use and kept behind a pointer so that
-	// Oid4vciReceiver stays comparable.
-	dpopNonces *dpopNonceCache
+	// dpopNonces and attestationChallenges are created on first use and kept
+	// behind pointers so that Oid4vciReceiver stays comparable.
+	dpopNonces            *recentValues[dpopNonceKey]
+	attestationChallenges *recentValues[attestationChallengeKey]
 }
 
 var (
