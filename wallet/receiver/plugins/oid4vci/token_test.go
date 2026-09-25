@@ -346,10 +346,10 @@ func TestOid4vciReceiver_RequestTokenAuthorizationCode(t *testing.T) {
 			ClientAttestation:    "attestation-jwt",
 			ClientAttestationPop: fmt.Sprintf("attestation-pop-jwt-%d", headerFactoryCalls),
 		}, nil
-	}, DPoP: func(nonce string) (string, error) {
+	}, DPoP: testProver(func(nonce string) (string, error) {
 		proofNonces = append(proofNonces, nonce)
 		return "proof:" + nonce, nil
-	}})
+	})})
 	if err != nil {
 		t.Fatalf("RequestToken() error = %v", err)
 	}
@@ -628,7 +628,7 @@ func TestOid4vciReceiver_RequestTokenClientAssertion(t *testing.T) {
 		ClientID:     "client-1",
 	}, types.ClientAuthentication{
 		ClientAssertion: func() (string, error) { return "assertion-jwt", nil },
-		DPoP:            fixedProof("dpop-proof"),
+		DPoP:            testProver(fixedProof("dpop-proof")),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "access-1", token.Token)
@@ -668,7 +668,7 @@ func TestOid4vciReceiver_RequestTokenRetryRefreshesClientAssertion(t *testing.T)
 			factoryCalls++
 			return fmt.Sprintf("assertion-%d", factoryCalls), nil
 		},
-		DPoP: fixedProof("dpop-proof"),
+		DPoP: testProver(fixedProof("dpop-proof")),
 	})
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts)
@@ -723,9 +723,9 @@ func TestRequestTokenPreAuthorizedCode_CarriesAttestationHeaders(t *testing.T) {
 	tokenEndpoint := issuer.URL() + "/token"
 
 	token, err := receiver.RequestToken(
-		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", TxCode: "493536", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: func(nonce string) (string, error) {
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", TxCode: "493536", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: testProver(func(nonce string) (string, error) {
 			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		}})
+		})})
 	require.NoError(t, err)
 	require.Equal(t, "access-1", token.Token)
 
@@ -753,9 +753,9 @@ func TestRequestTokenPreAuthorizedCode_RebuildsHeadersOnNonceChallenge(t *testin
 	tokenEndpoint := issuer.URL() + "/token"
 
 	token, err := receiver.RequestToken(
-		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: func(nonce string) (string, error) {
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{ClientAttestation: attestationHeadersFactory(t, clientKey, attesterKey, issuer.URL()), DPoP: testProver(func(nonce string) (string, error) {
 			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		}})
+		})})
 	require.NoError(t, err)
 	require.Equal(t, "access-1", token.Token)
 
@@ -775,9 +775,9 @@ func TestRequestTokenPreAuthorizedCode_IssuerRefusesMissingHeaders(t *testing.T)
 	tokenEndpoint := issuer.URL() + "/token"
 
 	_, err := receiver.RequestToken(
-		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{DPoP: func(nonce string) (string, error) {
+		context.Background(), mustURIField(t, tokenEndpoint), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-auth-code-1", ClientID: "client-1"}, types.ClientAuthentication{DPoP: testProver(func(nonce string) (string, error) {
 			return signDPoP(clientKey, http.MethodPost, tokenEndpoint, nonce, "")
-		}})
+		})})
 	require.ErrorContains(t, err, "invalid_client")
 }
 

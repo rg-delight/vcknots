@@ -124,7 +124,7 @@ func TestRequestCredentialNonceRetry_Success(t *testing.T) {
 			return []byte(`{"proof":"` + cNonce + `"}`), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if err != nil {
 		t.Fatalf("RequestCredential() error = %v", err)
@@ -173,7 +173,7 @@ func TestRequestCredentialNonceRetry_SecondInvalidNonceStops(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want invalid_nonce", err)
@@ -208,7 +208,7 @@ func TestRequestCredentialNonceRetry_NoNonceEndpoint(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want invalid_nonce", err)
@@ -758,7 +758,7 @@ func TestBearerTokenDPoPChallengeFailsClosed(t *testing.T) {
 				"initial-nonce",
 				func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
 				nil,
-				noopProofFactory,
+				testProver(noopProofFactory),
 			)
 			if !errors.Is(err, ErrDPoPRequired) {
 				t.Fatalf("error = %v, want ErrDPoPRequired", err)
@@ -814,7 +814,7 @@ func TestInvalidNonceTakesPriorityOverDPoPChallenge(t *testing.T) {
 			return []byte("{}"), "application/json", nil
 		},
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if err != nil {
 		t.Fatalf("RequestCredential() error = %v", err)
@@ -858,7 +858,7 @@ func TestInvalidNonceWithDPoPNonceSecondFailureReturnsErrInvalidNonce(t *testing
 		"initial-nonce",
 		func(string) ([]byte, string, error) { return []byte("{}"), "application/json", nil },
 		&nonceEndpoint,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 	if !errors.Is(err, types.ErrInvalidNonce) {
 		t.Fatalf("error = %v, want ErrInvalidNonce", err)

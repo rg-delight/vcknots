@@ -785,3 +785,23 @@ func TestAuthorizePreAuthorizedIssuanceRefusesFormatsOutsideTheFinalTable(t *tes
 		})
 	}
 }
+
+// RFC 9449 Section 9: an authorization server nonce "should not be confused"
+// with a resource server's. The DPoP-Nonce of the Token Response is not put in
+// the proof sent to the Credential Endpoint, even on the same origin.
+func TestAuthorizationServerDPoPNonceDoesNotReachTheCredentialEndpoint(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.includeNonceEndpoint = false
+		f.tokenHandler = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("DPoP-Nonce", "as-nonce-1")
+			mockserver.JSONResponse(w, http.StatusOK, f.tokenResponseValue())
+		}
+	})
+	grant, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+	require.NoError(t, err)
+	_, err = fixture.wallet.RequestCredential(context.Background(), grant, fixture.credentialRequest())
+	require.NoError(t, err)
+	claims, err := jwsClaims(fixture.credentialHeaders.Get("DPoP"))
+	require.NoError(t, err)
+	require.NotContains(t, claims, "nonce")
+}

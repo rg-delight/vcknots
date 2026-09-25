@@ -26,14 +26,19 @@ const clientAssertionLifetime = 5 * time.Minute
 // clientAttestationPoPLifetime bounds the exp of a Client Attestation PoP.
 const clientAttestationPoPLifetime = 5 * time.Minute
 
-// dpopProofFactory returns the RFC 9449 proof factory for one request, or nil
-// when key is nil.
-func dpopProofFactory(ctx context.Context, key IKeyEntry, method, endpoint, accessToken string) receiverTypes.DPoPProofFactory {
+// dpopProofFactory returns the RFC 9449 prover for one request, or the zero
+// prover when key is nil. The key thumbprint scopes the server nonces the
+// receiver keeps to this key.
+func dpopProofFactory(ctx context.Context, key IKeyEntry, method, endpoint, accessToken string) receiverTypes.DPoPProver {
 	if key == nil {
-		return nil
+		return receiverTypes.DPoPProver{}
 	}
-	return func(nonce string) (string, error) {
-		return jwtproof.DPoP(ctx, key, jwtproof.DPoPOptions{Method: method, URL: endpoint, AccessToken: accessToken, Nonce: nonce})
+	thumbprint, _ := keyThumbprint(key)
+	return receiverTypes.DPoPProver{
+		KeyThumbprint: thumbprint,
+		Proof: func(nonce string) (string, error) {
+			return jwtproof.DPoP(ctx, key, jwtproof.DPoPOptions{Method: method, URL: endpoint, AccessToken: accessToken, Nonce: nonce})
+		},
 	}
 }
 

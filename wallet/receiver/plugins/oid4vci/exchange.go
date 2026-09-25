@@ -32,8 +32,19 @@ type exchange struct {
 	// scheme its token_type names.
 	accessToken *types.CredentialIssuanceAccessToken
 	// dpop builds the DPoP proof for the nonce the receiver holds for the
-	// server. nil, or an empty proof, sends no DPoP header.
-	dpop types.DPoPProofFactory
+	// server and the key. A nil Proof, or an empty proof, sends no DPoP
+	// header.
+	dpop types.DPoPProver
+	// resourceServer marks a request to a resource server (the Credential
+	// Issuer's Nonce Endpoint and protected endpoints) rather than to the
+	// authorization server; their DPoP nonces are kept apart (RFC 9449
+	// Section 9).
+	resourceServer bool
+	// dpopNonceSource marks an exchange without a DPoP proof whose
+	// DPoP-Nonce response header is meant for later proofs: the OpenID4VCI
+	// 1.0 Section 7.2 Nonce Response. The nonce is kept unattributed until a
+	// key claims it.
+	dpopNonceSource bool
 	// limit bounds the response body; zero means httpfetch.DefaultBodyLimit.
 	limit int64
 }
@@ -72,7 +83,7 @@ func (o *Oid4vciReceiver) do(ctx context.Context, ex exchange) (*exchangeRespons
 	if err := o.requireEndpointScheme(ex.url); err != nil {
 		return nil, err
 	}
-	dpopNonce := o.dpopNonceFor(ex.url)
+	dpopNonce := o.dpopNonceFor(ex)
 	for attempt := 0; ; attempt++ {
 		proofSent, response, err := o.send(ctx, ex, dpopNonce)
 		if err != nil {
@@ -120,8 +131,8 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce strin
 		request.Header.Set("Authorization", authorizationScheme(ex.accessToken.TokenType)+" "+ex.accessToken.Token)
 	}
 	proofSent := false
-	if ex.dpop != nil {
-		proof, err := ex.dpop(dpopNonce)
+	if ex.dpop.Proof != nil {
+		proof, err := ex.dpop.Proof(dpopNonce)
 		if err != nil {
 			return false, nil, err
 		}
@@ -136,7 +147,7 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, dpopNonce strin
 		return false, nil, err
 	}
 	defer response.Body.Close()
-	o.rememberDPoPNonce(ex.url, response.Header.Get("DPoP-Nonce"))
+	o.rememberDPoPNonce(ex, response.Header.Get("DPoP-Nonce"))
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
 		return false, nil, fmt.Errorf("OID4VCI endpoint answered HTTP %d: %w", response.StatusCode, ErrHTTPRedirectNotAllowed)
 	}

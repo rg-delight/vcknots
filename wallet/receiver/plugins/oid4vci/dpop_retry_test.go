@@ -66,7 +66,7 @@ func TestTokenErrorWithDPoPNonceIsNotResent(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	proof := &countingProof{}
 
-	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1", TxCode: "1234"}, types.ClientAuthentication{DPoP: proof.factory})
+	_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1", TxCode: "1234"}, types.ClientAuthentication{DPoP: testProver(proof.factory)})
 
 	requireEndpointError(t, err, StageToken, http.StatusBadRequest, "invalid_grant")
 	if server.count() != 1 {
@@ -76,7 +76,7 @@ func TestTokenErrorWithDPoPNonceIsNotResent(t *testing.T) {
 		t.Fatalf("tx_code = %q", got)
 	}
 	// The nonce is still remembered for the next request to that server.
-	if got := receiver.dpopNonceFor(url.URL(mustURIField(t, server.URL+"/other"))); got != "fresh-nonce" {
+	if got := receiver.dpopNonceFor(exchange{url: url.URL(mustURIField(t, server.URL+"/other")), dpop: testProver(proof.factory)}); got != "fresh-nonce" {
 		t.Fatalf("remembered DPoP nonce = %q, want fresh-nonce", got)
 	}
 }
@@ -114,7 +114,7 @@ func TestDraft13CredentialErrorWithDPoPNonceIsNotResent(t *testing.T) {
 	receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 	proof := &countingProof{}
 
-	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, proof.factory)
+	_, err := receiver.RequestDraft13Credential(t.Context(), mustURIField(t, server.URL+"/credential"), dpopAccessToken("access-1"), types.Draft13CredentialRequest{Format: "vc+sd-jwt"}, testProver(proof.factory))
 
 	var endpointError *types.Draft13CredentialEndpointError
 	if !errors.As(err, &endpointError) || endpointError.Code != "invalid_request" {
@@ -136,7 +136,7 @@ func TestUseDPoPNonceIsResentOnceWithTheFreshNonce(t *testing.T) {
 		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		proof := &countingProof{}
 
-		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{DPoP: proof.factory})
+		_, err := receiver.RequestToken(t.Context(), mustURIField(t, server.URL+"/token"), types.TokenRequest{GrantType: types.PreAuthorizedCode, PreAuthorizedCode: "pre-1"}, types.ClientAuthentication{DPoP: testProver(proof.factory)})
 
 		requireEndpointError(t, err, StageToken, http.StatusBadRequest, "use_dpop_nonce")
 		if server.count() != 2 || strings.Join(proof.nonces, ",") != ",as-nonce" {
@@ -188,7 +188,7 @@ func TestUseDPoPNonceIsNotResentWhenNothingWouldChange(t *testing.T) {
 		})
 		receiver := &Oid4vciReceiver{HTTPClient: server.Client(), Experimental: experimental.Transport{AllowHTTP: true}}
 		endpoint := mustURIField(t, server.URL+"/credential")
-		receiver.rememberDPoPNonce(url.URL(endpoint), "stale-nonce")
+		receiver.rememberDPoPNonce(exchange{url: url.URL(endpoint), resourceServer: true, dpop: testProver(fixedProof("proof"))}, "stale-nonce")
 		proof := &countingProof{}
 
 		_, err := postCredentialBody(t.Context(), receiver, endpoint, "access-1", []byte(`{}`), "application/json", proof.factory)

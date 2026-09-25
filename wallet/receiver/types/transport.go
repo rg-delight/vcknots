@@ -22,7 +22,7 @@ import (
 //     "invalid_nonce" is asked again after a fresh c_nonce is fetched from the
 //     Nonce Endpoint and the body is rebuilt for it.
 //
-// Every factory (DPoPProofFactory, OAuthClientAttestationHeadersFactory,
+// Every factory (DPoPProver.Proof, OAuthClientAttestationHeadersFactory,
 // ClientAssertionFactory, CredentialRequestBodyFactory) is called once per
 // HTTP attempt, so nothing carrying a jti is ever replayed.
 
@@ -48,7 +48,7 @@ type IssuerDiscovery interface {
 // authorization server carries. A nil factory sends nothing for its mechanism.
 type ClientAuthentication struct {
 	// DPoP builds the RFC 9449 DPoP proof.
-	DPoP DPoPProofFactory
+	DPoP DPoPProver
 	// ClientAttestation builds the OAuth-Client-Attestation and
 	// OAuth-Client-Attestation-PoP headers.
 	ClientAttestation OAuthClientAttestationHeadersFactory
@@ -94,12 +94,12 @@ type CredentialTransport interface {
 	// RequestCredential posts the Section 8 Credential Request built by body
 	// for cNonce. On "invalid_nonce" it refreshes the c_nonce from
 	// nonceEndpoint and posts once more; a nil nonceEndpoint returns the error.
-	RequestCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, cNonce string, body CredentialRequestBodyFactory, nonceEndpoint *common.URIField, dpop DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
+	RequestCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, cNonce string, body CredentialRequestBodyFactory, nonceEndpoint *common.URIField, dpop DPoPProver) (*CredentialEndpointHTTPResponse, error)
 	// RequestDeferredCredential posts a Section 9 Deferred Credential Request
 	// body, encoded by EncodeCredentialRequest.
-	RequestDeferredCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, body []byte, contentType string, dpop DPoPProofFactory) (*CredentialEndpointHTTPResponse, error)
+	RequestDeferredCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, body []byte, contentType string, dpop DPoPProver) (*CredentialEndpointHTTPResponse, error)
 	// SendNotification posts a Section 11 Notification Request.
-	SendNotification(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, notification NotificationRequest, dpop DPoPProofFactory) error
+	SendNotification(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, notification NotificationRequest, dpop DPoPProver) error
 	// EncodeCredentialRequest serializes a (Deferred) Credential Request and
 	// encrypts it when md advertises credential_request_encryption (Section
 	// 10). It returns the body and its Content-Type. It performs no I/O.
@@ -122,13 +122,13 @@ type OID4VCITransport interface {
 // Credential Issuer. A refusal is reported as *Draft13CredentialEndpointError.
 type Draft13CredentialTransport interface {
 	// RequestDraft13Credential posts a Draft 13 Section 7.2 Credential Request.
-	RequestDraft13Credential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, request Draft13CredentialRequest, dpop DPoPProofFactory) (*Draft13CredentialResponse, error)
+	RequestDraft13Credential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, request Draft13CredentialRequest, dpop DPoPProver) (*Draft13CredentialResponse, error)
 	// RequestDraft13DeferredCredential posts a Draft 13 Section 9 Deferred
 	// Credential Request for transactionID.
-	RequestDraft13DeferredCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, transactionID string, dpop DPoPProofFactory) (*Draft13CredentialResponse, error)
+	RequestDraft13DeferredCredential(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, transactionID string, dpop DPoPProver) (*Draft13CredentialResponse, error)
 	// SendDraft13Notification posts a Draft 13 Section 10.1 Notification
 	// Request, whose body is the same as OpenID4VCI 1.0's.
-	SendDraft13Notification(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, notification NotificationRequest, dpop DPoPProofFactory) error
+	SendDraft13Notification(ctx context.Context, endpoint common.URIField, token CredentialIssuanceAccessToken, notification NotificationRequest, dpop DPoPProver) error
 }
 
 // Draft13Transport is everything an OpenID4VCI Draft 13 issuance needs from a

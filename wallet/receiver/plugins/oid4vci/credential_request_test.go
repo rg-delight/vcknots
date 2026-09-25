@@ -152,7 +152,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 		RedirectURI:  "https://wallet.example/callback",
 		CodeVerifier: "verifier-1",
 		ClientID:     "client-1",
-	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: fixedProof("dpop-token")})
+	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{}), DPoP: testProver(fixedProof("dpop-token"))})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -190,7 +190,7 @@ func TestOid4vciReceiver_FinalPrimitives(t *testing.T) {
 	if err := receiver.SendNotification(t.Context(), endpoint("/notification"), dpopAccessToken("access-1"), types.NotificationRequest{
 		NotificationID: deferred.NotificationID,
 		Event:          "credential_accepted",
-	}, fixedProof("dpop-notification")); err != nil {
+	}, testProver(fixedProof("dpop-notification"))); err != nil {
 		t.Fatalf("notification error = %v", err)
 	}
 }

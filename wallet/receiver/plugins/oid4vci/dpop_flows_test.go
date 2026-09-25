@@ -213,10 +213,10 @@ func TestOid4vciReceiver_RequestTokenDPoPRetry(t *testing.T) {
 	}, types.ClientAuthentication{ClientAttestation: fixedAttestationHeaders(types.OAuthClientAttestationHeaders{
 		ClientAttestation:    "attestation-jwt",
 		ClientAttestationPop: "attestation-pop-jwt",
-	}), DPoP: func(nonce string) (string, error) {
+	}), DPoP: testProver(func(nonce string) (string, error) {
 		proofNonces = append(proofNonces, nonce)
 		return "proof:" + nonce, nil
-	}})
+	})})
 	if err != nil {
 		t.Fatalf("token request error = %v", err)
 	}
@@ -320,10 +320,10 @@ func TestOid4vciReceiver_SendCredentialNotificationDPoPRetry(t *testing.T) {
 		common.URIField(*parsed),
 		dpopAccessToken("access-1"),
 		types.NotificationRequest{NotificationID: "notification-1", Event: "credential_accepted"},
-		func(nonce string) (string, error) {
+		testProver(func(nonce string) (string, error) {
 			proofNonces = append(proofNonces, nonce)
 			return "proof:" + nonce, nil
-		},
+		}),
 	)
 	if err != nil {
 		t.Fatalf("SendNotification() error = %v", err)
@@ -349,7 +349,7 @@ func TestCredentialRequestUsesBearerSchemeForBearerToken(t *testing.T) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 
 	require.NoError(t, err)
@@ -379,7 +379,7 @@ func TestCredentialRequestUsesDPoPSchemeForDPoPToken(t *testing.T) {
 			return []byte(`{"credential_configuration_id":"test-config"}`), "application/json", nil
 		},
 		nil,
-		noopProofFactory,
+		testProver(noopProofFactory),
 	)
 
 	require.NoError(t, err)

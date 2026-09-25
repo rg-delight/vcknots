@@ -58,11 +58,11 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
 		final := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.Final()}
-		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
+		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.NoError(t, err)
 
 		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
-		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
+		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
@@ -74,7 +74,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
 			return types.OAuthClientAttestationHeaders{}, nil
-		}, DPoP: func(string) (string, error) { return "proof", nil }})
+		}, DPoP: testProver(func(string) (string, error) { return "proof", nil })})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 

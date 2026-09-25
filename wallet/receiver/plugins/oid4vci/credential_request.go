@@ -80,9 +80,15 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 
 // RequestNonce performs the OpenID4VCI 1.0 Section 7 Nonce Request. A
 // DPoP-Nonce response header (Section 7.2) is returned and also kept for the
-// next proof to that server.
+// next proof to that server's resource endpoints, by the first DPoP key that
+// asks for one.
 func (o *Oid4vciReceiver) RequestNonce(ctx context.Context, endpoint common.URIField) (*types.NonceResponse, error) {
-	exchanged, err := o.do(observe.WithEndpoint(ctx, observe.EndpointNonce), exchange{method: http.MethodPost, url: url.URL(endpoint)})
+	exchanged, err := o.do(observe.WithEndpoint(ctx, observe.EndpointNonce), exchange{
+		method:          http.MethodPost,
+		url:             url.URL(endpoint),
+		resourceServer:  true,
+		dpopNonceSource: true,
+	})
 	if err == nil && !exchanged.ok() {
 		err = exchanged.statusError()
 	}
@@ -108,7 +114,7 @@ func (o *Oid4vciReceiver) RequestNonce(ctx context.Context, endpoint common.URIF
 // a fresh c_nonce from nonceEndpoint and posts once more; with a nil
 // nonceEndpoint the error is returned. A refusal is a
 // *types.CredentialEndpointError.
-func (o *Oid4vciReceiver) RequestCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, nonceEndpoint *common.URIField, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+func (o *Oid4vciReceiver) RequestCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, nonceEndpoint *common.URIField, dpop types.DPoPProver) (*types.CredentialEndpointHTTPResponse, error) {
 	if body == nil {
 		return nil, fmt.Errorf("%w: credential request body factory is required", common.ErrInvalidInput)
 	}
@@ -127,12 +133,12 @@ func (o *Oid4vciReceiver) RequestCredential(ctx context.Context, endpoint common
 // RequestDeferredCredential posts an OpenID4VCI 1.0 Section 9 Deferred
 // Credential Request body encoded by EncodeCredentialRequest. A refusal, such
 // as issuance_pending, is a *types.CredentialEndpointError.
-func (o *Oid4vciReceiver) RequestDeferredCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+func (o *Oid4vciReceiver) RequestDeferredCredential(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProver) (*types.CredentialEndpointHTTPResponse, error) {
 	return o.postCredentialEndpoint(observe.WithEndpoint(ctx, observe.EndpointDeferredCredential), endpoint, token, body, contentType, dpop)
 }
 
 // SendNotification posts an OpenID4VCI 1.0 Section 11 Notification Request.
-func (o *Oid4vciReceiver) SendNotification(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, notification types.NotificationRequest, dpop types.DPoPProofFactory) error {
+func (o *Oid4vciReceiver) SendNotification(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, notification types.NotificationRequest, dpop types.DPoPProver) error {
 	body, err := json.Marshal(notification)
 	if err != nil {
 		return err
@@ -142,7 +148,7 @@ func (o *Oid4vciReceiver) SendNotification(ctx context.Context, endpoint common.
 }
 
 // postCredentialRequest builds the body for cNonce and posts it.
-func (o *Oid4vciReceiver) postCredentialRequest(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+func (o *Oid4vciReceiver) postCredentialRequest(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, cNonce string, body types.CredentialRequestBodyFactory, dpop types.DPoPProver) (*types.CredentialEndpointHTTPResponse, error) {
 	encoded, contentType, err := body(cNonce)
 	if err != nil {
 		return nil, err
@@ -150,7 +156,7 @@ func (o *Oid4vciReceiver) postCredentialRequest(ctx context.Context, endpoint co
 	return o.postCredentialEndpoint(ctx, endpoint, token, encoded, contentType, dpop)
 }
 
-func (o *Oid4vciReceiver) postCredentialEndpoint(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProofFactory) (*types.CredentialEndpointHTTPResponse, error) {
+func (o *Oid4vciReceiver) postCredentialEndpoint(ctx context.Context, endpoint common.URIField, token types.CredentialIssuanceAccessToken, body []byte, contentType string, dpop types.DPoPProver) (*types.CredentialEndpointHTTPResponse, error) {
 	response, err := o.postProtected(ctx, endpoint, token, body, contentType, dpop, httpfetch.CredentialBodyLimit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to post credential endpoint request: %w", err)
@@ -273,7 +279,7 @@ func (o *Oid4vciReceiver) DecodeCredentialResponse(body []byte, contentType stri
 // 8.3.1.2 *types.CredentialEndpointError, or as ErrDPoPRequired when a request
 // sent with a Bearer token is asked for DPoP. An invalid_nonce refusal is
 // reported as such first, so the caller can refresh the c_nonce.
-func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProver, limit int64) (*exchangeResponse, error) {
 	response, err := o.postWithAccessToken(ctx, endpoint, accessToken, body, contentType, proofFactory, limit)
 	if err != nil {
 		return nil, err
@@ -296,7 +302,7 @@ func (o *Oid4vciReceiver) postProtected(ctx context.Context, endpoint common.URI
 // token_type names. A DPoP-bound token takes a proof from proofFactory for each
 // attempt; a Bearer token carries none (RFC 9449 Section 7.1 pairs the proof
 // with the DPoP scheme). The response is returned whatever its status.
-func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProofFactory, limit int64) (*exchangeResponse, error) {
+func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint common.URIField, accessToken types.CredentialIssuanceAccessToken, body []byte, contentType string, proofFactory types.DPoPProver, limit int64) (*exchangeResponse, error) {
 	ex := exchange{
 		method:      http.MethodPost,
 		url:         url.URL(endpoint),
@@ -306,11 +312,12 @@ func (o *Oid4vciReceiver) postWithAccessToken(ctx context.Context, endpoint comm
 		limit:       limit,
 	}
 	if authorizationScheme(accessToken.TokenType) == dpopAuthorizationScheme {
-		if proofFactory == nil {
+		if proofFactory.Proof == nil {
 			return nil, fmt.Errorf("%w: a DPoP-bound access token needs a DPoP proof factory", ErrDPoPRequired)
 		}
 		ex.dpop = proofFactory
 	}
+	ex.resourceServer = true
 	return o.do(ctx, ex)
 }
 

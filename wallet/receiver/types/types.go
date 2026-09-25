@@ -843,6 +843,21 @@ type Receiver interface {
 // server-provided nonce when it is not empty.
 type DPoPProofFactory func(nonce string) (string, error)
 
+// DPoPProver builds the RFC 9449 DPoP proofs of one request with one key. The
+// zero value sends no proof.
+type DPoPProver struct {
+	// KeyThumbprint is the base64url RFC 7638 SHA-256 thumbprint of the key
+	// Proof signs with. A receiver keeps a server-provided DPoP nonce per
+	// server, per server role (authorization server or resource server, RFC
+	// 9449 Section 9) and per key, so a nonce issued for one key is never
+	// sent with another, which would link the two keys. With an empty
+	// KeyThumbprint no nonce is kept across requests; a use_dpop_nonce
+	// challenge is still answered within the request.
+	KeyThumbprint string
+	// Proof builds the proof for one attempt; nil sends no proof.
+	Proof DPoPProofFactory
+}
+
 // CredentialRequestBodyFactory builds the credential request body (already
 // encoded, including any JWE wrapping) for a given c_nonce. OpenID4VCI 1.0
 // §8.3.1 / §8.3.1.2 requires the wallet to embed the current c_nonce in the

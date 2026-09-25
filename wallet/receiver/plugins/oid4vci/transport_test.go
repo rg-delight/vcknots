@@ -160,7 +160,7 @@ func TestPushAuthorizationRequestRetriesDPoPNonceWithFreshCredentials(t *testing
 		ClientID:     "client-1",
 		RedirectURI:  "https://wallet.example/callback",
 	}, types.ClientAuthentication{
-		DPoP: func(nonce string) (string, error) { return "proof-for-" + nonce, nil },
+		DPoP: testProver(func(nonce string) (string, error) { return "proof-for-" + nonce, nil }),
 		ClientAssertion: func() (string, error) {
 			assertions++
 			return "assertion-" + string(rune('0'+assertions)), nil
