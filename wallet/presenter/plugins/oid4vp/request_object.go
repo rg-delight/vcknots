@@ -42,9 +42,8 @@ type RequestObjectValidationOptions struct {
 	// 1.0 nor HAIP requires exp, so it is off by default in every profile.
 	RequireExpiry bool
 	// MaxAge bounds the lifetime of a Request Object, measured as exp - iat,
-	// or as exp - now when iat is absent. Zero means unbounded. The HAIP
-	// profile substitutes haipRequestObjectMaxAge when the caller left it
-	// zero, and honours a caller-supplied value as given.
+	// or as exp - now when iat is absent. Zero means unbounded in every
+	// profile: neither OpenID4VP 1.0 nor HAIP 1.0 bounds it.
 	MaxAge time.Duration
 	// VerifierAttestationIssuers are the parties this Wallet trusts for issuing
 	// Verifier Attestation JWTs (OID4VP 1.0 §5.9.3). An empty list refuses
@@ -56,10 +55,6 @@ type RequestObjectValidationOptions struct {
 	// Client Identifier.
 	Federation *FederationTrustOptions
 }
-
-// haipRequestObjectMaxAge is the Request Object lifetime the HAIP profile
-// applies when the caller configured no MaxAge.
-const haipRequestObjectMaxAge = 10 * time.Minute
 
 // RequestObjectVerification records the authentication performed by this
 // library. No request parameter can populate this field.

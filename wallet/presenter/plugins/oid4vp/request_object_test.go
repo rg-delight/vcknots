@@ -128,16 +128,16 @@ func TestHAIPRequestObjectRequiresExpiry(t *testing.T) {
 	}
 }
 
-// TestHAIPRequestObjectRejectsExcessiveLifetime covers the ten-minute MaxAge
-// the HAIP profile applies when the caller configured none.
-func TestHAIPRequestObjectRejectsExcessiveLifetime(t *testing.T) {
+// TestHAIPRequestObjectLifetimeIsUnbounded covers MaxAge's zero value under
+// HAIP: neither OpenID4VP 1.0 nor HAIP 1.0 bounds the lifetime of a Request
+// Object, so the profile adds no bound of its own.
+func TestHAIPRequestObjectLifetimeIsUnbounded(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	claims["iat"] = f.now.Unix()
 	claims["exp"] = f.now.Add(time.Hour).Unix()
-	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
-	if err == nil || !strings.Contains(err.Error(), "exceeding the configured maximum of 10m0s") {
-		t.Fatalf("HAIP must bound the Request Object lifetime: %v", err)
+	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference}); err != nil {
+		t.Fatalf("HAIP must not bound the Request Object lifetime: %v", err)
 	}
 }
 

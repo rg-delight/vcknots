@@ -342,11 +342,6 @@ func (c *requestCore) resolveClaimPolicy(options RequestObjectValidationOptions,
 		RequireExpiry:    options.RequireExpiry,
 		MaxAge:           options.MaxAge,
 	}
-	if c.haipRequestObjectPolicy() && policy.MaxAge == 0 {
-		// HAIP bounds the lifetime of a Request Object that does carry exp;
-		// it does not require exp (see RequireExpiry).
-		policy.MaxAge = haipRequestObjectMaxAge
-	}
 	return policy
 }
 

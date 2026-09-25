@@ -1074,7 +1074,7 @@ wallet 自身の以前の解析がその取得を記録したときだけ設定�
 解析済み要求の `RequestObjectVerification` は、認証した内容（証明書のフィンガープリントと `Certificate` の要約、失効確認の件数、echo された `WalletNonce`、`Delivery`、`ExpiresAt`、`VerifierAttestation` または `Federation` の証跡）を記録します。
 要求のパラメータからこの値を設定することはできません。
 
-`RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロのとき HAIP は 10 分を使います）、`Now`、`ClockSkew` を持ちます。
+`RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロはどのプロファイルでも無制限です）、`Now`、`ClockSkew` を持ちます。
 `iat` が未来の Request Object は拒否するので、受け入れる Verifier の時計のずれに合わせて `ClockSkew` を設定してください。
 `X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。
 `RequestObjectValidation` のアンカーと併用はできません。
