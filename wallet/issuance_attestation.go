@@ -2,12 +2,17 @@ package wallet
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"fmt"
 	"slices"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
+	"github.com/trustknots/vcknots/wallet/keystore"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -40,18 +45,51 @@ func (w *Wallet) attestationPolicyFor(provider any) attestation.TrustPolicy {
 	return policy
 }
 
-// clientAttestationKey is the wallet instance key a Client Attestation binds:
-// Config.Attestation.ClientKey, else Config.DPoP.Key.
-func (w *Wallet) clientAttestationKey() IKeyEntry {
-	if w.attestationSettings().ClientKey != nil {
-		return w.attestationSettings().ClientKey
+// clientInstanceKey returns the Client Instance Key a Client Attestation of
+// one flow binds, and, when the wallet generated it, its private JWK for the
+// flow's state. recorded is the key a previous stage of the flow kept.
+//
+//   - Config.Attestation.ClientKey is used as configured.
+//   - Config.Attestation.ClientKeyFromDPoP uses Config.DPoP.Key.
+//   - Otherwise the flow gets its own ephemeral key, so no two authorization
+//     servers see the same key
+//     (draft-ietf-oauth-attestation-based-client-auth Section 11.1
+//     RECOMMENDED).
+func (w *Wallet) clientInstanceKey(recorded *jose.JSONWebKey) (IKeyEntry, *jose.JSONWebKey, error) {
+	settings := w.attestationSettings()
+	switch {
+	case settings.ClientKey != nil && settings.ClientKeyFromDPoP:
+		return nil, nil, invalidArgument("Config.Attestation.ClientKey and ClientKeyFromDPoP are exclusive")
+	case settings.ClientKey != nil:
+		return settings.ClientKey, nil, nil
+	case settings.ClientKeyFromDPoP:
+		if w.dpop.Key == nil {
+			return nil, nil, invalidArgument("Config.Attestation.ClientKeyFromDPoP needs Config.DPoP.Key")
+		}
+		return w.dpop.Key, nil, nil
+	case recorded != nil:
+		key, err := keystore.NewKeyEntryFromJWK(*recorded)
+		if err != nil {
+			return nil, nil, fmt.Errorf("the state's client instance key: %w: %w", ErrIssuanceStateMismatch, err)
+		}
+		return key, nil, nil
 	}
-	return w.dpop.Key
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate a client instance key: %w", err)
+	}
+	jwk := jose.JSONWebKey{Key: private, KeyID: uuid.NewString(), Algorithm: string(jose.ES256), Use: "sig"}
+	key, err := keystore.NewKeyEntryFromJWK(jwk)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate a client instance key: %w", err)
+	}
+	return key, &jwk, nil
 }
 
 // clientAttestationFactory obtains and authenticates the Client Attestation
 // for the authorization server asIssuer (OpenID4VCI 1.0 Appendix E) and
-// returns the prover, which signs a fresh PoP for every attempt carrying the
+// returns the prover for the Client Instance Key key, which signs a fresh PoP
+// for every attempt carrying the
 // Challenge the receiver hands it. It fetches a Challenge from the
 // challenge_endpoint when the server advertises one, which is then the most
 // recently received Challenge (draft-ietf-oauth-attestation-based-client-auth-07
@@ -62,14 +100,14 @@ func (w *Wallet) clientAttestationFactory(
 	transport receiverTypes.AuthorizationTransport,
 	asMetadata *receiverTypes.AuthorizationServerMetadata,
 	asIssuer string,
+	key IKeyEntry,
 ) (receiverTypes.ClientAttestationProver, error) {
 	provider := w.attestationSettings().Client
 	if provider == nil {
 		return receiverTypes.ClientAttestationProver{}, nil
 	}
-	key := w.clientAttestationKey()
 	if key == nil {
-		return receiverTypes.ClientAttestationProver{}, invalidArgument("a client attestation needs Config.Attestation.ClientKey or Config.DPoP.Key")
+		return receiverTypes.ClientAttestationProver{}, invalidArgument("a client attestation needs a Client Instance Key")
 	}
 	clientID := w.clientAuth.ClientID
 	if clientID == "" {

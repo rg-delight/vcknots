@@ -139,7 +139,7 @@ func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 					return attesterKey.Public().Key, nil
 				}}
 			}
-			_, err := w.clientAttestationFactory(t.Context(), nil, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example")
+			_, err := w.clientAttestationFactory(t.Context(), nil, &receiverTypes.AuthorizationServerMetadata{}, "https://as.example", w.attestationConfig.ClientKey)
 			require.ErrorIs(t, err, attestation.ErrClientAttestationInvalid)
 			require.ErrorContains(t, err, tc.wantErr)
 		})

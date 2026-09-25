@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -130,7 +131,11 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		}
 		// RFC 9126 Section 2: the PAR endpoint authenticates the client like
 		// the token endpoint (HAIP Section 4.4.1).
-		auth, err := w.clientAuthentication(ctx, transport, discovery, false)
+		instanceKey, err := w.flowClientInstanceKey(authorization, nil)
+		if err != nil {
+			return nil, err
+		}
+		auth, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +203,11 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	auth, err := w.clientAuthentication(ctx, transport, discovery, false)
+	instanceKey, err := w.flowClientInstanceKey(nil, a.ClientInstanceKey)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +339,24 @@ func (w *Wallet) finalCredentialConfiguration(transport receiverTypes.OID4VCITra
 	return config, requireJWTProofType(id, config)
 }
 
+// flowClientInstanceKey resolves the Client Instance Key of one stage of a
+// flow when a Client Attestation is configured, and nil otherwise. A key the
+// wallet generates is recorded in authorization, when given, so the next stage
+// binds the same key; recorded is the key an earlier stage kept.
+func (w *Wallet) flowClientInstanceKey(authorization *IssuanceAuthorization, recorded *jose.JSONWebKey) (IKeyEntry, error) {
+	if w.attestationSettings().Client == nil {
+		return nil, nil
+	}
+	key, generated, err := w.clientInstanceKey(recorded)
+	if err != nil {
+		return nil, err
+	}
+	if authorization != nil {
+		authorization.ClientInstanceKey = generated
+	}
+	return key, nil
+}
+
 // checkPrivateKeyJWT refuses a configured private_key_jwt the authorization
 // server does not accept, unless a client attestation authenticates the
 // client instead.
@@ -347,13 +374,13 @@ func (w *Wallet) checkPrivateKeyJWT(as *receiverTypes.AuthorizationServerMetadat
 }
 
 // clientAuthentication returns how the client authenticates at the PAR and
-// token endpoints: a Client Attestation when Config.Attestation.Client is set,
-// else private_key_jwt when configured. Attestation and private_key_jwt are
+// token endpoints: a Client Attestation for instanceKey when
+// Config.Attestation.Client is set, else private_key_jwt when configured. Attestation and private_key_jwt are
 // alternatives. preAuthorized also requires anonymous access to be allowed
 // when neither is used. DPoP is left to the caller.
-func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTypes.AuthorizationTransport, discovery *issuanceDiscovery, preAuthorized bool) (receiverTypes.ClientAuthentication, error) {
+func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTypes.AuthorizationTransport, discovery *issuanceDiscovery, preAuthorized bool, instanceKey IKeyEntry) (receiverTypes.ClientAuthentication, error) {
 	var auth receiverTypes.ClientAuthentication
-	attestationProver, err := w.clientAttestationFactory(ctx, transport, discovery.asMetadata, discovery.authorizationServer)
+	attestationProver, err := w.clientAttestationFactory(ctx, transport, discovery.asMetadata, discovery.authorizationServer, instanceKey)
 	if err != nil {
 		return auth, err
 	}

@@ -96,6 +96,20 @@ func tokenTestVerifyJWT(t *testing.T, token string, key jose.JSONWebKey) map[str
 	return claims
 }
 
+// tokenTestCnfKey is the Client Instance Key a Client Attestation's cnf.jwk
+// names.
+func tokenTestCnfKey(t *testing.T, attestationClaims map[string]any) jose.JSONWebKey {
+	t.Helper()
+	cnf, ok := attestationClaims["cnf"].(map[string]any)
+	require.True(t, ok)
+	raw, err := json.Marshal(cnf["jwk"])
+	require.NoError(t, err)
+	var key jose.JSONWebKey
+	require.NoError(t, key.UnmarshalJSON(raw))
+	require.True(t, key.IsPublic())
+	return key
+}
+
 // tokenTestVerifyClientAttestationHeaders authenticates the Appendix E headers
 // as an authorization server does: the attestation is signed by the attester
 // and binds the instance key to client_id, the PoP is signed by that key and
@@ -104,7 +118,6 @@ func tokenTestVerifyClientAttestationHeaders(
 	t *testing.T,
 	headers http.Header,
 	attesterKey jose.JSONWebKey,
-	clientKey jose.JSONWebKey,
 	clientID string,
 	authorizationServer string,
 ) (attestationClaims map[string]any, popClaims map[string]any) {
@@ -120,7 +133,7 @@ func tokenTestVerifyClientAttestationHeaders(
 	require.True(t, ok)
 	require.NotNil(t, cnf["jwk"])
 
-	popClaims = tokenTestVerifyJWT(t, pop, clientKey)
+	popClaims = tokenTestVerifyJWT(t, pop, tokenTestCnfKey(t, attestationClaims))
 	require.Equal(t, clientID, popClaims["iss"])
 	require.Equal(t, authorizationServer, popClaims["aud"])
 	require.NotEmpty(t, popClaims["jti"])
@@ -577,7 +590,10 @@ func TestAuthorizePreAuthorizedIssuanceCarriesClientAttestationUnderHAIP(t *test
 	require.Equal(t, string(receiverTypes.PreAuthorizedCode), fixture.tokenForms[0].Get("grant_type"))
 	require.NotEmpty(t, fixture.tokenHeaders.Get("DPoP"))
 
-	tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
+	attestationClaims, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, "client-1", fixture.server.URL)
+	// The Client Instance Key is an ephemeral key of this flow, not the DPoP
+	// key (draft-ietf-oauth-attestation-based-client-auth Section 11.1).
+	require.NotEqual(t, jwkThumbprintForTest(t, fixture.clientKey), jwkThumbprintForTest(t, tokenTestCnfKey(t, attestationClaims)))
 	require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
 	require.Empty(t, fixture.tokenForms[0].Get("client_assertion_type"))
 }
@@ -601,9 +617,10 @@ func TestAuthorizePreAuthorizedIssuanceRefreshesAttestationOnDPoPNonceRetry(t *t
 	require.Equal(t, 2, fixture.tokenCalls)
 	require.Len(t, fixture.tokenHeaderList, 2)
 
-	_, firstPop := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaderList[0], attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
-	_, secondPop := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaderList[1], attesterKey, fixture.clientKey, "client-1", fixture.server.URL)
+	firstAttestation, firstPop := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaderList[0], attesterKey, "client-1", fixture.server.URL)
+	secondAttestation, secondPop := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaderList[1], attesterKey, "client-1", fixture.server.URL)
 	require.NotEqual(t, firstPop["jti"], secondPop["jti"])
+	require.Equal(t, firstAttestation["cnf"], secondAttestation["cnf"], "a retry keeps the flow's Client Instance Key")
 
 	firstProof := tokenTestVerifyJWT(t, fixture.tokenHeaderList[0].Get("DPoP"), fixture.clientKey)
 	secondProof := tokenTestVerifyJWT(t, fixture.tokenHeaderList[1].Get("DPoP"), fixture.clientKey)
@@ -884,4 +901,67 @@ func TestClientAttestationChallengeFromAPreviousResponseIsUsed(t *testing.T) {
 	tokenPoP, err := jwsClaims(fixture.tokenHeaders.Get("OAuth-Client-Attestation-PoP"))
 	require.NoError(t, err)
 	require.Equal(t, "challenge-from-par", tokenPoP["challenge"])
+}
+
+// jwkThumbprintForTest is the RFC 7638 thumbprint of key's public half.
+func jwkThumbprintForTest(t *testing.T, key jose.JSONWebKey) string {
+	t.Helper()
+	thumbprint, err := jwkThumbprint(key)
+	require.NoError(t, err)
+	return thumbprint
+}
+
+// draft-ietf-oauth-attestation-based-client-auth Section 11.1 RECOMMENDS a
+// different Client Instance Key per authorization server. By default each
+// flow gets its own ephemeral key: two issuances do not share one, and
+// neither is the DPoP key.
+func TestClientInstanceKeyIsEphemeralPerFlowByDefault(t *testing.T) {
+	fixture, attesterKey := tokenTestHAIPAttestationFixture(t)
+	_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+	require.NoError(t, err)
+	first, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, "client-1", fixture.server.URL)
+	_, err = fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+	require.NoError(t, err)
+	second, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, "client-1", fixture.server.URL)
+
+	dpop := jwkThumbprintForTest(t, fixture.clientKey)
+	firstKey := jwkThumbprintForTest(t, tokenTestCnfKey(t, first))
+	secondKey := jwkThumbprintForTest(t, tokenTestCnfKey(t, second))
+	require.NotEqual(t, firstKey, secondKey)
+	require.NotEqual(t, dpop, firstKey)
+	require.NotEqual(t, dpop, secondKey)
+}
+
+// Attestation.ClientKeyFromDPoP opts in to attesting the DPoP key.
+func TestClientInstanceKeyFromDPoPIsOptIn(t *testing.T) {
+	fixture, attesterKey := tokenTestHAIPAttestationFixture(t)
+	settings := fixture.wallet.attestationSettings()
+	settings.ClientKeyFromDPoP = true
+	fixture.wallet.attestationConfig = &settings
+	_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+	require.NoError(t, err)
+	claims, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, "client-1", fixture.server.URL)
+	require.Equal(t, jwkThumbprintForTest(t, fixture.clientKey), jwkThumbprintForTest(t, tokenTestCnfKey(t, claims)))
+}
+
+// An Authorization Code Flow binds the key of its Pushed Authorization
+// Request at the token endpoint too, since the server may bind the code to it
+// (Section 10.4); the key travels in the JSON state between the stages.
+func TestClientInstanceKeyIsCarriedFromPARToTheTokenRequest(t *testing.T) {
+	fixture, attesterKey := tokenTestHAIPAttestationFixture(t)
+	ctx := context.Background()
+	authorization, err := fixture.wallet.BeginIssuance(ctx, fixture.issuanceRequest())
+	require.NoError(t, err)
+	require.NotNil(t, authorization.ClientInstanceKey)
+	var restored IssuanceAuthorization
+	requireJSONRoundTrip(t, authorization, &restored)
+	location, err := fixture.followAuthorization(&restored)
+	require.NoError(t, err)
+	_, err = fixture.newWallet(t).AuthorizeIssuance(ctx, &restored, location)
+	require.NoError(t, err)
+
+	par, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.parHeaders, attesterKey, "client-1", fixture.server.URL)
+	token, _ := tokenTestVerifyClientAttestationHeaders(t, fixture.tokenHeaders, attesterKey, "client-1", fixture.server.URL)
+	require.Equal(t, jwkThumbprintForTest(t, tokenTestCnfKey(t, par)), jwkThumbprintForTest(t, tokenTestCnfKey(t, token)))
+	require.NotEqual(t, jwkThumbprintForTest(t, fixture.clientKey), jwkThumbprintForTest(t, tokenTestCnfKey(t, par)))
 }

@@ -91,6 +91,14 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{}), Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}},
 			want:   ErrInvalidArgument,
 		},
+		"ClientKeyFromDPoP without a DPoP key": {
+			config: Config{Storeless: true, Attestation: AttestationConfig{ClientKeyFromDPoP: true}},
+			want:   ErrInvalidArgument,
+		},
+		"ClientKeyFromDPoP with a ClientKey": {
+			config: Config{Storeless: true, DPoP: DPoPConfig{Enabled: true}, Attestation: AttestationConfig{ClientKeyFromDPoP: true, ClientKey: newMockKeyEntry()}},
+			want:   ErrInvalidArgument,
+		},
 		"a draft profile reported by a plugin": {
 			config: Config{Storeless: true, Receiver: receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.Draft13()})},
 			want:   profile.ErrDraftProfile,

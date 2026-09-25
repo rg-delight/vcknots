@@ -215,11 +215,26 @@ type IssuanceConfig struct {
 // without x5c needs Trust.ResolveKey.
 type AttestationConfig struct {
 	// Client supplies the OAuth 2.0 Client Attestation of this wallet
-	// instance (OpenID4VCI 1.0 Appendix E).
+	// instance (OpenID4VCI 1.0 Appendix E). It is asked for an attestation
+	// of the Client Instance Key of each flow (attestation.ClientRequest).
 	Client attestation.ClientProvider
-	// ClientKey is the wallet instance key the Client Attestation binds and
-	// the PoP is signed with. Nil means DPoP.Key.
+	// ClientKey is the Client Instance Key the Client Attestation binds and
+	// the PoP is signed with, for every authorization server. Using one key
+	// for every server lets the servers correlate the instance
+	// (draft-ietf-oauth-attestation-based-client-auth Section 11.1).
+	//
+	// When ClientKey is nil and ClientKeyFromDPoP is false, the wallet
+	// generates an ephemeral P-256 key for each authorization server flow,
+	// which that section RECOMMENDS: a Pre-Authorized Code token request
+	// uses a key of its own, and an Authorization Code Flow carries the key
+	// of its Pushed Authorization Request to its token request in
+	// IssuanceAuthorization.ClientInstanceKey.
 	ClientKey IKeyEntry
+	// ClientKeyFromDPoP uses Config.DPoP.Key as the Client Instance Key, so
+	// the DPoP key is attested. It is an opt-in: the one key then links the
+	// instance across authorization servers and ties the attestation to the
+	// DPoP key's lifetime. It cannot be combined with ClientKey.
+	ClientKeyFromDPoP bool
 	// Key supplies key attestations (OpenID4VCI 1.0 Appendix D).
 	Key attestation.KeyProvider
 	// Trust authenticates the attestations Client and Key return.
@@ -389,6 +404,9 @@ func newWallet(config Config) (*Wallet, error) {
 			return nil, fmt.Errorf("failed to generate DPoP key: %w", err)
 		}
 		config.DPoP.Key = key
+	}
+	if config.Attestation.ClientKeyFromDPoP && (config.Attestation.ClientKey != nil || config.DPoP.Key == nil) {
+		return nil, fmt.Errorf("%w: Attestation.ClientKeyFromDPoP needs a DPoP key and no Attestation.ClientKey", ErrInvalidArgument)
 	}
 	attestationConfig := config.Attestation
 	var testHooks *experimental.Hooks
