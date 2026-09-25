@@ -3,6 +3,7 @@ package oid4vp
 import (
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -60,8 +61,31 @@ func TestParseDraft24OID4VPClientIDExported(t *testing.T) {
 	if err != nil || parsed.Prefix() != OID4VPClientIDPrefixX509SanDNS {
 		t.Fatalf("Draft24 x509_san_dns = %v, %v", parsed, err)
 	}
-	if _, err := ParseDraft24OID4VPClientID("origin:https://verifier.example"); !errors.Is(err, ErrClientIDPrefixReserved) {
-		t.Fatalf("Draft24 reserved prefix error = %v, want ErrClientIDPrefixReserved", err)
+	parsed, err = ParseDraft24OID4VPClientID("registered-verifier")
+	if err != nil || parsed.Prefix() != OID4VPClientIDPrefixPreRegistered {
+		t.Fatalf("Draft24 pre-registered = %v, %v", parsed, err)
+	}
+	if _, err := ParseDraft24OID4VPClientID("web-origin:https://verifier.example"); !errors.Is(err, ErrClientIDPrefixReserved) {
+		t.Fatalf("Draft24 web-origin error = %v, want ErrClientIDPrefixReserved", err)
+	}
+}
+
+// TestParseDraft24OID4VPClientIDAcceptsOnlyDraft24Schemes covers Draft 24
+// §5.10.4: the OpenID4VP 1.0 prefixes are not Draft 24 schemes, and the did and
+// x509_san_uri schemes Draft 24 defines are refused as unsupported.
+func TestParseDraft24OID4VPClientIDAcceptsOnlyDraft24Schemes(t *testing.T) {
+	for _, clientID := range []string{
+		"x509_hash:YWJj", "decentralized_identifier:did:example:123",
+		"openid_federation:https://verifier.example", "origin:https://verifier.example",
+	} {
+		if _, err := ParseDraft24OID4VPClientID(clientID); err == nil || !strings.Contains(err.Error(), "not a Draft 24 Client Identifier Scheme") {
+			t.Fatalf("ParseDraft24OID4VPClientID(%q) error = %v, want a refusal of a non-Draft 24 scheme", clientID, err)
+		}
+	}
+	for _, clientID := range []string{"did:example:123", "x509_san_uri:https://verifier.example/cb"} {
+		if _, err := ParseDraft24OID4VPClientID(clientID); !errors.Is(err, ErrRequestObjectClientAuthUnsupported) {
+			t.Fatalf("ParseDraft24OID4VPClientID(%q) error = %v, want ErrRequestObjectClientAuthUnsupported", clientID, err)
+		}
 	}
 }
 
@@ -92,7 +116,7 @@ func TestParseOID4VPClientIDUnknownPrefix(t *testing.T) {
 // carried in plain query parameters has no signature to authenticate it.
 func TestDraft24QueryParamX509ClientIDRefused(t *testing.T) {
 	presenter := &Oid4vpPresenter{}
-	for _, clientID := range []string{"x509_san_dns:verifier.example", "x509_hash:YWJj", "verifier_attestation:verifier.example"} {
+	for _, clientID := range []string{"x509_san_dns:verifier.example", "verifier_attestation:verifier.example"} {
 		request := "openid4vp://?response_type=vp_token&client_id=" + clientID +
 			"&response_mode=direct_post&response_uri=https://verifier.example/response&nonce=n"
 		_, err := parseDraft24ForTest(presenter, request)

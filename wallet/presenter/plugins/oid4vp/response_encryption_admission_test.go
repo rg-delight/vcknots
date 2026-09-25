@@ -145,10 +145,11 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 	}
 
 	t.Run("Draft24 is exempt from the HAIP enc rule", func(t *testing.T) {
-		f := newRequestObjectFixture(t)
+		f := newRequestObjectFixture(t, "verifier.example")
 		claims := f.claims()
+		claims["client_id"] = draft24X509ClientID
 		claims["client_metadata"] = metadataClaim(t, encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"}))
-		uri := "openid4vp://authorize?" + url.Values{"client_id": {f.clientID()}, "request": {f.sign(t, claims, nil)}}.Encode()
+		uri := "openid4vp://authorize?" + url.Values{"client_id": {draft24X509ClientID}, "request": {f.sign(t, claims, nil)}}.Encode()
 		p := f.presenter()
 		p.Profile = profile.HAIP()
 		_, err := parseDraft24ForTest(p, uri)

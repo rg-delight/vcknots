@@ -20,7 +20,7 @@ type draft24RequestBuilder struct {
 	// wallet processes (Draft 24 Section 5.1).
 	supportedTransactionDataTypes []string
 	// walletMetadata and requestURINonce are the presenter's request_uri POST
-	// settings (Draft 24 Section 5.10).
+	// settings (Draft 24 Section 5.11).
 	walletMetadata  map[string]any
 	requestURINonce func() (string, error)
 }
@@ -33,22 +33,60 @@ func newDraft24RequestBuilder() *draft24RequestBuilder {
 	return &draft24RequestBuilder{requestCore: core}
 }
 
-// parseDraft24ClientID is the Client Identifier syntax of the Draft 24 wire
-// contract. It differs from OpenID4VP 1.0 in one prefix only: Draft 24
-// Section 5.10.1 names an OpenID Federation Entity Identifier with the "https"
-// Client Identifier Scheme, which is reported with the 1.0 prefix so both wire
-// contracts reach the one federation authentication.
+// parseDraft24ClientID parses a client_id with the Client Identifier Scheme
+// syntax of Draft 24 §5.10: "<client_id_scheme>:<orig_client_id>", with a
+// Client Identifier without ":" referencing a pre-registered client (§5.10.2).
+// Only the schemes Draft 24 §5.10.4 defines are accepted: redirect_uri,
+// https (an OpenID Federation Entity Identifier, reported with the 1.0
+// openid_federation prefix so both wire contracts reach one federation
+// authentication), verifier_attestation and x509_san_dns. did and
+// x509_san_uri are defined but not implemented, and are refused with
+// ErrRequestObjectClientAuthUnsupported. web-origin belongs to the Digital
+// Credentials API, which the Draft 24 entry points do not serve. The OpenID4VP
+// 1.0 prefixes x509_hash, decentralized_identifier, openid_federation and
+// origin are not Draft 24 schemes.
 func parseDraft24ClientID(clientID string) (*OID4VPClientID, error) {
 	trimmed := strings.TrimSpace(clientID)
-	if strings.HasPrefix(trimmed, "https://") {
-		return &OID4VPClientID{original: trimmed, prefix: OID4VPClientIDPrefixOIDFederation}, nil
+	if trimmed == "" {
+		return nil, fmt.Errorf("invalid client_id format")
 	}
-	return parseOID4VPClientID(trimmed)
+	scheme, original, found := strings.Cut(trimmed, ":")
+	if !found {
+		// Draft 24 §5.10.2: "If a : character is not present in the Client
+		// Identifier, the Wallet MUST treat the Client Identifier as
+		// referencing a pre-registered client."
+		return &OID4VPClientID{original: trimmed, prefix: OID4VPClientIDPrefixPreRegistered}, nil
+	}
+	switch scheme {
+	case "https":
+		// Draft 24 §5.10.4: "Since the Entity Identifier is already defined
+		// to start with https:, this Client Identifier Scheme MUST NOT be
+		// prefixed additionally."
+		return &OID4VPClientID{original: trimmed, prefix: OID4VPClientIDPrefixOIDFederation}, nil
+	case "redirect_uri", "verifier_attestation", "x509_san_dns":
+		original = strings.TrimSpace(original)
+		if original == "" || strings.HasPrefix(original, scheme+":") {
+			return nil, fmt.Errorf("invalid client_id: malformed %s Client Identifier", scheme)
+		}
+		return &OID4VPClientID{original: original, prefix: OID4VPClientIDPrefix(scheme)}, nil
+	case "did", "x509_san_uri":
+		return nil, fmt.Errorf("%w: the Draft 24 Client Identifier Scheme %q is not supported", ErrRequestObjectClientAuthUnsupported, scheme)
+	case string(OID4VPClientIDPrefixWebOrigin):
+		// Draft 24 §5.10.4: "The Wallet MUST NOT accept this Client
+		// Identifier Scheme if the request is not sent via the Digital
+		// Credentials API."
+		return nil, fmt.Errorf("client_id scheme 'web-origin' is only valid over the Digital Credentials API: %w", ErrClientIDPrefixReserved)
+	default:
+		// Draft 24 §5.10.1: "If the Wallet does not support the Client
+		// Identifier Scheme, the Wallet MUST refuse the request."
+		return nil, fmt.Errorf("client_id scheme %q is not a Draft 24 Client Identifier Scheme", scheme)
+	}
 }
 
-// ParseDraft24OID4VPClientID is ParseOID4VPClientID for a client_id that
-// arrived over the Draft 24 wire contract, where an "https" Client Identifier
-// names an OpenID Federation Entity Identifier.
+// ParseDraft24OID4VPClientID parses a client_id that arrived over the Draft 24
+// wire contract, with the Client Identifier Schemes of Draft 24 §5.10. An
+// "https" Client Identifier names an OpenID Federation Entity Identifier and
+// is reported with OID4VPClientIDPrefixOIDFederation.
 func ParseDraft24OID4VPClientID(clientID string) (*OID4VPClientID, error) {
 	return parseDraft24ClientID(clientID)
 }
@@ -132,14 +170,14 @@ func (b *draft24RequestBuilder) WithQueryParams(params map[string][]string) *dra
 // WithRequestObjectURI fetches the Request Object from request_uri and
 // authenticates it. A POST carries a fresh wallet_nonce the Request Object
 // must echo, and the presenter's WalletMetadata as wallet_metadata when set
-// (Draft 24 Section 5.10).
+// (Draft 24 Section 5.11).
 func (b *draft24RequestBuilder) WithRequestObjectURI(uri string, method RequestURIMethod) *draft24RequestBuilder {
 	if b.errValidation != nil {
 		return b
 	}
 	accept := "application/oauth-authz-req+jwt, application/jwt, text/plain, */*"
 	if method == RequestURIMethodPOST {
-		// Draft 24 Section 5.10: "the accept header set to
+		// Draft 24 Section 5.11: "the accept header set to
 		// application/oauth-authz-req+jwt".
 		accept = "application/oauth-authz-req+jwt"
 	}
@@ -161,6 +199,9 @@ func (b *draft24RequestBuilder) WithRequestObject(obj string) *draft24RequestBui
 func (b *draft24RequestBuilder) Build() (*CredentialPresentationRequest, error) {
 	if b.errValidation != nil {
 		return nil, b.errValidation
+	}
+	if err := b.checkPreRegisteredClient(); err != nil {
+		return nil, err
 	}
 	if err := b.validateResponseEncryptionMetadata(); err != nil {
 		b.errorResponseAllowed = false
@@ -216,15 +257,26 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 			return
 		}
 		switch parsedCID.prefix {
-		case OID4VPClientIDPrefixRedirectURI, OID4VPClientIDPrefixX509SanDNS:
+		case OID4VPClientIDPrefixRedirectURI:
+			// Draft 24 §5.10.4: the Client Identifier "is the Verifier's
+			// Redirect URI (or Response URI when Response Mode direct_post is
+			// used)".
 			redirectURIFromClientID = parsedCID.original
-		case OID4VPClientIDPrefixX509Hash, OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
+		case OID4VPClientIDPrefixX509SanDNS, OID4VPClientIDPrefixOIDFederation, OID4VPClientIDPrefixVerifierAttestation:
+			// Bound by what authenticates the Verifier: the certificate's DNS
+			// name, the Trust Chain metadata or the attestation.
 		case OID4VPClientIDPrefixPreRegistered:
-			// Draft 24 has no pre-registered Client Identifier.
-			b.errValidation = fmt.Errorf("invalid client_id format")
-			return
+			// Draft 24 §5.10.2: the client must be known in advance; the
+			// registration is checked in checkPreRegisteredClient.
+			registered, lookupErr := b.lookupPreRegisteredClient(parsedCID.original)
+			if lookupErr != nil {
+				b.errValidation = lookupErr
+				return
+			}
+			b.preRegisteredClient = registered
 		default:
-			b.errValidation = fmt.Errorf("unsupported client_id prefix: %s", parsedCID.prefix)
+			b.errValidation = fmt.Errorf("unsupported client_id scheme: %s", parsedCID.prefix)
+			return
 		}
 	}
 
@@ -233,13 +285,20 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		return
 	}
 
-	b.req.RedirectURI = redirectURIFromClientID
+	b.req.RedirectURI = redirectURIFromParam
+	if b.req.RedirectURI == "" {
+		b.req.RedirectURI = redirectURIFromClientID
+	}
 	b.req.State = getParam("state", false)
 	b.req.Nonce = getParam("nonce", true)
 	b.req.Scope = getParam("scope", false)
 	b.req.ResponseMode = OAuthAuthzReqResponseMode(getParam("response_mode", true))
 
-	responseURIFromParam := getParam("response_uri", isDirectPostMode(b.req.ResponseMode))
+	// Draft 24 §5.10.4: with the redirect_uri scheme "The Verifier MAY omit
+	// the redirect_uri Authorization Request parameter (or response_uri when
+	// Response Mode direct_post is used)."
+	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
+	responseURIFromParam := getParam("response_uri", responseURIRequired)
 	if isDirectPostMode(b.req.ResponseMode) {
 		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
 			b.errValidation = err
@@ -247,13 +306,18 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		}
 	}
 	b.req.ResponseURI = responseURIFromParam
-	if err := bindDraft24RedirectURIResponseURI(params, b.req.ClientID, redirectURIFromClientID, responseURIFromParam, b.req.ResponseMode); err != nil {
-		// The refused response_uri is not the Verifier's, so the error
-		// authorization response goes to the URI the Client Identifier
-		// authenticates.
-		b.req.ResponseURI = redirectURIFromClientID
-		b.errValidation = err
-		return
+	if redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
+		b.req.RedirectURI = ""
+		if responseURIFromParam == "" {
+			b.req.ResponseURI = redirectURIFromClientID
+		} else if responseURIFromParam != redirectURIFromClientID {
+			// The refused response_uri is not the Verifier's, so the error
+			// authorization response goes to the URI the Client Identifier
+			// authenticates.
+			b.req.ResponseURI = redirectURIFromClientID
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrResponseURIClientIDMismatch)
+			return
+		}
 	}
 
 	b.req.PresentationDefinitionURI = getParam("presentation_definition_uri", false)
@@ -286,6 +350,13 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 			return
 		}
 		b.req.ClientMetadata = metadata
+	}
+	// Draft 24 §5.1: "Authoritative data the Wallet is able to obtain about
+	// the Client from other sources ... take precedence over the values
+	// passed in client_metadata", so a registration's metadata replaces it.
+	if b.preRegisteredClient != nil && b.preRegisteredClient.Metadata != nil {
+		registeredMetadata := *b.preRegisteredClient.Metadata
+		b.req.ClientMetadata = &registeredMetadata
 	}
 
 	if rawDcqlQuery, exists := params["dcql_query"]; exists {

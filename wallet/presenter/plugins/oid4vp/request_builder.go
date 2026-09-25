@@ -16,9 +16,6 @@ type requestBuilder struct {
 	// policy is the presenter configuration of this parse. It is a pointer
 	// so that requestBuilder stays comparable; nil is the zero policy.
 	policy *builderPolicy
-	// preRegisteredClient is the registry entry of this request's
-	// pre-registered Client Identifier, nil for every other prefix.
-	preRegisteredClient *PreRegisteredClient
 }
 
 // builderPolicy is the part of the presenter configuration a requestBuilder
@@ -29,10 +26,6 @@ type builderPolicy struct {
 	// supportedTransactionDataTypes lists the transaction_data types the
 	// wallet processes (OID4VP 1.0 §5.1).
 	supportedTransactionDataTypes []string
-	// preRegisteredClients and resolvePreRegisteredClient are the registry a
-	// pre-registered Client Identifier is resolved against (OID4VP 1.0 §5.9.2).
-	preRegisteredClients       map[string]PreRegisteredClient
-	resolvePreRegisteredClient PreRegisteredClientResolver
 }
 
 // settings returns the builder's policy, or the zero policy.

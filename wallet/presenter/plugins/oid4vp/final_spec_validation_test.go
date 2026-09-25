@@ -559,23 +559,35 @@ func TestPreRegisteredClientIDResolverConsultedWhenMapMisses(t *testing.T) {
 	require.ErrorIs(t, err, ErrPreRegisteredClientUnknown)
 }
 
-// Fix 12 (regression): Draft24 refuses a pre-registered Client Identifier even
-// when the wallet has a registry, because it never authenticated one.
-func TestDraft24PreRegisteredClientStillRejected(t *testing.T) {
-	uri := finalQueryURI(url.Values{
-		"client_id":               {"example-client"},
-		"redirect_uri":            {"https://verifier.example/cb"},
-		"response_type":           {"vp_token"},
-		"response_mode":           {"fragment"},
-		"nonce":                   {"n"},
-		"presentation_definition": {`{"id":"definition"}`},
-	})
-	p := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
-		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier"}},
+// Draft 24 §5.10.2: a Client Identifier without ":" references a
+// pre-registered client, so Draft 24 resolves it in the same registry as the
+// 1.0 path: an unknown client is refused, and a known one is held to its
+// registered response endpoints, and its registered metadata takes precedence
+// over client_metadata (Draft 24 §5.1).
+func TestDraft24PreRegisteredClient(t *testing.T) {
+	values := func(responseURI string) url.Values {
+		return url.Values{
+			"client_id":               {"example-client"},
+			"response_uri":            {responseURI},
+			"response_type":           {"vp_token"},
+			"response_mode":           {"direct_post"},
+			"nonce":                   {"n"},
+			"client_metadata":         {`{"client_name":"Self-asserted"}`},
+			"presentation_definition": {`{"id":"definition"}`},
+		}
+	}
+	registered := &Oid4vpPresenter{PreRegisteredClients: map[string]PreRegisteredClient{
+		"example-client": {Metadata: &VerifierMetadata{ClientName: "Registered Verifier", RedirectURIs: []string{"https://verifier.example/cb"}}},
 	}}
-	_, err := parseDraft24ForTest(p, uri)
-	require.ErrorContains(t, err, "invalid client_id format")
-	require.NotErrorIs(t, err, ErrPreRegisteredClientUnknown)
+	request, err := parseDraft24ForTest(registered, finalQueryURI(values("https://verifier.example/cb")))
+	require.NoError(t, err)
+	require.Equal(t, "Registered Verifier", request.ClientMetadata.ClientName)
+
+	_, err = parseDraft24ForTest(registered, finalQueryURI(values("https://attacker.example/cb")))
+	require.ErrorIs(t, err, ErrPreRegisteredClientEndpointUnregistered)
+
+	_, err = parseDraft24ForTest(&Oid4vpPresenter{}, finalQueryURI(values("https://verifier.example/cb")))
+	require.ErrorIs(t, err, ErrPreRegisteredClientUnknown)
 }
 
 // An Authorization Request URI without an authority ("openid4vp:?...") is

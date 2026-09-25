@@ -49,22 +49,20 @@ func TestParseRequestObjectMatchesTheURIDelivery(t *testing.T) {
 // for the Presentation Exchange wire contract, whose by-value entry point
 // authenticates an X.509 Request Object through the same shared path.
 func TestParseDraft24RequestObjectMatchesTheURIDelivery(t *testing.T) {
-	f := newRequestObjectFixture(t)
-	claims := f.claims()
+	f := newRequestObjectFixture(t, "verifier.example")
+	claims := f.draft24Claims()
 	claims["response_mode"] = "direct_post"
-	delete(claims, "dcql_query")
-	claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
 	requestObject := f.sign(t, claims, nil)
 
 	uri := "openid4vp://authorize?" + url.Values{
-		"client_id": {f.clientID()},
+		"client_id": {draft24X509ClientID},
 		"request":   {requestObject},
 	}.Encode()
 	fromURI, err := parseDraft24ForTest(f.presenter(), uri)
 	if err != nil {
 		t.Fatalf("the Draft24 URI delivery must be accepted: %v", err)
 	}
-	fromValue, err := parseDraft24RequestObjectForTest(f.presenter(), requestObject, f.clientID())
+	fromValue, err := parseDraft24RequestObjectForTest(f.presenter(), requestObject, draft24X509ClientID)
 	if err != nil {
 		t.Fatalf("the Draft24 by-value delivery must be accepted: %v", err)
 	}
@@ -137,7 +135,7 @@ func TestParseRequestObjectRefusesUnsignedRequests(t *testing.T) {
 		!strings.Contains(err.Error(), "bounded compact signed JWT") {
 		t.Fatalf("want a non-JWT request refused, got %v", err)
 	}
-	if _, err := parseDraft24RequestObjectForTest(f.presenter(), unsigned, f.clientID()); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
+	if _, err := parseDraft24RequestObjectForTest(f.presenter(), unsigned, ""); !errors.Is(err, ErrRequestObjectSignatureInvalid) {
 		t.Fatalf("want the Draft24 entry point to refuse an alg=none request object, got %v", err)
 	}
 }

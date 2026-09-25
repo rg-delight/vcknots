@@ -9,15 +9,19 @@ import (
 
 // lookupPreRegisteredClient resolves a pre-registered Client Identifier against
 // the wallet's registry: the in-memory map first, then the caller's resolver.
-// OID4VP 1.0 §5.9.2: "the Client Identifier needs to be known to the Wallet in
-// advance of the Authorization Request", so an unresolved identifier is an
-// error rather than an unauthenticated Verifier.
-func (b *requestBuilder) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
-	if registered, exists := b.settings().preRegisteredClients[clientID]; exists {
+// OID4VP 1.0 §5.9.2 and Draft 24 §5.10.2: "the Client Identifier needs to be
+// known to the Wallet in advance of the Authorization Request", so an
+// unresolved identifier is an error rather than an unauthenticated Verifier.
+func (b *requestCore) lookupPreRegisteredClient(clientID string) (*PreRegisteredClient, error) {
+	registry := b.preRegistry
+	if registry == nil {
+		registry = &preRegisteredRegistry{}
+	}
+	if registered, exists := registry.clients[clientID]; exists {
 		return preRegisteredClientWithID(&registered, clientID), nil
 	}
-	if b.settings().resolvePreRegisteredClient != nil {
-		resolved, err := b.settings().resolvePreRegisteredClient(clientID)
+	if registry.resolve != nil {
+		resolved, err := registry.resolve(clientID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve pre-registered client_id %q: %w", clientID, err)
 		}
@@ -41,7 +45,7 @@ func preRegisteredClientWithID(client *PreRegisteredClient, clientID string) *Pr
 
 // authenticatePreRegisteredRequestObject verifies a pre-registered client's
 // Request Object with the keys registered for it.
-func (b *requestBuilder) authenticatePreRegisteredRequestObject(parsed *jwt.JSONWebToken, options RequestObjectValidationOptions) error {
+func (b *requestCore) authenticatePreRegisteredRequestObject(parsed *jwt.JSONWebToken, options RequestObjectValidationOptions) error {
 	client := b.preRegisteredClient
 	if client == nil || client.JWKS == nil || len(client.JWKS.Keys) == 0 {
 		return fmt.Errorf("%w: pre-registered client %q has no registered request signing key", ErrRequestObjectClientAuthUnsupported, b.req.ClientID)
@@ -68,7 +72,7 @@ func (b *requestBuilder) authenticatePreRegisteredRequestObject(parsed *jwt.JSON
 // registration: the response endpoint must be a registered redirect_uri,
 // compared exactly (OID4VP 1.0 §5.1 response_uri, RFC 6749 §3.1.2.3), and a
 // registration that requires signed requests refuses an unsigned one.
-func (b *requestBuilder) checkPreRegisteredClient() error {
+func (b *requestCore) checkPreRegisteredClient() error {
 	client := b.preRegisteredClient
 	if client == nil {
 		return nil

@@ -22,34 +22,24 @@ func draft24RedirectURIValues(clientURI, responseURI string) url.Values {
 	}
 }
 
-// Draft24 Section 5.10.1: with the redirect_uri scheme the Client Identifier
-// "is the Redirect URI (or Response URI when Response Mode direct_post is
-// used)", so the Response URI is bound to it exactly as on the Final path. The
-// pre-Draft22 tolerance admits a callback under the Client Identifier's path
-// only while the request still carries client_id_scheme=redirect_uri.
+// Draft 24 §5.10.4: with the redirect_uri scheme the Client Identifier "is
+// the Redirect URI (or Response URI when Response Mode direct_post is used)",
+// so the Response URI is bound to it exactly. The pre-Draft 22
+// client_id_scheme parameter is not a Draft 24 parameter and widens nothing.
 func TestDraft24RedirectURIClientIDBindsResponseURI(t *testing.T) {
 	tests := []struct {
 		name         string
 		clientURI    string
 		responseURI  string
 		scheme       string
-		allowHTTP    bool
 		wantAccepted bool
 	}{
 		{name: "same URI", clientURI: "https://verifier.example/response", responseURI: "https://verifier.example/response", wantAccepted: true},
-		{name: "same URI with legacy scheme", clientURI: "https://verifier.example/response", responseURI: "https://verifier.example/response", scheme: "redirect_uri", wantAccepted: true},
+		{name: "same URI with a client_id_scheme parameter", clientURI: "https://verifier.example/response", responseURI: "https://verifier.example/response", scheme: "redirect_uri", wantAccepted: true},
 		{name: "foreign URI", clientURI: "https://verifier.example/cb", responseURI: "https://verifier.example/elsewhere"},
-		{name: "sub path without legacy scheme", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/app/cb"},
-		{name: "sub path with legacy scheme", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/app/cb", scheme: "redirect_uri", wantAccepted: true},
-		{name: "sub path under trailing slash with legacy scheme", clientURI: "https://verifier.example/app/", responseURI: "https://verifier.example/app/cb", scheme: "redirect_uri", wantAccepted: true},
-		{name: "sibling path sharing a prefix", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/application", scheme: "redirect_uri"},
-		{name: "sibling path", clientURI: "https://verifier.example/app/cb", responseURI: "https://verifier.example/app/other", scheme: "redirect_uri"},
+		{name: "sub path", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/app/cb"},
+		{name: "sub path with the pre-Draft 22 client_id_scheme", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/app/cb", scheme: "redirect_uri"},
 		{name: "other host", clientURI: "https://verifier.example/app", responseURI: "https://attacker.example/app/cb", scheme: "redirect_uri"},
-		{name: "other port", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example:8443/app/cb", scheme: "redirect_uri"},
-		{name: "root client path", clientURI: "https://verifier.example/", responseURI: "https://verifier.example/cb", scheme: "redirect_uri"},
-		{name: "empty client path", clientURI: "https://verifier.example", responseURI: "https://verifier.example/cb", scheme: "redirect_uri"},
-		{name: "plain http is never tolerated", clientURI: "http://verifier.example/app", responseURI: "http://verifier.example/app/cb", scheme: "redirect_uri", allowHTTP: true},
-		{name: "other legacy scheme", clientURI: "https://verifier.example/app", responseURI: "https://verifier.example/app/cb", scheme: "x509_san_dns"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -64,7 +54,7 @@ func TestDraft24RedirectURIClientIDBindsResponseURI(t *testing.T) {
 				posted = append(posted, r.URL.String())
 				return nil, errors.New("no network in this test")
 			})}
-			p := &Oid4vpPresenter{AllowHTTP: tt.allowHTTP, HTTPClient: client}
+			p := &Oid4vpPresenter{HTTPClient: client}
 			req, err := parseDraft24ForTest(p, finalQueryURI(values))
 			if tt.wantAccepted {
 				require.NoError(t, err)
@@ -95,16 +85,13 @@ func TestDraft24RedirectURIClientIDMismatchAnswersTheClientIdentifier(t *testing
 	require.Equal(t, int32(1), verifier.calls.Load(), "the authenticated Client Identifier receives the error response")
 }
 
-// Draft24 keeps requiring the response_uri parameter for direct_post rather
-// than defaulting it to the Client Identifier as the Final path does.
-func TestDraft24RedirectURIClientIDStillRequiresResponseURI(t *testing.T) {
+// Draft 24 §5.10.4: "The Verifier MAY omit the redirect_uri Authorization
+// Request parameter (or response_uri when Response Mode direct_post is used)",
+// so the Response URI is the Client Identifier.
+func TestDraft24RedirectURIClientIDDefaultsResponseURI(t *testing.T) {
 	values := draft24RedirectURIValues("https://verifier.example/response", "")
 	values.Del("response_uri")
-	_, err := parseDraft24ForTest((&Oid4vpPresenter{}), finalQueryURI(values))
-	require.ErrorContains(t, err, "response_uri")
-}
-
-func TestLegacyRedirectURIResponseURIAllowedRejectsUnparsableURIs(t *testing.T) {
-	require.False(t, legacyRedirectURIResponseURIAllowed("https://verifier.example/%zz", "https://verifier.example/app/cb"))
-	require.False(t, legacyRedirectURIResponseURIAllowed("https://verifier.example/app", "https://verifier.example/%zz"))
+	req, err := parseDraft24ForTest((&Oid4vpPresenter{}), finalQueryURI(values))
+	require.NoError(t, err)
+	require.Equal(t, "https://verifier.example/response", req.ResponseURI)
 }

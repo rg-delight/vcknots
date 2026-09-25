@@ -31,7 +31,7 @@ var (
 	ErrTransactionDataTypeUnsupported = common.NewCodedError("transaction_data_type_unsupported", "transaction_data type is not supported by this wallet")
 	// ErrResponseURIClientIDMismatch reports a redirect_uri Client Identifier
 	// whose Response URI is not the one the Client Identifier names. OpenID4VP
-	// 1.0 Section 5.9.3 (and Draft24 Section 5.10.1): the original Client
+	// 1.0 Section 5.9.3 (and Draft 24 Section 5.10.4): the original Client
 	// Identifier "is the Verifier's Redirect URI (or Response URI when
 	// Response Mode direct_post is used)".
 	ErrResponseURIClientIDMismatch = common.NewCodedError("response_uri_client_id_mismatch", "response_uri does not match the redirect_uri Client Identifier")

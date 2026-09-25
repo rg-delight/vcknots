@@ -140,7 +140,7 @@ func draft24RequestURIPost(f *requestObjectFixture) string {
 	}.Encode()
 }
 
-// TestDraft24RequestURIPostSendsWalletNonceAndMetadata covers Draft 24 §5.10:
+// TestDraft24RequestURIPostSendsWalletNonceAndMetadata covers Draft 24 §5.11:
 // the POST carries the Wallet's wallet_metadata and a fresh wallet_nonce, and
 // "if the Wallet passed a wallet_nonce in the POST request, the Wallet MUST
 // validate whether the request object contains the respective nonce value".

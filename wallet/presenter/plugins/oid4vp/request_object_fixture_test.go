@@ -141,6 +141,22 @@ func (f *requestObjectFixture) presenter() *Oid4vpPresenter {
 	return &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
 }
 
+// draft24X509ClientID is the Draft 24 Client Identifier of a fixture created
+// with the DNS name verifier.example. x509_hash is not a Draft 24 Client
+// Identifier Scheme (Draft 24 §5.10.4).
+const draft24X509ClientID = "x509_san_dns:verifier.example"
+
+// draft24Claims is claims as a Draft 24 request: the x509_san_dns Client
+// Identifier and a Presentation Exchange presentation_definition. The fixture
+// must have been created with the DNS name verifier.example.
+func (f *requestObjectFixture) draft24Claims() map[string]any {
+	claims := f.claims()
+	claims["client_id"] = draft24X509ClientID
+	delete(claims, "dcql_query")
+	claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
+	return claims
+}
+
 func (f *requestObjectFixture) claims() map[string]any {
 	return map[string]any{
 		// The HAIP profile requires a bounded Request Object lifetime, so the

@@ -99,6 +99,19 @@ type requestCore struct {
 	// audienceOptional skips the aud check when no WalletAudience is
 	// configured.
 	audienceOptional bool
+	// preRegistry is the presenter's registry of pre-registered clients, nil
+	// when it has none. preRegisteredClient is the registry entry of this
+	// request's pre-registered Client Identifier, nil for every other prefix.
+	preRegistry         *preRegisteredRegistry
+	preRegisteredClient *PreRegisteredClient
+}
+
+// preRegisteredRegistry is where a pre-registered Client Identifier is
+// resolved (OID4VP 1.0 §5.9.2, Draft 24 §5.10.2): the map first, then the
+// resolver.
+type preRegisteredRegistry struct {
+	clients map[string]PreRegisteredClient
+	resolve PreRegisteredClientResolver
 }
 
 func newRequestCore() requestCore {
@@ -241,7 +254,7 @@ func (c *requestCore) fetchRequestObject(uri string, method RequestURIMethod, fo
 }
 
 // fetchRequestObjectByReference fetches the Request Object of a request_uri
-// (OID4VP 1.0 §5.10, Draft 24 §5.10) and records that this parse observed
+// (OID4VP 1.0 §5.10, Draft 24 §5.11) and records that this parse observed
 // delivery by reference. RequestObjectValidationOptions.RequestURIPolicy
 // decides first whether the request_uri belongs to the outer client_id. A POST carries a fresh wallet_nonce, which the
 // Request Object must echo (§5.10.1), and walletMetadata as wallet_metadata

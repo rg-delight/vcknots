@@ -79,7 +79,7 @@ type RequestObjectVerification struct {
 	RevocationUnadvertised int
 	// WalletNonce is the wallet_nonce this library sent with a request_uri
 	// POST and the authenticated Request Object echoed (OID4VP 1.0 §5.10.1,
-	// Draft 24 §5.10.1). It is empty for GET and for a Request Object passed
+	// Draft 24 §5.11.1). It is empty for GET and for a Request Object passed
 	// by value.
 	WalletNonce string
 	// Delivery records how this library observed the Request Object arrive:

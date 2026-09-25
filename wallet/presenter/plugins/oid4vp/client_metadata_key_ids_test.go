@@ -137,17 +137,14 @@ func TestClientMetadataJWKKeyIDsOnPlainRequests(t *testing.T) {
 // entry points of both wire contracts authenticate it through the same
 // builder, so the requirement reaches it the same way.
 func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
-	f := newRequestObjectFixture(t)
+	f := newRequestObjectFixture(t, "verifier.example")
 	withoutKeyID := func(draft24 bool) map[string]any {
 		claims := f.claims()
-		claims["client_metadata"] = map[string]any{
-			"jwks": map[string]any{"keys": []any{publicEncryptionJWK(t, "")}},
-			"encrypted_response_enc_values_supported": []string{"A128GCM", "A256GCM"},
-		}
 		if draft24 {
-			delete(claims, "dcql_query")
-			claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
+			claims = f.draft24Claims()
 		}
+		metadata := claims["client_metadata"].(map[string]any)
+		metadata["jwks"] = map[string]any{"keys": []any{publicEncryptionJWK(t, "")}}
 		return claims
 	}
 	entryPoints := []struct {
@@ -161,25 +158,26 @@ func TestClientMetadataJWKKeyIDsOnSignedRequestObjects(t *testing.T) {
 	for _, entry := range entryPoints {
 		t.Run(entry.name, func(t *testing.T) {
 			requestObject := f.sign(t, withoutKeyID(entry.draft24), nil)
+			clientID := f.clientID()
+			if entry.draft24 {
+				clientID = draft24X509ClientID
+			}
 
 			lenient := f.presenter()
-			request, err := entry.parse(lenient, requestObject, f.clientID())
+			request, err := entry.parse(lenient, requestObject, clientID)
 			require.NoError(t, err)
 			require.NotNil(t, request.RequestObjectVerification)
 
 			strict := f.presenter()
 			strict.RequireClientMetadataJWKKeyIDs = true
-			_, err = entry.parse(strict, requestObject, f.clientID())
+			_, err = entry.parse(strict, requestObject, clientID)
 			require.True(t, errors.Is(err, ErrClientMetadataJWKKeyIDMissing), "want ErrClientMetadataJWKKeyIDMissing, got %v", err)
 
 			withKeyID := f.sign(t, f.claims(), nil)
 			if entry.draft24 {
-				claims := f.claims()
-				delete(claims, "dcql_query")
-				claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
-				withKeyID = f.sign(t, claims, nil)
+				withKeyID = f.sign(t, f.draft24Claims(), nil)
 			}
-			_, err = entry.parse(strict, withKeyID, f.clientID())
+			_, err = entry.parse(strict, withKeyID, clientID)
 			require.NoError(t, err)
 		})
 	}

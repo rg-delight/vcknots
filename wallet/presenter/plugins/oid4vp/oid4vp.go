@@ -38,7 +38,7 @@ type Oid4vpPresenter struct {
 	// (profile.ErrDraftProfile).
 	Profile profile.Profile
 	// WalletMetadata, when non-nil, is serialized as the wallet_metadata form
-	// parameter of a request_uri POST (OID4VP 1.0 §5.10, Draft 24 §5.10).
+	// parameter of a request_uri POST (OID4VP 1.0 §5.10, Draft 24 §5.11).
 	// When nil the parameter is omitted.
 	WalletMetadata map[string]any
 	// RequestURINonce generates the wallet_nonce sent with a request_uri POST.
@@ -51,10 +51,10 @@ type Oid4vpPresenter struct {
 	// §5.1).
 	SupportedTransactionDataTypes []string
 	// PreRegisteredClients is the registry of Verifiers registered out of
-	// band, keyed by Client Identifier (OID4VP 1.0 §5.9.2). A Final request
-	// whose client_id has no ":" and resolves neither here nor through
-	// ResolvePreRegisteredClient is refused with ErrPreRegisteredClientUnknown.
-	// The Draft24 entry points refuse every pre-registered Client Identifier.
+	// band, keyed by Client Identifier (OID4VP 1.0 §5.9.2, Draft 24 §5.10.2).
+	// A request whose client_id has no ":" and resolves neither here nor
+	// through ResolvePreRegisteredClient is refused with
+	// ErrPreRegisteredClientUnknown.
 	PreRegisteredClients map[string]PreRegisteredClient
 	// ResolvePreRegisteredClient is consulted when PreRegisteredClients holds no
 	// entry for the Client Identifier, so a wallet can keep its registry in a
@@ -230,6 +230,9 @@ func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) 
 	core.x509TrustChainRoots = p.X509TrustChainRoots
 	core.insecureSkipX509Verify = p.InsecureSkipX509Verify
 	core.requireClientMetadataJWKKeyIDs = p.RequireClientMetadataJWKKeyIDs
+	if p.PreRegisteredClients != nil || p.ResolvePreRegisteredClient != nil {
+		core.preRegistry = &preRegisteredRegistry{clients: p.PreRegisteredClients, resolve: p.ResolvePreRegisteredClient}
+	}
 	if p.RequestObjectValidation != nil {
 		core.setRequestObjectValidation(*p.RequestObjectValidation)
 	}
@@ -254,8 +257,6 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 		walletMetadata:                p.WalletMetadata,
 		requestURINonce:               p.RequestURINonce,
 		supportedTransactionDataTypes: p.SupportedTransactionDataTypes,
-		preRegisteredClients:          p.PreRegisteredClients,
-		resolvePreRegisteredClient:    p.ResolvePreRegisteredClient,
 	}
 	return builder, nil
 }
