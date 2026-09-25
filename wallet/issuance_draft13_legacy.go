@@ -36,9 +36,10 @@ func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType 
 
 // ReceiveCredential runs a Pre-Authorized Code issuance through the receiver
 // plugin's Receiver methods and stores the credential once it passes
-// req.Acceptance, or else Config.CredentialAcceptance. Without either the
-// credential is parsed but its issuer is not authenticated. It is OpenID4VCI
-// Draft 13 and returns ErrProfileForbidsDraft
+// req.Acceptance, or else Config.CredentialAcceptance. With neither policy
+// nothing is requested (ErrCredentialAcceptancePolicyRequired): a credential
+// whose issuer is not authenticated is never stored (SD-JWT VC -19 §2.4). It
+// is OpenID4VCI Draft 13 and returns ErrProfileForbidsDraft
 // unless Config.Profiles enables profile.Draft13; new code uses
 // AuthorizePreAuthorizedIssuance and RequestCredential.
 func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
@@ -54,9 +55,11 @@ func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 	if err != nil {
 		return nil, keepMessage(ErrInvalidArgument, err)
 	}
-	policy := req.Acceptance
-	if policy == nil {
-		policy = w.credentialAcceptance
+	// Before any request: a credential the wallet cannot authenticate is not
+	// fetched at all.
+	policy, err := w.acceptancePolicy(req.Acceptance)
+	if err != nil {
+		return nil, err
 	}
 
 	issuerMetadata, authMetadata, err := w.fetchCredentialMetadata(req)
@@ -496,26 +499,13 @@ func (w *Wallet) requestCredential(
 }
 
 // storeAndParseCredential verifies the credential under policy, stores it and
-// parses it for return. Nothing is stored when verification fails. A nil
-// policy only parses the credential.
+// parses it for return. Nothing is stored when verification fails.
 func (w *Wallet) storeAndParseCredential(ctx context.Context, policy *acceptance.Policy, credentialIssuer string, credentialJWT *string, serializationFlavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*SavedCredential, error) {
 	if serializationFlavor == "" {
 		serializationFlavor = credential.JwtVc
 	}
 
-	var parsedCredential *credential.Credential
-	var verification *acceptance.Verification
-	var verificationErr error
-	if policy == nil {
-		// Without a policy the credential is only parsed.
-		var acceptor *acceptance.Acceptor
-		acceptor, verificationErr = acceptance.NewAcceptor(profile.Draft13(), w.serializer, w.verifier)
-		if verificationErr == nil {
-			parsedCredential, verification, verificationErr = acceptor.Parse([]byte(*credentialJWT), acceptance.Options{Flavor: serializationFlavor, HolderKey: holderKey})
-		}
-	} else {
-		parsedCredential, verification, verificationErr = w.verifyCredentialUnder(ctx, profile.Draft13(), policy, []byte(*credentialJWT), serializationFlavor, holderKey, credentialIssuer)
-	}
+	parsedCredential, verification, verificationErr := w.verifyCredentialUnder(ctx, profile.Draft13(), policy, []byte(*credentialJWT), serializationFlavor, holderKey, credentialIssuer)
 	if verificationErr != nil {
 		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}

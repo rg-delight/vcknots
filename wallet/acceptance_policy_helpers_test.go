@@ -15,6 +15,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
+	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp/federation"
 )
 
@@ -81,6 +82,16 @@ func domainLinkageCredential(did, kid, origin string, algorithm jose.SignatureAl
 		panic(err)
 	}
 	return token
+}
+
+// mockIssuerAcceptance authenticates the credentials the mockserver issuers
+// sign: their x5c chain reaches mockserver.CredentialTrustAnchors. No DNS
+// binding is required, since the mock issuers run on 127.0.0.1.
+func mockIssuerAcceptance() *acceptance.Policy {
+	return &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{
+		TrustAnchors:                mockserver.CredentialTrustAnchors(),
+		AllowUnadvertisedRevocation: true,
+	}}
 }
 
 // issuerKeyNetwork answers GET requests from canned JSON documents keyed by

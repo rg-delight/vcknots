@@ -171,7 +171,11 @@ func (f *acceptanceFixture) receiveUnder(t *testing.T, policy *acceptance.Policy
 
 func (f *acceptanceFixture) storeCredential(t *testing.T, wire string, holder *jose.JSONWebKey) (*SavedCredential, error) {
 	t.Helper()
-	return f.wallet.storeAndParseCredential(t.Context(), f.wallet.credentialAcceptance, testIssuerIdentifier, &wire, credential.SDJwtVC, holder)
+	policy, err := f.wallet.acceptancePolicy(nil)
+	if err != nil {
+		return nil, err
+	}
+	return f.wallet.storeAndParseCredential(t.Context(), policy, testIssuerIdentifier, &wire, credential.SDJwtVC, holder)
 }
 
 func (f *acceptanceFixture) entryCount(t *testing.T) int {
@@ -354,10 +358,22 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	return testIssuerChain{caCert: caCert, caKey: caKey, leafCert: leafCert, leafKey: leafKey}
 }
 
-// TestReceiveCredentialAcceptsUnderTheRequestPolicy pins that
-// ReceiveCredentialRequest.Acceptance authenticates the issuer.
-func TestReceiveCredentialAcceptsUnderTheRequestPolicy(t *testing.T) {
+// TestReceiveCredentialRequiresAPolicy pins CR-10: ReceiveCredential used to
+// store a credential whose issuer it had not authenticated when no policy was
+// configured. SD-JWT VC -19 §2.4 requires the issuer-signed JWT's key to be
+// validated, so without a policy nothing is requested or stored.
+func TestReceiveCredentialRequiresAPolicy(t *testing.T) {
 	issuerKey := testutil.NewP256Key(t)
+
+	t.Run("without a policy nothing is requested", func(t *testing.T) {
+		fixture := newAcceptanceFixture(t, nil)
+		holder := fixture.holder.PublicKey()
+		fixture.send(buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey}))
+		_, err := fixture.receive(t)
+		require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+		require.Len(t, fixture.wireCh, 1, "the credential endpoint must not be called")
+		require.Equal(t, 0, fixture.entryCount(t))
+	})
 
 	t.Run("a per-request policy stores the authenticated credential", func(t *testing.T) {
 		fixture := newAcceptanceFixture(t, nil)

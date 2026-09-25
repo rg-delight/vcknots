@@ -264,6 +264,7 @@ type ReceiveCredentialRequest struct {
 	CachedIssuerMetadata *receiverTypes.CredentialIssuerMetadata
 	TxCode               string
 	// Acceptance overrides Config.CredentialAcceptance for this credential.
+	// One of the two is required.
 	Acceptance *acceptance.Policy
 }
 

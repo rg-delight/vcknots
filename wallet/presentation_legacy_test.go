@@ -585,7 +585,7 @@ func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry)
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"test-config"},
 			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "test-code"}},
-		}, Type: receiverTypes.Oid4vci, Key: key,
+		}, Type: receiverTypes.Oid4vci, Key: key, Acceptance: mockIssuerAcceptance(),
 	})
 	require.NoError(t, err, "presentation test must receive and store a real signed credential")
 	require.NotNil(t, saved)

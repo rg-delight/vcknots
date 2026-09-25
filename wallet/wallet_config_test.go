@@ -157,8 +157,9 @@ func TestSetReceiverRefusalReachesReceiveCredential(t *testing.T) {
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
+		Type:       receiverTypes.Oid4vci,
+		Key:        newMockKeyEntry(),
+		Acceptance: mockIssuerAcceptance(),
 	})
 	require.ErrorIs(t, err, ErrProfileMismatch)
 }

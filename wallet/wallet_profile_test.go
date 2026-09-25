@@ -367,13 +367,16 @@ func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry
 	}
 }
 
-// ReceiveCredential is upstream's Draft 13 entry point and
-// Config.CredentialAcceptance is optional there by design, so a nil policy
-// keeps storing credentials.
-func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
+// ReceiveCredential is upstream's Draft 13 entry point. It used to store a
+// credential whose issuer it had not authenticated when no policy was
+// configured; SD-JWT VC -19 §2.4 and §2.5 require the issuer key to be
+// validated, so it now needs a policy and requests nothing without one (CR-10,
+// upstream-origin behaviour change).
+func TestReceiveCredentialDraftRequiresAPolicy(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()
-	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: testutil.NewP256Key(t), cnf: &holderKey})
+	issuerKey := testutil.NewP256Key(t)
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, cnf: &holderKey})
 	server := newDraftIssuanceServer(t, wire, "Bearer")
 
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client()}))
@@ -382,9 +385,15 @@ func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 	w, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving})
 	require.NoError(t, err)
 
-	saved, err := w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Equal(t, 0, acceptanceEntryCount(t, store))
+
+	request := draftReceiveRequest(t, server, holder)
+	request.Acceptance = acceptIssuerKeyPolicy(issuerKey)
+	saved, err := w.ReceiveCredential(request)
 	require.NoError(t, err)
-	require.NotNil(t, saved)
+	require.NotNil(t, saved.Verification.IssuerKey)
 	require.Equal(t, 1, acceptanceEntryCount(t, store))
 }
 
