@@ -56,7 +56,7 @@ DCQL の `trusted_authorities` で評価するのは `aki` と `openid_federatio
 * **Final**（`profile.Final()`）は追加制約のない OpenID4VCI 1.0 と OpenID4VP 1.0 です。`profile.Profile` のゼロ値は Final です。
 * **HAIP**（`profile.HAIP()`）は Final に `profile.HAIPOptions()` を加えたものです。HAIP 1.0 の要件を 1 つずつ `Options` のフィールドで表し、各フィールドには要件を定める HAIP の節を記しています。これらはこのプロファイルの Must option です。
 * `Profile.With(options)` はプロファイルを強めます。たとえば `profile.Final().With(profile.Options{RequireDPoP: true})` は Final に HAIP の要件を 1 つ加えます。プロファイルが持つ option を弱めることはできません（`profile.ErrProfileMustOption`）。
-* **Draft 13**（`profile.Draft13()`）と **Draft 24**（`profile.Draft24()`）は Draft のビューを有効にします。option は持ちません。HAIP は 1.0 仕様だけのプロファイルなので、HAIP とは併用できません。
+* **Draft 13**（`profile.Draft13()`）と **Draft 24**（`profile.Draft24()`）は Draft のビューを有効にします。option は持ちません。HAIP は 1.0 仕様だけのプロファイルなので、HAIP とも、Options が `profile.HAIPOptions()` を覆う 1.0 プロファイルとも併用できません。
 * receiver と presenter の plugin は wallet の 1.0 プロファイルで構築します（`oid4vci.Oid4vciReceiver.Profile`、`oid4vp.Oid4vpPresenter.Profile`）。wallet が自ら構築する plugin にはそれが設定されます。
 * wallet は渡された plugin を変更しません。`NewWalletWithConfig` が確認する内容は[プロファイルの規則](#profile-rules)を参照してください。
 
@@ -1363,7 +1363,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 
 `NewWalletWithConfig` は構成を `Config.Profiles` に照らして確認します。
 
-* `Config.Profiles` は 1.0 のプロファイルをちょうど 1 つ、Draft のプロファイルをそれぞれ高々 1 つ含みます（`ErrInvalidArgument`）。HAIP と Draft のプロファイルの併用は拒否します（`ErrProfileForbidsDraft`）。
+* `Config.Profiles` は 1.0 のプロファイルをちょうど 1 つ、Draft のプロファイルをそれぞれ高々 1 つ含みます（`ErrInvalidArgument`）。Options が `profile.HAIPOptions()` を覆う（`Options.Covers`）1.0 プロファイル、つまり `profile.HAIP()` と、名前が `final` のままの `profile.Final().With(profile.HAIPOptions())` は、Draft のプロファイルとも `Experimental.Hooks` とも併用できません（`ErrProfileForbidsDraft`）。判定は名前ではなく Options で行います。
 * `profile.Carrier` を実装する receiver / presenter の plugin は、option を含めて wallet の 1.0 プロファイルを報告しなければなりません（`ErrProfileMismatch`）。Draft のプロファイルを報告する plugin は拒否します（`profile.ErrDraftProfile`）。1.0 プロファイルが option を持つとき（HAIP、または `With` で強めた Final）は `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、素の Final では受け入れます。
 * `Draft13()` のメソッドと `ReceiveCredential` は `profile.Draft13()` が、`Draft24()` のメソッドと Draft 24 の handle は `profile.Draft24()` が有効でなければ `ErrProfileForbidsDraft` を返します。`Experimental.Hooks` は Draft のプロファイルが 1 つも有効でなければ拒否します。
 * `Experimental.Transport` は、`ForbidInsecureTransports` を持つプロファイル（HAIP）と、wallet が再構成しない注入された `Receiver` / `Presenter` との併用で拒否します（`ErrInvalidArgument`）。

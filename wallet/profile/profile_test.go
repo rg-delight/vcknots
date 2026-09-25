@@ -220,3 +220,28 @@ func TestSets(t *testing.T) {
 		t.Fatal("String")
 	}
 }
+
+func TestOptionsCovers(t *testing.T) {
+	strict, err := Final().With(HAIPOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := HAIPOptions()
+	partial.RequirePAR = false
+	for name, test := range map[string]struct {
+		options Options
+		want    bool
+	}{
+		"HAIP":                    {HAIP().Options(), true},
+		"Final with HAIP options": {strict.Options(), true},
+		"Final":                   {Final().Options(), false},
+		"all of HAIP but PAR":     {partial, false},
+	} {
+		if got := test.options.Covers(HAIPOptions()); got != test.want {
+			t.Errorf("%s: Covers(HAIPOptions()) = %v, want %v", name, got, test.want)
+		}
+	}
+	if !Final().Options().Covers(Options{}) {
+		t.Error("every Options covers the zero Options")
+	}
+}

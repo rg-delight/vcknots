@@ -49,7 +49,7 @@ A profile is a protocol version and the constraints the wallet adds on top of it
 * **Final** (`profile.Final()`) is OpenID4VCI 1.0 and OpenID4VP 1.0 without additional constraints. The zero `profile.Profile` is Final.
 * **HAIP** (`profile.HAIP()`) is Final with `profile.HAIPOptions()`: every HAIP 1.0 requirement, each an `Options` field named after the HAIP section that states it. They are the profile's Must options.
 * `Profile.With(options)` strengthens a profile: `profile.Final().With(profile.Options{RequireDPoP: true})` adds one HAIP requirement to Final. It never weakens an option the profile already carries (`profile.ErrProfileMustOption`).
-* **Draft 13** (`profile.Draft13()`) and **Draft 24** (`profile.Draft24()`) enable the draft views. They take no options, and HAIP profiles only the 1.0 specifications, so they cannot be combined with HAIP.
+* **Draft 13** (`profile.Draft13()`) and **Draft 24** (`profile.Draft24()`) enable the draft views. They take no options, and HAIP profiles only the 1.0 specifications, so they cannot be combined with HAIP or with any 1.0 profile whose Options cover `profile.HAIPOptions()`.
 * Build the receiver and presenter plugins with the wallet's 1.0 profile (`oid4vci.Oid4vciReceiver.Profile`, `oid4vp.Oid4vpPresenter.Profile`). The plugins the wallet builds itself get it.
 * The wallet never changes a plugin it is given. See [Profile rules](#profile-rules) for what `NewWalletWithConfig` checks.
 
@@ -1164,7 +1164,7 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 
 `NewWalletWithConfig` checks the configuration against `Config.Profiles`:
 
-* `Config.Profiles` names exactly one 1.0 profile and each draft profile at most once (`ErrInvalidArgument`). HAIP together with a draft profile is refused (`ErrProfileForbidsDraft`).
+* `Config.Profiles` names exactly one 1.0 profile and each draft profile at most once (`ErrInvalidArgument`). A 1.0 profile whose Options cover `profile.HAIPOptions()` (`Options.Covers`) - `profile.HAIP()`, or `profile.Final().With(profile.HAIPOptions())`, which keeps the name `final` - together with a draft profile or with `Experimental.Hooks` is refused (`ErrProfileForbidsDraft`). The rule reads the Options, not the name.
 * A receiver or presenter plugin that implements `profile.Carrier` must report the wallet's 1.0 profile, options included (`ErrProfileMismatch`); a plugin reporting a draft profile is refused (`profile.ErrDraftProfile`). When the 1.0 profile carries options (HAIP, or Final strengthened with `With`), a plugin that does not implement `profile.Carrier` is refused (`ErrProfilePluginUnsupported`); under plain Final it is accepted.
 * `Draft13()` methods and `ReceiveCredential` return `ErrProfileForbidsDraft` unless `profile.Draft13()` is enabled, and `Draft24()` methods and Draft 24 handles unless `profile.Draft24()` is. `Experimental.Hooks` is refused unless a draft profile is enabled.
 * `Experimental.Transport` is refused under a profile with `ForbidInsecureTransports` (HAIP) and together with an injected `Receiver` or `Presenter`, which the wallet does not reconfigure (`ErrInvalidArgument`).

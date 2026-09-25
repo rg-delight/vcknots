@@ -22,7 +22,8 @@ type walletProfiles struct {
 }
 
 // resolveProfiles validates Config.Profiles: exactly one 1.0 profile, each
-// draft profile at most once, and no draft profile beside HAIP.
+// draft profile at most once, and no draft profile beside a 1.0 profile whose
+// Options cover HAIPOptions() (enforcesHAIP), whatever its name.
 func resolveProfiles(profiles []profile.Profile) (walletProfiles, error) {
 	if len(profiles) == 0 {
 		profiles = DefaultProfiles()
@@ -49,10 +50,17 @@ func resolveProfiles(profiles []profile.Profile) (walletProfiles, error) {
 	if finals != 1 {
 		return walletProfiles{}, fmt.Errorf("%w: Config.Profiles must name exactly one OpenID4VCI 1.0 / OpenID4VP 1.0 profile, got %d", ErrInvalidArgument, finals)
 	}
-	if resolved.final.Name() == profile.NameHAIP && (resolved.draft13 || resolved.draft24) {
-		return walletProfiles{}, fmt.Errorf("%w: HAIP 1.0 profiles only OpenID4VCI 1.0 and OpenID4VP 1.0, so Config.Profiles cannot name a draft profile with it", ErrProfileForbidsDraft)
+	if enforcesHAIP(resolved.final) && (resolved.draft13 || resolved.draft24) {
+		return walletProfiles{}, fmt.Errorf("%w: HAIP 1.0 profiles only OpenID4VCI 1.0 and OpenID4VP 1.0, so Config.Profiles cannot name a draft profile beside %s", ErrProfileForbidsDraft, resolved.final)
 	}
 	return resolved, nil
+}
+
+// enforcesHAIP reports whether p applies all of HAIP 1.0: profile.HAIP(), or
+// profile.Final().With(profile.HAIPOptions()), which keeps the name "final".
+// The decision reads the Options, never the name.
+func enforcesHAIP(p profile.Profile) bool {
+	return p.Options().Covers(profile.HAIPOptions())
 }
 
 // options returns the Options of the wallet's 1.0 profile.

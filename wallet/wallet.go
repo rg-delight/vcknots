@@ -118,8 +118,11 @@ type Config struct {
 	// profiles profile.Draft13 and profile.Draft24, which enable
 	// Wallet.Draft13 and Wallet.Draft24. Without a draft profile, its entry
 	// points return ErrProfileForbidsDraft. HAIP 1.0 profiles only the 1.0
-	// specifications, so a HAIP profile with a draft profile is refused
-	// (ErrProfileForbidsDraft); a second 1.0 profile, a repeated draft
+	// specifications, so a 1.0 profile whose Options cover
+	// profile.HAIPOptions() - profile.HAIP() or
+	// profile.Final().With(profile.HAIPOptions()) - with a draft profile or
+	// with Experimental.Hooks is refused (ErrProfileForbidsDraft); a second
+	// 1.0 profile, a repeated draft
 	// profile or no 1.0 profile is ErrInvalidArgument.
 	//
 	// Every plugin of Receiver and Presenter that implements profile.Carrier
@@ -456,6 +459,9 @@ func newDefaultReceiver(walletProfile profile.Profile, transport experimental.Tr
 // Options.ForbidInsecureTransports (HAIP Section 4), and a transport escape
 // with an injected plugin, which the wallet does not reconfigure.
 func checkExperimental(config Config, profiles walletProfiles) error {
+	if config.Experimental.Hooks.Set() && enforcesHAIP(profiles.final) {
+		return fmt.Errorf("%w: %s does not permit Experimental.Hooks", ErrProfileForbidsDraft, profiles.final)
+	}
 	if config.Experimental.Hooks.Set() && !profiles.draft13 && !profiles.draft24 {
 		return fmt.Errorf("%w: Experimental.Hooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
 	}

@@ -161,6 +161,13 @@ func (o Options) ValidatesCredentialConfigurations() bool {
 	return o.RequireIssuerMetadataScopes || o.AllowedCredentialFormats != 0
 }
 
+// Covers reports whether o keeps every option of floor at least as strict.
+// Options().Covers(HAIPOptions()) tells a profile that enforces all of HAIP
+// 1.0 - HAIP() or Final().With(HAIPOptions()) - whatever its name.
+func (o Options) Covers(floor Options) bool {
+	return len(o.weakened(floor)) == 0
+}
+
 // weakened names the options of floor that o does not keep at least as
 // strict.
 func (o Options) weakened(floor Options) []string {

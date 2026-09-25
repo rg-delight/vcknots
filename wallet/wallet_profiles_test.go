@@ -40,6 +40,34 @@ func TestConfigProfilesRefusesInvalidSets(t *testing.T) {
 	}
 }
 
+// Review of 2026-09-25 (finding 8): the draft refusal read the profile's name,
+// so profile.Final().With(profile.HAIPOptions()) - all of HAIP under the name
+// "final" - ran beside Draft 13, Draft 24 and Experimental.Hooks. The refusal
+// now reads the Options.
+func TestConfigProfilesRefuseDraftsAndHooksBesideHAIPOptions(t *testing.T) {
+	strict, err := profile.Final().With(profile.HAIPOptions())
+	require.NoError(t, err)
+	require.Equal(t, profile.NameFinal, strict.Name())
+	hooks := experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}
+	for _, p := range []profile.Profile{profile.HAIP(), strict} {
+		for name, profiles := range map[string][]profile.Profile{
+			"Draft 13": {p, profile.Draft13()},
+			"Draft 24": {profile.Draft24(), p},
+			"both":     {p, profile.Draft13(), profile.Draft24()},
+		} {
+			t.Run(p.String()+" with "+name, func(t *testing.T) {
+				_, err := NewWalletWithConfig(Config{Profiles: profiles, Storeless: true})
+				requireCoded(t, err, ErrProfileForbidsDraft)
+			})
+		}
+		t.Run(p.String()+" with Hooks", func(t *testing.T) {
+			_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{p}, Storeless: true, Experimental: hooks})
+			requireCoded(t, err, ErrProfileForbidsDraft)
+			require.ErrorContains(t, err, "does not permit Experimental.Hooks")
+		})
+	}
+}
+
 func TestConfigProfilesAcceptsStrengthenedFinalWithDrafts(t *testing.T) {
 	strengthened, err := profile.Final().With(profile.Options{RequireDPoP: true, RequirePAR: true})
 	require.NoError(t, err)
