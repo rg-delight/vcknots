@@ -52,6 +52,13 @@ var (
 	// metadata is missing or malformed, the Entity Type is disallowed by a
 	// constraint, or display metadata is not an absolute URI.
 	ErrMetadataDerivationFailed = common.NewCodedError("openid_federation_metadata_derivation_failed", "OpenID Federation metadata could not be derived")
+	// ErrVerifierKeysUnavailable reports that the openid_credential_verifier
+	// metadata the Trust Chain produced yields no key to verify a Request
+	// Object with: it publishes none of jwks, signed_jwks_uri and jwks_uri, a
+	// representation is malformed or could not be retrieved, a signed JWK Set
+	// is not signed with a Federation Entity Key of the Verifier, or no key is
+	// a signing key (OpenID Federation 1.0 Sections 5.2.1 and 12.1.1.1.2).
+	ErrVerifierKeysUnavailable = common.NewCodedError("openid_federation_verifier_keys_unavailable", "the OpenID Federation verifier metadata yields no Request Object signing key")
 	// ErrResponseURINotRegistered reports that the endpoint an Authorization
 	// Response would be sent to is not one of the redirect_uris of the
 	// Verifier metadata the Trust Chain produced.

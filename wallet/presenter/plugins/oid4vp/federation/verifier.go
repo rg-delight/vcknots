@@ -27,7 +27,10 @@ type VerifierTrust struct {
 	// either name reads the formats.
 	Metadata map[string]any
 	// RequestObjectJWKS are the keys the Verifier signs Request Objects
-	// with: the Federation Entity Keys of its Entity Configuration.
+	// with: the signing keys its openid_credential_verifier metadata
+	// publishes in jwks, signed_jwks_uri or jwks_uri (OpenID Federation 1.0
+	// Sections 5.2.1 and 12.1.1.1.2). The Federation Entity Keys of its
+	// Entity Configuration sign Entity Statements, never Request Objects.
 	RequestObjectJWKS jose.JSONWebKeySet
 	// OrganizationName, LogoURI, PolicyURI and HomepageURI are the
 	// federation_entity display metadata (OpenID Federation 1.0 Section
@@ -51,11 +54,13 @@ func (r *Resolver) ResolveVerifierTrust(ctx context.Context, entityID string, ca
 		return nil, err
 	}
 	trust := &VerifierTrust{
-		TrustChain:        chain,
-		Metadata:          normalizeVerifierMetadata(metadata),
-		RequestObjectJWKS: chain.Statements[0].JWKS,
+		TrustChain: chain,
+		Metadata:   normalizeVerifierMetadata(metadata),
 	}
 	if err := trust.setDisplayMetadata(preferredLocales); err != nil {
+		return nil, err
+	}
+	if trust.RequestObjectJWKS, err = r.verifierRequestObjectKeys(ctx, chain, metadata); err != nil {
 		return nil, err
 	}
 	return trust, nil

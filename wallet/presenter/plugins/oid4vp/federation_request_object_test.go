@@ -29,12 +29,17 @@ type federationRequestFixture struct {
 	now                  time.Time
 	verifierID, anchorID string
 	verifierKey          *ecdsa.PrivateKey
-	anchorKey            *ecdsa.PrivateKey
-	chain                []string
+	// requestKey signs the Verifier's Request Objects; its
+	// openid_credential_verifier metadata publishes it in jwks. verifierKey
+	// is the Federation Entity Key, which signs Entity Statements only.
+	requestKey *ecdsa.PrivateKey
+	anchorKey  *ecdsa.PrivateKey
+	chain      []string
 }
 
 const (
 	federationVerifierKid = "verifier-key"
+	federationRequestKid  = "request-key"
 	federationAnchorKid   = "anchor-key"
 )
 
@@ -44,6 +49,7 @@ func newFederationRequestFixture(t *testing.T) *federationRequestFixture {
 		statements:  map[string]string{},
 		now:         time.Now().UTC().Truncate(time.Second),
 		verifierKey: testutil.NewP256Key(t),
+		requestKey:  testutil.NewP256Key(t),
 		anchorKey:   testutil.NewP256Key(t),
 	}
 	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +74,7 @@ func newFederationRequestFixture(t *testing.T) *federationRequestFixture {
 		"metadata": map[string]any{
 			"openid_credential_verifier": map[string]any{
 				"client_name":          "Federated verifier",
+				"jwks":                 publicJWKS(f.requestKey, federationRequestKid),
 				"redirect_uris":        []string{federationResponseURI},
 				"vp_formats_supported": map[string]any{"dc+sd-jwt": map[string]any{"sd-jwt_alg_values": []string{"ES256"}}},
 			},
@@ -170,7 +177,7 @@ func (f *federationRequestFixture) parse(t *testing.T, requestObject string, opt
 
 func TestFederationRequestObjectWithDiscoveredTrustChain(t *testing.T) {
 	f := newFederationRequestFixture(t)
-	request, err := f.parse(t, f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, nil), f.options(), f.server.Client())
+	request, err := f.parse(t, f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, nil), f.options(), f.server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +225,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 func TestFederationRequestObjectWithCarriedTrustChain(t *testing.T) {
 	f := newFederationRequestFixture(t)
 	t.Run("trust_chain JOSE header", func(t *testing.T) {
-		requestObject := f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, map[jose.HeaderKey]any{"trust_chain": f.chain})
+		requestObject := f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, map[jose.HeaderKey]any{"trust_chain": f.chain})
 		request, err := f.parse(t, requestObject, f.options(), offlineClient(t))
 		if err != nil {
 			t.Fatal(err)
@@ -230,19 +237,19 @@ func TestFederationRequestObjectWithCarriedTrustChain(t *testing.T) {
 	t.Run("trust_chain claim", func(t *testing.T) {
 		claims := f.claims()
 		claims["trust_chain"] = f.chain
-		if _, err := f.parse(t, f.requestObject(t, claims, f.verifierKey, federationVerifierKid, nil), f.options(), offlineClient(t)); err != nil {
+		if _, err := f.parse(t, f.requestObject(t, claims, f.requestKey, federationRequestKid, nil), f.options(), offlineClient(t)); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("anchor configured with other keys", func(t *testing.T) {
 		options := f.options()
 		options.Federation.TrustAnchors[0].JWKS = publicJWKS(testutil.NewP256Key(t), federationAnchorKid)
-		requestObject := f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, map[jose.HeaderKey]any{"trust_chain": f.chain})
+		requestObject := f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, map[jose.HeaderKey]any{"trust_chain": f.chain})
 		_, err := f.parse(t, requestObject, options, offlineClient(t))
 		requireErrorIs(t, err, federation.ErrTrustChainInvalid)
 	})
 	t.Run("malformed trust_chain header", func(t *testing.T) {
-		requestObject := f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, map[jose.HeaderKey]any{"trust_chain": []any{""}})
+		requestObject := f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, map[jose.HeaderKey]any{"trust_chain": []any{""}})
 		_, err := f.parse(t, requestObject, f.options(), offlineClient(t))
 		requireErrorIs(t, err, federation.ErrTrustChainInvalid)
 	})
@@ -259,18 +266,26 @@ func TestFederationRequestObjectRefusals(t *testing.T) {
 	}{
 		{
 			name:    "missing kid",
-			request: func() string { return f.requestObject(t, f.claims(), f.verifierKey, "", nil) },
+			request: func() string { return f.requestObject(t, f.claims(), f.requestKey, "", nil) },
 			want:    ErrRequestObjectSignatureInvalid,
 		},
 		{
 			name:    "alg outside the federation policy",
-			request: func() string { return f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, nil) },
+			request: func() string { return f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, nil) },
 			options: func() RequestObjectValidationOptions {
 				options := f.options()
 				options.Federation.SigningAlgorithms = []jose.SignatureAlgorithm{jose.ES384}
 				return options
 			},
 			want: ErrRequestObjectSignatureInvalid,
+		},
+		{
+			// OpenID Federation 1.0 §12.1.1.1.2 verifies the Request Object
+			// with the openid_credential_verifier metadata keys; the
+			// Federation Entity Key signs Entity Statements only (§5.2.1).
+			name:    "signed by the Federation Entity Key",
+			request: func() string { return f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, nil) },
+			want:    ErrRequestObjectSignatureInvalid,
 		},
 		{
 			name:    "signed by a key the subject did not publish",
@@ -282,13 +297,13 @@ func TestFederationRequestObjectRefusals(t *testing.T) {
 			request: func() string {
 				claims := f.claims()
 				claims["response_uri"] = "https://attacker.example/response"
-				return f.requestObject(t, claims, f.verifierKey, federationVerifierKid, nil)
+				return f.requestObject(t, claims, f.requestKey, federationRequestKid, nil)
 			},
 			want: federation.ErrResponseURINotRegistered,
 		},
 		{
 			name:    "no federation options",
-			request: func() string { return f.requestObject(t, f.claims(), f.verifierKey, federationVerifierKid, nil) },
+			request: func() string { return f.requestObject(t, f.claims(), f.requestKey, federationRequestKid, nil) },
 			options: func() RequestObjectValidationOptions {
 				return RequestObjectValidationOptions{Now: func() time.Time { return f.now }}
 			},
