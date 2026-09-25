@@ -1075,12 +1075,12 @@ func presentWithConsent(ctx context.Context, w *wallet.Wallet, uri string, holde
 **封をした受理。**
 `h.Seal(key)` は `presenterTypes.SealedAdmission` を返します。
 最初の受理で観測した事実の記録を、呼出し側が持つ鍵で HMAC-SHA256 によって封をしたものです。
-記録には、ライブラリが `request_uri` から取得したままの Request Object、参照渡しで届いたこと、ライブラリが送った `wallet_nonce`、外側の `client_id`、Request Object を認証した時刻、受理したときのプロファイルの名前を含みます。
-`w.ReadmitPresentationRequest(ctx, sealed, key)`（Draft 24 の要求には `w.Draft24().ReadmitPresentationRequest`）は、同じ鍵で封が検証でき、記録が wallet のプロファイルとメソッドのプロトコルの版を名指しているときだけ記録を受け付けます。
-そのうえで Request Object を改めて認証します。
-署名、Client Identifier Prefix が選ぶ client の認証、`wallet_nonce` の echo、プロファイルのすべての option を、参照渡しで届いた Request Object として、最初の受理の時刻の時計で検証します。
+記録には、ライブラリが取得したままの Request Object、取得元の `request_uri`、参照渡しで届いたこと、ライブラリが送った `wallet_nonce`、外側の `client_id`、Request Object を認証した時刻、受理したときのプロファイルとその `profile.Options` の正規形を含みます。
+`w.ReadmitPresentationRequest(ctx, sealed, key)`（Draft 24 の要求には `w.Draft24().ReadmitPresentationRequest`）は、同じ鍵で封が検証でき、記録が wallet のプロファイルとその Options、メソッドのプロトコルの版を名指し、`MaxReadmitAge` より新しいときだけ記録を受け付けます。
+そのうえで、記録した `request_uri` に `RequestURIPolicy` を適用し、Request Object を改めて認証します。
+署名、Client Identifier Prefix が選ぶ client の認証、`wallet_nonce` の echo、プロファイルのすべての option を、参照渡しで届いた Request Object として検証します。
 `request_uri` は取得し直しません。
-結果は通常のハンドルで、`SubmitPresentation` か `DeclinePresentation` で応答でき、もう一度封をすることもできます。
+結果は通常のハンドルで、`SubmitPresentation` か `DeclinePresentation` で応答でき、もう一度封をすることもできます（同じ記録になります）。
 
 HAIP の wallet が後の呼出しで応答する方法はこれです。
 HAIP（`Options.RequireSignedRequestByReference`、§5.1）は値で渡された Request Object を拒否しますが、封をした受理は値渡しではありません。
@@ -1121,9 +1121,10 @@ func answer(ctx context.Context, w *wallet.Wallet, sealed presenterTypes.SealedA
 
 * **鍵。** `oid4vp.MinSealKeyBytes`（32）バイト以上の乱数で、wallet の運用者だけが知るものにします。短い鍵は `oid4vp.ErrSealKeyTooShort` です。ライブラリは鍵を保存しません。鍵を入れ替えると、古い鍵で封をした受理は使えなくなります。
 * **封ができるもの。** ライブラリが `request_uri` から Request Object を取得した要求（`RequestObjectVerification.Delivery == "reference"`）だけです。値で渡された Request Object、プレーンなパラメータ、DC API の要求は `oid4vp.ErrAdmissionNotSealable` です。引き継ぐべき届き方の事実がないからです。
-* **拒否。** 形式が壊れた記録、`v1` 以外の版、改ざんされた記録やタグ、別の鍵、別のプロファイルやプロトコルの版の記録は `oid4vp.ErrSealedAdmissionInvalid`（コード `sealed_admission_invalid`）です。何かを認証したり取得したりする前に判定します。
-* **時計。** 再受理では、`iat`、`exp`、`nbf` と証明書の有効期間を最初の受理の時刻で判定します。そのため、同意が Request Object の `exp` を過ぎても応答は拒否されません。独自の上限を設けたい wallet は `RequestObjectVerification.ExpiresAt` で `exp` を読めます。失効リストは改めて取得します。
-* **形式。** `v1.` + base64url（JSON の記録）+ `.` + base64url（HMAC-SHA256 のタグ）です。タグは版を名指すラベルと記録を覆います。記録は、持っている者なら誰でも読めます。封が守るのは完全性であって機密性ではないので、Request Object を置いてよい場所に保管してください。
+* **拒否。** 形式が壊れた記録、`v2` 以外の版、正規の padding なし base64url でない記録やタグ、改ざんされた記録やタグ、別の鍵、別のプロファイル、別のプロファイルの Options（`profile.Final().With(profile.HAIPOptions())` は `profile.Final()` とは別です）、別のプロトコルの版の記録、`Oid4vpPresenter.MaxReadmitAge`（既定は `oid4vp.DefaultMaxReadmitAge` の 15 分）より古い記録、presenter の時計より後に受理したことになっている記録は `oid4vp.ErrSealedAdmissionInvalid`（コード `sealed_admission_invalid`）です。何かを認証したり取得したりする前に判定します。`RequestURIPolicy` が拒否する `request_uri` は、取得の前と同じく `ErrRequestURINotAssociated` です。
+* **時計。** 再受理では、Request Object の `iat`、`exp`、`nbf` を最初の受理の時刻で判定します。そのため、同意が `exp` を過ぎても応答は拒否されません。その期間の上限は `MaxReadmitAge` で、より短い上限を設けたい wallet は `RequestObjectVerification.ExpiresAt` で `exp` を読めます。それ以外はすべて現在の時計で判定します。証明書チェーンとその有効期間、失効（失効リストは改めて取得します）、Verifier Attestation、OpenID Federation の Trust Chain です。最初の受理の後に期限切れや失効となった証明書は、再受理を拒否します。
+* **再利用。** ライブラリは状態を持たないので、同じ封は `MaxReadmitAge` まで何度でも再受理できます。封と鍵を持つ者は、同じ要求に何度でも応答できます。要求ごとに一度だけ応答する wallet は `Oid4vpPresenter.ConsumeSealedAdmission(ctx, sealID, notAfter)` を設定します。再受理が成功すると、最後に封の識別子（タグ）と、どのみち再受理できなくなる時刻を渡して呼び出します。hook は識別子を不可分に記録し、既に見た識別子にはエラーを返します。そのとき再受理は `oid4vp.ErrSealedAdmissionConsumed`（コード `sealed_admission_consumed`）で拒否されます。失敗した再受理は封を消費しません。再受理したハンドルにもう一度封をすると同じ封になるので、識別子も同じです。wallet が構築する presenter には hook がありません。設定するには `Config.Presenter` で `Oid4vpPresenter` を注入します。
+* **形式。** `v2.` + base64url（JSON の記録）+ `.` + base64url（HMAC-SHA256 のタグ）で、どちらも正規の padding なしの表記です。タグは版を名指すラベルと記録を覆います。記録は、持っている者なら誰でも読めます。封が守るのは完全性であって機密性ではないので、Request Object を置いてよい場所に保管してください。
 
 **保持した Request Object。**
 プロファイルが値渡しの Request Object を認める場合（HAIP 以外）は、代わりに Request Object（`h.RequestObject()`）を保持しておき、もう一度解析することもできます。

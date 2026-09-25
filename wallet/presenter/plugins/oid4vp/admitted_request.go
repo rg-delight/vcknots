@@ -43,25 +43,30 @@ type AdmittedRequest struct {
 }
 
 // admissionFacts are what a parse observed about the Request Object's
-// arrival: how it came, the outer client_id it was bound to, the wallet_nonce
-// sent for it, the instant it was authenticated at and the profile it was
-// admitted under.
+// arrival: how it came and from which request_uri, the outer client_id it was
+// bound to, the wallet_nonce sent for it, the instant it was authenticated at
+// (the first admission's, for a re-admission) and the profile and profile
+// Options it was admitted under.
 type admissionFacts struct {
-	source        requestSource
-	outerClientID string
-	walletNonce   string
-	admittedAt    time.Time
-	profile       string
+	source         requestSource
+	requestURI     string
+	outerClientID  string
+	walletNonce    string
+	admittedAt     time.Time
+	profile        string
+	profileOptions string
 }
 
 // recordAdmission copies the facts of core's parse onto the handle.
 func (r *AdmittedRequest) recordAdmission(core *requestCore, profileName string) {
 	r.admission = admissionFacts{
-		source:        core.requestSource,
-		outerClientID: core.expectedClientID,
-		walletNonce:   core.sentWalletNonce,
-		admittedAt:    core.admittedAt,
-		profile:       profileName,
+		source:         core.requestSource,
+		requestURI:     core.requestURI,
+		outerClientID:  core.expectedClientID,
+		walletNonce:    core.sentWalletNonce,
+		admittedAt:     core.admissionInstant(),
+		profile:        profileName,
+		profileOptions: canonicalProfileOptions(core.options),
 	}
 }
 

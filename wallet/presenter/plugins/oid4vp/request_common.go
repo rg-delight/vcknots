@@ -89,10 +89,16 @@ type requestCore struct {
 	// admittedAt is the instant this parse authenticates the Request Object
 	// at, pinned by the first requestObjectValidationOptions call so every
 	// check of the parse reads the same clock. readmitAt, when set, is the
-	// instant of the sealed admission a re-admission replays.
+	// instant of the sealed admission a re-admission replays: the Request
+	// Object's own exp, iat and nbf are judged at it (claimsAt), while the
+	// certificate chain, its revocation, a Verifier Attestation and a Trust
+	// Chain are judged at admittedAt, the current instant.
 	admittedAt    time.Time
 	readmitAt     time.Time
 	requestSource requestSource
+	// requestURI is the request_uri the Request Object was fetched from, ""
+	// unless requestSource is sourceReference.
+	requestURI string
 	// requestObject is the Request Object the request was read from, "" for
 	// plain parameters.
 	requestObject string
@@ -280,10 +286,8 @@ type requestURIPostSettings struct {
 // unless post.omitNonce leaves it out; it carries post.walletMetadata as
 // wallet_metadata when that is non-nil.
 func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestURIMethod, post requestURIPostSettings, accept string) ([]byte, error) {
-	if c.requestObjectValidation != nil && c.requestObjectValidation.RequestURIPolicy != nil {
-		if err := c.requestObjectValidation.RequestURIPolicy(c.expectedClientID, uri); err != nil {
-			return nil, newAuthorizationRequestError(InvalidRequestError, "%w: %w", ErrRequestURINotAssociated, err)
-		}
+	if err := c.applyRequestURIPolicy(uri); err != nil {
+		return nil, err
 	}
 	form := url.Values{}
 	if method == RequestURIMethodPOST {
@@ -315,7 +319,21 @@ func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestUR
 		return nil, err
 	}
 	c.requestSource = sourceReference
+	c.requestURI = uri
 	return body, nil
+}
+
+// applyRequestURIPolicy runs RequestObjectValidationOptions.RequestURIPolicy,
+// when one is set, on the request_uri a Request Object was (or, for a
+// re-admission, had been) fetched from and the outer client_id.
+func (c *requestCore) applyRequestURIPolicy(uri string) error {
+	if c.requestObjectValidation == nil || c.requestObjectValidation.RequestURIPolicy == nil {
+		return nil
+	}
+	if err := c.requestObjectValidation.RequestURIPolicy(c.expectedClientID, uri); err != nil {
+		return newAuthorizationRequestError(InvalidRequestError, "%w: %w", ErrRequestURINotAssociated, err)
+	}
+	return nil
 }
 
 // defaultRequestURINonce returns 32 random bytes, base64url-encoded without
@@ -379,14 +397,28 @@ func (c *requestCore) requestObjectValidationOptions() (RequestObjectValidationO
 		return options, errors.New("request object clock skew cannot be negative")
 	}
 	if c.admittedAt.IsZero() {
-		c.admittedAt = c.readmitAt
-		if c.admittedAt.IsZero() {
-			c.admittedAt = requestObjectNow(options)
-		}
+		c.admittedAt = requestObjectNow(options)
 	}
 	admittedAt := c.admittedAt
 	options.Now = func() time.Time { return admittedAt }
 	return options, nil
+}
+
+// claimsAt is the instant the Request Object's exp, iat and nbf are judged
+// at: the instant of the sealed admission a re-admission replays, and now
+// otherwise. Nothing else reads it; trust decisions use the current clock.
+func (c *requestCore) claimsAt(now time.Time) time.Time {
+	if !c.readmitAt.IsZero() {
+		return c.readmitAt
+	}
+	return now
+}
+
+// admissionInstant is the instant a sealed record of this parse names: the
+// sealed instant for a re-admission, so sealing a re-admitted handle again
+// never moves it forward, and the parse's own instant otherwise.
+func (c *requestCore) admissionInstant() time.Time {
+	return c.claimsAt(c.admittedAt)
 }
 
 // verifyRequestObjectCertificateChain runs the configured X.509 chain and
@@ -416,7 +448,7 @@ func (c *requestCore) resolveClaimPolicy(options RequestObjectValidationOptions,
 	policy := requestObjectClaimPolicy{
 		Audiences:        options.WalletAudience,
 		AudienceOptional: c.audienceOptional && len(options.WalletAudience) == 0,
-		Now:              now,
+		Now:              c.claimsAt(now),
 		ClockSkew:        options.ClockSkew,
 		RequireExpiry:    options.RequireExpiry,
 		MaxAge:           options.MaxAge,

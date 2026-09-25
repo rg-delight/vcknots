@@ -67,9 +67,12 @@ func (w *Wallet) ParsePresentationRequestObject(ctx context.Context, requestObje
 // sealed admission h.Seal(key) returned for a handle this wallet's presenter
 // admitted by fetching its request_uri, so a caller whose calls are stateless
 // can answer the request after the Holder's consent. The seal must verify
-// under key and name the wallet's profile; the Request Object is then
-// authenticated again as delivered by reference, with the wallet_nonce sent
-// for it, on the clock of the first admission. Under a profile that requires
+// under key, name the wallet's profile and its Options, and be younger than
+// oid4vp.DefaultMaxReadmitAge; the Request Object is then authenticated again
+// as delivered by reference, with the wallet_nonce sent for it, its exp, iat
+// and nbf on the clock of the first admission and its trust on the current
+// clock. The same seal re-admits more than once unless the presenter's
+// ConsumeSealedAdmission refuses it. Under a profile that requires
 // delivery by reference (HAIP) this is how a later call answers the request:
 // ParsePresentationRequestObject refuses a Request Object passed by value
 // there. See oid4vp.Oid4vpPresenter.ReadmitRequest.

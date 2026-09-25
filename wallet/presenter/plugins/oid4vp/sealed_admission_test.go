@@ -71,7 +71,7 @@ func TestSealedAdmissionReadmitsUnderHAIP(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	first, sealed := f.admitSealed(t, f.sealedPresenter(profile.HAIP(), f.now), claims)
-	require.True(t, strings.HasPrefix(string(sealed), "v1."), "the sealed admission is versioned: %q", sealed)
+	require.True(t, strings.HasPrefix(string(sealed), "v2."), "the sealed admission is versioned: %q", sealed)
 
 	later := f.sealedPresenter(profile.HAIP(), f.now.Add(time.Minute))
 	readmitted, err := later.ReadmitRequest(context.Background(), sealed, sealKey)
@@ -168,7 +168,7 @@ func TestSealedAdmissionRefusesAlteredSeals(t *testing.T) {
 		"a changed admission time": {withRecord(func(r *sealedAdmissionRecord) { r.AdmittedAt = time.Now().UTC().Format(time.RFC3339Nano) }), sealKey},
 		"a changed profile":        {withRecord(func(r *sealedAdmissionRecord) { r.Profile = profile.NameFinal }), sealKey},
 		"a changed tag":            {types.SealedAdmission(parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))), sealKey},
-		"another version":          {types.SealedAdmission("v2." + parts[1] + "." + parts[2]), sealKey},
+		"another version":          {types.SealedAdmission("v1." + parts[1] + "." + parts[2]), sealKey},
 		"no version":               {types.SealedAdmission(parts[1] + "." + parts[2]), sealKey},
 		"an extra segment":         {sealed + ".x", sealKey},
 		"empty":                    {"", sealKey},

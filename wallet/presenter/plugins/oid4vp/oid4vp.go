@@ -69,6 +69,21 @@ type Oid4vpPresenter struct {
 	// is chosen by an unauthenticated request, and a caller that wants to
 	// answer it calls AuthorizationRequestError.SendErrorResponse itself.
 	SendParseErrorResponses bool
+	// MaxReadmitAge bounds how long after the first admission a sealed
+	// admission is re-admitted (ReadmitRequest, ReadmitDraft24Request),
+	// measured on RequestObjectValidation.Now. Zero means
+	// DefaultMaxReadmitAge; a negative value is refused.
+	MaxReadmitAge time.Duration
+	// ConsumeSealedAdmission, when set, is called by a re-admission that
+	// admitted the request, with the seal's identifier (its base64url tag,
+	// which only the key's holder can produce) and the instant after which
+	// the seal no longer re-admits anyway. A non-nil error refuses the
+	// re-admission with ErrSealedAdmissionConsumed. A wallet that answers
+	// each request once records the identifier atomically and refuses one it
+	// has seen; without the hook, the same seal re-admits any number of times
+	// until MaxReadmitAge. Sealing a re-admitted handle again yields the same
+	// seal, and so the same identifier.
+	ConsumeSealedAdmission func(ctx context.Context, sealID string, notAfter time.Time) error
 
 	// Experimental relaxes the presenter beyond OpenID4VP for a local test
 	// verifier (package experimental). The zero value applies none. A profile
