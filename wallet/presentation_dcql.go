@@ -196,7 +196,7 @@ func (w *Wallet) serializeDCQLAnswers(req *oid4vp.CredentialPresentationRequest,
 			// HAIP 1.0 Section 6.1.1.1: a credential with cryptographic holder
 			// binding is always presented with a KB-JWT, even when the
 			// Verifier waived the requirement.
-			if w.profile.IsHAIP() && flavor == credential.SDJwtVC && sdJWTCarriesConfirmation(saved.Entry.Raw) {
+			if w.options().AlwaysKeyBindingWhenConfirmed && flavor == credential.SDJwtVC && sdJWTCarriesConfirmation(saved.Entry.Raw) {
 				sdOpts.RequireKeyBinding = true
 			}
 			sdOpts.TransactionData = owned

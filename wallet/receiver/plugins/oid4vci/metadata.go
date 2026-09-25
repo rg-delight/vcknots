@@ -121,20 +121,21 @@ func (o *Oid4vciReceiver) FetchIssuerMetadata(endpoint common.URIField, receivin
 // Issuer Metadata of issuer (a Credential Issuer Identifier, or its well-known
 // metadata URL). The document's credential_issuer must equal the identifier
 // (Section 12.2.4); signed metadata follows IssuerMetadataSigning (Section
-// 12.2.3); under HAIP the metadata must also satisfy HAIP Section 4.1.
+// 12.2.3); the metadata must also satisfy the profile's HAIP Section 4.1
+// options.
 func (o *Oid4vciReceiver) DiscoverCredentialIssuer(ctx context.Context, issuer common.URIField) (*types.CredentialIssuerMetadata, error) {
-	normalized, err := o.normalizedProfile()
+	options, err := o.profileOptions()
 	if err != nil {
 		return nil, err
 	}
-	if err := o.requireHAIPTransport(normalized); err != nil {
+	if err := o.requireSecureTransport(options); err != nil {
 		return nil, err
 	}
-	metadata, err := o.fetchIssuerMetadata(ctx, issuer, normalized)
+	metadata, err := o.fetchIssuerMetadata(ctx, issuer, options)
 	if err != nil {
 		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
 	}
-	if err := requireHAIPIssuerMetadata(normalized, metadata); err != nil {
+	if err := requireNonceEndpointForKeyBinding(options, metadata); err != nil {
 		return nil, err
 	}
 	return metadata, nil
@@ -144,21 +145,21 @@ func (o *Oid4vciReceiver) DiscoverCredentialIssuer(ctx context.Context, issuer c
 // tries the Draft 13 location when AppendedMetadataPathFallback allows it, and
 // then the issuer's OpenID Federation Entity when IssuerMetadataFederation is
 // set.
-func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint common.URIField, normalized profile.Profile) (*types.CredentialIssuerMetadata, error) {
-	signing := o.issuerMetadataSigningOptions(normalized)
+func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint common.URIField, options profile.Options) (*types.CredentialIssuerMetadata, error) {
+	signing := o.issuerMetadataSigningOptions(options)
 	identifier := credentialIssuerIdentifier(url.URL(endpoint))
 
 	var metadata types.CredentialIssuerMetadata
-	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, normalized, &metadata)
+	err := o.fetchFinalIssuerMetadata(ctx, endpoint, identifier, signing, options, &metadata)
 	if err == nil {
 		return &metadata, nil
 	}
 	endpointURL := url.URL(endpoint)
-	if o.AppendedMetadataPathFallback && !normalized.IsHAIP() && isNotFound(err) &&
+	if o.AppendedMetadataPathFallback && !options.RequireWellKnownMetadataLocation && isNotFound(err) &&
 		strings.Trim(endpointURL.Path, "/") != "" &&
 		!strings.Contains(endpointURL.Path, wellKnownCredentialIssuer) {
 		appendedURL := *endpointURL.JoinPath(wellKnownCredentialIssuer)
-		if err = o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, normalized, &metadata); err == nil {
+		if err = o.fetchIssuerMetadataDocument(ctx, appendedURL, identifier, signing, options, &metadata); err == nil {
 			return &metadata, nil
 		}
 	}
@@ -219,13 +220,14 @@ func (o *Oid4vciReceiver) federationIssuerMetadata(ctx context.Context, identifi
 // level than possible with TLS alone", which makes the capability mandatory and
 // its use conditional: an unconfigured HAIP receiver therefore asks for signed
 // metadata but still accepts the unsigned application/json document every
-// Credential Issuer MUST publish (Section 12.2.2). A caller that supplies
-// options keeps them verbatim, so opting out of the request is possible.
-func (o *Oid4vciReceiver) issuerMetadataSigningOptions(normalized profile.Profile) IssuerMetadataSigningOptions {
+// Credential Issuer MUST publish (Section 12.2.2). That default follows
+// Options.RequestSignedIssuerMetadata. A caller that supplies options keeps
+// them verbatim, so opting out of the request is possible.
+func (o *Oid4vciReceiver) issuerMetadataSigningOptions(options profile.Options) IssuerMetadataSigningOptions {
 	if o.IssuerMetadataSigning != nil {
 		return *o.IssuerMetadataSigning
 	}
-	return IssuerMetadataSigningOptions{Request: normalized.IsHAIP()}
+	return IssuerMetadataSigningOptions{Request: options.RequestSignedIssuerMetadata}
 }
 
 // credentialIssuerIdentifier recovers the Credential Issuer Identifier from the
@@ -248,7 +250,7 @@ func credentialIssuerIdentifier(endpointURL url.URL) string {
 	return identifier.String()
 }
 
-func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(ctx context.Context, endpoint common.URIField, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile, target *types.CredentialIssuerMetadata) error {
+func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(ctx context.Context, endpoint common.URIField, identifier string, signing IssuerMetadataSigningOptions, options profile.Options, target *types.CredentialIssuerMetadata) error {
 	endpointURL := url.URL(endpoint)
 	originalPath := endpointURL.Path
 	if originalPath == "/" {
@@ -257,7 +259,7 @@ func (o *Oid4vciReceiver) fetchFinalIssuerMetadata(ctx context.Context, endpoint
 	if !strings.HasPrefix(originalPath, wellKnownCredentialIssuer) {
 		endpointURL.Path = wellKnownCredentialIssuer + originalPath
 	}
-	return o.fetchIssuerMetadataDocument(ctx, endpointURL, identifier, signing, normalized, target)
+	return o.fetchIssuerMetadataDocument(ctx, endpointURL, identifier, signing, options, target)
 }
 
 // IssuerMetadataSigningOptions configures OpenID4VCI 1.0 Section 12.2.3 signed
@@ -342,7 +344,7 @@ const signedIssuerMetadataJWTType = "openidvci-issuer-metadata+jwt"
 // and decodes the response by its media type, per Section 12.2.2. identifier is
 // the Credential Issuer Identifier the request was derived from; signed metadata
 // is bound to it through the sub claim.
-func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, requestURL url.URL, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile, target *types.CredentialIssuerMetadata) error {
+func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, requestURL url.URL, identifier string, signing IssuerMetadataSigningOptions, options profile.Options, target *types.CredentialIssuerMetadata) error {
 	trustConfigured := len(signing.TrustAnchors) > 0 || signing.RootCAs != nil
 	if signing.Require && !trustConfigured {
 		return fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureRequired)
@@ -373,7 +375,7 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 	}
 
 	if httpfetch.MediaTypeIs(response.header, "application/jwt") {
-		return o.decodeSignedIssuerMetadata(ctx, strings.TrimSpace(string(bodyBytes)), identifier, signing, normalized, target)
+		return o.decodeSignedIssuerMetadata(ctx, strings.TrimSpace(string(bodyBytes)), identifier, signing, options, target)
 	}
 	if signing.Require {
 		return fmt.Errorf("%w: the Credential Issuer answered with an unsigned document",
@@ -398,8 +400,8 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 // used by the Credential Issuer MUST be added as top-level claims in the JWS
 // payload", so the verified payload is the complete document and nothing is
 // merged from an unsigned one.
-func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile, target *types.CredentialIssuerMetadata) error {
-	verification, payload, err := o.verifySignedIssuerMetadata(ctx, compact, identifier, signing, normalized)
+func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, options profile.Options, target *types.CredentialIssuerMetadata) error {
+	verification, payload, err := o.verifySignedIssuerMetadata(ctx, compact, identifier, signing, options)
 	if err != nil {
 		return err
 	}
@@ -425,8 +427,8 @@ func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compac
 // x5c JOSE header, which HAIP Section 4.1 requires: "Key resolution for the
 // signed Credential Issuer Metadata MUST be supported using the `x5c` JOSE
 // header parameter"; the same section forbids the trust anchor inside x5c and a
-// self-signed signing certificate.
-func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, normalized profile.Profile) (*types.MetadataVerification, []byte, error) {
+// self-signed signing certificate, which Options.SignedMetadataX5C applies.
+func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, options profile.Options) (*types.MetadataVerification, []byte, error) {
 	if len(signing.TrustAnchors) == 0 && signing.RootCAs == nil {
 		return nil, nil, fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureInvalid)
 	}
@@ -455,7 +457,7 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 	}
-	if normalized.IsHAIP() {
+	if options.SignedMetadataX5C.ExcludeAnchor {
 		containsAnchor, err := commonX509.ContainsTrustAnchor(chain, signing.TrustAnchors, signing.RootCAs)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
@@ -465,6 +467,8 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 				"%w: HAIP forbids including the trust anchor certificate in the x5c header",
 				ErrIssuerMetadataSignatureInvalid)
 		}
+	}
+	if options.SignedMetadataX5C.RejectSelfSigned {
 		if err := commonX509.RequireNonSelfSignedLeaf(chain, "signed issuer metadata"); err != nil {
 			return nil, nil, fmt.Errorf("%w: %w", ErrIssuerMetadataSignatureInvalid, err)
 		}
@@ -567,11 +571,11 @@ func (o *Oid4vciReceiver) FetchAuthorizationServerMetadata(endpoint common.URIFi
 // URL) and refuses a document whose issuer is not that identifier (RFC 8414
 // Section 3.3, compared exactly).
 func (o *Oid4vciReceiver) DiscoverAuthorizationServer(ctx context.Context, issuer common.URIField) (*types.AuthorizationServerMetadata, error) {
-	normalized, err := o.normalizedProfile()
+	options, err := o.profileOptions()
 	if err != nil {
 		return nil, err
 	}
-	if err := o.requireHAIPTransport(normalized); err != nil {
+	if err := o.requireSecureTransport(options); err != nil {
 		return nil, err
 	}
 
@@ -630,35 +634,32 @@ func (o *Oid4vciReceiver) fetchMetadataDocument(ctx context.Context, requestURL 
 	return nil
 }
 
-// ValidateCredentialConfigurationForProfile applies the HAIP 1.0 constraints on
-// a single Credential Configuration. Under Final every configuration is
-// accepted. HAIP §4.1: "The Credential Issuer metadata MUST include a scope for
-// every Credential Configuration it supports"; HAIP §5.3.2 and §6 restrict the
-// offered credential formats to SD-JWT VC (dc+sd-jwt) and ISO mdoc (mso_mdoc).
+// ValidateCredentialConfigurationForProfile applies the profile's constraints
+// on a single Credential Configuration: Options.RequireIssuerMetadataScopes
+// (HAIP §4.1: "The Credential Issuer metadata MUST include a scope for every
+// Credential Configuration it supports") and Options.AllowedCredentialFormats
+// (HAIP §3 and §4: SD-JWT VC dc+sd-jwt or ISO mdoc mso_mdoc). Under Final
+// every configuration is accepted.
 func (o *Oid4vciReceiver) ValidateCredentialConfigurationForProfile(config types.CredentialConfiguration) error {
-	normalized, err := o.normalizedProfile()
+	options, err := o.profileOptions()
 	if err != nil {
 		return err
 	}
-	if !normalized.IsHAIP() {
-		return nil
-	}
-	if strings.TrimSpace(config.Scope) == "" {
+	if options.RequireIssuerMetadataScopes && strings.TrimSpace(config.Scope) == "" {
 		return fmt.Errorf("HAIP requires a scope for every credential configuration")
 	}
-	switch strings.ToLower(strings.TrimSpace(config.Format)) {
-	case "dc+sd-jwt", "mso_mdoc":
-		return nil
-	default:
-		return fmt.Errorf("HAIP requires credential format dc+sd-jwt or mso_mdoc, got %q", config.Format)
+	if format := strings.ToLower(strings.TrimSpace(config.Format)); !options.AllowedCredentialFormats.Allows(format) {
+		return fmt.Errorf("HAIP requires credential format %s, got %q", strings.ReplaceAll(options.AllowedCredentialFormats.String(), ",", " or "), config.Format)
 	}
+	return nil
 }
 
-// requireHAIPIssuerMetadata applies HAIP Section 4.1: a nonce_endpoint is
-// required when a Credential Configuration advertises
+// requireNonceEndpointForKeyBinding applies
+// Options.RequireNonceEndpointForKeyBinding (HAIP Section 4.1): a
+// nonce_endpoint is required when a Credential Configuration advertises
 // cryptographic_binding_methods_supported.
-func requireHAIPIssuerMetadata(normalized profile.Profile, metadata *types.CredentialIssuerMetadata) error {
-	if !normalized.IsHAIP() || metadata.NonceEndpoint != nil {
+func requireNonceEndpointForKeyBinding(options profile.Options, metadata *types.CredentialIssuerMetadata) error {
+	if !options.RequireNonceEndpointForKeyBinding || metadata.NonceEndpoint != nil {
 		return nil
 	}
 	for id, config := range metadata.CredentialConfigurationSupported {

@@ -139,8 +139,8 @@ func admittedOID4VPRequest(admitted presenterTypes.AdmittedRequest, err error) (
 	return handle, nil
 }
 
-// checkPresentationHandle refuses a nil handle, a canceled ctx and, under
-// HAIP, a Draft 24 handle.
+// checkPresentationHandle refuses a nil handle, a canceled ctx and a Draft 24
+// handle when Config.Profiles does not enable profile.Draft24.
 func (w *Wallet) checkPresentationHandle(ctx context.Context, h *oid4vp.AdmittedRequest) error {
 	if h == nil {
 		return fmt.Errorf("%w: an admitted presentation request is required", ErrInvalidArgument)
@@ -148,8 +148,8 @@ func (w *Wallet) checkPresentationHandle(ctx context.Context, h *oid4vp.Admitted
 	if err := ctx.Err(); err != nil {
 		return classify(err)
 	}
-	if h.Draft24() && w.profile.IsHAIP() {
-		return ErrProfileForbidsDraft
+	if h.Draft24() {
+		return w.requireDraft24()
 	}
 	return nil
 }

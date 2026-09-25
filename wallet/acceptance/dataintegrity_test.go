@@ -79,7 +79,7 @@ func ldpOptions() Options { return Options{Flavor: credential.LdpVc} }
 func TestVerifyDataIntegrityCredential(t *testing.T) {
 	issuer := newLdpIssuer(t)
 	raw := issuer.sign(t, issuer.did(), time.Now().Add(time.Hour))
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 
 	t.Run("a resolved issuer key verifies the proof", func(t *testing.T) {
 		policy := resolving(issuer.publicJWK())
@@ -151,7 +151,7 @@ func TestVerifyDataIntegrityCredentialRequiresTheIssuersVerificationMethod(t *te
 	raw := issuer.sign(t, "https://issuer.example", time.Now().Add(time.Hour))
 	policy := resolving(issuer.publicJWK())
 	policy.DataIntegrityContexts = issuer.contexts
-	_, _, err := newTestAcceptor(t, profile.Final).Verify(t.Context(), raw, policy, ldpOptions())
+	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, policy, ldpOptions())
 	require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 	require.ErrorContains(t, err, "is not controlled by issuer")
 }
@@ -159,16 +159,16 @@ func TestVerifyDataIntegrityCredentialRequiresTheIssuersVerificationMethod(t *te
 func TestVerifyDataIntegrityCredentialChecksValidity(t *testing.T) {
 	issuer := newLdpIssuer(t)
 	raw := issuer.sign(t, issuer.did(), time.Now().Add(-time.Hour))
-	_, _, err := newTestAcceptor(t, profile.Final).Verify(t.Context(), raw, Policy{UnverifiedIssuer: true}, ldpOptions())
+	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, Policy{UnverifiedIssuer: true}, ldpOptions())
 	require.ErrorIs(t, err, ErrCredentialExpired)
 }
 
 func TestParseDataIntegrityCredential(t *testing.T) {
-	_, _, err := newTestAcceptor(t, profile.Final).Parse([]byte(`"not an object"`), ldpOptions())
+	_, _, err := newTestAcceptor(t, profile.Final()).Parse([]byte(`"not an object"`), ldpOptions())
 	require.ErrorIs(t, err, ErrCredentialParse)
 
 	issuer := newLdpIssuer(t)
-	parsed, _, err := newTestAcceptor(t, profile.Final).Parse(issuer.sign(t, issuer.did(), time.Now().Add(-time.Hour)), ldpOptions())
+	parsed, _, err := newTestAcceptor(t, profile.Final()).Parse(issuer.sign(t, issuer.did(), time.Now().Add(-time.Hour)), ldpOptions())
 	require.NoError(t, err)
 	require.Equal(t, issuer.did(), parsed.Issuer)
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // Sentinel errors the OID4VP Final Request Object authentication path returns.
@@ -100,7 +101,7 @@ type errorResponseTarget struct {
 	responseMode OAuthAuthzReqResponseMode
 	state        string
 	metadata     *VerifierMetadata
-	haip         bool
+	encryption   profile.ResponseEncryptionRules
 }
 
 // ResponseURI returns the Response URI an error authorization response for
@@ -134,7 +135,7 @@ func (e *AuthorizationRequestError) SendErrorResponse(ctx context.Context, clien
 		values["state"] = target.state
 	}
 	formData, _ := errorResponseForm(values, target.responseMode, func(payload []byte) (string, error) {
-		return encryptAuthorizationResponse(payload, target.metadata, target.haip)
+		return encryptAuthorizationResponse(payload, target.metadata, target.encryption)
 	})
 	if _, err := postAuthorizationResponse(ctx, client, target.responseURI, formData); err != nil {
 		return fmt.Errorf("failed to send error authorization response: %w", err)
@@ -176,7 +177,7 @@ func (b *requestCore) attachErrorResponseTarget(err error) {
 		responseMode: b.req.ResponseMode,
 		state:        b.req.State,
 		metadata:     b.req.ClientMetadata,
-		haip:         b.haipRequestObjectPolicy(),
+		encryption:   b.options.ResponseEncryption,
 	}
 }
 

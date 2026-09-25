@@ -126,25 +126,22 @@ func AcceptedSDAlgorithms() []string {
 
 // Acceptor runs the acceptance checks. It is safe for concurrent use.
 type Acceptor struct {
-	profile    profile.Profile
+	x5c        profile.X5CRules
 	serializer *serializer.SerializationDispatcher
 	verifier   *verifier.VerificationDispatcher
 }
 
-// NewAcceptor builds an Acceptor for profile p. The profile is normalized, so
-// an unknown value is an error. The serializer and verifier are required.
-func NewAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *verifier.VerificationDispatcher) (*Acceptor, error) {
-	normalized, err := p.Normalize()
-	if err != nil {
-		return nil, err
-	}
+// NewAcceptor builds an Acceptor that applies the credential rules of
+// options, the Options of the wallet's profile: IssuerX5C (HAIP 1.0 §6.1.1).
+// The serializer and verifier are required.
+func NewAcceptor(options profile.Options, s *serializer.SerializationDispatcher, v *verifier.VerificationDispatcher) (*Acceptor, error) {
 	if s == nil {
 		return nil, fmt.Errorf("%w: acceptance requires a serialization dispatcher", common.ErrInvalidInput)
 	}
 	if v == nil {
 		return nil, fmt.Errorf("%w: acceptance requires a verification dispatcher", common.ErrInvalidInput)
 	}
-	return &Acceptor{profile: normalized, serializer: s, verifier: v}, nil
+	return &Acceptor{x5c: options.IssuerX5C, serializer: s, verifier: v}, nil
 }
 
 // Verify applies policy to raw and returns the parsed credential and what was
@@ -202,8 +199,8 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 
 	// HAIP §6.1.1: "The SD-JWT VC MUST contain the credential issuer's signing
 	// certificate along with a trust chain in the x5c JOSE header".
-	haipX5C := a.profile.IsHAIP() && flavor == credential.SDJwtVC
-	if haipX5C {
+	requireX5C := a.x5c.Require && flavor == credential.SDJwtVC
+	if requireX5C {
 		if _, present := header["x5c"]; !present {
 			return nil, nil, ErrHAIPX5CRequired
 		}
@@ -241,7 +238,7 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 		now = policy.Now()
 	}
 	issuer, _ := payload["iss"].(string)
-	if err := a.authenticateIssuer(ctx, parsed, policy, header, payload, issuer, now, haipX5C, verification); err != nil {
+	if err := a.authenticateIssuer(ctx, parsed, policy, header, payload, issuer, now, requireX5C, verification); err != nil {
 		return nil, nil, err
 	}
 	if err := checkValidity(payload, now, policy.ClockSkew); err != nil {

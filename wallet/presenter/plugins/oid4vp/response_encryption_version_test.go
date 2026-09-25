@@ -33,7 +33,7 @@ func TestResponseEncryptionFollowsTheRequestVersion(t *testing.T) {
 		"client_metadata":         {string(metadata)},
 		"presentation_definition": {`{"id":"definition"}`},
 	})
-	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	p := &Oid4vpPresenter{Profile: profile.HAIP()}
 	request, err := parseDraft24ForTest(p, uri)
 	require.NoError(t, err, "Draft24 is admitted without the HAIP P-256 rule")
 

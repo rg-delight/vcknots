@@ -107,7 +107,8 @@ func codedErrorValues() map[string]error {
 		"ErrProfileMismatch":                   ErrProfileMismatch,
 		"ErrProfilePluginUnsupported":          ErrProfilePluginUnsupported,
 		"ErrProfileForbidsDraft":               ErrProfileForbidsDraft,
-		"profile.ErrUnknownProfile":            profile.ErrUnknownProfile,
+		"profile.ErrDraftProfile":              profile.ErrDraftProfile,
+		"profile.ErrProfileMustOption":         profile.ErrProfileMustOption,
 		"oid4vp.ErrPreRegisteredClientUnknown": oid4vp.ErrPreRegisteredClientUnknown,
 
 		"*AuthorizationResponseError":       &AuthorizationResponseError{Code: "access_denied"},

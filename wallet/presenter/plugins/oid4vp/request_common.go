@@ -67,11 +67,13 @@ const maxRequestObjectBytes = 1 << 20
 
 // requestCore is the state of one parse that both wire contracts use.
 type requestCore struct {
-	ctx                     context.Context
-	req                     *CredentialPresentationRequest
-	httpClient              *http.Client
-	allowHTTP               bool
-	profile                 profile.Profile
+	ctx        context.Context
+	req        *CredentialPresentationRequest
+	httpClient *http.Client
+	allowHTTP  bool
+	// options are the profile Options this parse applies; Draft 24 parses
+	// keep the zero value.
+	options                 profile.Options
 	x509TrustChainRoots     *x509.CertPool
 	insecureSkipX509Verify  bool
 	requestObjectValidation *RequestObjectValidationOptions
@@ -108,7 +110,6 @@ func newRequestCore() requestCore {
 			OAuthAuthzRequest: &OAuthAuthzRequest{},
 			ClientMetadata:    &VerifierMetadata{},
 		},
-		profile: profile.Final,
 	}
 }
 
@@ -127,11 +128,6 @@ func (c *requestCore) context() context.Context {
 		return c.ctx
 	}
 	return context.Background()
-}
-
-// haipRequestObjectPolicy reports whether the HAIP Request Object rules apply.
-func (c *requestCore) haipRequestObjectPolicy() bool {
-	return c.profile.IsHAIP()
 }
 
 // isDirectPostMode reports whether the Response Mode delivers the Authorization
@@ -345,16 +341,19 @@ func (c *requestCore) resolveClaimPolicy(options RequestObjectValidationOptions,
 	return policy
 }
 
-// rejectTrustAnchorInX5C enforces HAIP §5: "The X.509 certificate of the
-// trust anchor MUST NOT be included in the x5c JOSE header of the signed
-// request. The X.509 certificate signing the request MUST NOT be
-// self-signed." It is inert outside the HAIP profile.
-func (c *requestCore) rejectTrustAnchorInX5C(certificates []*x509.Certificate, options RequestObjectValidationOptions) error {
-	if !c.haipRequestObjectPolicy() {
-		return nil
+// applyRequestObjectX5CRules enforces Options.RequestObjectX5C (HAIP §5):
+// "The X.509 certificate of the trust anchor MUST NOT be included in the x5c
+// JOSE header of the signed request. The X.509 certificate signing the
+// request MUST NOT be self-signed."
+func (c *requestCore) applyRequestObjectX5CRules(certificates []*x509.Certificate, options RequestObjectValidationOptions) error {
+	rules := c.options.RequestObjectX5C
+	if rules.RejectSelfSigned {
+		if err := commonX509.RequireNonSelfSignedLeaf(certificates, "request object"); err != nil {
+			return err
+		}
 	}
-	if err := commonX509.RequireNonSelfSignedLeaf(certificates, "request object"); err != nil {
-		return err
+	if !rules.ExcludeAnchor {
+		return nil
 	}
 	anchored, err := commonX509.ContainsTrustAnchor(certificates, options.TrustAnchors, options.RootCAs)
 	if err != nil {
@@ -401,7 +400,7 @@ func (c *requestCore) authenticateX509RequestObject(obj string, parsed *jwt.JSON
 	if err != nil {
 		return err
 	}
-	if err := c.rejectTrustAnchorInX5C(certificates, options); err != nil {
+	if err := c.applyRequestObjectX5CRules(certificates, options); err != nil {
 		return err
 	}
 	if err := bindX509ClientID(clientID, certificates[0], c.req); err != nil {

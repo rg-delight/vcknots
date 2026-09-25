@@ -28,7 +28,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
-	normalized, err := o.normalizedProfile()
+	options, err := o.profileOptions()
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 	if err := json.Unmarshal(response.body, &accessToken); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
-	if err := requireDPoPTokenType(normalized, accessToken.TokenType); err != nil {
+	if err := requireDPoPTokenType(options, accessToken.TokenType); err != nil {
 		return nil, err
 	}
 	return &accessToken, nil
@@ -103,7 +103,7 @@ func (o *Oid4vciReceiver) FetchAccessToken(
 // (OpenID4VCI 1.0 Section 5.1.4). RFC 9126 Section 2 has it carry the client
 // authentication of the token endpoint.
 func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint common.URIField, request types.PushedAuthorizationRequest, auth types.ClientAuthentication) (*types.PushedAuthorizationResponse, error) {
-	if _, err := o.normalizedProfile(); err != nil {
+	if _, err := o.profileOptions(); err != nil {
 		return nil, err
 	}
 	formData := url.Values{}
@@ -140,10 +140,11 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	return &response, nil
 }
 
-// RequestToken sends an OpenID4VCI 1.0 Section 6.1 Token Request. Under HAIP
-// a token_type other than DPoP is refused with ErrDPoPRequired.
+// RequestToken sends an OpenID4VCI 1.0 Section 6.1 Token Request. Under
+// Options.RequireDPoP a token_type other than DPoP is refused with
+// ErrDPoPRequired.
 func (o *Oid4vciReceiver) RequestToken(ctx context.Context, endpoint common.URIField, request types.TokenRequest, auth types.ClientAuthentication) (*types.CredentialIssuanceAccessToken, error) {
-	normalized, err := o.normalizedProfile()
+	options, err := o.profileOptions()
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +160,7 @@ func (o *Oid4vciReceiver) RequestToken(ctx context.Context, endpoint common.URIF
 	if err := o.postForm(observe.WithEndpoint(ctx, observe.EndpointToken), endpointURL, formData, auth, &response); err != nil {
 		return nil, stageError(StageToken, fmt.Errorf("token request failed: %w", err))
 	}
-	if err := requireDPoPTokenType(normalized, response.TokenType); err != nil {
+	if err := requireDPoPTokenType(options, response.TokenType); err != nil {
 		return nil, err
 	}
 	return &response, nil

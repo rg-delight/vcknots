@@ -49,7 +49,7 @@ func requireChainErrorCode(t *testing.T, err error, code string) {
 // hint for which resolved key to try first, not a filter: the header is
 // unauthenticated until a key verifies it.
 func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	signer := testutil.NewP256Key(t)
 	stale := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: signer, kid: "issuer-key-1"}))
@@ -109,7 +109,7 @@ func TestCredentialAcceptorKidOrdersResolvedKeys(t *testing.T) {
 // key whose JWK use is not "sig", or whose alg names another algorithm, is not
 // a signature candidate even when it holds the signing key.
 func TestCredentialAcceptorIgnoresKeysNotForThisSignature(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	signer := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: signer}))
 	resolving := func(keys ...jose.JSONWebKey) Policy {
@@ -220,7 +220,7 @@ func revokedIssuerChain(t *testing.T) (testIssuerChain, *http.Client) {
 // of the configured anchors, never when the chain says something about the
 // signer such as a revoked certificate.
 func TestCredentialAcceptorResolveIssuerKeysWhenX5CUntrusted(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	unrelated := newTestIssuerChain(t, []string{"issuer.example.test"})
 	untrustedWire := []byte(buildWire(t, testWire{signingKey: chain.leafKey, x5c: chain.x5c(), kid: "issuer-key-1"}))
@@ -351,7 +351,7 @@ func TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly(t *testing.T) {
 	require.NoError(t, err)
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
-	haip, err := NewAcceptor(profile.HAIP, serialization, verification)
+	haip, err := NewAcceptor(profile.HAIPOptions(), serialization, verification)
 	require.NoError(t, err)
 
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})

@@ -100,7 +100,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		}
 	}
 	if withAttestation {
-		if md.NonceEndpoint == nil && w.profile.IsHAIP() {
+		if md.NonceEndpoint == nil && w.options().RequireNonceEndpointForKeyBinding {
 			return nil, fmt.Errorf("the credential configuration %q is requested with a key attestation: %w", grant.CredentialConfigurationID, ErrNonceEndpointRequired)
 		}
 		if req.KeyAttestation == nil && w.attestationSettings().Key == nil {

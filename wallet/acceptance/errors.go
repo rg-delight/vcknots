@@ -51,13 +51,15 @@ var (
 	// ErrSDAlgUnsupported reports an _sd_alg that is not a string or not one
 	// of AcceptedSDAlgorithms.
 	ErrSDAlgUnsupported = common.NewCodedError("sd_alg_unsupported", "credential _sd_alg is not supported")
-	// ErrHAIPX5CRequired reports an SD-JWT VC without x5c under the HAIP
-	// profile (HAIP §6.1.1).
+	// ErrHAIPX5CRequired reports an SD-JWT VC without x5c under
+	// profile.Options.IssuerX5C.Require (HAIP §6.1.1).
 	ErrHAIPX5CRequired = common.NewCodedError("haip_x5c_required", "HAIP requires the issuer signing certificate in the x5c header")
 	// ErrHAIPTrustAnchorInX5C reports an x5c chain that carries a configured
-	// trust anchor under the HAIP profile (HAIP §6.1.1).
+	// trust anchor under profile.Options.IssuerX5C.ExcludeAnchor (HAIP
+	// §6.1.1).
 	ErrHAIPTrustAnchorInX5C = common.NewCodedError("haip_trust_anchor_in_x5c", "HAIP forbids including the trust anchor certificate in the x5c header")
 	// ErrIssuerCertificateSelfSigned reports a self-signed issuer signing
-	// certificate under the HAIP profile (HAIP §6.1.1).
+	// certificate under profile.Options.IssuerX5C.RejectSelfSigned (HAIP
+	// §6.1.1).
 	ErrIssuerCertificateSelfSigned = common.NewCodedError("issuer_certificate_self_signed", "the issuer signing certificate must not be self-signed")
 )

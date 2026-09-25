@@ -186,7 +186,7 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if rawDcqlQuery, exists := params["dcql_query"]; exists {
-		dcqlQuery, err := parseDcqlQueryWithHAIP(rawDcqlQuery, b.profile.IsHAIP())
+		dcqlQuery, err := parseDcqlQueryWithFormats(rawDcqlQuery, b.options.AllowedCredentialFormats)
 		if err != nil {
 			b.errValidation = err
 			return

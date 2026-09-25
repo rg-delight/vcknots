@@ -45,7 +45,7 @@ func parseRequestByReference(t *testing.T, f *requestObjectFixture, p profile.Pr
 func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 	t.Run("by value with attestation is accepted and recorded", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		req, err := parseRequestByValue(t, f, profile.HAIP, true)
+		req, err := parseRequestByValue(t, f, profile.HAIP(), true)
 		if err != nil {
 			t.Fatalf("HAIP with DeliveredByReference must accept the Request Object: %v", err)
 		}
@@ -63,7 +63,7 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 
 	t.Run("by value without attestation is rejected", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		_, err := parseRequestByValue(t, f, profile.HAIP, false)
+		_, err := parseRequestByValue(t, f, profile.HAIP(), false)
 		if err == nil || !strings.Contains(err.Error(), "request_uri") {
 			t.Fatalf("HAIP must reject a by-value Request Object without attestation: %v", err)
 		}
@@ -71,7 +71,7 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 
 	t.Run("request_uri is recorded as delivered by reference", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		req, err := parseRequestByReference(t, f, profile.HAIP)
+		req, err := parseRequestByReference(t, f, profile.HAIP())
 		if err != nil {
 			t.Fatalf("HAIP request_uri must be accepted: %v", err)
 		}
@@ -89,10 +89,10 @@ func TestHAIPRequestDeliveryAttestation(t *testing.T) {
 
 	t.Run("Final ignores the attestation", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		if _, err := parseRequestByValue(t, f, profile.Final, false); err != nil {
+		if _, err := parseRequestByValue(t, f, profile.Final(), false); err != nil {
 			t.Fatalf("Final must accept a by-value Request Object without attestation: %v", err)
 		}
-		req, err := parseRequestByValue(t, f, profile.Final, true)
+		req, err := parseRequestByValue(t, f, profile.Final(), true)
 		if err != nil {
 			t.Fatalf("Final must accept a by-value Request Object with attestation: %v", err)
 		}
@@ -116,7 +116,7 @@ func TestDeliveryAttestationDoesNotSuppressWalletNonceMismatch(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	claims["wallet_nonce"] = "wrong-nonce"
-	_, err := parseRequestObjectWithSourceForTest(presenterForDelivery(f, profile.HAIP), f.signWithRoot(t, claims, false), types.RequestObjectSource{
+	_, err := parseRequestObjectWithSourceForTest(presenterForDelivery(f, profile.HAIP()), f.signWithRoot(t, claims, false), types.RequestObjectSource{
 		ClientID:             f.clientID(),
 		DeliveredByReference: true,
 		WalletNonce:          "expected-nonce",

@@ -303,9 +303,14 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 	if (operationName == "receive-code" || operationName == "receive-code-wallet-initiated") && config.RedirectURI == "" {
 		return nil, fmt.Errorf("%s requires redirectUri", operationName)
 	}
-	selectedProfile, err := profile.Profile(config.Profile).Normalize()
-	if err != nil {
-		return nil, fmt.Errorf("invalid profile: %w", err)
+	var selectedProfile profile.Profile
+	switch config.Profile {
+	case "", profile.NameFinal:
+		selectedProfile = profile.Final()
+	case profile.NameHAIP:
+		selectedProfile = profile.HAIP()
+	default:
+		return nil, fmt.Errorf("invalid profile %q: want %q or %q", config.Profile, profile.NameFinal, profile.NameHAIP)
 	}
 	if config.VerifierAllowUnadvertisedRevocation && len(config.VerifierCAFiles) == 0 {
 		return nil, fmt.Errorf("verifierAllowUnadvertisedRevocation requires verifierCAFiles")
@@ -421,7 +426,7 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		CredStore:            store,
 		Receiver:             receiving,
 		Presenter:            presenting,
-		Profile:              selectedProfile,
+		Profiles:             []profile.Profile{selectedProfile},
 		CredentialAcceptance: acceptancePolicy,
 		DPoP:                 wallet.DPoPConfig{Enabled: true, Key: dpop},
 		ClientAuth:           wallet.ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: config.ClientID, Key: client},

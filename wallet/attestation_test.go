@@ -148,7 +148,7 @@ func TestClientAttestationFactory_RejectsBeforeNetwork(t *testing.T) {
 
 // TestAttestationPolicyForStaticAttesters pins that a bundled static attester
 // without a chain is verified with its own key and no extra configuration,
-// and that HAIP raises RequireX5C.
+// and that HAIP adds its AttestationX5C rules.
 func TestAttestationPolicyForStaticAttesters(t *testing.T) {
 	clientKey := newPrivateJWKForFinalVCITest(t, "client-key-1")
 	attester := &attestation.StaticClientAttester{Key: testKeyEntry(t, newPrivateJWKForFinalVCITest(t, "attester-key-1")), Issuer: "https://attester.example"}
@@ -156,12 +156,12 @@ func TestAttestationPolicyForStaticAttesters(t *testing.T) {
 	issued, err := attester.ClientAttestation(t.Context(), request)
 	require.NoError(t, err)
 
-	final := &Wallet{profile: profile.Final}
+	final := &Wallet{}
 	require.NoError(t, attestation.ValidateClientAttestation(t.Context(), issued, request, final.attestationPolicyFor(attester)))
 	require.ErrorContains(t, attestation.ValidateClientAttestation(t.Context(), issued, request, final.attestationPolicyFor(nil)), "no x5c chain")
 
-	haip := &Wallet{profile: profile.HAIP}
-	require.True(t, haip.attestationPolicyFor(attester).RequireX5C)
+	haip := &Wallet{profile: profile.HAIP()}
+	require.Equal(t, profile.HAIPOptions().AttestationX5C, haip.attestationPolicyFor(attester).X5C)
 	require.ErrorContains(t, attestation.ValidateClientAttestation(t.Context(), issued, request, haip.attestationPolicyFor(attester)), "x5c")
 }
 

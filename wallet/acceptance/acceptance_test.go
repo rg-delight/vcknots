@@ -24,7 +24,7 @@ import (
 // and a cnf must match the holder key, and nothing about the issuer is
 // checked.
 func TestParseChecksOnlyWhatNeedsNoPolicy(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 
 	t.Run("a malformed credential is refused", func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestParseChecksOnlyWhatNeedsNoPolicy(t *testing.T) {
 }
 
 func TestVerifyX509Policy(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	otherChain := newTestIssuerChain(t, []string{"issuer.example.test"})
@@ -103,7 +103,7 @@ func TestVerifyX509Policy(t *testing.T) {
 }
 
 func TestVerifyResolvedIssuerKeys(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	issuerKey := testutil.NewP256Key(t)
 	holder := newHolderKey(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
@@ -128,7 +128,7 @@ func TestVerifyResolvedIssuerKeys(t *testing.T) {
 }
 
 func TestVerifyUnverifiedIssuer(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	other := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
@@ -177,16 +177,16 @@ func TestVerifyHAIPRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	roots.AddCert(chain.caCert)
 	policy := Policy{IssuerX509: &IssuerX509TrustOptions{RootCAs: roots, AllowUnadvertisedRevocation: true}}
 
-	_, verification, err := newTestAcceptor(t, profile.Final).Verify(t.Context(), wire, policy, sdJWT(&holder))
+	_, verification, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), wire, policy, sdJWT(&holder))
 	require.NoError(t, err)
 	require.Len(t, verification.CertificateSHA256, 2)
 
-	_, _, err = newTestAcceptor(t, profile.HAIP).Verify(t.Context(), wire, policy, sdJWT(&holder))
+	_, _, err = newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), wire, policy, sdJWT(&holder))
 	require.ErrorIs(t, err, ErrHAIPTrustAnchorInX5C)
 }
 
 func TestVerifyRejectsUnsupportedConfirmationMethod(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	issuerKey := testutil.NewP256Key(t)
 	holder := newHolderKey(t)
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
@@ -251,7 +251,7 @@ func testIssuers(t *testing.T) []testIssuer {
 // TestVerifySigningAlgorithms proves every registered algorithm verifies a
 // real credential, and that only a policy listing it makes it acceptable.
 func TestVerifySigningAlgorithms(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	for _, issuer := range testIssuers(t) {
 		t.Run(string(issuer.algorithm), func(t *testing.T) {
@@ -300,7 +300,7 @@ func TestAlgorithmListsAreCopies(t *testing.T) {
 // TestVerifyAlgorithmWithoutPlugin pins that listing an algorithm no verifier
 // implements does not make it acceptable, and "none" never is.
 func TestVerifyAlgorithmWithoutPlugin(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	issuerKey := testutil.NewP256Key(t)
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
@@ -366,21 +366,21 @@ func TestVerifyTypedFailures(t *testing.T) {
 		rejected string
 		sentinel error
 	}{
-		{"parse", profile.Final, resolvingPolicy, signed(testWire{}), "this-is-not-a-credential", ErrCredentialParse},
-		{"typ", profile.Final, resolvingPolicy, signed(testWire{typ: "vc+sd-jwt"}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
-		{"alg", profile.Final, resolvingPolicy, signed(testWire{}), unsignedWire(t, "none"), ErrCredentialAlgUnsupported},
-		{"holder binding missing", profile.Final, bindingPolicy, signed(testWire{}), buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1"}), ErrHolderBindingMissing},
-		{"holder binding mismatch", profile.Final, resolvingPolicy, signed(testWire{}), signed(testWire{cnf: &otherHolder}), ErrHolderBindingMismatch},
-		{"issuer key unresolved", profile.Final, resolvingPolicy, signed(testWire{}), signed(testWire{signingKey: issuerKey, kid: "another-key"}), ErrIssuerKeyUnresolved},
-		{"issuer signature invalid", profile.Final, resolvingPolicy, signed(testWire{}), signed(testWire{tamperSignature: true}), ErrIssuerSignatureInvalid},
-		{"expired", profile.Final, resolvingPolicy, signed(testWire{}), signed(testWire{exp: time.Now().Add(-time.Hour)}), ErrCredentialExpired},
-		{"not yet valid", profile.Final, resolvingPolicy, signed(testWire{}), signed(testWire{nbf: ptr(time.Now().Add(time.Hour))}), ErrCredentialNotYetValid},
-		{"disclosure integrity", profile.Final, resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, extraDisclosure: true}), ErrDisclosureIntegrity},
-		{"sd_alg", profile.Final, resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, sdAlg: "sha-1"}), ErrSDAlgUnsupported},
-		{"issuer DNS binding", profile.Final, x509Trust(chain.anchors(), true), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
-		{"HAIP x5c required", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
-		{"HAIP trust anchor in x5c", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
-		{"HAIP self-signed issuer certificate", profile.HAIP, x509Trust(chain.anchors(), false), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
+		{"parse", profile.Final(), resolvingPolicy, signed(testWire{}), "this-is-not-a-credential", ErrCredentialParse},
+		{"typ", profile.Final(), resolvingPolicy, signed(testWire{typ: "vc+sd-jwt"}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
+		{"alg", profile.Final(), resolvingPolicy, signed(testWire{}), unsignedWire(t, "none"), ErrCredentialAlgUnsupported},
+		{"holder binding missing", profile.Final(), bindingPolicy, signed(testWire{}), buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1"}), ErrHolderBindingMissing},
+		{"holder binding mismatch", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{cnf: &otherHolder}), ErrHolderBindingMismatch},
+		{"issuer key unresolved", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{signingKey: issuerKey, kid: "another-key"}), ErrIssuerKeyUnresolved},
+		{"issuer signature invalid", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{tamperSignature: true}), ErrIssuerSignatureInvalid},
+		{"expired", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{exp: time.Now().Add(-time.Hour)}), ErrCredentialExpired},
+		{"not yet valid", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{nbf: ptr(time.Now().Add(time.Hour))}), ErrCredentialNotYetValid},
+		{"disclosure integrity", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, extraDisclosure: true}), ErrDisclosureIntegrity},
+		{"sd_alg", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, sdAlg: "sha-1"}), ErrSDAlgUnsupported},
+		{"issuer DNS binding", profile.Final(), x509Trust(chain.anchors(), true), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
+		{"HAIP x5c required", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
+		{"HAIP trust anchor in x5c", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
+		{"HAIP self-signed issuer certificate", profile.HAIP(), x509Trust(chain.anchors(), false), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -399,7 +399,7 @@ func TestVerifyTypedFailures(t *testing.T) {
 // TestVerifyPolicyIsPerCall pins that one acceptor judges a credential by the
 // policy passed with each call.
 func TestVerifyPolicyIsPerCall(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
@@ -426,7 +426,7 @@ func TestVerifyPolicyIsPerCall(t *testing.T) {
 // TestVerifyRequireHolderBinding pins the fail-closed reading: a cnf is bound
 // only once compared with a holder key.
 func TestVerifyRequireHolderBinding(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
 	issuerKey := testutil.NewP256Key(t)
 	bound := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder}))
@@ -451,7 +451,7 @@ func TestVerifyRequireHolderBinding(t *testing.T) {
 }
 
 func TestVerifyExpectedSDJWTVCType(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", vct: "urn:test:acceptance"}))
 	policy := resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"})
@@ -468,7 +468,7 @@ func TestVerifyExpectedSDJWTVCType(t *testing.T) {
 }
 
 func TestVerifyInfersTheFlavor(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final)
+	acceptor := newTestAcceptor(t, profile.Final())
 	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, typ: "JWT"}))
 	// With the flavor inferred, the SD-JWT VC typ rule applies to a "~" wire.
@@ -509,14 +509,11 @@ func TestNewAcceptorValidatesInputs(t *testing.T) {
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
 
-	_, err = NewAcceptor(profile.Final, nil, verification)
+	_, err = NewAcceptor(profile.Options{}, nil, verification)
 	require.ErrorContains(t, err, "serialization dispatcher")
-	_, err = NewAcceptor(profile.Final, serialization, nil)
+	_, err = NewAcceptor(profile.Options{}, serialization, nil)
 	require.ErrorContains(t, err, "verification dispatcher")
-	_, err = NewAcceptor(profile.Profile("draft24"), serialization, verification)
-	require.Error(t, err)
-
-	acceptor, err := NewAcceptor(profile.Profile(""), serialization, verification)
+	acceptor, err := NewAcceptor(profile.HAIP().Options(), serialization, verification)
 	require.NoError(t, err)
-	require.Equal(t, profile.Final, acceptor.profile)
+	require.Equal(t, profile.HAIPOptions().IssuerX5C, acceptor.x5c)
 }

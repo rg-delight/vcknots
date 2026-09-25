@@ -32,7 +32,7 @@ func newTestAcceptor(t *testing.T, p profile.Profile) *Acceptor {
 	require.NoError(t, err)
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
-	acceptor, err := NewAcceptor(p, serialization, verification)
+	acceptor, err := NewAcceptor(p.Options(), serialization, verification)
 	require.NoError(t, err)
 	return acceptor
 }

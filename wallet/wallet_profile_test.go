@@ -27,6 +27,25 @@ import (
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
+// profilesFor is Config.Profiles for a wallet built around the 1.0 profile
+// p: HAIP alone, and any other profile with both draft profiles, as
+// DefaultProfiles runs Final.
+func profilesFor(p profile.Profile) []profile.Profile {
+	if p.Name() == profile.NameHAIP {
+		return []profile.Profile{p}
+	}
+	return []profile.Profile{p, profile.Draft13(), profile.Draft24()}
+}
+
+// useProfiles re-points a built wallet at profiles, as NewWalletWithConfig
+// would have set them.
+func useProfiles(t *testing.T, w *Wallet, profiles ...profile.Profile) {
+	t.Helper()
+	resolved, err := resolveProfiles(profiles)
+	require.NoError(t, err)
+	w.profile, w.draft13, w.draft24 = resolved.final, resolved.draft13, resolved.draft24
+}
+
 func newProfileCredStore(t *testing.T) *credstore.CredStoreDispatcher {
 	t.Helper()
 	storage, err := local.NewLocalCredentialStorage(filepath.Join(t.TempDir(), "credentials.db"))
@@ -41,7 +60,7 @@ func newProfileCredStore(t *testing.T) *credstore.CredStoreDispatcher {
 // otherwise the root constructs the default dispatcher for that component.
 func newProfileWallet(t *testing.T, p profile.Profile, receiverPlugin receiverTypes.Receiver, presenterPlugin presenterTypes.Presenter, acceptance *acceptance.Policy) *Wallet {
 	t.Helper()
-	config := Config{Profile: p, CredStore: newProfileCredStore(t), CredentialAcceptance: acceptance}
+	config := Config{Profiles: profilesFor(p), CredStore: newProfileCredStore(t), CredentialAcceptance: acceptance}
 	if receiverPlugin != nil {
 		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, receiverPlugin))
 		require.NoError(t, err)
@@ -73,38 +92,40 @@ func assertCarrierProfile[T any](t *testing.T, plugins []T, want profile.Profile
 
 func TestNewWalletWithConfig_ProfilePropagation(t *testing.T) {
 	t.Run("rejects a mismatched injected presenter plugin", func(t *testing.T) {
-		presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenterTypes.Oid4vp, &oid4vp.Oid4vpPresenter{Profile: profile.Final}))
+		presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenterTypes.Oid4vp, &oid4vp.Oid4vpPresenter{Profile: profile.Final()}))
 		require.NoError(t, err)
-		_, err = NewWalletWithConfig(Config{Profile: profile.HAIP, CredStore: newProfileCredStore(t), Presenter: presenting})
+		_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, CredStore: newProfileCredStore(t), Presenter: presenting})
 		require.ErrorIs(t, err, ErrProfileMismatch)
 	})
 
 	t.Run("rejects a mismatched injected receiver plugin", func(t *testing.T) {
-		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.Final}))
+		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.Final()}))
 		require.NoError(t, err)
-		_, err = NewWalletWithConfig(Config{Profile: profile.HAIP, CredStore: newProfileCredStore(t), Receiver: receiving})
+		_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, CredStore: newProfileCredStore(t), Receiver: receiving})
 		require.ErrorIs(t, err, ErrProfileMismatch)
 	})
 
 	t.Run("accepts matching injected plugins", func(t *testing.T) {
-		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP}))
+		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()}))
 		require.NoError(t, err)
-		presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenterTypes.Oid4vp, &oid4vp.Oid4vpPresenter{Profile: profile.HAIP}))
+		presenting, err := presenter.NewPresentationDispatcher(presenter.WithPlugin(presenterTypes.Oid4vp, &oid4vp.Oid4vpPresenter{Profile: profile.HAIP()}))
 		require.NoError(t, err)
-		w, err := NewWalletWithConfig(Config{Profile: profile.HAIP, CredStore: newProfileCredStore(t), Receiver: receiving, Presenter: presenting})
+		w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, CredStore: newProfileCredStore(t), Receiver: receiving, Presenter: presenting})
 		require.NoError(t, err)
-		require.Equal(t, profile.HAIP, w.profile)
+		require.Equal(t, profile.HAIP(), w.profile)
 	})
 
 	t.Run("default construction propagates the profile to both plugins", func(t *testing.T) {
-		w := newProfileWallet(t, profile.HAIP, nil, nil, nil)
-		assertCarrierProfile(t, w.receiver.Plugins(), profile.HAIP)
-		assertCarrierProfile(t, w.presenter.Plugins(), profile.HAIP)
+		w := newProfileWallet(t, profile.HAIP(), nil, nil, nil)
+		assertCarrierProfile(t, w.receiver.Plugins(), profile.HAIP())
+		assertCarrierProfile(t, w.presenter.Plugins(), profile.HAIP())
 	})
 
-	t.Run("unknown profile is rejected", func(t *testing.T) {
-		_, err := NewWalletWithConfig(Config{Profile: profile.Profile("bogus"), CredStore: newProfileCredStore(t)})
-		require.ErrorIs(t, err, profile.ErrUnknownProfile)
+	t.Run("a plugin reporting a draft profile is rejected", func(t *testing.T) {
+		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.Draft24()}))
+		require.NoError(t, err)
+		_, err = NewWalletWithConfig(Config{CredStore: newProfileCredStore(t), Receiver: receiving})
+		require.ErrorIs(t, err, profile.ErrDraftProfile)
 	})
 }
 
@@ -128,7 +149,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 		receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 		require.NoError(t, err)
 		w, err := NewWalletWithConfig(Config{
-			Profile:              p,
+			Profiles:             profilesFor(p),
 			CredStore:            newProfileCredStore(t),
 			Receiver:             receiving,
 			CredentialAcceptance: &acceptance.Policy{UnverifiedIssuer: true},
@@ -141,7 +162,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 	}
 
 	t.Run("HAIP with no client authentication rejects before any network request", func(t *testing.T) {
-		w := newWallet(profile.HAIP, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP})
+		w := newWallet(profile.HAIP(), &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP()})
 		_, err := w.BeginIssuance(t.Context(), request)
 		require.ErrorContains(t, err, "client authentication")
 		require.ErrorIs(t, err, ErrInvalidArgument)
@@ -149,7 +170,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 	})
 
 	t.Run("Final proceeds to metadata discovery", func(t *testing.T) {
-		w := newWallet(profile.Final, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true, Profile: profile.Final})
+		w := newWallet(profile.Final(), &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), AllowHTTP: true, Profile: profile.Final()})
 		_, err := w.BeginIssuance(t.Context(), request)
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "client authentication")
@@ -178,24 +199,24 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 	t.Run("SD-JWT VC without x5c", func(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder})
 
-		finalWallet := newProfileWallet(t, profile.Final, nil, nil, resolvePolicy())
+		finalWallet := newProfileWallet(t, profile.Final(), nil, nil, resolvePolicy())
 		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.NoError(t, err)
 
-		haipWallet := newProfileWallet(t, profile.HAIP, nil, nil, resolvePolicy())
-		_, err = haipWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
+		haipWallet := newProfileWallet(t, profile.HAIP(), nil, nil, resolvePolicy())
+		_, _, err = haipWallet.verifyCredentialForAcceptanceContext(t.Context(), []byte(wire), credential.SDJwtVC, &holder, true)
 		require.ErrorContains(t, err, "x5c")
 	})
 
 	t.Run("trust anchor included in x5c", func(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
 
-		finalWallet := newProfileWallet(t, profile.Final, nil, nil, anchorPolicy())
+		finalWallet := newProfileWallet(t, profile.Final(), nil, nil, anchorPolicy())
 		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
 		require.NoError(t, err)
 
-		haipWallet := newProfileWallet(t, profile.HAIP, nil, nil, anchorPolicy())
-		_, err = haipWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
+		haipWallet := newProfileWallet(t, profile.HAIP(), nil, nil, anchorPolicy())
+		_, _, err = haipWallet.verifyCredentialForAcceptanceContext(t.Context(), []byte(wire), credential.SDJwtVC, &holder, true)
 		require.ErrorContains(t, err, "trust anchor")
 	})
 }
@@ -278,7 +299,7 @@ func TestWallet_HAIPForcesKeyBindingForConfirmationCredentials(t *testing.T) {
 
 	t.Run("HAIP forces a KB-JWT", func(t *testing.T) {
 		fixture, uri := newFixture(t)
-		fixture.wallet.profile = profile.HAIP
+		useProfiles(t, fixture.wallet, profile.HAIP())
 
 		_, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
 		require.NoError(t, err)
@@ -362,7 +383,7 @@ func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client()}))
 	require.NoError(t, err)
 	store := newProfileCredStore(t)
-	w, err := NewWalletWithConfig(Config{Profile: profile.Final, CredStore: store, Receiver: receiving})
+	w, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving})
 	require.NoError(t, err)
 
 	saved, err := w.ReceiveCredential(draftReceiveRequest(t, server, holder))
@@ -381,11 +402,11 @@ func TestReceiveCredentialIsRefusedUnderHAIP(t *testing.T) {
 	// plugin checks before the credential request.
 	server := newDraftIssuanceServer(t, wire, "DPoP")
 
-	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP}))
+	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client(), Profile: profile.HAIP()}))
 	require.NoError(t, err)
 	store := newProfileCredStore(t)
 	w, err := NewWalletWithConfig(Config{
-		Profile:   profile.HAIP,
+		Profiles:  []profile.Profile{profile.HAIP()},
 		CredStore: store,
 		Receiver:  receiving,
 		DPoP:      DPoPConfig{Enabled: true, Key: newMockKeyEntry()},

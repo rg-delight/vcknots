@@ -119,10 +119,10 @@ func TestHAIPRequestObjectRequiresExpiry(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	delete(claims, "exp")
-	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference}); err != nil {
+	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference}); err != nil {
 		t.Fatalf("HAIP must accept a Request Object without exp by default: %v", err)
 	}
-	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, RequireExpiry: true})
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, RequireExpiry: true})
 	if err == nil || !strings.Contains(err.Error(), "request object is missing exp") {
 		t.Fatalf("RequireExpiry must reject a Request Object without exp: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestHAIPRequestObjectLifetimeIsUnbounded(t *testing.T) {
 	claims := f.claims()
 	claims["iat"] = f.now.Unix()
 	claims["exp"] = f.now.Add(time.Hour).Unix()
-	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference}); err != nil {
+	if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference}); err != nil {
 		t.Fatalf("HAIP must not bound the Request Object lifetime: %v", err)
 	}
 }
@@ -146,7 +146,7 @@ func TestHAIPRequestObjectAcceptsBoundedLifetime(t *testing.T) {
 	claims := f.claims()
 	claims["iat"] = f.now.Unix()
 	claims["exp"] = f.now.Add(5 * time.Minute).Unix()
-	request, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	request, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 	if err != nil {
 		t.Fatalf("HAIP must accept a bounded Request Object: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 
 	// The Request Object is passed by value; the attestation is what lets it
 	// satisfy the HAIP Section 5.1 delivery requirement.
-	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
+	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP()}
 	_, err := parseRequestObjectWithSourceForTest(haip, requestObject, types.RequestObjectSource{ClientID: f.clientID(), DeliveredByReference: true})
 	if err == nil || !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
 		t.Fatalf("HAIP must reject the anchor in x5c with a root pool: %v", err)
@@ -500,7 +500,7 @@ func TestParsePresentationRequestRequestObjectSentinels(t *testing.T) {
 			name:     "haip request_uri required",
 			sentinel: ErrHAIPRequestURIRequired,
 			presenter: func(f *requestObjectFixture) *Oid4vpPresenter {
-				return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByValue})
+				return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByValue})
 			},
 			uri: func(t *testing.T, f *requestObjectFixture) string {
 				return signedRequestURI(f.clientID(), f.sign(t, f.claims(), nil))
@@ -570,7 +570,7 @@ func TestFinalRequestObjectIssuedInTheFuture(t *testing.T) {
 	claims := f.claims()
 	claims["iat"] = f.now.Add(time.Hour).Unix()
 	claims["exp"] = f.now.Add(time.Hour + 5*time.Minute).Unix()
-	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+	_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 	if !errors.Is(err, ErrRequestObjectExpired) {
 		t.Fatalf("want ErrRequestObjectExpired for a future iat, got %v", err)
 	}
@@ -589,19 +589,19 @@ func TestFinalRequestObjectIssuedInTheFuture(t *testing.T) {
 	}
 }
 
-// TestHAIPRequestObjectRejectsSelfSignedSigner covers HAIP Section 5: "The
-// X.509 certificate signing the request MUST NOT be self-signed."
-func TestHAIPRequestObjectRejectsSelfSignedSigner(t *testing.T) {
+// TestRequestObjectX5CRulesRejectSelfSigned covers HAIP Section 5: "The X.509
+// certificate signing the request MUST NOT be self-signed."
+func TestRequestObjectX5CRulesRejectSelfSigned(t *testing.T) {
 	f := newRequestObjectFixture(t)
-	haip := requestCore{profile: profile.HAIP}
-	if err := haip.rejectTrustAnchorInX5C([]*x509.Certificate{f.root}, f.options()); err == nil || !strings.Contains(err.Error(), "self-signed") {
+	core := requestCore{options: profile.Options{RequestObjectX5C: profile.X5CRules{RejectSelfSigned: true}}}
+	if err := core.applyRequestObjectX5CRules([]*x509.Certificate{f.root}, f.options()); err == nil || !strings.Contains(err.Error(), "self-signed") {
 		t.Fatalf("a self-signed signing certificate must be refused: %v", err)
 	}
-	if err := haip.rejectTrustAnchorInX5C([]*x509.Certificate{f.leaf}, f.options()); err != nil {
+	if err := core.applyRequestObjectX5CRules([]*x509.Certificate{f.leaf, f.root}, f.options()); err != nil {
 		t.Fatalf("a CA-issued signing certificate must be accepted: %v", err)
 	}
-	final := requestCore{profile: profile.Final}
-	if err := final.rejectTrustAnchorInX5C([]*x509.Certificate{f.root}, f.options()); err != nil {
+	final := requestCore{}
+	if err := final.applyRequestObjectX5CRules([]*x509.Certificate{f.root}, f.options()); err != nil {
 		t.Fatalf("Final applies no x5c rule: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // PresentationDefinition is used only by the explicit Draft24 entrypoint.
@@ -183,22 +184,21 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
 
-	// encryptionPolicy records the response encryption rules the request
+	// encryptionRules records the response encryption rules the request
 	// carrying this metadata was admitted under, so the response is encrypted
-	// under the same rules. It is never read from or written to JSON.
-	encryptionPolicy responseEncryptionPolicy
+	// under the same rules; encryptionRulesSet is false for metadata no parse
+	// admitted, which follows the presenter's profile. Neither is read from or
+	// written to JSON.
+	encryptionRules    profile.ResponseEncryptionRules
+	encryptionRulesSet bool
 }
 
-// responseEncryptionPolicy is the response encryption rule set a request was
-// admitted under.
-type responseEncryptionPolicy int
-
-const (
-	// encryptionPolicyUnset defers to the presenter's profile.
-	encryptionPolicyUnset responseEncryptionPolicy = iota
-	encryptionPolicyFinal
-	encryptionPolicyHAIP
-)
+// admitEncryptionRules records the response encryption rules the request
+// carrying m was admitted under.
+func (m *VerifierMetadata) admitEncryptionRules(rules profile.ResponseEncryptionRules) {
+	m.encryptionRules = rules
+	m.encryptionRulesSet = true
+}
 
 // FetchKeyWithKID returns the key of v.Jwks whose kid is kid, or an error when
 // there is none.

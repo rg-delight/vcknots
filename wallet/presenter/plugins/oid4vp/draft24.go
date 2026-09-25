@@ -86,7 +86,7 @@ func (p *Oid4vpPresenter) parseDraft24RequestObject(ctx context.Context, request
 // newDraft24RequestBuilder creates the builder of one Draft 24 parse. The
 // presenter's profile must be valid but does not apply.
 func (p *Oid4vpPresenter) newDraft24RequestBuilder(ctx context.Context) (*draft24RequestBuilder, error) {
-	if _, err := p.normalizedProfile(); err != nil {
+	if _, err := p.profileOptions(); err != nil {
 		return nil, err
 	}
 	builder := newDraft24RequestBuilder()

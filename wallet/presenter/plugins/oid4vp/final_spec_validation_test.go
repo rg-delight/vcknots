@@ -70,11 +70,11 @@ func TestFinalPreRegisteredClientID(t *testing.T) {
 
 func TestHAIPRejectsPreRegisteredClientID(t *testing.T) {
 	builder := NewRequestBuilder()
-	builder.profile = profile.HAIP
+	builder.options = profile.HAIPOptions()
 	builder.requestSource = sourceReference
 	builder.req.ClientID = "example-client"
 	builder.req.ResponseMode = OAuthAuthzReqResponseModeDirectPostJWT
-	err := builder.enforceHAIPProfile()
+	err := builder.enforceProfileOptions()
 	assertAuthzErrorCode(t, err, InvalidRequestError)
 	require.Contains(t, err.Error(), "x509_hash")
 }
@@ -594,4 +594,33 @@ func TestFinalQueryParametersWithoutAuthority(t *testing.T) {
 
 	_, err = p.ParsePresentationRequest(uri("https://example.com/elsewhere"))
 	require.ErrorIs(t, err, ErrResponseURIClientIDMismatch)
+}
+
+// Each HAIP option applies on its own: a Final profile strengthened with one
+// option enforces that option and none of the others.
+func TestStrengthenedFinalAppliesOnlyItsOptions(t *testing.T) {
+	newBuilder := func(options profile.Options, source requestSource, clientID string) *requestBuilder {
+		builder := NewRequestBuilder()
+		builder.options = options
+		builder.requestSource = source
+		builder.req.ClientID = clientID
+		builder.req.ResponseMode = OAuthAuthzReqResponseModeDirectPost
+		return builder
+	}
+	requireX5C := profile.Options{RequestObjectX5C: profile.X5CRules{Require: true}}
+	// A signed request whose Client Identifier carries no x5c is refused...
+	err := newBuilder(requireX5C, sourceReference, "decentralized_identifier:did:example:123").enforceProfileOptions()
+	assertAuthzErrorCode(t, err, InvalidRequestError)
+	require.Contains(t, err.Error(), "x5c")
+	// ...an X.509 one is not, and neither is response_mode direct_post,
+	// which only RequireDirectPostJWT refuses.
+	require.NoError(t, newBuilder(requireX5C, sourceReference, "x509_san_dns:verifier.example").enforceProfileOptions())
+	// An unsigned request carries no Request Object to hold to x5c.
+	require.NoError(t, newBuilder(requireX5C, sourceQuery, "redirect_uri:https://verifier.example/cb").enforceProfileOptions())
+
+	prefixes := profile.Options{AllowedClientIDPrefixes: profile.ClientIDPrefixRedirectURI | profile.ClientIDPrefixX509Hash}
+	require.NoError(t, newBuilder(prefixes, sourceQuery, "redirect_uri:https://verifier.example/cb").enforceProfileOptions())
+	err = newBuilder(prefixes, sourceReference, "x509_san_dns:verifier.example").enforceProfileOptions()
+	assertAuthzErrorCode(t, err, InvalidRequestError)
+	require.Contains(t, err.Error(), "redirect_uri or x509_hash")
 }

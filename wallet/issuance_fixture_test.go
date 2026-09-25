@@ -175,7 +175,7 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 	f.additionalEntry = f.keyEntry(f.additionalKey)
 	f.dpopEntry = f.keyEntry(f.clientKey)
 	f.issuedCredential = f.issueCredential(f.holderKey, map[string]string{"given_name": "Taro"})
-	if f.walletProfile.IsHAIP() {
+	if f.walletProfile.Options().ForbidInsecureTransports {
 		f.server = httptest.NewTLSServer(http.HandlerFunc(f.serveHTTP))
 	} else {
 		f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
@@ -191,7 +191,7 @@ func (f *finalIssuanceFixture) newWallet(t *testing.T) *Wallet {
 	t.Helper()
 	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
 		HTTPClient: f.server.Client(),
-		AllowHTTP:  !f.walletProfile.IsHAIP(),
+		AllowHTTP:  !f.walletProfile.Options().ForbidInsecureTransports,
 		Profile:    f.walletProfile,
 	})
 	if f.wrapReceiverPlugin != nil {
@@ -200,7 +200,7 @@ func (f *finalIssuanceFixture) newWallet(t *testing.T) *Wallet {
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, plugin))
 	require.NoError(t, err)
 	config := Config{
-		Profile:    f.walletProfile,
+		Profiles:   profilesFor(f.walletProfile),
 		CredStore:  newProfileCredStore(t),
 		Receiver:   receiving,
 		ClientAuth: ClientAuthConfig{ClientID: "client-1"},
@@ -231,7 +231,7 @@ func newHAIPIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) *
 	t.Helper()
 	clientAuthKey, _ := newClientAuthKeyEntry(t, "client-auth-key-1")
 	haip := append([]func(*finalIssuanceFixture){func(f *finalIssuanceFixture) {
-		f.walletProfile = profile.HAIP
+		f.walletProfile = profile.HAIP()
 		f.clientAuthKey = clientAuthKey
 		f.issParameterSupported = true
 		f.authMethodsSupported = []receiverTypes.TokenEndpointAuthMethod{receiverTypes.PrivateKeyJwt}

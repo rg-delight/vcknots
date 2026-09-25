@@ -604,7 +604,7 @@ func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 // TestHooks are refused when a HAIP wallet is constructed.
 func TestDraft13KeyProofHookIsRefusedUnderHAIP(t *testing.T) {
 	_, err := NewWalletWithConfig(Config{
-		Profile:   profile.HAIP,
+		Profiles:  []profile.Profile{profile.HAIP()},
 		CredStore: newProfileCredStore(t),
 		TestHooks: &TestHooks{KeyProof: ProofTransform{}},
 	})
@@ -1088,7 +1088,7 @@ func draft13States(issuer string, version IssuanceVersion) (*IssuanceAuthorizati
 // before anything is sent.
 func TestDraft13IsForbiddenUnderHAIP(t *testing.T) {
 	fixture := newDraft13Fixture(t)
-	haip := newProfileWallet(t, profile.HAIP, &receiverOid4vci.Oid4vciReceiver{Profile: profile.HAIP}, nil, acceptIssuerKeyPolicy(fixture.issuerKey))
+	haip := newProfileWallet(t, profile.HAIP(), &receiverOid4vci.Oid4vciReceiver{Profile: profile.HAIP()}, nil, acceptIssuerKeyPolicy(fixture.issuerKey))
 	draft13 := haip.Draft13()
 	ctx := context.Background()
 	authorization, grant, deferred, notification := draft13States(fixture.server.URL, IssuanceVersionDraft13)

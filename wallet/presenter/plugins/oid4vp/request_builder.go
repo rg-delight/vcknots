@@ -47,20 +47,20 @@ func (b *requestBuilder) settings() builderPolicy {
 }
 
 // NewRequestBuilder creates a builder for OpenID4VP 1.0 Authorization
-// Requests under profile.Final. WithProfile selects another profile.
+// Requests under profile.Final(). WithProfile selects another profile.
 func NewRequestBuilder() *requestBuilder {
 	return &requestBuilder{requestCore: newRequestCore()}
 }
 
-// WithProfile selects the protocol policy of the builder. An unknown profile
-// is recorded as a validation error and surfaces from Build.
+// WithProfile selects the OpenID4VP 1.0 profile whose Options the builder
+// applies. A draft profile is recorded as a validation error and surfaces
+// from Build.
 func (b *requestBuilder) WithProfile(p profile.Profile) *requestBuilder {
-	normalized, err := p.Normalize()
-	if err != nil {
+	if err := p.RequireFinalVersion(); err != nil {
 		b.errValidation = fmt.Errorf("invalid OID4VP profile: %w", err)
 		return b
 	}
-	b.profile = normalized
+	b.options = p.Options()
 	return b
 }
 
@@ -251,14 +251,11 @@ func (b *requestBuilder) Build() (*CredentialPresentationRequest, error) {
 		b.errorResponseAllowed = false
 		return nil, err
 	}
-	if err := b.enforceHAIPProfile(); err != nil {
+	if err := b.enforceProfileOptions(); err != nil {
 		return nil, err
 	}
 	if b.req.ClientMetadata != nil {
-		b.req.ClientMetadata.encryptionPolicy = encryptionPolicyFinal
-		if b.haipRequestObjectPolicy() {
-			b.req.ClientMetadata.encryptionPolicy = encryptionPolicyHAIP
-		}
+		b.req.ClientMetadata.admitEncryptionRules(b.options.ResponseEncryption)
 	}
 	return b.req, nil
 }

@@ -12,14 +12,13 @@ import (
 )
 
 // attestationPolicyFor is the policy an attestation from provider is
-// validated under: Config.Attestation.Trust, with RequireX5C raised under HAIP
-// (HAIP Sections 4.4.1 and 4.5.1), and, when no resolver is configured, the
-// bundled static attester's own public key for an attestation without x5c.
+// validated under: Config.Attestation.Trust, with the profile's
+// Options.AttestationX5C added to its X5C rules (HAIP Sections 4.4.1 and
+// 4.5.1), and, when no resolver is configured, the bundled static attester's
+// own public key for an attestation without x5c.
 func (w *Wallet) attestationPolicyFor(provider any) attestation.TrustPolicy {
 	policy := w.attestationSettings().Trust
-	if w.profile.IsHAIP() {
-		policy.RequireX5C = true
-	}
+	policy.X5C = policy.X5C.Union(w.options().AttestationX5C)
 	if policy.ResolveKey != nil {
 		return policy
 	}

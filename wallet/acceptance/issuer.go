@@ -18,9 +18,11 @@ import (
 )
 
 // authenticateIssuer establishes the issuer key and verifies the signature
-// under it. requireX5C (HAIP SD-JWT VC) makes a validated x5c chain the only
-// way: IssuerX509 is required and neither UnverifiedIssuer nor
-// ResolveIssuerKeysWhenX5CUntrusted applies.
+// under it. requireX5C (IssuerX5C.Require on an SD-JWT VC) makes a validated
+// x5c chain the only way: IssuerX509 is required and neither
+// UnverifiedIssuer nor ResolveIssuerKeysWhenX5CUntrusted applies.
+// IssuerX5C.ExcludeAnchor and RejectSelfSigned apply to every x5c chain the
+// issuer is authenticated with.
 //
 // An x5c header is evidence only when IssuerX509 is configured. A caller that
 // resolves keys itself keeps that mechanism even when x5c is present
@@ -57,12 +59,14 @@ func (a *Acceptor) authenticateIssuer(ctx context.Context, parsed *credential.Cr
 		return err
 	}
 	trust := policy.IssuerX509
-	if a.profile.IsHAIP() {
+	if a.x5c.RejectSelfSigned {
 		// HAIP §6.1.1: "The X.509 certificate signing the request MUST NOT be
 		// self-signed."
 		if err := commonX509.RequireNonSelfSignedLeaf(certificates, "issuer"); err != nil {
 			return fmt.Errorf("%w: %w", ErrIssuerCertificateSelfSigned, err)
 		}
+	}
+	if a.x5c.ExcludeAnchor {
 		// HAIP §6.1.1: "The X.509 certificate of the trust anchor MUST NOT be
 		// included in the x5c JOSE header". Both anchor forms are consulted.
 		containsAnchor, err := commonX509.ContainsTrustAnchor(certificates, trust.TrustAnchors, trust.RootCAs)

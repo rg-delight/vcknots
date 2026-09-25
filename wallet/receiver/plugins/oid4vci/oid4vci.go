@@ -37,10 +37,12 @@ type Oid4vciReceiver struct {
 	// AppendedMetadataPathFallback retries Credential Issuer Metadata at the
 	// OpenID4VCI Draft 13 Section 11.2.2 location, the well-known path appended
 	// to an identifier that has a path, when the Section 12.2.2 location
-	// answers 404. It is off by default and never applies under HAIP.
+	// answers 404. It is off by default and never applies under
+	// Options.RequireWellKnownMetadataLocation.
 	AppendedMetadataPathFallback bool
-	// Profile selects the OpenID4VCI 1.0 policy. The zero value normalizes to
-	// profile.Final; profile.HAIP enforces HAIP 1.0.
+	// Profile is the OpenID4VCI 1.0 profile whose Options the receiver
+	// applies. The zero value is profile.Final(); profile.HAIP() enforces
+	// HAIP 1.0. A draft profile is refused (profile.ErrDraftProfile).
 	Profile profile.Profile
 	// IssuerMetadataSigning configures OpenID4VCI 1.0 Section 12.2.3 signed
 	// Credential Issuer Metadata. A nil value requests signed metadata under
@@ -71,29 +73,25 @@ var (
 	_ profile.Carrier        = (*Oid4vciReceiver)(nil)
 )
 
-// ProtocolProfile reports the normalized OID4VCI profile this receiver enforces.
+// ProtocolProfile reports the OpenID4VCI 1.0 profile this receiver enforces.
 func (o *Oid4vciReceiver) ProtocolProfile() profile.Profile {
-	normalized, err := o.Profile.Normalize()
-	if err != nil {
-		return o.Profile
-	}
-	return normalized
+	return o.Profile
 }
 
-// normalizedProfile normalizes the configured profile once. Unknown values fail
-// closed before any network access so every checkpoint reads a validated value.
-func (o *Oid4vciReceiver) normalizedProfile() (profile.Profile, error) {
-	normalized, err := o.Profile.Normalize()
-	if err != nil {
-		return "", fmt.Errorf("invalid OID4VCI profile: %w", err)
+// profileOptions returns the Options of the configured profile. A draft
+// profile fails closed before any network access.
+func (o *Oid4vciReceiver) profileOptions() (profile.Options, error) {
+	if err := o.Profile.RequireFinalVersion(); err != nil {
+		return profile.Options{}, fmt.Errorf("invalid OID4VCI profile: %w", err)
 	}
-	return normalized, nil
+	return o.Profile.Options(), nil
 }
 
-// requireHAIPTransport rejects the test-only HTTP escape when HAIP is selected.
-// HAIP §4 requires TLS for issuer and authorization server endpoints.
-func (o *Oid4vciReceiver) requireHAIPTransport(normalized profile.Profile) error {
-	if normalized.IsHAIP() && o.AllowHTTP {
+// requireSecureTransport rejects the test-only HTTP escape under
+// Options.ForbidInsecureTransports (HAIP §4 requires TLS for issuer and
+// authorization server endpoints).
+func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error {
+	if options.ForbidInsecureTransports && o.AllowHTTP {
 		return fmt.Errorf("%w: HAIP profile does not permit AllowHTTP", common.ErrInvalidInput)
 	}
 	return nil

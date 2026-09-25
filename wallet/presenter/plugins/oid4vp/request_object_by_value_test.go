@@ -199,7 +199,7 @@ func (f *requestObjectFixture) haipPresenter() *Oid4vpPresenter {
 	return &Oid4vpPresenter{
 		HTTPClient:              f.server.Client(),
 		RequestObjectValidation: &validation,
-		Profile:                 profile.HAIP,
+		Profile:                 profile.HAIP(),
 	}
 }
 

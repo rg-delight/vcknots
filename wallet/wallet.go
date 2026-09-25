@@ -69,9 +69,14 @@ type Wallet struct {
 	dpop       DPoPConfig
 	clientAuth ClientAuthConfig
 
-	// profile is the policy this wallet enforces. Every protocol plugin the
-	// wallet uses reports the same profile (see Config.Profile).
+	// profile is the OpenID4VCI 1.0 / OpenID4VP 1.0 profile this wallet
+	// enforces. Every protocol plugin the wallet uses reports the same
+	// profile (see Config.Profiles).
 	profile profile.Profile
+	// draft13 and draft24 record whether Config.Profiles enables
+	// profile.Draft13 and profile.Draft24.
+	draft13 bool
+	draft24 bool
 
 	issuance IssuanceConfig
 	// attestationConfig is a pointer so that Wallet stays comparable.
@@ -106,13 +111,26 @@ type Config struct {
 	DPoP       DPoPConfig
 	ClientAuth ClientAuthConfig
 
-	// Profile selects the protocol policy; the zero value is profile.Final.
+	// Profiles selects the protocol profiles the wallet runs: exactly one
+	// OpenID4VCI 1.0 / OpenID4VP 1.0 profile (profile.Final or profile.HAIP,
+	// or one of them strengthened with Profile.With), and any of the draft
+	// profiles profile.Draft13 and profile.Draft24, which enable
+	// Wallet.Draft13 and Wallet.Draft24. Without a draft profile, its entry
+	// points return ErrProfileForbidsDraft. HAIP 1.0 profiles only the 1.0
+	// specifications, so a HAIP profile with a draft profile is refused
+	// (ErrProfileForbidsDraft); a second 1.0 profile, a repeated draft
+	// profile or no 1.0 profile is ErrInvalidArgument.
+	//
 	// Every plugin of Receiver and Presenter that implements profile.Carrier
-	// must report this profile (ErrProfileMismatch). Under profile.HAIP a
-	// plugin that does not implement profile.Carrier is refused
-	// (ErrProfilePluginUnsupported), and so is TestHooks
-	// (ErrProfileForbidsDraft).
-	Profile profile.Profile
+	// must report the 1.0 profile (ErrProfileMismatch). When that profile
+	// carries any option, a plugin that does not implement profile.Carrier
+	// is refused (ErrProfilePluginUnsupported), since it would not apply
+	// them.
+	//
+	// An empty Profiles is DefaultProfiles(): Final with both draft profiles.
+	// That is what the library ran before profiles could be chosen, so a
+	// zero Config keeps every entry point an existing integration calls.
+	Profiles []profile.Profile
 
 	// SupportedTransactionDataTypes lists the OpenID4VP transaction_data
 	// "type" values the wallet can process (OpenID4VP 1.0 Section 5.1). It
@@ -207,7 +225,9 @@ type AttestationConfig struct {
 
 // TestHooks rewrite messages after the library built them, so a tester can
 // see how an issuer or verifier handles a malformed one. A nil hook leaves its
-// message unchanged. They are refused under the HAIP profile.
+// message unchanged. They rewrite draft protocol messages only, so they are
+// refused (ErrProfileForbidsDraft) unless Config.Profiles enables a draft
+// profile, which never happens under HAIP.
 type TestHooks struct {
 	// KeyProof rewrites Draft 13 key proofs.
 	KeyProof ProofTransform
@@ -296,12 +316,13 @@ func newWallet(config Config) (*Wallet, error) {
 	if err := validateClientAuthConfig(config.ClientAuth); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidArgument, err)
 	}
-	walletProfile, err := config.Profile.Normalize()
+	profiles, err := resolveProfiles(config.Profiles)
 	if err != nil {
-		return nil, fmt.Errorf("invalid wallet profile: %w", err)
+		return nil, err
 	}
-	if walletProfile.IsHAIP() && config.TestHooks != nil {
-		return nil, fmt.Errorf("%w: TestHooks are refused under HAIP", ErrProfileForbidsDraft)
+	walletProfile := profiles.final
+	if config.TestHooks != nil && !profiles.draft13 && !profiles.draft24 {
+		return nil, fmt.Errorf("%w: TestHooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
 	}
 	if config.Storeless && config.CredStore != nil {
 		return nil, fmt.Errorf("%w: a storeless wallet cannot be configured with a credential store", ErrInvalidArgument)
@@ -391,6 +412,8 @@ func newWallet(config Config) (*Wallet, error) {
 		clientAuth: config.ClientAuth,
 
 		profile: walletProfile,
+		draft13: profiles.draft13,
+		draft24: profiles.draft24,
 
 		issuance:          config.Issuance,
 		attestationConfig: &attestationConfig,
@@ -401,10 +424,10 @@ func newWallet(config Config) (*Wallet, error) {
 }
 
 // newDefaultReceiver builds the receiver of a wallet whose Config.Receiver is
-// nil: the upstream defaults under Final, and only an OpenID4VCI plugin
-// constructed with the HAIP profile under HAIP.
+// nil: the upstream defaults under plain Final, and only an OpenID4VCI plugin
+// constructed with the wallet's profile when that profile carries options.
 func newDefaultReceiver(walletProfile profile.Profile) (*receiver.ReceivingDispatcher, error) {
-	if !walletProfile.IsHAIP() {
+	if walletProfile == profile.Final() {
 		return receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
 	}
 	return receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &receiverOid4vci.Oid4vciReceiver{
@@ -414,23 +437,24 @@ func newDefaultReceiver(walletProfile profile.Profile) (*receiver.ReceivingDispa
 }
 
 // checkPluginProfiles refuses a plugin whose profile.Carrier reports another
-// profile than the wallet's and, under HAIP, a plugin that is not a Carrier:
-// HAIP adds checks a plugin must know to apply.
+// profile than the wallet's and, when the wallet's profile carries options, a
+// plugin that is not a Carrier: an option adds checks a plugin must know to
+// apply.
 func checkPluginProfiles[P any](plugins []P, walletProfile profile.Profile) error {
 	for _, plugin := range plugins {
 		carrier, ok := any(plugin).(profile.Carrier)
 		if !ok {
-			if walletProfile.IsHAIP() {
+			if walletProfile.Options() != (profile.Options{}) {
 				return fmt.Errorf("%w: %T does not implement profile.Carrier", ErrProfilePluginUnsupported, plugin)
 			}
 			continue
 		}
-		pluginProfile, err := carrier.ProtocolProfile().Normalize()
-		if err != nil {
+		pluginProfile := carrier.ProtocolProfile()
+		if err := pluginProfile.RequireFinalVersion(); err != nil {
 			return fmt.Errorf("%T: %w", plugin, err)
 		}
 		if pluginProfile != walletProfile {
-			return fmt.Errorf("%w: %T enforces %q, the wallet %q", ErrProfileMismatch, plugin, pluginProfile, walletProfile)
+			return fmt.Errorf("%w: %T enforces %s, the wallet %s", ErrProfileMismatch, plugin, pluginProfile, walletProfile)
 		}
 	}
 	return nil

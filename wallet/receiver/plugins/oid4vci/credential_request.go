@@ -38,7 +38,7 @@ func (o *Oid4vciReceiver) FetchNonce(receivingTypes types.SupportedReceivingType
 	if receivingTypes != types.Oid4vci {
 		return nil, fmt.Errorf("unsupported flavor: %v", receivingTypes)
 	}
-	if _, err := o.normalizedProfile(); err != nil {
+	if _, err := o.profileOptions(); err != nil {
 		return nil, err
 	}
 

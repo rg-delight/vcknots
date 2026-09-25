@@ -15,6 +15,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // JOSEHeader is the protected header of an attestation JWT, as a KeyResolver
@@ -37,9 +38,12 @@ type KeyResolver func(header JOSEHeader) (any, error)
 // are configured; one without x5c is verified with ResolveKey. There is no
 // way to accept an unverified attestation.
 type TrustPolicy struct {
-	// RequireX5C enforces HAIP §4.4.1 and §4.5.1: the signing certificate is
-	// in x5c, is not self-signed, and the chain omits the trust anchor.
-	RequireX5C bool
+	// X5C applies the HAIP 1.0 certificate rules of §4.4.1 and §4.5.1:
+	// Require refuses an attestation without x5c, RejectSelfSigned a
+	// self-signed signing certificate, and ExcludeAnchor a chain that
+	// includes a configured trust anchor. The wallet adds the rules of its
+	// profile's Options.AttestationX5C.
+	X5C profile.X5CRules
 	// TrustAnchors or RootCAs (at most one) are the Wallet Provider anchors.
 	// Without them an x5c chain is not validated; only the signature is.
 	TrustAnchors []*x509.Certificate
@@ -101,7 +105,7 @@ func validateClient(ctx context.Context, attestation *ClientAttestation, request
 	if err := authenticate(ctx, attestation.JWT, header, policy, "client attestation", now); err != nil {
 		return err
 	}
-	return checkClientClaims(attestation, request, policy.RequireX5C, now)
+	return checkClientClaims(attestation, request, now)
 }
 
 func validateKey(ctx context.Context, attestation *KeyAttestation, request KeyRequest, policy TrustPolicy) error {
@@ -116,11 +120,11 @@ func validateKey(ctx context.Context, attestation *KeyAttestation, request KeyRe
 	if err := authenticate(ctx, attestation.JWT, header, policy, "key attestation", now); err != nil {
 		return err
 	}
-	return checkKeyClaims(attestation, request, policy.RequireX5C, now)
+	return checkKeyClaims(attestation, request, now)
 }
 
 // checkClientClaims checks the claims of an authenticated Wallet Attestation.
-func checkClientClaims(attestation *ClientAttestation, request ClientRequest, requireX5C bool, now time.Time) error {
+func checkClientClaims(attestation *ClientAttestation, request ClientRequest, now time.Time) error {
 	header, claims, err := parseJWT(attestation.JWT)
 	if err != nil {
 		return fmt.Errorf("client attestation is malformed: %w", err)
@@ -140,17 +144,11 @@ func checkClientClaims(attestation *ClientAttestation, request ClientRequest, re
 	if err := sameKey(request.ClientKey, claims.Cnf.JWK); err != nil {
 		return fmt.Errorf("client attestation cnf.jwk does not match the wallet client key: %w", err)
 	}
-	if err := checkExpiry("client attestation", claims.Exp, attestation.ExpiresAt, now); err != nil {
-		return err
-	}
-	if requireX5C {
-		return requireNonSelfSigned(header, "client attestation")
-	}
-	return nil
+	return checkExpiry("client attestation", claims.Exp, attestation.ExpiresAt, now)
 }
 
 // checkKeyClaims checks the claims of an authenticated key attestation.
-func checkKeyClaims(attestation *KeyAttestation, request KeyRequest, requireX5C bool, now time.Time) error {
+func checkKeyClaims(attestation *KeyAttestation, request KeyRequest, now time.Time) error {
 	header, claims, err := parseJWT(attestation.JWT)
 	if err != nil {
 		return fmt.Errorf("key attestation is malformed: %w", err)
@@ -184,9 +182,6 @@ func checkKeyClaims(attestation *KeyAttestation, request KeyRequest, requireX5C 
 			return fmt.Errorf("key attestation does not attest the holder key at index %d", index)
 		}
 	}
-	if requireX5C {
-		return requireNonSelfSigned(header, "key attestation")
-	}
 	return nil
 }
 
@@ -204,14 +199,6 @@ func checkExpiry(label string, exp *float64, expiresAt time.Time, now time.Time)
 		return fmt.Errorf("%s is expired", label)
 	}
 	return nil
-}
-
-func requireNonSelfSigned(header jwtHeader, label string) error {
-	chain, err := commonX509.DecodeX5CChain(header.X5C)
-	if err != nil {
-		return err
-	}
-	return commonX509.RequireNonSelfSignedLeaf(chain, label)
 }
 
 type jwtHeader struct {
@@ -322,7 +309,10 @@ func authenticate(ctx context.Context, token string, header jwtHeader, policy Tr
 		}
 		chain = decoded
 	}
-	if policy.RequireX5C {
+	if policy.X5C.Require && len(chain) == 0 {
+		return fmt.Errorf("%s must include an x5c header chain", label)
+	}
+	if policy.X5C.RejectSelfSigned && len(chain) > 0 {
 		if err := commonX509.RequireNonSelfSignedLeaf(chain, label); err != nil {
 			return err
 		}
@@ -363,13 +353,13 @@ func authenticate(ctx context.Context, token string, header jwtHeader, policy Tr
 }
 
 // verifyChain validates an x5c chain against the configured anchors; without
-// anchors there is nothing to validate against. Under RequireX5C the chain must
-// not carry the anchor (HAIP §4.4.1, §4.5.1).
+// anchors there is nothing to validate against. Under X5C.ExcludeAnchor the
+// chain must not carry the anchor (HAIP §4.4.1, §4.5.1).
 func verifyChain(ctx context.Context, chain []*x509.Certificate, policy TrustPolicy, label string, now time.Time) error {
 	if len(policy.TrustAnchors) == 0 && policy.RootCAs == nil {
 		return nil
 	}
-	if policy.RequireX5C {
+	if policy.X5C.ExcludeAnchor {
 		containsAnchor, err := commonX509.ContainsTrustAnchor(chain, policy.TrustAnchors, policy.RootCAs)
 		if err != nil {
 			return fmt.Errorf("%s x5c header is invalid: %w", label, err)

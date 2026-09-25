@@ -51,23 +51,23 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		want   error
 	}{
 		"HAIP refuses a receiver plugin that reports no profile": {
-			config: Config{Profile: profile.HAIP, Storeless: true, Receiver: receiverWith(t, mock.NewMockReceiver(t.TempDir()))},
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Receiver: receiverWith(t, mock.NewMockReceiver(t.TempDir()))},
 			want:   ErrProfilePluginUnsupported,
 		},
 		"HAIP refuses a presenter plugin that reports no profile": {
-			config: Config{Profile: profile.HAIP, Storeless: true, Presenter: presenterWith(t, plainPresenter{})},
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Presenter: presenterWith(t, plainPresenter{})},
 			want:   ErrProfilePluginUnsupported,
 		},
 		"HAIP refuses a plugin whose zero profile means Final": {
-			config: Config{Profile: profile.HAIP, Storeless: true, Receiver: receiverWith(t, &oid4vci.Oid4vciReceiver{})},
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Receiver: receiverWith(t, &oid4vci.Oid4vciReceiver{})},
 			want:   ErrProfileMismatch,
 		},
 		"Final refuses a HAIP plugin": {
-			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{Profile: profile.HAIP})},
+			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{Profile: profile.HAIP()})},
 			want:   ErrProfileMismatch,
 		},
 		"HAIP refuses test hooks": {
-			config: Config{Profile: profile.HAIP, Storeless: true, TestHooks: &TestHooks{}},
+			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, TestHooks: &TestHooks{}},
 			want:   ErrProfileForbidsDraft,
 		},
 		"transaction data types with an injected presenter": {
@@ -78,9 +78,9 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 			config: Config{Storeless: true, Presenter: presenterWith(t, plainPresenter{})},
 			want:   ErrInvalidArgument,
 		},
-		"unknown profile": {
-			config: Config{Profile: "haip-draft", Storeless: true},
-			want:   profile.ErrUnknownProfile,
+		"a draft profile reported by a plugin": {
+			config: Config{Storeless: true, Receiver: receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.Draft13()})},
+			want:   profile.ErrDraftProfile,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -98,18 +98,18 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 	})
 
 	t.Run("a refused plugin is left as it was given", func(t *testing.T) {
-		plugin := &oid4vci.Oid4vciReceiver{Profile: profile.Final}
-		_, err := NewWalletWithConfig(Config{Profile: profile.HAIP, Storeless: true, Receiver: receiverWith(t, plugin)})
+		plugin := &oid4vci.Oid4vciReceiver{Profile: profile.Final()}
+		_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Receiver: receiverWith(t, plugin)})
 		require.ErrorIs(t, err, ErrProfileMismatch)
-		require.Equal(t, profile.Final, plugin.Profile)
+		require.Equal(t, profile.Final(), plugin.Profile)
 	})
 
 	t.Run("the default HAIP receiver holds only HAIP plugins", func(t *testing.T) {
-		w, err := NewWalletWithConfig(Config{Profile: profile.HAIP, Storeless: true})
+		w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
 		require.NoError(t, err)
 		plugins := w.receiver.Plugins()
 		require.Len(t, plugins, 1)
-		require.Equal(t, profile.HAIP, plugins[0].(profile.Carrier).ProtocolProfile())
+		require.Equal(t, profile.HAIP(), plugins[0].(profile.Carrier).ProtocolProfile())
 	})
 }
 
@@ -117,8 +117,8 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 // is not installed, and the receiver-using methods report the refusal instead
 // of running without the HAIP checks.
 func TestSetReceiverChecksProfile(t *testing.T) {
-	finalPlugin := &oid4vci.Oid4vciReceiver{Profile: profile.Final}
-	w, err := NewWalletWithConfig(Config{Profile: profile.HAIP, Storeless: true})
+	finalPlugin := &oid4vci.Oid4vciReceiver{Profile: profile.Final()}
+	w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
 	require.NoError(t, err)
 
 	w.SetReceiver(receiverWith(t, finalPlugin))
@@ -131,13 +131,13 @@ func TestSetReceiverChecksProfile(t *testing.T) {
 	require.ErrorIs(t, err, ErrProfileMismatch)
 	_, err = w.receiver.Draft13Transport(receiverTypes.Oid4vci)
 	require.ErrorIs(t, err, ErrProfileMismatch)
-	require.Equal(t, profile.Final, finalPlugin.Profile, "the wallet must not change a plugin it was given")
+	require.Equal(t, profile.Final(), finalPlugin.Profile, "the wallet must not change a plugin it was given")
 
 	w.SetReceiver(nil)
 	_, err = w.receiver.OID4VCITransport(receiverTypes.Oid4vci)
 	requireCoded(t, err, ErrInvalidArgument)
 
-	haipReceiver := receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP})
+	haipReceiver := receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()})
 	w.SetReceiver(haipReceiver)
 	require.Same(t, haipReceiver, w.receiver)
 }
@@ -145,7 +145,7 @@ func TestSetReceiverChecksProfile(t *testing.T) {
 func TestSetReceiverRefusalReachesReceiveCredential(t *testing.T) {
 	w, err := NewWalletWithConfig(Config{Storeless: true})
 	require.NoError(t, err)
-	w.SetReceiver(receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP}))
+	w.SetReceiver(receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()}))
 
 	issuer, err := url.Parse("https://issuer.example")
 	require.NoError(t, err)

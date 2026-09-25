@@ -15,6 +15,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -35,7 +36,8 @@ func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType 
 // ReceiveCredential runs a Pre-Authorized Code issuance through the receiver
 // plugin's Receiver methods and stores the credential. Without
 // Config.CredentialAcceptance the credential is parsed but its issuer is not
-// authenticated. It returns ErrProfileForbidsDraft under HAIP; new code uses
+// authenticated. It is OpenID4VCI Draft 13 and returns ErrProfileForbidsDraft
+// unless Config.Profiles enables profile.Draft13; new code uses
 // AuthorizePreAuthorizedIssuance and RequestCredential.
 func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
 	saved, err := w.receiveCredential(req)
@@ -43,8 +45,8 @@ func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredenti
 }
 
 func (w *Wallet) receiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error) {
-	if w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := w.requireDraft13(); err != nil {
+		return nil, err
 	}
 	preAuthCode, err := w.validateCredentialOffer(req.CredentialOffer)
 	if err != nil {
@@ -495,7 +497,7 @@ func (w *Wallet) storeAndParseCredential(ctx context.Context, credentialJWT *str
 		serializationFlavor = credential.JwtVc
 	}
 
-	parsedCredential, verification, verificationErr := w.verifyCredentialForAcceptanceContext(ctx, []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
+	parsedCredential, verification, verificationErr := w.verifyCredentialUnder(ctx, profile.Draft13().Options(), []byte(*credentialJWT), serializationFlavor, holderKey, requirePolicy)
 	if verificationErr != nil {
 		return nil, fmt.Errorf("failed to verify credential: %w", verificationErr)
 	}

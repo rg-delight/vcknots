@@ -220,7 +220,7 @@ func TestWallet_Draft24RefusedUnderHAIP(t *testing.T) {
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	uri := draft24PresentationURI(fixture.baseURL, "direct_post", "")
 	request := parseDraft24(t, fixture.wallet, uri)
-	fixture.wallet.profile = profile.HAIP
+	useProfiles(t, fixture.wallet, profile.HAIP())
 
 	_, err := fixture.wallet.Draft24().ParsePresentationRequest(t.Context(), uri)
 	require.ErrorIs(t, err, ErrProfileForbidsDraft)

@@ -84,13 +84,14 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	if err := w.checkPrivateKeyJWT(as); err != nil {
 		return nil, err
 	}
-	// HAIP Section 4 requires PAR; OpenID4VCI 1.0 does not, so a Final
-	// issuer without a PAR endpoint gets the parameters inline.
+	// HAIP Section 4 requires PAR (Options.RequirePAR); OpenID4VCI 1.0 does
+	// not, so a Final issuer without a PAR endpoint gets the parameters
+	// inline.
 	usePAR := as.PushedAuthorizationRequestEndpoint != nil
-	if !usePAR && w.profile.IsHAIP() {
+	if !usePAR && w.options().RequirePAR {
 		return nil, invalidMetadata("HAIP requires a pushed authorization request endpoint on the authorization server")
 	}
-	scope, details, err := authorizationRequestParameters(req.AuthorizationRequestType, configurationID, config, w.profile.IsHAIP())
+	scope, details, err := authorizationRequestParameters(req.AuthorizationRequestType, configurationID, config, w.options().RequireScopeAuthorization)
 	if err != nil {
 		return nil, err
 	}
@@ -186,8 +187,9 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	advertised := as.AuthorizationResponseIssParameterSupported
 	code, err := validateAuthorizationRedirect(redirectURL, a.AuthorizationURL, a.State, a.RedirectURI, authorizationResponseIssuerPolicy{
 		expected: discovery.authorizationServer,
-		// FAPI 2.0 Section 5.3.2.2, which HAIP builds on, requires the check.
-		required: w.profile.IsHAIP() || (advertised != nil && *advertised),
+		// FAPI 2.0 Section 5.3.2.2, which HAIP builds on, requires the check
+		// (Options.RequireAuthorizationResponseIss).
+		required: w.options().RequireAuthorizationResponseIss || (advertised != nil && *advertised),
 	})
 	if err != nil {
 		return nil, err
@@ -255,7 +257,7 @@ func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 	if w.credentialAcceptance == nil {
 		return fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
-	if w.profile.IsHAIP() && w.dpop.Key == nil {
+	if w.options().RequireDPoP && w.dpop.Key == nil {
 		return fmt.Errorf("HAIP requires Config.DPoP.Key: %w", ErrDPoPKeyRequired)
 	}
 	return nil
@@ -268,7 +270,7 @@ func (w *Wallet) requireFinalAuthorizationStage(ctx context.Context) error {
 	if err := w.requireFinalIssuance(ctx); err != nil {
 		return err
 	}
-	if w.profile.IsHAIP() && w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
+	if w.options().RequireClientAuthentication && w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
 		return invalidArgument("HAIP requires an OAuth2 client authentication mechanism")
 	}
 	return nil
@@ -311,8 +313,8 @@ func (w *Wallet) finalCredentialConfiguration(transport receiverTypes.OID4VCITra
 		return config, err
 	}
 	validator, _ := transport.(oid4vciProfileValidator)
-	if w.profile.IsHAIP() && validator == nil {
-		return config, invalidArgument("HAIP requires a receiver plugin that validates issuer metadata against the profile")
+	if w.options().ValidatesCredentialConfigurations() && validator == nil {
+		return config, invalidArgument("the %s profile requires a receiver plugin that validates issuer metadata against the profile", w.profile.Name())
 	}
 	if validator != nil {
 		if err := validator.ValidateCredentialConfigurationForProfile(config); err != nil {
@@ -366,9 +368,10 @@ func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTyp
 // authorizationRequestParameters resolves the scope or authorization_details
 // that request the configuration (OpenID4VCI 1.0 Sections 5.1.1, 5.1.2). The
 // default is scope when advertised, since without one "the only way to request
-// the Credential is using authorization_details" (Section 12.2.4). HAIP allows
-// scope only (HAIP Sections 4.2, 4.3).
-func authorizationRequestParameters(requested AuthorizationRequestType, configurationID string, config receiverTypes.CredentialConfiguration, haip bool) (string, []map[string]any, error) {
+// the Credential is using authorization_details" (Section 12.2.4).
+// scopeOnly (Options.RequireScopeAuthorization) allows scope only (HAIP
+// Sections 4.2, 4.3).
+func authorizationRequestParameters(requested AuthorizationRequestType, configurationID string, config receiverTypes.CredentialConfiguration, scopeOnly bool) (string, []map[string]any, error) {
 	scope := strings.TrimSpace(config.Scope)
 	details := []map[string]any{{
 		"type":                        receiverTypes.AuthorizationDetailTypeOpenIDCredential,
@@ -379,20 +382,20 @@ func authorizationRequestParameters(requested AuthorizationRequestType, configur
 		if scope != "" {
 			return config.Scope, nil, nil
 		}
-		if haip {
+		if scopeOnly {
 			return "", nil, invalidMetadata("HAIP requires the credential configuration %q to advertise a scope", configurationID)
 		}
 		return "", details, nil
 	case AuthorizationRequestScope:
 		if scope == "" {
-			if haip {
+			if scopeOnly {
 				return "", nil, invalidMetadata("HAIP requires the credential configuration %q to advertise a scope", configurationID)
 			}
 			return "", nil, invalidMetadata("authorization request type %q requires the credential configuration %q to advertise a scope", AuthorizationRequestScope, configurationID)
 		}
 		return config.Scope, nil, nil
 	case AuthorizationRequestDetails:
-		if haip {
+		if scopeOnly {
 			return "", nil, invalidArgument("HAIP requires the scope authorization request type")
 		}
 		return "", details, nil

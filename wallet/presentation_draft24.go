@@ -20,7 +20,8 @@ import (
 // Draft24Presentation parses OpenID4VP Draft 24 requests, which answer with
 // DIF Presentation Exchange. Its handles are answered with
 // Wallet.SubmitPresentation and Wallet.DeclinePresentation. Every method
-// returns ErrProfileForbidsDraft under the HAIP profile.
+// returns ErrProfileForbidsDraft unless Config.Profiles enables
+// profile.Draft24.
 type Draft24Presentation struct {
 	w *Wallet
 }
@@ -33,8 +34,8 @@ func (w *Wallet) Draft24() *Draft24Presentation {
 // ParsePresentationRequest parses and admits an OpenID4VP Draft 24
 // Authorization Request URI.
 func (d *Draft24Presentation) ParsePresentationRequest(ctx context.Context, uri string) (*oid4vp.AdmittedRequest, error) {
-	if d.w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := d.w.requireDraft24(); err != nil {
+		return nil, err
 	}
 	return admittedOID4VPRequest(d.w.presenter.ParseDraft24Request(ctx, presenterTypes.Oid4vp, uri))
 }
@@ -42,8 +43,8 @@ func (d *Draft24Presentation) ParsePresentationRequest(ctx context.Context, uri 
 // ParsePresentationRequestObject authenticates a Draft 24 Request Object the
 // caller already holds and admits the request it carries.
 func (d *Draft24Presentation) ParsePresentationRequestObject(ctx context.Context, requestObject string, src presenterTypes.RequestObjectSource) (*oid4vp.AdmittedRequest, error) {
-	if d.w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := d.w.requireDraft24(); err != nil {
+		return nil, err
 	}
 	return admittedOID4VPRequest(d.w.presenter.ParseDraft24RequestObject(ctx, presenterTypes.Oid4vp, requestObject, src))
 }

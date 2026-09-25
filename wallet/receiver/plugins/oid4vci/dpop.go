@@ -89,10 +89,11 @@ func (o *Oid4vciReceiver) storeDPoPNonceLocked(server, nonce string) {
 	delete(cache.entries, oldest)
 }
 
-// requireDPoPTokenType applies HAIP Section 4 (sender-constrained access
-// tokens): under HAIP a token_type other than DPoP is ErrDPoPRequired.
-func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
-	if normalized.IsHAIP() && !strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
+// requireDPoPTokenType applies Options.RequireDPoP (HAIP Section 4,
+// sender-constrained access tokens): a token_type other than DPoP is
+// ErrDPoPRequired.
+func requireDPoPTokenType(options profile.Options, tokenType string) error {
+	if options.RequireDPoP && !strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
 		return fmt.Errorf(
 			"%w: HAIP requires a DPoP-bound access token, the token endpoint issued token_type %q",
 			ErrDPoPRequired, tokenType)
@@ -103,7 +104,7 @@ func requireDPoPTokenType(normalized profile.Profile, tokenType string) error {
 // ErrDPoPRequired reports that a DPoP proof is required (RFC 9449) and the
 // wallet cannot send one: a Bearer-token request answered with a DPoP
 // challenge, a DPoP-bound token without a proof factory, or a non-DPoP token
-// under HAIP.
+// under Options.RequireDPoP.
 var ErrDPoPRequired = common.NewCodedError("dpop_required", "credential endpoint requires DPoP")
 
 // dpopAuthorizationScheme is the RFC 9449 Section 7.1 authentication scheme for

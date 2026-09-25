@@ -33,19 +33,19 @@ func newTokenServer(t *testing.T, tokenType string) common.URIField {
 func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 	t.Run("pre-authorized token path", func(t *testing.T) {
 		bearer := newTokenServer(t, "Bearer")
-		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
+		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
 		token, err := final.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.NoError(t, err)
 		require.Equal(t, "Bearer", token.TokenType)
 
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
+		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
 		_, err = haip.FetchAccessToken(types.Oid4vci, bearer, "code", "")
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
 	t.Run("DPoP token type is case-insensitive", func(t *testing.T) {
 		dpop := newTokenServer(t, "dpop")
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
+		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
 		token, err := haip.FetchAccessToken(types.Oid4vci, dpop, "code", "")
 		require.NoError(t, err)
 		require.Equal(t, "dpop", token.TokenType)
@@ -56,11 +56,11 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		request := types.TokenRequest{
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
-		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
+		final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
 		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
 		require.NoError(t, err)
 
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
+		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
 		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: fixedProof("proof")})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
@@ -70,26 +70,35 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		request := types.TokenRequest{
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
-		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
+		haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
 		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: func() (types.OAuthClientAttestationHeaders, error) {
 			return types.OAuthClientAttestationHeaders{}, nil
 		}, DPoP: func(string) (string, error) { return "proof", nil }})
 		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
 	})
 
-	t.Run("unknown profile fails closed", func(t *testing.T) {
+	t.Run("a draft profile fails closed", func(t *testing.T) {
 		bearer := newTokenServer(t, "DPoP")
-		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Profile("bogus")}
+		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Draft13()}
 		_, err := receiver.FetchAccessToken(types.Oid4vci, bearer, "code", "")
-		require.ErrorContains(t, err, "unknown protocol profile")
+		require.ErrorIs(t, err, profile.ErrDraftProfile)
+	})
+
+	t.Run("RequireDPoP alone on Final", func(t *testing.T) {
+		bearer := newTokenServer(t, "Bearer")
+		dpopOnly, err := profile.Final().With(profile.Options{RequireDPoP: true})
+		require.NoError(t, err)
+		receiver := &Oid4vciReceiver{AllowHTTP: true, Profile: dpopOnly}
+		_, err = receiver.FetchAccessToken(types.Oid4vci, bearer, "code", "")
+		require.ErrorIs(t, err, ErrDPoPRequired)
 	})
 }
 
 // TestOid4vciReceiver_ProfileCredentialConfiguration covers HAIP §4.1 (scope)
 // and §5.3.2/§6 (formats).
 func TestOid4vciReceiver_ProfileCredentialConfiguration(t *testing.T) {
-	haip := &Oid4vciReceiver{Profile: profile.HAIP}
-	final := &Oid4vciReceiver{Profile: profile.Final}
+	haip := &Oid4vciReceiver{Profile: profile.HAIP()}
+	final := &Oid4vciReceiver{Profile: profile.Final()}
 
 	t.Run("Final accepts everything", func(t *testing.T) {
 		for _, config := range []types.CredentialConfiguration{
@@ -152,16 +161,16 @@ func TestDiscoverCredentialIssuerAppliesHAIPNonceEndpointRule(t *testing.T) {
 	}
 
 	t.Run("Final accepts metadata without nonce_endpoint", func(t *testing.T) {
-		require.NoError(t, discover(t, profile.Final, withBinding, false))
+		require.NoError(t, discover(t, profile.Final(), withBinding, false))
 	})
 	t.Run("HAIP rejects a binding method without nonce_endpoint", func(t *testing.T) {
-		require.ErrorContains(t, discover(t, profile.HAIP, withBinding, false), "requires nonce_endpoint")
+		require.ErrorContains(t, discover(t, profile.HAIP(), withBinding, false), "requires nonce_endpoint")
 	})
 	t.Run("HAIP accepts once nonce_endpoint is present", func(t *testing.T) {
-		require.NoError(t, discover(t, profile.HAIP, withBinding, true))
+		require.NoError(t, discover(t, profile.HAIP(), withBinding, true))
 	})
 	t.Run("HAIP accepts configurations without binding methods", func(t *testing.T) {
-		require.NoError(t, discover(t, profile.HAIP, withoutBinding, false))
+		require.NoError(t, discover(t, profile.HAIP(), withoutBinding, false))
 	})
 }
 
@@ -177,14 +186,14 @@ func TestOid4vciReceiver_ProfileAllowHTTP(t *testing.T) {
 	t.Cleanup(server.Close)
 	endpoint := common.URIField(*mustParseURL(t, server.URL))
 
-	haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP}
+	haip := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.HAIP()}
 	_, err := haip.FetchIssuerMetadata(endpoint, types.Oid4vci)
 	require.ErrorContains(t, err, "HAIP profile does not permit AllowHTTP")
 	code, coded := common.CodeOf(err)
 	require.True(t, coded)
 	require.Equal(t, "invalid_argument", code)
 
-	final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final}
+	final := &Oid4vciReceiver{AllowHTTP: true, Profile: profile.Final()}
 	_, err = final.FetchIssuerMetadata(endpoint, types.Oid4vci)
 	require.NoError(t, err)
 }

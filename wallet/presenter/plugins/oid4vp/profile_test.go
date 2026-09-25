@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,13 +23,13 @@ import (
 // both directions: the Final profile accepts the input and the HAIP profile
 // rejects it.
 func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
-	t.Run("unknown profile value is rejected before parsing", func(t *testing.T) {
+	t.Run("a draft profile is rejected before parsing", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
-			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: unknown, Delivery: deliverByValue})
-			if err == nil || !strings.Contains(err.Error(), "unknown protocol profile") {
-				t.Fatalf("profile %q: want unknown profile error, got %v", unknown, err)
+		for _, draft := range []profile.Profile{profile.Draft13(), profile.Draft24()} {
+			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: draft, Delivery: deliverByValue})
+			if !errors.Is(err, profile.ErrDraftProfile) {
+				t.Fatalf("profile %s: want ErrDraftProfile, got %v", draft.Name(), err)
 			}
 		}
 	})
@@ -36,10 +37,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 	t.Run("AllowHTTP under HAIP", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference, AllowHTTP: true}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference, AllowHTTP: true}); err != nil {
 			t.Fatalf("Final must accept AllowHTTP test policy: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, AllowHTTP: true})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, AllowHTTP: true})
 		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject AllowHTTP: %v", err)
 		}
@@ -48,12 +49,12 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 	t.Run("InsecureSkipX509Verify under HAIP", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference, Insecure: true}); err == nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference, Insecure: true}); err == nil {
 			// InsecureSkipX509Verify is refused on the Final Request Object path
 			// itself, so only assert the HAIP-specific policy error.
 			t.Log("Final rejected insecure verify for its own reason")
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, Insecure: true})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, Insecure: true})
 		if err == nil || !strings.Contains(err.Error(), "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify") {
 			t.Fatalf("HAIP must reject InsecureSkipX509Verify: %v", err)
 		}
@@ -64,10 +65,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		claims := f.claims()
 		claims["client_id"] = "x509_san_dns:verifier.example"
 		claims["response_uri"] = "https://verifier.example/response"
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference}); err != nil {
 			t.Fatalf("Final must accept x509_san_dns: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 		if err == nil || !strings.Contains(err.Error(), "x509_hash Client Identifier Prefix") {
 			t.Fatalf("HAIP must reject x509_san_dns: %v", err)
 		}
@@ -76,10 +77,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 	t.Run("request object by value under HAIP", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByValue}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByValue}); err != nil {
 			t.Fatalf("Final must accept a Request Object by value: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByValue})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByValue})
 		if err == nil || !strings.Contains(err.Error(), "request_uri") {
 			t.Fatalf("HAIP must reject a Request Object by value: %v", err)
 		}
@@ -92,10 +93,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		claims["response_mode"] = "fragment"
 		delete(claims, "response_uri")
 		claims["redirect_uri"] = "https://verifier.example/cb"
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByQuery}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByQuery}); err != nil {
 			t.Fatalf("Final must accept a plain query request: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByQuery})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByQuery})
 		if err == nil || !strings.Contains(err.Error(), "request_uri") {
 			t.Fatalf("HAIP must reject a plain query request: %v", err)
 		}
@@ -105,10 +106,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
 		claims["response_mode"] = "direct_post"
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference}); err != nil {
 			t.Fatalf("Final must accept direct_post: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 		if err == nil || !strings.Contains(err.Error(), "response_mode direct_post.jwt") {
 			t.Fatalf("HAIP must reject direct_post: %v", err)
 		}
@@ -120,7 +121,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		claims["response_mode"] = "dc_api.jwt"
 		delete(claims, "response_uri")
 		claims["redirect_uri"] = "https://verifier.example/cb"
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 		if err == nil || !strings.Contains(err.Error(), "only valid over the Digital Credentials API") {
 			t.Fatalf("dc_api.jwt must be refused outside the DC API: %v", err)
 		}
@@ -129,14 +130,14 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 	t.Run("DCQL credential format under HAIP", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference, DCQLFormat: "jwt_vc_json"}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference, DCQLFormat: "jwt_vc_json"}); err != nil {
 			t.Fatalf("Final must accept jwt_vc_json: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, DCQLFormat: "jwt_vc_json"})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, DCQLFormat: "jwt_vc_json"})
 		if err == nil || !strings.Contains(err.Error(), "dc+sd-jwt and mso_mdoc") {
 			t.Fatalf("HAIP must reject jwt_vc_json: %v", err)
 		}
-		_, err = f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, DCQLFormat: "vc+sd-jwt"})
+		_, err = f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, DCQLFormat: "vc+sd-jwt"})
 		if err == nil || !strings.Contains(err.Error(), "dc+sd-jwt and mso_mdoc") {
 			t.Fatalf("HAIP must reject vc+sd-jwt: %v", err)
 		}
@@ -145,10 +146,10 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 	t.Run("trust anchor in x5c header under HAIP", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
-		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final, Delivery: deliverByReference, IncludeRoot: true}); err != nil {
+		if _, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.Final(), Delivery: deliverByReference, IncludeRoot: true}); err != nil {
 			t.Fatalf("Final must accept a chain that includes the anchor: %v", err)
 		}
-		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference, IncludeRoot: true})
+		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, IncludeRoot: true})
 		if err == nil || !strings.Contains(err.Error(), "trust anchor certificate in the x5c header") {
 			t.Fatalf("HAIP must reject the anchor in x5c: %v", err)
 		}
@@ -165,7 +166,7 @@ func TestFinalAndHAIPProfileDraft24Exempt(t *testing.T) {
 	token := f.sign(t, claims, nil)
 	uri := "openid4vp://authorize?" + url.Values{"client_id": {claims["client_id"].(string)}, "request": {token}}.Encode()
 	p := f.presenter()
-	p.Profile = profile.HAIP
+	p.Profile = profile.HAIP()
 	if _, err := parseDraft24ForTest(p, uri); err != nil {
 		t.Fatalf("Draft24 must not enforce HAIP: %v", err)
 	}
@@ -346,7 +347,7 @@ func TestPresentDCQLHAIPResponseEncryption(t *testing.T) {
 	vpToken := map[string][]string{"pid": {"credential"}}
 
 	newHAIPPresenter := func(s *encryptionServer) *Oid4vpPresenter {
-		return &Oid4vpPresenter{HTTPClient: s.server.Client(), Profile: profile.HAIP}
+		return &Oid4vpPresenter{HTTPClient: s.server.Client(), Profile: profile.HAIP()}
 	}
 
 	t.Run("ECDH-ES with A128GCM is accepted", func(t *testing.T) {
@@ -452,7 +453,7 @@ func dcapiUnsignedInvocation(t *testing.T, responseMode string) types.DCAPIInvoc
 // MUST use the Response Mode dc_api.jwt." An unencrypted dc_api response is not
 // acceptable under HAIP.
 func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
-	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	p := &Oid4vpPresenter{Profile: profile.HAIP()}
 	_, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api"))
 	if err == nil {
 		t.Fatal("HAIP must reject the unencrypted dc_api response mode")
@@ -463,7 +464,7 @@ func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
 }
 
 func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
-	p := &Oid4vpPresenter{Profile: profile.HAIP}
+	p := &Oid4vpPresenter{Profile: profile.HAIP()}
 	request, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api.jwt"))
 	if err != nil {
 		t.Fatalf("HAIP must accept dc_api.jwt: %v", err)
@@ -476,7 +477,7 @@ func TestHAIPDCAPIAcceptsDCAPIJWT(t *testing.T) {
 // OID4VP 1.0 Appendix A.2 keeps the unencrypted dc_api Response Mode available
 // outside HAIP.
 func TestFinalDCAPIStillAcceptsDCAPI(t *testing.T) {
-	p := &Oid4vpPresenter{Profile: profile.Final}
+	p := &Oid4vpPresenter{Profile: profile.Final()}
 	request, err := parseDCAPIForTest(p, dcapiUnsignedInvocation(t, "dc_api"))
 	if err != nil {
 		t.Fatalf("Final must accept dc_api: %v", err)
@@ -504,8 +505,8 @@ func finalQueryBuilderParams(responseType string) map[string][]string {
 // value, because every HAIP checkpoint would then be inert without saying so.
 func TestNewRequestBuilderDefaultsToFinalProfile(t *testing.T) {
 	b := NewRequestBuilder()
-	if b.profile != profile.Final {
-		t.Fatalf("profile = %q, want %q", b.profile, profile.Final)
+	if b.options != profile.Final().Options() {
+		t.Fatalf("options = %+v, want the Final options", b.options)
 	}
 	// A HAIP-only rule (§5.1 delivery by request_uri) is not applied.
 	if _, err := b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build(); err != nil {
@@ -519,9 +520,9 @@ func TestNewRequestBuilderDefaultsToFinalProfile(t *testing.T) {
 }
 
 func TestRequestBuilderWithProfileEnforcesHAIP(t *testing.T) {
-	b := NewRequestBuilder().WithProfile(profile.HAIP)
-	if b.profile != profile.HAIP {
-		t.Fatalf("profile = %q, want %q", b.profile, profile.HAIP)
+	b := NewRequestBuilder().WithProfile(profile.HAIP())
+	if b.options != profile.HAIPOptions() {
+		t.Fatalf("options = %+v, want HAIPOptions", b.options)
 	}
 	_, err := b.WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
 	if err == nil || !strings.Contains(err.Error(), "request_uri") {
@@ -529,11 +530,11 @@ func TestRequestBuilderWithProfileEnforcesHAIP(t *testing.T) {
 	}
 }
 
-func TestRequestBuilderWithProfileRejectsUnknownProfile(t *testing.T) {
-	for _, unknown := range []profile.Profile{"HAIP", "draft24", "Final"} {
-		_, err := NewRequestBuilder().WithProfile(unknown).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
-		if err == nil || !strings.Contains(err.Error(), "unknown protocol profile") {
-			t.Fatalf("WithProfile(%q): want unknown profile error, got %v", unknown, err)
+func TestRequestBuilderWithProfileRejectsDraftProfiles(t *testing.T) {
+	for _, draft := range []profile.Profile{profile.Draft13(), profile.Draft24()} {
+		_, err := NewRequestBuilder().WithProfile(draft).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
+		if !errors.Is(err, profile.ErrDraftProfile) {
+			t.Fatalf("WithProfile(%s): want ErrDraftProfile, got %v", draft.Name(), err)
 		}
 	}
 }

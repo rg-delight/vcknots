@@ -49,15 +49,17 @@ var (
 // Profile conditions, reported when the wallet is built or its receiver set.
 var (
 	// ErrProfileMismatch reports a plugin whose profile.Carrier reports a
-	// profile other than Config.Profile.
+	// profile other than the 1.0 profile of Config.Profiles.
 	ErrProfileMismatch = common.NewCodedError("profile_mismatch", "plugin profile does not match the wallet profile")
 	// ErrProfilePluginUnsupported reports a plugin that does not implement
-	// profile.Carrier in a HAIP wallet.
+	// profile.Carrier in a wallet whose profile carries options (HAIP, or
+	// Final strengthened with Profile.With).
 	ErrProfilePluginUnsupported = common.NewCodedError("profile_plugin_unsupported", "plugin does not report a profile")
-	// ErrProfileForbidsDraft reports a draft protocol version or a test hook
-	// used in a HAIP wallet. HAIP 1.0 applies only to OpenID4VCI 1.0 and
-	// OpenID4VP 1.0.
-	ErrProfileForbidsDraft = common.NewCodedError("profile_forbids_draft", "the HAIP profile allows no draft protocol version or test hook")
+	// ErrProfileForbidsDraft reports a draft protocol version, or a test
+	// hook, used by a wallet whose Config.Profiles does not enable that
+	// draft profile, and Config.Profiles naming a draft profile with HAIP,
+	// which applies only to OpenID4VCI 1.0 and OpenID4VP 1.0.
+	ErrProfileForbidsDraft = common.NewCodedError("profile_forbids_draft", "the wallet profiles do not enable this draft protocol version")
 )
 
 // ErrorCode reports the code of the outermost CodedError in err's chain, and

@@ -213,7 +213,7 @@ func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 		enc       jose.ContentEncryption
 	}{
 		{name: "final defaults to A128GCM", enc: jose.A128GCM},
-		{name: "haip prefers A256GCM", profile: profile.HAIP, encValues: []string{"A128GCM", "A256GCM"}, enc: jose.A256GCM},
+		{name: "haip prefers A256GCM", profile: profile.HAIP(), encValues: []string{"A128GCM", "A256GCM"}, enc: jose.A256GCM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recipient := testutil.NewP256Key(t)
@@ -246,7 +246,7 @@ func TestSubmitDCQLResponseDCAPIEncrypted(t *testing.T) {
 
 func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 	t.Run("unsigned", func(t *testing.T) {
-		p := &Oid4vpPresenter{Profile: profile.HAIP}
+		p := &Oid4vpPresenter{Profile: profile.HAIP()}
 		invocation := types.DCAPIInvocation{
 			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, testutil.NewP256Key(t), []string{"A128GCM", "A256GCM"})},
 			Origin:  "https://verifier.example",
@@ -296,7 +296,7 @@ func TestParseDCAPIRequestHAIPAcceptsAllRequestTypes(t *testing.T) {
 }
 
 func TestParseDCAPIRequestHAIPRejectsDirectPost(t *testing.T) {
-	p := (&Oid4vpPresenter{Profile: profile.HAIP})
+	p := (&Oid4vpPresenter{Profile: profile.HAIP()})
 	invocation := types.DCAPIInvocation{
 		Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiRaw(t, map[string]any{
 			"response_type": "vp_token", "response_mode": "direct_post.jwt", "nonce": "n-1", "dcql_query": dcapiDCQL(),
@@ -323,7 +323,7 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 		Origin: "https://verifier.example",
 	}
 
-	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP}
+	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP()}
 	_, err := parseDCAPIForTest(haip, invocation)
 	require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
 
@@ -335,7 +335,7 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 // presenterWithHAIP mirrors requestObjectFixture.presenterWith for the HAIP
 // profile without changing the shared fixture file.
 func (f *requestObjectFixture) presenterWithHAIP() *Oid4vpPresenter {
-	return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP})
+	return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP()})
 }
 
 // TestParseRequestRejectsWebOriginClientIDFromTheWire pins that "web-origin" is
@@ -540,7 +540,7 @@ func TestParseDCAPIRequestAdmission(t *testing.T) {
 			Request: types.DCAPIRequest{Protocol: DCAPIProtocolUnsigned, Data: dcapiUnsignedDataWithMetadata(t, recipient, []string{"A256GCM"})},
 			Origin:  "https://verifier.example",
 		}
-		_, err := parseDCAPIForTest((&Oid4vpPresenter{Profile: profile.HAIP}), invocation)
+		_, err := parseDCAPIForTest((&Oid4vpPresenter{Profile: profile.HAIP()}), invocation)
 		require.ErrorIs(t, err, ErrResponseEncryptionEncMissing)
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"maps"
 	"net/url"
 	"slices"
@@ -168,7 +169,8 @@ func (b *draft24RequestBuilder) Build() (*CredentialPresentationRequest, error) 
 		b.req.RequestObjectVerification.Delivery = b.requestSource.delivery()
 	}
 	if b.req.ClientMetadata != nil {
-		b.req.ClientMetadata.encryptionPolicy = encryptionPolicyFinal
+		// Draft 24 is outside every 1.0 profile: OpenID4VP 1.0 rules.
+		b.req.ClientMetadata.admitEncryptionRules(profile.ResponseEncryptionRules{})
 	}
 	return b.req, nil
 }

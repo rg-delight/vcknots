@@ -37,7 +37,7 @@ func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 		return nil, err
 	}
 	clientID := strings.TrimSpace(w.clientAuth.ClientID)
-	if w.profile.IsHAIP() && clientID == "" {
+	if w.options().RequireClientAuthentication && clientID == "" {
 		return nil, invalidArgument("HAIP requires a client_id on the pre-authorized_code token request")
 	}
 	hint := strings.TrimSpace(req.AuthorizationServer)
@@ -123,7 +123,7 @@ func (w *Wallet) newFinalGrant(
 	required := issuerRequiresKeyAttestation(config)
 	// HAIP Section 4.5.1: an issuer that requires key binding advertises a
 	// nonce_endpoint.
-	if required && md.NonceEndpoint == nil && w.profile.IsHAIP() {
+	if required && md.NonceEndpoint == nil && w.options().RequireNonceEndpointForKeyBinding {
 		return nil, fmt.Errorf("the credential configuration %q requires a key attestation: %w", configurationID, ErrNonceEndpointRequired)
 	}
 	cNonce := ""
@@ -173,12 +173,12 @@ func (w *Wallet) checkTokenType(token *receiverTypes.CredentialIssuanceAccessTok
 }
 
 // checkGrantToken validates the access token of a state read back from the
-// caller: present, and DPoP-bound under HAIP (HAIP Section 4).
+// caller: present, and DPoP-bound under Options.RequireDPoP (HAIP Section 4).
 func (w *Wallet) checkGrantToken(token *receiverTypes.CredentialIssuanceAccessToken) error {
 	if token == nil || strings.TrimSpace(token.Token) == "" {
 		return fmt.Errorf("the state carries no access token: %w", ErrIssuanceStateMismatch)
 	}
-	if w.profile.IsHAIP() && !isDPoPAccessToken(token) {
+	if w.options().RequireDPoP && !isDPoPAccessToken(token) {
 		return fmt.Errorf("HAIP requires a DPoP-bound access token, the token has token_type %q: %w", token.TokenType, ErrDPoPRequired)
 	}
 	return nil

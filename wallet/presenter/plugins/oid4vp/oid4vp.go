@@ -31,9 +31,11 @@ type Oid4vpPresenter struct {
 	// WARNING: This should NEVER be set to true in production environments.
 	// This is only for conformance testing with self-signed or non-standard certificates.
 	InsecureSkipX509Verify bool
-	// Profile selects the OpenID4VP protocol policy. The zero value normalizes to
-	// profile.Final, which applies no HAIP constraints. Set it to profile.HAIP to
-	// enforce HAIP 1.0 on the Final path; the Draft24 entrypoints ignore it.
+	// Profile is the OpenID4VP 1.0 profile whose Options the presenter
+	// applies. The zero value is profile.Final(), which adds no constraint;
+	// profile.HAIP() enforces HAIP 1.0 on the 1.0 path. The Draft24
+	// entrypoints do not apply it. A draft profile is refused
+	// (profile.ErrDraftProfile).
 	Profile profile.Profile
 	// WalletMetadata, when non-nil, is serialized as the wallet_metadata form
 	// parameter of a Final request_uri POST (OID4VP 1.0 §5.10). When nil the
@@ -82,14 +84,9 @@ func (p *Oid4vpPresenter) httpClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// ProtocolProfile reports the normalized OpenID4VP profile this presenter
-// enforces.
+// ProtocolProfile reports the OpenID4VP 1.0 profile this presenter enforces.
 func (p *Oid4vpPresenter) ProtocolProfile() profile.Profile {
-	normalized, err := p.Profile.Normalize()
-	if err != nil {
-		return p.Profile
-	}
-	return normalized
+	return p.Profile
 }
 
 var (
@@ -203,14 +200,13 @@ func authorizationRequestQuery(uriString string) (url.Values, error) {
 	return parsedURL.Query(), nil
 }
 
-// normalizedProfile returns the presenter's profile, failing closed on an
-// unknown value before any network access.
-func (p *Oid4vpPresenter) normalizedProfile() (profile.Profile, error) {
-	normalized, err := p.Profile.Normalize()
-	if err != nil {
-		return "", fmt.Errorf("invalid OID4VP profile: %w", err)
+// profileOptions returns the Options of the presenter's profile, failing
+// closed on a draft profile before any network access.
+func (p *Oid4vpPresenter) profileOptions() (profile.Options, error) {
+	if err := p.Profile.RequireFinalVersion(); err != nil {
+		return profile.Options{}, fmt.Errorf("invalid OID4VP profile: %w", err)
 	}
-	return normalized, nil
+	return p.Profile.Options(), nil
 }
 
 // configureCore copies the presenter's transport and trust policy into the
@@ -230,17 +226,17 @@ func (p *Oid4vpPresenter) configureCore(ctx context.Context, core *requestCore) 
 // newRequestBuilder creates the builder of one OpenID4VP 1.0 parse with the
 // presenter's transport, trust and protocol policy.
 func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilder, error) {
-	normalizedProfile, err := p.normalizedProfile()
+	options, err := p.profileOptions()
 	if err != nil {
 		return nil, err
 	}
-	if normalizedProfile.IsHAIP() && (p.AllowHTTP || p.InsecureSkipX509Verify) {
+	if options.ForbidInsecureTransports && (p.AllowHTTP || p.InsecureSkipX509Verify) {
 		// HAIP §5: the profile requires TLS verifier endpoints and verified
 		// X.509 request signing; the test-only escapes must not weaken it.
 		return nil, newAuthorizationRequestError(InvalidRequestError, "HAIP profile does not permit AllowHTTP or InsecureSkipX509Verify")
 	}
 	builder := NewRequestBuilder()
-	builder.profile = normalizedProfile
+	builder.options = options
 	p.configureCore(ctx, &builder.requestCore)
 	builder.policy = &builderPolicy{
 		walletMetadata:                p.WalletMetadata,

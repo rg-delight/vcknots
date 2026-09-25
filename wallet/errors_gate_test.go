@@ -230,8 +230,12 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			_, err := storelessWallet(t).GetCredentialEntry("any")
 			return err
 		},
-		"NewWalletWithConfig: unknown profile": func(t *testing.T) error {
-			_, err := NewWalletWithConfig(Config{Profile: profile.Profile("unknown")})
+		"NewWalletWithConfig: no 1.0 profile": func(t *testing.T) error {
+			_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Draft13()}})
+			return err
+		},
+		"NewWalletWithConfig: HAIP with a draft profile": func(t *testing.T) error {
+			_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP(), profile.Draft24()}})
 			return err
 		},
 		"NewWalletWithConfig: store on a storeless wallet": func(t *testing.T) error {

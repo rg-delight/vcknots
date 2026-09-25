@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/keystore"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 func newPrivateJWK(t *testing.T, keyID string) jose.JSONWebKey {
@@ -200,7 +201,7 @@ func TestStaticClientAttesterProducesAValidAttestation(t *testing.T) {
 
 	// The x5c leaf authenticates it, and HAIP accepts the non-self-signed leaf.
 	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, TrustPolicy{}))
-	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, TrustPolicy{RequireX5C: true}))
+	require.NoError(t, ValidateClientAttestation(t.Context(), attestation, request, TrustPolicy{X5C: haipX5C}))
 
 	header, claims, err := parseJWT(attestation.JWT)
 	require.NoError(t, err)
@@ -298,7 +299,7 @@ func TestClientAttestationClaimsAreChecked(t *testing.T) {
 	})
 }
 
-func TestRequireX5CRefusesAMissingOrSelfSignedChain(t *testing.T) {
+func TestX5CRulesRefuseAMissingOrSelfSignedChain(t *testing.T) {
 	clientKey := newPrivateJWK(t, "client-key-1")
 	holderKey := newPrivateJWK(t, "holder-key-1")
 	attesterKey := newPrivateJWK(t, "attester-key-1")
@@ -307,7 +308,7 @@ func TestRequireX5CRefusesAMissingOrSelfSignedChain(t *testing.T) {
 	clientRequest := ClientRequest{ClientID: "client-1", ClientKey: clientKey}
 	keyRequest := KeyRequest{Keys: []jose.JSONWebKey{holderKey}, Nonce: "cnonce-1"}
 	policy := resolvedBy(attesterKey)
-	policy.RequireX5C = true
+	policy.X5C = haipX5C
 
 	withoutX5C := signJWT(t, attesterKey, clientAttestationType, clientClaimsFor(clientKey))
 	require.ErrorContains(t, ValidateClientAttestation(t.Context(), &ClientAttestation{JWT: withoutX5C}, clientRequest, policy), "x5c")
@@ -481,7 +482,7 @@ func TestValidateChecksTheChain(t *testing.T) {
 
 	t.Run("a chain reaching the anchor is trusted", func(t *testing.T) {
 		policy := anchoredPolicy(t, anchor)
-		policy.RequireX5C = true
+		policy.X5C = haipX5C
 		require.NoError(t, ValidateClientAttestation(t.Context(), client, clientRequest, policy))
 		require.NoError(t, ValidateKeyAttestation(t.Context(), key, keyRequest, policy))
 	})
@@ -500,7 +501,7 @@ func TestValidateChecksTheChain(t *testing.T) {
 		carried, err := (&StaticKeyAttester{Key: keyEntry(t, attesterKey), Chain: []*x509.Certificate{leaf, anchor}, Issuer: "https://key-attester.example"}).KeyAttestation(t.Context(), keyRequest)
 		require.NoError(t, err)
 		policy := anchoredPolicy(t, anchor)
-		policy.RequireX5C = true
+		policy.X5C = haipX5C
 		require.ErrorContains(t, ValidateKeyAttestation(t.Context(), carried, keyRequest, policy), "trust anchor")
 	})
 }
@@ -530,3 +531,6 @@ func TestKeyRequestIsJSON(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 }
+
+// haipX5C is the HAIP 1.0 attestation rule set (profile.HAIPOptions).
+var haipX5C = profile.HAIPOptions().AttestationX5C

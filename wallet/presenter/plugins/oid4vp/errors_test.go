@@ -102,7 +102,7 @@ func TestParsePresentationRequestReturnsRequestObjectSentinels(t *testing.T) {
 
 	t.Run("haip request_uri required", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
-		p := f.presenterWith(requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByValue})
+		p := f.presenterWith(requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByValue})
 		uri := "openid4vp://authorize?" + url.Values{
 			"client_id": {f.clientID()},
 			"request":   {f.sign(t, f.claims(), nil)},

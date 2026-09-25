@@ -135,7 +135,7 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 			f := newRequestObjectFixture(t)
 			claims := f.claims()
 			claims["client_metadata"] = metadataClaim(t, tt.metadata)
-			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP, Delivery: deliverByReference})
+			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference})
 			if tt.want == nil {
 				require.NoError(t, err)
 				return
@@ -150,7 +150,7 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 		claims["client_metadata"] = metadataClaim(t, encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"}))
 		uri := "openid4vp://authorize?" + url.Values{"client_id": {f.clientID()}, "request": {f.sign(t, claims, nil)}}.Encode()
 		p := f.presenter()
-		p.Profile = profile.HAIP
+		p.Profile = profile.HAIP()
 		_, err := parseDraft24ForTest(p, uri)
 		require.NoError(t, err)
 	})

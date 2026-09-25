@@ -122,7 +122,7 @@ func TestIssuerMetadataAppendedPathFallbackIsOptIn(t *testing.T) {
 		profile                     profile.Profile
 	}{
 		"AllowHTTP only": {allowHTTP: true},
-		"HAIP":           {secure: true, fallback: true, profile: profile.HAIP},
+		"HAIP":           {secure: true, fallback: true, profile: profile.HAIP()},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -492,7 +492,7 @@ func TestFetchIssuerMetadataRejectsAnchorInSignedMetadataX5C(t *testing.T) {
 		AllowUnadvertisedRevocation: true,
 	}
 
-	haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP, IssuerMetadataSigning: signing}
+	haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP(), IssuerMetadataSigning: signing}
 	metadata, err := haip.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
 	if err == nil {
 		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
@@ -502,7 +502,7 @@ func TestFetchIssuerMetadataRejectsAnchorInSignedMetadataX5C(t *testing.T) {
 	}
 
 	// The same chain is accepted outside HAIP, where the rule does not apply.
-	final := &Oid4vciReceiver{HTTPClient: client, Profile: profile.Final, IssuerMetadataSigning: signing}
+	final := &Oid4vciReceiver{HTTPClient: client, Profile: profile.Final(), IssuerMetadataSigning: signing}
 	if _, err := final.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci); err != nil {
 		t.Fatalf("Final FetchIssuerMetadata() error = %v", err)
 	}
@@ -556,7 +556,7 @@ func TestFetchIssuerMetadataHAIPAcceptsUnsignedByDefault(t *testing.T) {
 		return "application/json", `{"credential_issuer":"` + identifier + `","credential_endpoint":"` + identifier + `/credential"}`
 	})
 
-	receiver := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP}
+	receiver := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP()}
 
 	metadata, err := receiver.FetchIssuerMetadata(mustURIField(t, serverURL), types.Oid4vci)
 	if err != nil {

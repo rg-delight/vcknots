@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -82,8 +83,8 @@ func (d *Draft13Issuance) NotifyIssuer(ctx context.Context, n *IssuanceNotificat
 // require applies the preconditions of every Draft 13 stage.
 func (d *Draft13Issuance) require(ctx context.Context) (receiverTypes.Draft13Transport, error) {
 	w := d.w
-	if w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := w.requireDraft13(); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -423,8 +424,8 @@ func (d *Draft13Issuance) credentialStage(ctx context.Context, cache *issuanceMe
 }
 
 func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
-	if d.w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := d.w.requireDraft13(); err != nil {
+		return nil, err
 	}
 	if err := checkGrant(grant, IssuanceVersionDraft13); err != nil {
 		return nil, err
@@ -590,7 +591,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 	if err != nil {
 		return result, err
 	}
-	parsed, verification, err := d.w.verifyCredentialForAcceptanceContext(ctx, raw, flavor, holderKey, true)
+	parsed, verification, err := d.w.verifyCredentialUnder(ctx, profile.Draft13().Options(), raw, flavor, holderKey, true)
 	if err != nil {
 		return result, fmt.Errorf("failed to verify credential: %w", err)
 	}
@@ -624,8 +625,8 @@ func draft13CredentialResponse(response *receiverTypes.Draft13CredentialResponse
 }
 
 func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferred *DeferredIssuance) (*IssuanceResult, error) {
-	if d.w.profile.IsHAIP() {
-		return nil, ErrProfileForbidsDraft
+	if err := d.w.requireDraft13(); err != nil {
+		return nil, err
 	}
 	if err := checkDeferred(deferred, IssuanceVersionDraft13); err != nil {
 		return nil, err
@@ -661,8 +662,8 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 }
 
 func (d *Draft13Issuance) notifyIssuer(ctx context.Context, n *IssuanceNotification, event NotificationEvent, description string) error {
-	if d.w.profile.IsHAIP() {
-		return ErrProfileForbidsDraft
+	if err := d.w.requireDraft13(); err != nil {
+		return err
 	}
 	if err := checkNotification(n, IssuanceVersionDraft13, event, description); err != nil {
 		return err

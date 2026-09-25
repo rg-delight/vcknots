@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // encryptAuthorizationResponseJWE encrypts payload as an OID4VP 1.0 §8.3
@@ -14,18 +15,18 @@ import (
 // the rules that request was admitted with, so a Draft24 request is not held
 // to HAIP after consent; other metadata follows the presenter's profile.
 func (p *Oid4vpPresenter) encryptAuthorizationResponseJWE(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
-	haip := p.Profile.IsHAIP()
-	if metadata != nil && metadata.encryptionPolicy != encryptionPolicyUnset {
-		haip = metadata.encryptionPolicy == encryptionPolicyHAIP
+	rules := p.Profile.Options().ResponseEncryption
+	if metadata != nil && metadata.encryptionRulesSet {
+		rules = metadata.encryptionRules
 	}
-	return encryptAuthorizationResponse(payloadBytes, metadata, haip)
+	return encryptAuthorizationResponse(payloadBytes, metadata, rules)
 }
 
 // encryptAuthorizationResponse selects a usable Verifier encryption key and
-// encrypts payload as an OID4VP 1.0 §8.3 authorization response JWE, applying
-// the HAIP rules when haip is set.
-func encryptAuthorizationResponse(payloadBytes []byte, metadata *VerifierMetadata, haip bool) (string, error) {
-	selection, err := selectResponseEncryptionForProfile(metadata, haip)
+// encrypts payload as an OID4VP 1.0 §8.3 authorization response JWE under
+// rules.
+func encryptAuthorizationResponse(payloadBytes []byte, metadata *VerifierMetadata, rules profile.ResponseEncryptionRules) (string, error) {
+	selection, err := selectResponseEncryptionForProfile(metadata, rules)
 	if err != nil {
 		return "", err
 	}
@@ -76,7 +77,7 @@ var (
 		"A192CBC-HS384": jose.A192CBC_HS384,
 		"A256CBC-HS512": jose.A256CBC_HS512,
 	}
-	haipJWEOnlyContentEncryptions = map[string]jose.ContentEncryption{
+	gcmContentEncryptions = map[string]jose.ContentEncryption{
 		"A128GCM": jose.A128GCM,
 		"A256GCM": jose.A256GCM,
 	}
@@ -86,8 +87,8 @@ var (
 	// profile of §5.2: "Wallets MUST support `A128GCM` or `A256GCM`, or both.
 	// If both are supported, the Wallet SHOULD use `A256GCM` for the JWE
 	// `enc`." The strongest AEAD therefore comes first, and the AES-CBC-HMAC
-	// variants trail behind the AEADs; under HAIP they are filtered out by
-	// haipJWEOnlyContentEncryptions.
+	// variants trail behind the AEADs; under ResponseEncryptionRules.GCMOnly
+	// they are filtered out by gcmContentEncryptions.
 	walletContentEncryptionPreference = []string{
 		"A256GCM", "A192GCM", "A128GCM",
 		"A256CBC-HS512", "A192CBC-HS384", "A128CBC-HS256",
@@ -95,20 +96,20 @@ var (
 )
 
 // selectResponseEncryptionForProfile applies OID4VP 1.0 §8.3 and RFC 7517 §5
-// key selection, and with haip the HAIP §5 combination: ECDH-ES on P-256 with
-// A128GCM or A256GCM. Parsing a request and encrypting its response share it.
-// A failure wraps ErrResponseEncryptionKeyUnusable or
+// key selection under rules; HAIPOptions sets the HAIP §5 combination:
+// ECDH-ES on P-256 with A128GCM or A256GCM. Parsing a request and encrypting
+// its response share it. A failure wraps ErrResponseEncryptionKeyUnusable or
 // ErrResponseEncryptionEncUnsupported.
-func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (*responseEncryption, error) {
+func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profile.ResponseEncryptionRules) (*responseEncryption, error) {
 	if metadata == nil {
 		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response: %w", ErrResponseEncryptionKeyMissing)
 	}
 	allowedEncryptions := jweContentEncryptions
-	if haip {
-		allowedEncryptions = haipJWEOnlyContentEncryptions
+	if rules.GCMOnly {
+		allowedEncryptions = gcmContentEncryptions
 	}
 
-	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, haip, metadata.AuthorizationEncryptedResponseAlg)
+	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, rules, metadata.AuthorizationEncryptedResponseAlg)
 	if key == nil {
 		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
 	}
@@ -122,7 +123,7 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (
 	if algName == "" {
 		algName = "ECDH-ES"
 	}
-	if haip && algName != "ECDH-ES" {
+	if rules.ECDHESOnly && algName != "ECDH-ES" {
 		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q: %w", algName, ErrResponseEncryptionKeyUnusable)
 	}
 	alg, err := parseJWEKeyAlgorithm(algName)
@@ -163,13 +164,13 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, haip bool) (
 // selectUsableVerifierEncryptionKey iterates client_metadata.jwks.keys in order
 // and returns the first key usable for response encryption, skipping unusable
 // keys silently (RFC 7517 §5, "ignore unusable keys").
-func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool, legacyAlg string) *jose.JSONWebKey {
+func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, rules profile.ResponseEncryptionRules, legacyAlg string) *jose.JSONWebKey {
 	if set == nil {
 		return nil
 	}
 	for i := range set.Keys {
 		key := &set.Keys[i]
-		if usableVerifierEncryptionKey(key, haip, legacyAlg) {
+		if usableVerifierEncryptionKey(key, rules, legacyAlg) {
 			return key
 		}
 	}
@@ -178,10 +179,10 @@ func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, haip bool, legac
 
 // usableVerifierEncryptionKey reports whether key supports ECDH-ES response
 // encryption. use must be "enc" or empty, the key must be EC (P-256, plus
-// P-384/P-521 under Final only) and alg must be present (OID4VP 1.0 §8.3:
-// "The `alg` parameter MUST be present in the JWKs.") and a supported key
-// agreement algorithm.
-func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool, legacyAlg string) bool {
+// P-384/P-521 unless rules.P256Only) and alg must be present (OID4VP 1.0
+// §8.3: "The `alg` parameter MUST be present in the JWKs.") and a supported
+// key agreement algorithm.
+func usableVerifierEncryptionKey(key *jose.JSONWebKey, rules profile.ResponseEncryptionRules, legacyAlg string) bool {
 	if key == nil || key.Key == nil {
 		return false
 	}
@@ -195,7 +196,7 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool, legacyAlg stri
 	switch publicKey.Curve {
 	case elliptic.P256():
 	case elliptic.P384(), elliptic.P521():
-		if haip {
+		if rules.P256Only {
 			return false
 		}
 	default:
@@ -206,8 +207,9 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool, legacyAlg stri
 		// OID4VP 1.0 §8.3 requires alg on every JWK used for encryption. A
 		// verifier that still advertises the draft-era
 		// authorization_encrypted_response_alg member instead is accepted on the
-		// Final profile for interoperability; HAIP keeps the strict rule.
-		if haip || legacyAlg == "" {
+		// Final profile for interoperability; RequireJWKAlg keeps the strict
+		// rule.
+		if rules.RequireJWKAlg || legacyAlg == "" {
 			return false
 		}
 		algName = legacyAlg
@@ -215,7 +217,7 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, haip bool, legacyAlg stri
 	if _, err := parseJWEKeyAlgorithm(algName); err != nil {
 		return false
 	}
-	if haip && algName != "ECDH-ES" {
+	if rules.ECDHESOnly && algName != "ECDH-ES" {
 		return false
 	}
 	return true

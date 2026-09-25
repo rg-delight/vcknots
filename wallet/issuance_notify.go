@@ -28,7 +28,7 @@ func (w *Wallet) notifyIssuer(ctx context.Context, n *IssuanceNotification, even
 	if !isDPoPAccessToken(n.AccessToken) && !strings.EqualFold(strings.TrimSpace(n.AccessToken.TokenType), "Bearer") {
 		return fmt.Errorf("access token has token_type %q: %w", n.AccessToken.TokenType, ErrTokenTypeUnsupported)
 	}
-	if w.profile.IsHAIP() && !isDPoPAccessToken(n.AccessToken) {
+	if w.options().RequireDPoP && !isDPoPAccessToken(n.AccessToken) {
 		return fmt.Errorf("HAIP requires a DPoP-bound access token, the token has token_type %q: %w", n.AccessToken.TokenType, ErrDPoPRequired)
 	}
 	dpopKey, err := w.requireDPoPKey(n.DPoPKeyThumbprint, n.AccessToken, ErrNotificationDPoPKeyMissing)
