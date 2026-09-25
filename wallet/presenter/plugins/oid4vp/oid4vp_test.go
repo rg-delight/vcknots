@@ -453,9 +453,9 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 				case "request_uri with default GET method":
 					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
 				case "request_uri with explicit GET method":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=GET"
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=get"
 				case "request_uri with POST method":
-					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=POST"
+					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL + "&request_uri_method=post"
 				case "request_uri server error":
 					uri = "openid4vp://present?client_id=redirect_uri:https://example.com/response&request_uri=" + server.URL
 				}
@@ -1519,7 +1519,7 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			if ua := r.Header.Get("User-Agent"); ua != "" {
 				t.Errorf("User-Agent is not empty string, got %q", ua)
 			}
-			if got := r.Header.Get("Accept"); got != "application/oauth-authz-req+jwt, application/jwt, text/plain, */*" {
+			if got := r.Header.Get("Accept"); got != "application/oauth-authz-req+jwt" {
 				t.Errorf("unexpected Accept header: %q", got)
 			}
 			if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
@@ -1528,8 +1528,11 @@ func Test_requestBuilder_WithRequestObjectURI(t *testing.T) {
 			if err := r.ParseForm(); err != nil {
 				t.Fatalf("failed to parse form: %v", err)
 			}
-			if got := r.Form.Get("wallet_metadata"); got != "{}" {
-				t.Errorf("unexpected wallet_metadata body value: %q", got)
+			if _, present := r.Form["wallet_metadata"]; present {
+				t.Errorf("wallet_metadata sent without configured metadata: %q", r.Form.Get("wallet_metadata"))
+			}
+			if r.Form.Get("wallet_nonce") == "" {
+				t.Error("wallet_nonce missing from the POST body")
 			}
 			w.WriteHeader(http.StatusOK)
 		})

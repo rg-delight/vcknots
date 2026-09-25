@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 )
@@ -20,6 +19,10 @@ type draft24RequestBuilder struct {
 	// supportedTransactionDataTypes lists the transaction_data types the
 	// wallet processes (Draft 24 Section 5.1).
 	supportedTransactionDataTypes []string
+	// walletMetadata and requestURINonce are the presenter's request_uri POST
+	// settings (Draft 24 Section 5.10).
+	walletMetadata  map[string]any
+	requestURINonce func() (string, error)
 }
 
 func newDraft24RequestBuilder() *draft24RequestBuilder {
@@ -131,22 +134,24 @@ func (b *draft24RequestBuilder) WithQueryParams(params map[string][]string) *dra
 }
 
 // WithRequestObjectURI fetches the Request Object from request_uri and
-// authenticates it. A POST carries an empty wallet_metadata object and no
-// wallet_nonce.
+// authenticates it. A POST carries a fresh wallet_nonce the Request Object
+// must echo, and the presenter's WalletMetadata as wallet_metadata when set
+// (Draft 24 Section 5.10).
 func (b *draft24RequestBuilder) WithRequestObjectURI(uri string, method RequestURIMethod) *draft24RequestBuilder {
 	if b.errValidation != nil {
 		return b
 	}
-	form := url.Values{}
+	accept := "application/oauth-authz-req+jwt, application/jwt, text/plain, */*"
 	if method == RequestURIMethodPOST {
-		form.Set("wallet_metadata", "{}")
+		// Draft 24 Section 5.10: "the accept header set to
+		// application/oauth-authz-req+jwt".
+		accept = "application/oauth-authz-req+jwt"
 	}
-	body, err := b.fetchRequestObject(uri, method, form, "application/oauth-authz-req+jwt, application/jwt, text/plain, */*")
+	body, err := b.fetchRequestObjectByReference(uri, method, b.walletMetadata, b.requestURINonce, accept)
 	if err != nil {
 		b.errValidation = err
 		return b
 	}
-	b.requestSource = sourceReference
 	return b.withRequestObject(string(body))
 }
 

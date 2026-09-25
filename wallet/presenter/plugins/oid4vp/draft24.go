@@ -24,7 +24,7 @@ func (p *Oid4vpPresenter) ParseDraft24Request(ctx context.Context, uri string) (
 }
 
 // ParseDraft24RequestObject is ParseRequestObject for the Draft 24 wire
-// contract.
+// contract: the Request Object is authenticated as one passed by value.
 func (p *Oid4vpPresenter) ParseDraft24RequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
 	return asAdmitted(p.parseDraft24RequestObject(ctx, requestObject, src))
 }
@@ -51,12 +51,14 @@ func (p *Oid4vpPresenter) parseDraft24RequestURI(ctx context.Context, uriString 
 	switch {
 	case requestURI != "":
 		method := RequestURIMethodGET
-		switch requestURIMethod := queryParams.Get("request_uri_method"); strings.ToLower(requestURIMethod) {
+		// Draft 24 §5.1: "Two case-sensitive valid values are defined in this
+		// specification: get and post."
+		switch requestURIMethod := queryParams.Get("request_uri_method"); requestURIMethod {
 		case "", "get":
 		case "post":
 			method = RequestURIMethodPOST
 		default:
-			return nil, fmt.Errorf("unsupported request_uri_method: %s", requestURIMethod)
+			return nil, newAuthorizationRequestError(InvalidRequestURIMethodError, "request_uri_method must be 'get' or 'post' (case-sensitive), got %q", requestURIMethod)
 		}
 		builder.WithRequestObjectURI(requestURI, method)
 	case requestObj != "":
@@ -78,7 +80,7 @@ func (p *Oid4vpPresenter) parseDraft24RequestObject(ctx context.Context, request
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
-	builder.applySource(clientID, src)
+	builder.applySource(clientID)
 	builder.WithRequestObject(requestObject)
 	return p.finishParse(&builder.requestCore, builder.Build, wireDraft24)
 }
@@ -92,6 +94,8 @@ func (p *Oid4vpPresenter) newDraft24RequestBuilder(ctx context.Context) (*draft2
 	builder := newDraft24RequestBuilder()
 	p.configureCore(ctx, &builder.requestCore)
 	builder.supportedTransactionDataTypes = p.SupportedTransactionDataTypes
+	builder.walletMetadata = p.WalletMetadata
+	builder.requestURINonce = p.RequestURINonce
 	return builder, nil
 }
 

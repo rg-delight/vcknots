@@ -63,20 +63,16 @@ type RequestObjectVerification struct {
 	CertificateSHA256      []string
 	RevocationChecked      int
 	RevocationUnadvertised int
-	// WalletNonce is the wallet_nonce sent with a Final request_uri POST and
-	// echoed by the authenticated Request Object. It is empty for GET and when
-	// no nonce was sent (OID4VP 1.0 §5.10.1).
+	// WalletNonce is the wallet_nonce this library sent with a request_uri
+	// POST and the authenticated Request Object echoed (OID4VP 1.0 §5.10.1,
+	// Draft 24 §5.10.1). It is empty for GET and for a Request Object passed
+	// by value.
 	WalletNonce string
 	// Delivery records how this library observed the Request Object arrive:
-	// "reference" (request_uri), "value" (request=), or "query" (plain query
-	// parameters). It is empty when the library did not observe one of those
-	// paths.
+	// "reference" when it fetched request_uri itself, and "value" for a
+	// Request Object passed in the request parameter or to
+	// ParseRequestObject. It is empty for a Digital Credentials API request.
 	Delivery string
-	// DeliveryAttested is true when the caller's
-	// RequestObjectSource.DeliveredByReference was accepted for the HAIP
-	// delivery check, letting a Request Object passed by value satisfy the
-	// request_uri requirement.
-	DeliveryAttested bool
 	// ExpiresAt is the exp claim of the authenticated Request Object, in UTC.
 	// It is the zero value when the Request Object carried no exp, which the
 	// RequireExpiry policy decides whether to accept. A Wallet that has to show
@@ -215,7 +211,6 @@ func (b *requestBuilder) authenticateFinalRequestObject(obj string) error {
 	if err != nil {
 		return err
 	}
-	b.adoptCallerWalletNonce()
 	parsed, claims, err := decodeRequestObject(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {
 		return err

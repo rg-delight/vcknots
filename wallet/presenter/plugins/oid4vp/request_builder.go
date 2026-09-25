@@ -1,11 +1,8 @@
 package oid4vp
 
 import (
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
@@ -166,51 +163,12 @@ func (b *requestBuilder) WithRequestObjectURI(uri string, method RequestURIMetho
 	if b.errValidation != nil {
 		return b
 	}
-	form := url.Values{}
-	if method == RequestURIMethodPOST {
-		// OID4VP 1.0 §5.10: the POST always carries a fresh wallet_nonce and
-		// includes wallet_metadata only when the Wallet has metadata to convey.
-		nonce, err := b.newRequestURINonce()
-		if err != nil {
-			b.errValidation = fmt.Errorf("failed to generate wallet_nonce: %w", err)
-			return b
-		}
-		b.sentWalletNonce = nonce
-		form.Set("wallet_nonce", nonce)
-		if b.settings().walletMetadata != nil {
-			metadataJSON, err := json.Marshal(b.settings().walletMetadata)
-			if err != nil {
-				b.errValidation = fmt.Errorf("failed to marshal wallet_metadata: %w", err)
-				return b
-			}
-			form.Set("wallet_metadata", string(metadataJSON))
-		}
-	}
-	body, err := b.fetchRequestObject(uri, method, form, "application/oauth-authz-req+jwt")
+	body, err := b.fetchRequestObjectByReference(uri, method, b.settings().walletMetadata, b.settings().requestURINonce, "application/oauth-authz-req+jwt")
 	if err != nil {
 		b.errValidation = err
 		return b
 	}
-	b.requestSource = sourceReference
 	return b.withRequestObject(string(body))
-}
-
-// newRequestURINonce returns the wallet_nonce for a request_uri POST: the
-// presenter's generator when set, otherwise 32 random bytes, base64url-encoded
-// without padding (OID4VP 1.0 §5.10).
-func (b *requestBuilder) newRequestURINonce() (string, error) {
-	if b.settings().requestURINonce != nil {
-		return b.settings().requestURINonce()
-	}
-	return defaultRequestURINonce()
-}
-
-func defaultRequestURINonce() (string, error) {
-	buffer := make([]byte, 32)
-	if _, err := rand.Read(buffer); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
 // AuthorityKeyIdentifiersFromCredential returns the base64url-encoded Authority

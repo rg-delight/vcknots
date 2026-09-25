@@ -23,7 +23,6 @@ func (b *draft24RequestBuilder) withRequestObject(obj string) *draft24RequestBui
 		b.errValidation = err
 		return b
 	}
-	b.adoptCallerWalletNonce()
 
 	parsedJWT, claims, err := decodeRequestObject(obj, resolveRequestObjectAlgorithms(options))
 	if err != nil {

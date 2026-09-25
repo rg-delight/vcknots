@@ -38,11 +38,11 @@ type Oid4vpPresenter struct {
 	// (profile.ErrDraftProfile).
 	Profile profile.Profile
 	// WalletMetadata, when non-nil, is serialized as the wallet_metadata form
-	// parameter of a Final request_uri POST (OID4VP 1.0 §5.10). When nil the
-	// parameter is omitted.
+	// parameter of a request_uri POST (OID4VP 1.0 §5.10, Draft 24 §5.10).
+	// When nil the parameter is omitted.
 	WalletMetadata map[string]any
-	// RequestURINonce generates the wallet_nonce sent with a Final request_uri
-	// POST. A nil value uses 32 random bytes, base64url-encoded without padding.
+	// RequestURINonce generates the wallet_nonce sent with a request_uri POST.
+	// A nil value uses 32 random bytes, base64url-encoded without padding.
 	RequestURINonce func() (string, error)
 	// SupportedTransactionDataTypes lists the transaction_data "type" values the
 	// wallet can process. A nil or empty list means the wallet supports no
@@ -116,10 +116,14 @@ func (p *Oid4vpPresenter) ParseRequest(ctx context.Context, uri string) (types.A
 }
 
 // ParseRequestObject authenticates an OpenID4VP 1.0 Request Object the caller
-// already holds, with the same checks as one ParseRequest fetched. src.ClientID
-// is the Authorization Request client_id the Request Object's claim must equal
-// (OID4VP 1.0 §5.10.1, ErrRequestObjectClientIDMismatch); it is empty only when
-// there is no outer client_id. The result is an *AdmittedRequest.
+// already holds, as a Request Object passed by value (RFC 9101 §5.1).
+// src.ClientID is the Authorization Request client_id the Request Object's
+// claim must equal (OID4VP 1.0 §5.10.1, ErrRequestObjectClientIDMismatch); it
+// is empty only when there is no outer client_id. A profile with
+// RequireSignedRequestByReference (HAIP 1.0 §5.1) refuses every Request Object
+// passed by value with ErrHAIPRequestURIRequired: only ParseRequest, which
+// fetches request_uri itself, observes delivery by reference. The result is an
+// *AdmittedRequest.
 func (p *Oid4vpPresenter) ParseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
 	return asAdmitted(p.parseRequestObject(ctx, requestObject, src))
 }
@@ -166,6 +170,9 @@ func (p *Oid4vpPresenter) parseRequestURI(ctx context.Context, uriString string)
 		}
 		builder.WithRequestObjectURI(requestURI, method)
 	case requestObj != "":
+		if builder.options.RequireSignedRequestByReference {
+			return nil, errHAIPRequestURIRequired()
+		}
 		builder.WithRequestObject(requestObj)
 	default:
 		builder.WithQueryParams(queryParams)
@@ -185,7 +192,12 @@ func (p *Oid4vpPresenter) parseRequestObject(ctx context.Context, requestObject 
 			return nil, fmt.Errorf("invalid client_id in initial request: %w", err)
 		}
 	}
-	builder.applySource(clientID, src)
+	if builder.options.RequireSignedRequestByReference {
+		// HAIP 1.0 §5.1: the Request Object must come from request_uri, which
+		// only a fetch by this library can establish.
+		return nil, errHAIPRequestURIRequired()
+	}
+	builder.applySource(clientID)
 	builder.WithRequestObject(requestObject)
 	return p.finishParse(&builder.requestCore, builder.Build, wireOpenID4VP1)
 }

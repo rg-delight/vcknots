@@ -2,7 +2,9 @@ package oid4vp
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +19,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
-	"github.com/trustknots/vcknots/wallet/presenter/types"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -82,12 +83,8 @@ type requestCore struct {
 	// by value and named no outer client_id to compare it with. The client_id
 	// claim is still authenticated against the signer.
 	expectedClientIDAbsent bool
-	// deliveredByReference and callerWalletNonce are the caller's statements
-	// about a Request Object passed by value (types.RequestObjectSource).
-	deliveredByReference bool
-	callerWalletNonce    string
-	// sentWalletNonce is the wallet_nonce the Request Object must echo
-	// (OID4VP 1.0 §5.10.1): the one this parse sent, or the caller's.
+	// sentWalletNonce is the wallet_nonce this parse sent with a request_uri
+	// POST, which the Request Object must echo (OID4VP 1.0 §5.10.1).
 	sentWalletNonce string
 	requestSource   requestSource
 	// requestObject is the Request Object the request was read from, "" for
@@ -113,13 +110,11 @@ func newRequestCore() requestCore {
 	}
 }
 
-// applySource records the caller's facts about a Request Object passed by
-// value (types.RequestObjectSource).
-func (c *requestCore) applySource(clientID string, src types.RequestObjectSource) {
+// applySource records the outer client_id of a Request Object passed by value
+// (types.RequestObjectSource).
+func (c *requestCore) applySource(clientID string) {
 	c.expectedClientID = clientID
 	c.expectedClientIDAbsent = clientID == ""
-	c.deliveredByReference = src.DeliveredByReference
-	c.callerWalletNonce = src.WalletNonce
 }
 
 // context returns the context this parse's outbound requests run under.
@@ -245,6 +240,53 @@ func (c *requestCore) fetchRequestObject(uri string, method RequestURIMethod, fo
 	return body, nil
 }
 
+// fetchRequestObjectByReference fetches the Request Object of a request_uri
+// (OID4VP 1.0 §5.10, Draft 24 §5.10) and records that this parse observed
+// delivery by reference. A POST carries a fresh wallet_nonce, which the
+// Request Object must echo (§5.10.1), and walletMetadata as wallet_metadata
+// when it is non-nil.
+func (c *requestCore) fetchRequestObjectByReference(uri string, method RequestURIMethod, walletMetadata map[string]any, newNonce func() (string, error), accept string) ([]byte, error) {
+	form := url.Values{}
+	if method == RequestURIMethodPOST {
+		if newNonce == nil {
+			newNonce = defaultRequestURINonce
+		}
+		nonce, err := newNonce()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate wallet_nonce: %w", err)
+		}
+		if nonce == "" {
+			return nil, errors.New("failed to generate wallet_nonce: the generator returned an empty value")
+		}
+		c.sentWalletNonce = nonce
+		form.Set("wallet_nonce", nonce)
+		if walletMetadata != nil {
+			metadataJSON, err := json.Marshal(walletMetadata)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal wallet_metadata: %w", err)
+			}
+			form.Set("wallet_metadata", string(metadataJSON))
+		}
+	}
+	body, err := c.fetchRequestObject(uri, method, form, accept)
+	if err != nil {
+		return nil, err
+	}
+	c.requestSource = sourceReference
+	return body, nil
+}
+
+// defaultRequestURINonce returns 32 random bytes, base64url-encoded without
+// padding (OID4VP 1.0 §5.10: "a base64url-encoded, fresh, cryptographically
+// random number with sufficient entropy").
+func defaultRequestURINonce() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
 // decodeRequestObject parses a Request Object as a bounded compact JWS with
 // the typ header oauth-authz-req+jwt (RFC 9101 §5.2) and returns its
 // unverified claims.
@@ -295,15 +337,6 @@ func (c *requestCore) requestObjectValidationOptions() (RequestObjectValidationO
 		return options, errors.New("request object clock skew cannot be negative")
 	}
 	return options, nil
-}
-
-// adoptCallerWalletNonce takes the wallet_nonce the caller states it sent when
-// it fetched a Request Object that now arrives by value, so the echo rule of
-// OID4VP 1.0 §5.10.1 binds it. A nonce this parse sent itself always wins.
-func (c *requestCore) adoptCallerWalletNonce() {
-	if c.sentWalletNonce == "" && c.requestSource == sourceValue && c.callerWalletNonce != "" {
-		c.sentWalletNonce = c.callerWalletNonce
-	}
 }
 
 // verifyRequestObjectCertificateChain runs the configured X.509 chain and

@@ -17,19 +17,16 @@ type AdmittedRequest interface {
 	Protocol() SupportedPresentationProtocol
 }
 
-// RequestObjectSource carries the facts about how a Request Object reached the
-// wallet, which the Request Object alone cannot tell.
+// RequestObjectSource carries the Authorization Request facts a Request
+// Object passed by value cannot carry itself. How the Request Object reached
+// the wallet is not among them: a presenter observes delivery only when it
+// fetches request_uri itself (RequestParser.ParseRequest), and a Request
+// Object handed over by value is always treated as delivered by value.
 type RequestObjectSource struct {
 	// ClientID is the client_id of the Authorization Request that carried or
 	// referenced the Request Object; the Request Object's own client_id must
 	// equal it. Empty when the caller has none.
 	ClientID string
-	// DeliveredByReference reports that the Request Object was fetched from a
-	// request_uri rather than passed by value.
-	DeliveredByReference bool
-	// WalletNonce is the wallet_nonce the wallet sent with a request_uri POST
-	// (OpenID4VP 1.0 Section 5.10); the Request Object must echo it.
-	WalletNonce string
 }
 
 // RequestParser parses and admits OpenID4VP 1.0 Authorization Requests.
@@ -38,7 +35,7 @@ type RequestParser interface {
 	// request_uri when present.
 	ParseRequest(ctx context.Context, uri string) (AdmittedRequest, error)
 	// ParseRequestObject authenticates a Request Object the caller already
-	// holds.
+	// holds, as a Request Object passed by value.
 	ParseRequestObject(ctx context.Context, requestObject string, src RequestObjectSource) (AdmittedRequest, error)
 }
 

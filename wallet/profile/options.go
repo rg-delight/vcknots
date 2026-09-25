@@ -81,9 +81,9 @@ type Options struct {
 	AttestationX5C X5CRules
 
 	// RequireSignedRequestByReference requires a redirect-based
-	// Authorization Request to be a signed Request Object passed by
-	// request_uri (or by value with the caller's DeliveredByReference
-	// statement).
+	// Authorization Request to be a signed Request Object the presenter
+	// fetched from request_uri itself; a Request Object passed by value is
+	// refused.
 	// HAIP 1.0 §5.1 (OpenID4VP via redirects).
 	RequireSignedRequestByReference bool
 	// RequireDirectPostJWT requires the response mode direct_post.jwt on a
