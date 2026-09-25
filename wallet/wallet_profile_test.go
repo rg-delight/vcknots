@@ -152,7 +152,7 @@ func TestBeginIssuance_HAIPClientAuthentication(t *testing.T) {
 			Profiles:             profilesFor(p),
 			CredStore:            newProfileCredStore(t),
 			Receiver:             receiving,
-			CredentialAcceptance: &acceptance.Policy{UnverifiedIssuer: true},
+			CredentialAcceptance: acceptIssuerKeyPolicy(testutil.NewP256Key(t)),
 			ClientAuth:           ClientAuthConfig{ClientID: "client-1"},
 			DPoP:                 DPoPConfig{Key: dpopKey},
 			Issuance:             IssuanceConfig{RedirectURI: "openid-credential-offer://callback"},
@@ -182,12 +182,13 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 	holder := newMockKeyEntry().PublicKey()
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	issuerKey := testutil.NewP256Key(t)
-	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
 
 	resolvePolicy := func() *acceptance.Policy {
-		return &acceptance.Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{issuerJWK}, nil
-		}}
+		return acceptIssuerKeyPolicy(issuerKey)
+	}
+	accept := func(w *Wallet, wire string) error {
+		_, _, err := w.VerifyCredentialForAcceptance(t.Context(), CredentialAcceptanceRequest{Raw: []byte(wire), Flavor: credential.SDJwtVC, HolderKey: &holder, CredentialIssuer: testIssuerIdentifier})
+		return err
 	}
 	anchorPolicy := func() *acceptance.Policy {
 		return &acceptance.Policy{IssuerX509: &acceptance.IssuerX509TrustOptions{
@@ -200,24 +201,20 @@ func TestWallet_HAIPCredentialAcceptance(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder})
 
 		finalWallet := newProfileWallet(t, profile.Final(), nil, nil, resolvePolicy())
-		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
-		require.NoError(t, err)
+		require.NoError(t, accept(finalWallet, wire))
 
 		haipWallet := newProfileWallet(t, profile.HAIP(), nil, nil, resolvePolicy())
-		_, _, err = haipWallet.verifyCredentialForAcceptanceContext(t.Context(), []byte(wire), credential.SDJwtVC, &holder, true)
-		require.ErrorContains(t, err, "x5c")
+		require.ErrorContains(t, accept(haipWallet, wire), "x5c")
 	})
 
 	t.Run("trust anchor included in x5c", func(t *testing.T) {
 		wire := buildAcceptanceWire(t, acceptanceWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder})
 
 		finalWallet := newProfileWallet(t, profile.Final(), nil, nil, anchorPolicy())
-		_, err := finalWallet.storeAndParseCredential(t.Context(), &wire, credential.SDJwtVC, &holder, false)
-		require.NoError(t, err)
+		require.NoError(t, accept(finalWallet, wire))
 
 		haipWallet := newProfileWallet(t, profile.HAIP(), nil, nil, anchorPolicy())
-		_, _, err = haipWallet.verifyCredentialForAcceptanceContext(t.Context(), []byte(wire), credential.SDJwtVC, &holder, true)
-		require.ErrorContains(t, err, "trust anchor")
+		require.ErrorContains(t, accept(haipWallet, wire), "trust anchor")
 	})
 }
 
@@ -370,14 +367,16 @@ func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry
 	}
 }
 
-// ReceiveCredential is upstream's Draft 13 entry point and
-// Config.CredentialAcceptance is optional there by design, so a nil policy
-// keeps storing credentials. SD-JWT VC §3.5 leaves issuer key resolution to
-// ecosystem policy, so the library does not turn its absence into an error.
-func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
+// ReceiveCredential is upstream's Draft 13 entry point. It used to store a
+// credential whose issuer it had not authenticated when no policy was
+// configured; SD-JWT VC -19 §2.4 and §2.5 require the issuer key to be
+// validated, so it now needs a policy and requests nothing without one (CR-10,
+// upstream-origin behaviour change).
+func TestReceiveCredentialDraftRequiresAPolicy(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()
-	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: testutil.NewP256Key(t), cnf: &holderKey})
+	issuerKey := testutil.NewP256Key(t)
+	wire := buildAcceptanceWire(t, acceptanceWire{signingKey: issuerKey, cnf: &holderKey})
 	server := newDraftIssuanceServer(t, wire, "Bearer")
 
 	receiving, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{HTTPClient: server.Client()}))
@@ -386,9 +385,15 @@ func TestReceiveCredentialDraftKeepsPermissiveDefault(t *testing.T) {
 	w, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving})
 	require.NoError(t, err)
 
-	saved, err := w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Equal(t, 0, acceptanceEntryCount(t, store))
+
+	request := draftReceiveRequest(t, server, holder)
+	request.Acceptance = acceptIssuerKeyPolicy(issuerKey)
+	saved, err := w.ReceiveCredential(request)
 	require.NoError(t, err)
-	require.NotNil(t, saved)
+	require.NotNil(t, saved.Verification.IssuerKey)
 	require.Equal(t, 1, acceptanceEntryCount(t, store))
 }
 

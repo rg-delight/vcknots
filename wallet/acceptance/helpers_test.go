@@ -1,6 +1,7 @@
 package acceptance
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,9 +9,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"math/big"
+	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -32,7 +37,7 @@ func newTestAcceptor(t *testing.T, p profile.Profile) *Acceptor {
 	require.NoError(t, err)
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
-	acceptor, err := NewAcceptor(p.Options(), serialization, verification)
+	acceptor, err := NewAcceptor(p, serialization, verification)
 	require.NoError(t, err)
 	return acceptor
 }
@@ -242,11 +247,101 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	return testIssuerChain{caCert: caCert, caKey: caKey, leafCert: leafCert, leafKey: leafKey}
 }
 
-// resolving is a Policy whose resolver returns keys.
+// testCredentialIssuer is the Credential Issuer Identifier, and the default
+// iss of buildWire.
+const testCredentialIssuer = "https://issuer.example.test"
+
+// keyNetwork serves issuer key material (JWT VC Issuer Metadata, DID
+// Configurations) under any https origin without a network, and refuses every
+// request for a document it was not given.
+type keyNetwork struct {
+	mu        sync.Mutex
+	documents map[string]any
+	requests  int
+}
+
+func newKeyNetwork() *keyNetwork {
+	return &keyNetwork{documents: map[string]any{}}
+}
+
+func (n *keyNetwork) RoundTrip(request *http.Request) (*http.Response, error) {
+	n.mu.Lock()
+	n.requests++
+	document, ok := n.documents[request.URL.String()]
+	n.mu.Unlock()
+	if !ok {
+		body := []byte(`{}`)
+		return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: request}, nil
+	}
+	body, err := json.Marshal(document)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: request}, nil
+}
+
+func (n *keyNetwork) requestCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.requests
+}
+
+// publishIssuerMetadata publishes JWT VC Issuer Metadata for issuer (an https
+// URL without a path) carrying keys inline (SD-JWT VC -19 §4).
+func (n *keyNetwork) publishIssuerMetadata(issuer string, keys ...jose.JSONWebKey) {
+	entries := make([]any, 0, len(keys))
+	for _, key := range keys {
+		raw, err := key.MarshalJSON()
+		if err != nil {
+			panic(err)
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			panic(err)
+		}
+		entries = append(entries, entry)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.documents[issuer+"/.well-known/jwt-vc-issuer"] = map[string]any{"issuer": issuer, "jwks": map[string]any{"keys": entries}}
+}
+
+// linkDID publishes a DIF Well Known DID Configuration at origin whose Domain
+// Linkage Credential, signed by key under kid, links did to origin.
+func (n *keyNetwork) linkDID(t *testing.T, origin, did, kid string, algorithm jose.SignatureAlgorithm, key any) {
+	t.Helper()
+	now := time.Now()
+	claims := map[string]any{
+		"iss": did, "sub": did,
+		"nbf": now.Add(-time.Hour).Unix(), "exp": now.Add(time.Hour).Unix(),
+		"vc": map[string]any{
+			"@context":          []any{"https://www.w3.org/2018/credentials/v1", "https://identity.foundation/.well-known/did-configuration/v1"},
+			"type":              []any{"VerifiableCredential", "DomainLinkageCredential"},
+			"issuer":            did,
+			"issuanceDate":      now.Add(-time.Hour).UTC().Format(time.RFC3339),
+			"credentialSubject": map[string]any{"id": did, "origin": origin},
+		},
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: algorithm, Key: key}, (&jose.SignerOptions{}).WithHeader("kid", kid))
+	require.NoError(t, err)
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	require.NoError(t, err)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.documents[origin+"/.well-known/did-configuration.json"] = map[string]any{"linked_dids": []any{token}}
+}
+
+// resolver is an issuer key resolver on this network with mechanisms on.
+func (n *keyNetwork) resolver(mechanisms issuerkeys.Mechanisms) *issuerkeys.Resolver {
+	return &issuerkeys.Resolver{HTTPClient: &http.Client{Transport: n}, Mechanisms: mechanisms}
+}
+
+// resolving is a Policy that authenticates testCredentialIssuer, the default
+// iss of buildWire, through JWT VC Issuer Metadata publishing keys.
 func resolving(keys ...jose.JSONWebKey) Policy {
-	return Policy{ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-		return keys, nil
-	}}
+	network := newKeyNetwork()
+	network.publishIssuerMetadata(testCredentialIssuer, keys...)
+	return Policy{IssuerKeys: network.resolver(issuerkeys.Mechanisms{JWTVCIssuerMetadata: true})}
 }
 
 // x509Trust is a Policy trusting anchors, with no CRL distribution points

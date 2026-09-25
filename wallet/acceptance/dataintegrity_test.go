@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credential/dataintegrity"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
@@ -48,10 +49,6 @@ func (i ldpIssuer) did() string {
 	return did
 }
 
-func (i ldpIssuer) publicJWK() jose.JSONWebKey {
-	return jose.JSONWebKey{Key: i.key.Public(), KeyID: i.method, Algorithm: string(jose.EdDSA), Use: "sig"}
-}
-
 // sign returns the signed credential issued by issuer, valid until validUntil.
 func (i ldpIssuer) sign(t *testing.T, issuer string, validUntil time.Time) []byte {
 	t.Helper()
@@ -74,67 +71,73 @@ func (i ldpIssuer) sign(t *testing.T, issuer string, validUntil time.Time) []byt
 	return raw
 }
 
-func ldpOptions() Options { return Options{Flavor: credential.LdpVc} }
+func ldpOptions() Options {
+	return Options{Flavor: credential.LdpVc, CredentialIssuer: testCredentialIssuer}
+}
+
+// policy authenticates the issuer's did:key through a DID Configuration the
+// Credential Issuer's origin publishes (OpenID4VCI 1.0 §14.4), with the
+// issuer's contexts pinned.
+func (i ldpIssuer) policy(t *testing.T) Policy {
+	t.Helper()
+	network := newKeyNetwork()
+	network.linkDID(t, testCredentialIssuer, i.did(), i.method, jose.EdDSA, i.key)
+	return Policy{
+		IssuerKeys:            network.resolver(issuerkeys.Mechanisms{DIDKey: true, DIDConfiguration: true}),
+		DataIntegrityContexts: i.contexts,
+	}
+}
 
 func TestVerifyDataIntegrityCredential(t *testing.T) {
 	issuer := newLdpIssuer(t)
 	raw := issuer.sign(t, issuer.did(), time.Now().Add(time.Hour))
 	acceptor := newTestAcceptor(t, profile.Final())
 
-	t.Run("a resolved issuer key verifies the proof", func(t *testing.T) {
-		policy := resolving(issuer.publicJWK())
-		var resolvedIssuer string
-		var header map[string]any
-		policy.ResolveIssuerKeys = func(iss string, h map[string]any) ([]jose.JSONWebKey, error) {
-			resolvedIssuer, header = iss, h
-			return []jose.JSONWebKey{issuer.publicJWK()}, nil
-		}
-		policy.DataIntegrityContexts = issuer.contexts
-		parsed, verification, err := acceptor.Verify(t.Context(), raw, policy, ldpOptions())
+	t.Run("a DID key bound by a DID Configuration verifies the proof", func(t *testing.T) {
+		parsed, verification, err := acceptor.Verify(t.Context(), raw, issuer.policy(t), ldpOptions())
 		require.NoError(t, err)
 		require.Equal(t, issuer.did(), parsed.Issuer)
-		require.Equal(t, issuer.did(), resolvedIssuer)
-		require.Equal(t, issuer.method, header["kid"])
-		require.Equal(t, "EdDSA", header["alg"])
 		require.Equal(t, issuer.method, verification.IssuerKeyID)
 		require.NotNil(t, verification.IssuerKey)
+		require.Equal(t, issuerkeys.MechanismDIDConfigurationBinding, verification.Mechanism)
+		require.Equal(t, issuer.did(), verification.DID)
+		require.Equal(t, issuer.did(), verification.Issuer)
 	})
 
-	t.Run("UnverifiedIssuer accepts it without a key", func(t *testing.T) {
-		parsed, verification, err := acceptor.Verify(t.Context(), raw, Policy{UnverifiedIssuer: true}, ldpOptions())
-		require.NoError(t, err)
-		require.Equal(t, "Computer Science", (*parsed.Claims)["degreeName"])
-		require.Nil(t, verification.IssuerKey)
-	})
-
-	t.Run("another key does not verify it", func(t *testing.T) {
-		other := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-		policy := resolving(jose.JSONWebKey{Key: other.Public(), Algorithm: string(jose.EdDSA)})
-		policy.DataIntegrityContexts = issuer.contexts
+	t.Run("a DID without a DID Configuration binding is refused", func(t *testing.T) {
+		policy := Policy{
+			IssuerKeys:            newKeyNetwork().resolver(issuerkeys.Mechanisms{DIDKey: true, DIDConfiguration: true}),
+			DataIntegrityContexts: issuer.contexts,
+		}
 		_, _, err := acceptor.Verify(t.Context(), raw, policy, ldpOptions())
-		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
-		require.ErrorIs(t, err, dataintegrity.ErrProofInvalid)
+		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+		require.ErrorIs(t, err, issuerkeys.ErrDIDOnlyTrustUnsupported)
+	})
+
+	t.Run("a DID Configuration of another origin does not bind", func(t *testing.T) {
+		options := ldpOptions()
+		options.CredentialIssuer = "https://other.example.test"
+		_, _, err := acceptor.Verify(t.Context(), raw, issuer.policy(t), options)
+		require.ErrorIs(t, err, issuerkeys.ErrDIDOnlyTrustUnsupported)
 	})
 
 	t.Run("unpinned contexts fail closed", func(t *testing.T) {
-		_, _, err := acceptor.Verify(t.Context(), raw, resolving(issuer.publicJWK()), ldpOptions())
+		policy := issuer.policy(t)
+		policy.DataIntegrityContexts = nil
+		_, _, err := acceptor.Verify(t.Context(), raw, policy, ldpOptions())
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 		require.ErrorIs(t, err, dataintegrity.ErrContextNotPinned)
 	})
 
 	t.Run("a tampered claim fails", func(t *testing.T) {
 		tampered := []byte(strings.Replace(string(raw), "Computer Science", "Law", 1))
-		policy := resolving(issuer.publicJWK())
-		policy.DataIntegrityContexts = issuer.contexts
-		_, _, err := acceptor.Verify(t.Context(), tampered, policy, ldpOptions())
+		_, _, err := acceptor.Verify(t.Context(), tampered, issuer.policy(t), ldpOptions())
 		require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 	})
 
 	t.Run("IssuerX509 alone authenticates nothing", func(t *testing.T) {
 		chain := newTestIssuerChain(t, []string{"issuer.example"})
-		policy := x509Trust(chain.anchors(), false)
-		policy.UnverifiedIssuer = true
-		_, _, err := acceptor.Verify(t.Context(), raw, policy, ldpOptions())
+		_, _, err := acceptor.Verify(t.Context(), raw, x509Trust(chain.anchors(), false), ldpOptions())
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 	})
 
@@ -149,9 +152,7 @@ func TestVerifyDataIntegrityCredential(t *testing.T) {
 func TestVerifyDataIntegrityCredentialRequiresTheIssuersVerificationMethod(t *testing.T) {
 	issuer := newLdpIssuer(t)
 	raw := issuer.sign(t, "https://issuer.example", time.Now().Add(time.Hour))
-	policy := resolving(issuer.publicJWK())
-	policy.DataIntegrityContexts = issuer.contexts
-	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, policy, ldpOptions())
+	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, issuer.policy(t), ldpOptions())
 	require.ErrorIs(t, err, ErrIssuerSignatureInvalid)
 	require.ErrorContains(t, err, "is not controlled by issuer")
 }
@@ -159,7 +160,7 @@ func TestVerifyDataIntegrityCredentialRequiresTheIssuersVerificationMethod(t *te
 func TestVerifyDataIntegrityCredentialChecksValidity(t *testing.T) {
 	issuer := newLdpIssuer(t)
 	raw := issuer.sign(t, issuer.did(), time.Now().Add(-time.Hour))
-	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, Policy{UnverifiedIssuer: true}, ldpOptions())
+	_, _, err := newTestAcceptor(t, profile.Final()).Verify(t.Context(), raw, issuer.policy(t), ldpOptions())
 	require.ErrorIs(t, err, ErrCredentialExpired)
 }
 

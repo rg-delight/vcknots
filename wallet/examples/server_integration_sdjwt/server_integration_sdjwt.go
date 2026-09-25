@@ -400,13 +400,18 @@ func main() {
 	}
 
 	mockKey := common.NewMockKeyEntry()
+	issuerAcceptance, err := common.SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"))
+	if err != nil {
+		panic(err)
+	}
 	walletConfig := wallet.Config{
-		CredStore:  credStore,
-		IDProfiler: idProf,
-		Receiver:   receiverDisp,
-		Serializer: serializerDisp,
-		Verifier:   verifierDisp,
-		Presenter:  presenterDisp,
+		CredentialAcceptance: issuerAcceptance,
+		CredStore:            credStore,
+		IDProfiler:           idProf,
+		Receiver:             receiverDisp,
+		Serializer:           serializerDisp,
+		Verifier:             verifierDisp,
+		Presenter:            presenterDisp,
 	}
 	if !isConformanceMode {
 		clientAuth, err := common.LoadClientAuth()

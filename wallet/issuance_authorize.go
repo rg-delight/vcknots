@@ -248,14 +248,12 @@ func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, version Issua
 }
 
 // requireFinalIssuance applies the preconditions of every OpenID4VCI 1.0
-// stage: a live context, an acceptance policy, and under HAIP a DPoP key (HAIP
-// Section 4).
+// stage: a live context and under HAIP a DPoP key (HAIP Section 4). The
+// acceptance policy is required where credentials are requested, since each
+// request may bring its own (CredentialRequest.Acceptance).
 func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if w.credentialAcceptance == nil {
-		return fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 	if w.options().RequireDPoP && w.dpop.Key == nil {
 		return fmt.Errorf("HAIP requires Config.DPoP.Key: %w", ErrDPoPKeyRequired)

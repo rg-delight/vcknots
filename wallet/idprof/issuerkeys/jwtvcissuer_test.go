@@ -25,7 +25,6 @@ func TestJWTVCIssuerMetadataRung(t *testing.T) {
 			wantKeyIDs:     []string{"issuer-key-1"},
 			diagnostics: map[string]wantDiagnostic{
 				RungJWTVCIssuerMetadata: {attempted: true, count: 1},
-				RungIssuerMetadataJWKS:  {failure: "issuer metadata carries no signing key"},
 			},
 			check: func(t *testing.T, f *ladderFixture, resolution *Resolution, _ error) {
 				if f.origin.requested("/.well-known/jwt-vc-issuer/tenant") != 1 {
@@ -290,6 +289,26 @@ func TestJWTVCIssuerMetadataRung(t *testing.T) {
 			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungJWTVCIssuerMetadata: {attempted: true, failure: "issuer identifier carries a query or fragment"},
+			},
+		},
+		{
+			// SD-JWT VC -19 §4.2: "either jwks_uri or jwks ..., but not both".
+			name: "a document carrying both jwks and jwks_uri is refused",
+			arrange: func(t *testing.T, f *ladderFixture) Request {
+				f.origin.json(t, "/.well-known/jwt-vc-issuer/tenant", map[string]any{
+					"issuer": f.issuer, "jwks": jwksObject(t, f.signer.public), "jwks_uri": f.origin.url() + "/jwks.json",
+				})
+				f.origin.json(t, "/jwks.json", jwksObject(t, f.signer.public))
+				return f.sdJWTRequest()
+			},
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungJWTVCIssuerMetadata: {attempted: true, failure: "jwt-vc-issuer metadata carries both jwks and jwks_uri"},
+			},
+			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
+				if f.origin.requested("/jwks.json") != 0 {
+					t.Errorf("jwks_uri was requested from a document that also carries jwks")
+				}
 			},
 		},
 	})

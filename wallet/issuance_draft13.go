@@ -59,8 +59,9 @@ func (d *Draft13Issuance) AuthorizePreAuthorizedIssuance(ctx context.Context, re
 // RequestCredential sends the Draft 13 Credential Request (Section 7.2) with
 // one key proof, retrying once with the fresh c_nonce of an invalid_proof
 // error (Section 7.3.2). Config.TestHooks.KeyProof rewrites the proof. The
-// credential is verified under Config.CredentialAcceptance and saved unless
-// the wallet is storeless.
+// credential is verified under req.Acceptance, or else
+// Config.CredentialAcceptance, and saved unless the wallet is storeless. With
+// neither policy nothing is sent (ErrCredentialAcceptancePolicyRequired).
 func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
 	result, err := d.requestCredential(ctx, grant, req)
 	return result, classify(err)
@@ -88,9 +89,6 @@ func (d *Draft13Issuance) require(ctx context.Context) (receiverTypes.Draft13Tra
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if w.credentialAcceptance == nil {
-		return nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 	}
 	transport, err := w.receiver.Draft13Transport(receiverTypes.Oid4vci)
 	if err != nil {
@@ -436,6 +434,10 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if req.KeyAttestation != nil || req.IncludeKeyAttestation {
 		return nil, invalidArgument("Draft 13 has no key attestation")
 	}
+	policy, err := d.w.acceptancePolicy(req.Acceptance)
+	if err != nil {
+		return nil, err
+	}
 	var holderKey IKeyEntry
 	if len(req.HolderKeys) == 1 {
 		if holderKey = req.HolderKeys[0]; holderKey == nil {
@@ -501,11 +503,12 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 				Interval:                  intervalDuration(response.Interval),
 				HolderKeys:                holderKeys,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
+				Acceptance:                req.Acceptance,
 				cache:                     d.w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil
 	}
-	return d.acceptCredential(ctx, md, config, grant.AccessToken, grant.DPoPKeyThumbprint, response, holderKeys)
+	return d.acceptCredential(ctx, policy, md, config, grant.AccessToken, grant.DPoPKeyThumbprint, response, holderKeys)
 }
 
 // credentialRequest builds the Section 7.2 Credential Request with a key
@@ -569,7 +572,7 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 
 // acceptCredential verifies and stores a Draft 13 credential; on refusal the
 // result carries the notification for credential_failure.
-func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverTypes.CredentialIssuerMetadata, config receiverTypes.CredentialConfiguration, token *receiverTypes.CredentialIssuanceAccessToken, thumbprint string, response *receiverTypes.Draft13CredentialResponse, holderKeys []jose.JSONWebKey) (*IssuanceResult, error) {
+func (d *Draft13Issuance) acceptCredential(ctx context.Context, policy *acceptance.Policy, md *receiverTypes.CredentialIssuerMetadata, config receiverTypes.CredentialConfiguration, token *receiverTypes.CredentialIssuanceAccessToken, thumbprint string, response *receiverTypes.Draft13CredentialResponse, holderKeys []jose.JSONWebKey) (*IssuanceResult, error) {
 	result := &IssuanceResult{CredentialResponse: draft13CredentialResponse(response)}
 	if response.NotificationID != "" {
 		result.Notification = &IssuanceNotification{
@@ -591,7 +594,7 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, md *receiverType
 	if err != nil {
 		return result, err
 	}
-	parsed, verification, err := d.w.verifyCredentialUnder(ctx, profile.Draft13().Options(), raw, flavor, holderKey, true)
+	parsed, verification, err := d.w.verifyCredentialUnder(ctx, profile.Draft13(), policy, raw, flavor, holderKey, md.CredentialIssuer)
 	if err != nil {
 		return result, fmt.Errorf("failed to verify credential: %w", err)
 	}
@@ -631,6 +634,10 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err := checkDeferred(deferred, IssuanceVersionDraft13); err != nil {
 		return nil, err
 	}
+	policy, err := d.w.acceptancePolicy(deferred.Acceptance)
+	if err != nil {
+		return nil, err
+	}
 	transport, discovery, dpopKey, err := d.credentialStage(ctx, deferred.cache, deferred.CredentialIssuer, deferred.AccessToken, deferred.DPoPKeyThumbprint,
 		fmt.Errorf("dpop key is required for a DPoP-bound access token: %w", ErrDPoPKeyMismatch))
 	if err != nil {
@@ -658,7 +665,7 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 		// Section 9.1: "still pending" is the Section 9.2 error, not a body.
 		return nil, ErrDraft13CredentialResponseInvalid
 	}
-	return d.acceptCredential(ctx, md, config, deferred.AccessToken, deferred.DPoPKeyThumbprint, response, deferred.HolderKeys)
+	return d.acceptCredential(ctx, policy, md, config, deferred.AccessToken, deferred.DPoPKeyThumbprint, response, deferred.HolderKeys)
 }
 
 func (d *Draft13Issuance) notifyIssuer(ctx context.Context, n *IssuanceNotification, event NotificationEvent, description string) error {

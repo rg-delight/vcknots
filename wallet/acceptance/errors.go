@@ -14,8 +14,9 @@ var (
 	// its issuer JWT is not three base64url parts of the JSON it must hold.
 	ErrCredentialParse = common.NewCodedError("credential_parse_failed", "credential could not be parsed")
 	// ErrCredentialTypInvalid reports an issuer JWT typ the serialization does
-	// not allow (SD-JWT VC §3.1: dc+sd-jwt, or the earlier vc+sd-jwt), or a vct
-	// other than Policy.ExpectedSDJWTVCType.
+	// not allow (SD-JWT VC §2.2.1: dc+sd-jwt; vc+sd-jwt only under
+	// profile.Draft13), an SD-JWT VC without a vct (§2.2.2.3), or a vct other
+	// than Policy.ExpectedSDJWTVCType.
 	ErrCredentialTypInvalid = common.NewCodedError("credential_typ_invalid", "credential typ header is not supported")
 	// ErrCredentialAlgUnsupported reports an alg header that is missing,
 	// "none", absent from Policy.SigningAlgorithms, or implemented by no

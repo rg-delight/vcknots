@@ -15,7 +15,7 @@ import (
 // Request (Section 9) for d. While the issuer has not issued the credentials,
 // the result's Deferred is d with the interval the issuer asked for; the
 // library does not wait or retry. Issued credentials are accepted as in
-// RequestCredential.
+// RequestCredential, under d.Acceptance or else Config.CredentialAcceptance.
 func (w *Wallet) RequestDeferredCredential(ctx context.Context, d *DeferredIssuance) (*IssuanceResult, error) {
 	result, err := w.requestDeferredCredential(ctx, d)
 	return result, classify(err)
@@ -26,6 +26,10 @@ func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssua
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
+		return nil, err
+	}
+	policy, err := w.acceptancePolicy(d.Acceptance)
+	if err != nil {
 		return nil, err
 	}
 	if err := w.checkGrantToken(d.AccessToken); err != nil {
@@ -91,7 +95,7 @@ func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssua
 		result.CredentialResponse = response
 		return result, nil
 	}
-	return w.acceptCredentialResponse(ctx, md, d.CredentialConfigurationID, d.AccessToken, d.DPoPKeyThumbprint, response, d.HolderKeys)
+	return w.acceptCredentialResponse(ctx, policy, md, d.CredentialConfigurationID, d.AccessToken, d.DPoPKeyThumbprint, response, d.HolderKeys)
 }
 
 // pendingDeferred returns d, still pending, with the interval the issuer

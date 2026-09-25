@@ -37,7 +37,7 @@ holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイル
 | `walletAudience` | []string | `[]` | `RequestObjectValidationOptions.WalletAudience` です。`verifierCAFiles` が必要です。 |
 | `issuerCAFiles` | []string | `[]` | Credential の `x5c` チェーンに対する PEM の Issuer トラストアンカー（`acceptance.IssuerX509TrustOptions.TrustAnchors`）です。 |
 | `issuerAllowUnadvertisedRevocation` | bool | `false` | `acceptance.IssuerX509TrustOptions.AllowUnadvertisedRevocation` です。`issuerCAFiles` が必要です。 |
-| `issuerJWKSFiles` | []string | `[]` | `x5c` のない Credential のための Issuer 公開鍵の JWKS ファイルです。構成したすべての鍵を返す `acceptance.Policy.ResolveIssuerKeys` を設定します。秘密鍵は拒否します。 |
+| `issuerKeyResolution` | bool | `false` | `acceptance.Policy.IssuerKeys` に `issuerkeys.Resolver` を設定します。`x5c` のない https の `iss` には JWT VC Issuer Metadata（SD-JWT VC -19 §4）を、DID の `iss` には DID Configuration による Credential Issuer の origin との束縛（OpenID4VCI 1.0 §14.4）を許します。 |
 | `requireHolderBinding` | bool | `false` | `acceptance.Policy.RequireHolderBinding` です。 |
 | `redirectUri` | string | `""` | `Config.Issuance.RedirectURI` です。`receive-code` と `receive-code-wallet-initiated` で必須です。 |
 | `authorizationRequestType` | string | `""` | `IssuanceRequest.AuthorizationRequestType` で、`""`、`"scope"`、`"authorization_details"` のいずれかです。HAIP が受け付けるのは `scope` だけです。 |
@@ -51,11 +51,15 @@ holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイル
 | `additionalHolderKeys` | int | `0` | `receive-code` と `receive-code-wallet-initiated` の batch 要求に使う、追加の一時 P-256 holder 鍵の数です。 |
 | `followRedirect` | bool | `true` | `present` が返された `redirect_uri` を開くかどうかです。 |
 
-OpenID4VCI 1.0 のメソッドは `Config.CredentialAcceptance` がないと実行を拒否するため、driver は常にこれを設定します。
-`issuerCAFiles` か `issuerJWKSFiles` があれば、ポリシーは Issuer の鍵を認証します。
-どちらもなければ driver は `acceptance.Policy.UnverifiedIssuer` を設定し、鍵を認証できないテスト用 Issuer に対して実行していることを 1 か所で明示します。
-HAIP では、SD-JWT VC にはそれでも `issuerCAFiles` が必要です。
-`requireHolderBinding` はどちらの場合にも適用されます。
+発行のメソッドは `Config.CredentialAcceptance` がないと Credential を要求しないため、driver は常にこれを設定します。
+`issuerCAFiles` も `issuerKeyResolution` もなければ、driver は起動を拒否します。
+ポリシーが決めるのは、どの方式を許すかだけです。
+どの方式を使うかは Credential で決まります。
+`x5c` ヘッダがあれば、その chain を `issuerCAFiles` で検証します（信頼できない chain は拒否します）。
+`x5c` がなければ、`iss` の形で JWT VC Issuer Metadata か DID かが決まります。
+許した方式のどれでも認証できない Credential は拒否します。
+HAIP では、SD-JWT VC に `issuerCAFiles` が必要です。
+`requireHolderBinding` はすべての場合に適用されます。
 
 TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であり、`IssuerX509TrustOptions` と `RequestObjectValidationOptions` の CRL 用クライアントでもあるので、CRL の取得も `tlsCAFiles` に従います。
 矛盾するオプション（CA ファイルのない `*AllowUnadvertisedRevocation`、`verifierCAFiles` のない `walletAudience`、issuer のない attester 鍵）と、`redirectUri` のない Authorization Code の操作は、どの操作を実行するよりも前に拒否します。
@@ -75,7 +79,7 @@ TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であ�
   "walletAudience": ["https://self-issued.me/v2"],
   "issuerCAFiles": ["/path/to/issuer-trust-anchor.pem"],
   "issuerAllowUnadvertisedRevocation": false,
-  "issuerJWKSFiles": ["/path/to/issuer-jwks.json"],
+  "issuerKeyResolution": true,
   "requireHolderBinding": true,
   "profile": "final",
   "holderKeyFile": "/path/to/holder.jwk",

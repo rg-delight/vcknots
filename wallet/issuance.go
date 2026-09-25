@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/credential"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -101,6 +102,13 @@ type CredentialRequest struct {
 	// IncludeKeyAttestation sends a key attestation although the issuer does
 	// not require one.
 	IncludeKeyAttestation bool
+	// Acceptance is the acceptance policy of this issuance: it overrides
+	// Config.CredentialAcceptance for the credentials of this request, and of
+	// the Deferred issuance it may return. The library fills the issuance
+	// context the policy needs (the Credential Issuer Identifier and the
+	// Credential Format). One of the two is required, and the request is not
+	// sent without it (ErrCredentialAcceptancePolicyRequired).
+	Acceptance *acceptance.Policy
 }
 
 // IssuanceAuthorization is the state between BeginIssuance and
@@ -196,6 +204,11 @@ type DeferredIssuance struct {
 	// Credential Response. Secret.
 	ResponseDecryptionKey *jose.JSONWebKey `json:"response_decryption_key,omitempty"`
 	DPoPKeyThumbprint     string           `json:"dpop_key_thumbprint,omitempty"`
+	// Acceptance is the CredentialRequest.Acceptance this issuance was
+	// requested with. It is not serialized: a caller that stores the state
+	// sets it again, or the credentials are accepted under
+	// Config.CredentialAcceptance.
+	Acceptance *acceptance.Policy `json:"-"`
 
 	cache *issuanceMetadataCache
 }
@@ -214,8 +227,8 @@ type IssuanceNotification struct {
 // IssuanceResult is the outcome of RequestCredential or
 // RequestDeferredCredential: credentials, or a transaction still pending.
 type IssuanceResult struct {
-	// Credentials were verified under Config.CredentialAcceptance and, unless
-	// the wallet is storeless, saved.
+	// Credentials were verified under the request's Acceptance policy (or
+	// Config.CredentialAcceptance) and, unless the wallet is storeless, saved.
 	Credentials []*SavedCredential
 	// Deferred is set while the issuer has not issued the credentials yet.
 	Deferred *DeferredIssuance
@@ -250,6 +263,9 @@ type ReceiveCredentialRequest struct {
 	RequestedFormat      credential.SupportedSerializationFlavor
 	CachedIssuerMetadata *receiverTypes.CredentialIssuerMetadata
 	TxCode               string
+	// Acceptance overrides Config.CredentialAcceptance for this credential.
+	// One of the two is required.
+	Acceptance *acceptance.Policy
 }
 
 // CredentialOffer represents a credential offer from an issuer.

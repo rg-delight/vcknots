@@ -23,7 +23,8 @@ type jwtVCIssuerMetadata struct {
 	// JWKS is the Issuer's public keys, carried inline.
 	JWKS json.RawMessage `json:"jwks"`
 	// JWKSURI locates the Issuer's public keys at a separate URL. The
-	// specification lets a document use either form, not both.
+	// specification requires either form, "but not both" (SD-JWT VC -19
+	// §4.2).
 	JWKSURI string `json:"jwks_uri"`
 }
 
@@ -99,6 +100,13 @@ func (r *Resolver) jwtVCIssuerKeys(ctx context.Context, request Request) (keys [
 		return nil, false, newMechanismError(ErrJWTVCIssuerMismatch, "jwt-vc-issuer metadata names another issuer")
 	}
 
+	// SD-JWT VC -19 §4.2: "MUST include either jwks_uri or jwks ..., but
+	// not both". A document that carries both is not JWT VC Issuer
+	// Metadata, whichever of the two the resolver would have read.
+	inlineJWKS := len(metadata.JWKS) > 0 && string(metadata.JWKS) != "null"
+	if metadata.JWKSURI != "" && inlineJWKS {
+		return nil, false, newMechanismError(ErrIssuerMetadataInvalid, "jwt-vc-issuer metadata carries both jwks and jwks_uri")
+	}
 	remoteSkipped = metadata.JWKSURI != "" && !r.Mechanisms.RemoteJWKS
 	set, err := r.jwtVCIssuerJWKS(ctx, metadata)
 	if err != nil {
@@ -110,10 +118,9 @@ func (r *Resolver) jwtVCIssuerKeys(ctx context.Context, request Request) (keys [
 
 // jwtVCIssuerJWKS returns the key set of a JWT VC Issuer Metadata document.
 //
-// A `jwks_uri` is followed only when Mechanisms.RemoteJWKS allows it. When it
-// does not, the member is ignored rather than refused: the document may also
-// carry an inline `jwks`, and the point of the switch is that no second request
-// is made, not that the document is rejected for offering one.
+// A `jwks_uri` is followed only when Mechanisms.RemoteJWKS allows it; when it
+// does not, the rung finds no inline `jwks` and records the switch. The caller
+// has already refused a document carrying both members.
 func (r *Resolver) jwtVCIssuerJWKS(ctx context.Context, metadata jwtVCIssuerMetadata) (*jose.JSONWebKeySet, error) {
 	if metadata.JWKSURI != "" && r.Mechanisms.RemoteJWKS {
 		jwksURL, err := r.allowedURL(metadata.JWKSURI)

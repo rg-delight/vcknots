@@ -14,6 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/testutil"
 	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer"
@@ -80,7 +81,7 @@ func TestVerifyX509Policy(t *testing.T) {
 		"a disclosure without a digest":      {signed(testWire{disclosures: map[string]string{"given_name": "Taro"}, extraDisclosure: true}), x509Trust(chain.anchors(), false), "disclosure is not referenced"},
 		"an issuer DNS binding mismatch":     {signed(testWire{issuer: "https://other.example.test"}), x509Trust(chain.anchors(), true), "not bound to issuer host"},
 		"a non SD-JWT typ":                   {signed(testWire{typ: "JWT"}), x509Trust(chain.anchors(), false), "typ header"},
-		"x5c without configured X.509 trust": {signed(testWire{}), Policy{}, "x5c issuer authentication is not configured"},
+		"x5c without configured X.509 trust": {signed(testWire{}), Policy{}, "does not permit x5c issuer authentication"},
 	}
 	for name, testCase := range rejections {
 		t.Run(name+" is refused", func(t *testing.T) {
@@ -94,11 +95,23 @@ func TestVerifyX509Policy(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("x5c is ignored when the caller resolves keys without X.509 trust", func(t *testing.T) {
-		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{}), resolving(jose.JSONWebKey{Key: chain.leafKey.Public(), KeyID: "leaf"}), sdJWT(&holder))
+	// SD-JWT VC -19 §2.5 and §7.3: an x5c header selects the x5c mechanism,
+	// so a policy without X.509 trust refuses it even when the issuer's JWT VC
+	// Issuer Metadata publishes the leaf key.
+	t.Run("x5c is refused when the policy resolves keys without X.509 trust", func(t *testing.T) {
+		_, _, err := acceptor.Verify(t.Context(), signed(testWire{}), resolving(jose.JSONWebKey{Key: chain.leafKey.Public(), KeyID: "leaf"}), sdJWT(&holder))
+		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
+		require.ErrorContains(t, err, "does not permit x5c issuer authentication")
+	})
+
+	t.Run("the verification records the x5c mechanism and the certificate subject", func(t *testing.T) {
+		_, verification, err := acceptor.Verify(t.Context(), signed(testWire{}), x509Trust(chain.anchors(), true), sdJWT(&holder))
 		require.NoError(t, err)
-		require.Nil(t, verification.CertificateSHA256)
-		require.Equal(t, "leaf", verification.IssuerKeyID)
+		require.Equal(t, issuerkeys.MechanismX5CTrustedChain, verification.Mechanism)
+		require.Equal(t, testCredentialIssuer, verification.Issuer)
+		require.True(t, verification.IssuerDNSBound)
+		require.Equal(t, "CN=Acceptance Test Issuer", verification.IssuerCertificateSubject.Subject)
+		require.Equal(t, []string{"issuer.example.test"}, verification.IssuerCertificateSubject.DNSNames)
 	})
 }
 
@@ -112,6 +125,9 @@ func TestVerifyResolvedIssuerKeys(t *testing.T) {
 		_, verification, err := acceptor.Verify(t.Context(), wire, resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}), sdJWT(&holder))
 		require.NoError(t, err)
 		require.Equal(t, "issuer-key-1", verification.IssuerKeyID)
+		require.Equal(t, issuerkeys.MechanismJWTVCIssuerMetadata, verification.Mechanism)
+		require.Equal(t, testCredentialIssuer, verification.Issuer)
+		require.Nil(t, verification.IssuerCertificateSubject)
 	})
 
 	t.Run("only wrong keys are a signature failure", func(t *testing.T) {
@@ -123,48 +139,12 @@ func TestVerifyResolvedIssuerKeys(t *testing.T) {
 	t.Run("no resolver and no x5c is unresolved", func(t *testing.T) {
 		_, _, err := acceptor.Verify(t.Context(), wire, Policy{}, sdJWT(&holder))
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
-		require.ErrorContains(t, err, "issuer key resolution is not configured")
-	})
-}
-
-func TestVerifyUnverifiedIssuer(t *testing.T) {
-	acceptor := newTestAcceptor(t, profile.Final())
-	holder := newHolderKey(t)
-	other := newHolderKey(t)
-	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
-	wire := []byte(buildWire(t, testWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder}))
-	permissive := Policy{UnverifiedIssuer: true}
-
-	t.Run("accepts and records no issuer authentication", func(t *testing.T) {
-		_, verification, err := acceptor.Verify(t.Context(), wire, permissive, sdJWT(&holder))
-		require.NoError(t, err)
-		require.True(t, verification.HolderBound)
-		require.Nil(t, verification.CertificateSHA256)
-		require.Empty(t, verification.IssuerKeyID)
-		require.Nil(t, verification.IssuerKey)
-	})
-
-	t.Run("still checks the holder binding", func(t *testing.T) {
-		_, _, err := acceptor.Verify(t.Context(), wire, permissive, sdJWT(&other))
-		require.ErrorIs(t, err, ErrHolderBindingMismatch)
-	})
-
-	t.Run("still checks validity", func(t *testing.T) {
-		expired := buildWire(t, testWire{signingKey: chain.leafKey, x5c: chain.x5c(), cnf: &holder, exp: time.Now().Add(-time.Hour)})
-		_, _, err := acceptor.Verify(t.Context(), []byte(expired), permissive, sdJWT(&holder))
-		require.ErrorIs(t, err, ErrCredentialExpired)
-	})
-
-	t.Run("yields to configured issuer trust", func(t *testing.T) {
-		policy := x509Trust(newTestIssuerChain(t, nil).anchors(), false)
-		policy.UnverifiedIssuer = true
-		_, _, err := acceptor.Verify(t.Context(), wire, policy, sdJWT(&holder))
-		require.ErrorContains(t, err, "issuer certificate chain is not trusted")
+		require.ErrorContains(t, err, "the policy permits no mechanism for this https issuer")
 	})
 
 	t.Run("an exp beyond any date is malformed", func(t *testing.T) {
-		far := buildWire(t, testWire{signingKey: testutil.NewP256Key(t), cnf: &holder, exp: time.Unix(9e15, 0)})
-		_, _, err := acceptor.Verify(t.Context(), []byte(far), permissive, sdJWT(&holder))
+		far := buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1", cnf: &holder, exp: time.Unix(9e15, 0)})
+		_, _, err := acceptor.Verify(t.Context(), []byte(far), resolving(jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1"}), sdJWT(&holder))
 		require.ErrorIs(t, err, ErrCredentialParse)
 	})
 }
@@ -327,12 +307,7 @@ func TestVerifyTypedFailures(t *testing.T) {
 	issuerJWK := jose.JSONWebKey{Key: &issuerKey.PublicKey, KeyID: "issuer-key-1", Algorithm: "ES256"}
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 
-	resolvingPolicy := Policy{ResolveIssuerKeys: func(_ string, header map[string]any) ([]jose.JSONWebKey, error) {
-		if kid, _ := header["kid"].(string); kid != "issuer-key-1" {
-			return nil, nil
-		}
-		return []jose.JSONWebKey{issuerJWK}, nil
-	}}
+	resolvingPolicy := resolving(issuerJWK)
 	bindingPolicy := resolvingPolicy
 	bindingPolicy.RequireHolderBinding = true
 	signed := func(spec testWire) string {
@@ -367,11 +342,11 @@ func TestVerifyTypedFailures(t *testing.T) {
 		sentinel error
 	}{
 		{"parse", profile.Final(), resolvingPolicy, signed(testWire{}), "this-is-not-a-credential", ErrCredentialParse},
-		{"typ", profile.Final(), resolvingPolicy, signed(testWire{typ: "vc+sd-jwt"}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
+		{"typ", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{typ: "JWT"}), ErrCredentialTypInvalid},
 		{"alg", profile.Final(), resolvingPolicy, signed(testWire{}), unsignedWire(t, "none"), ErrCredentialAlgUnsupported},
 		{"holder binding missing", profile.Final(), bindingPolicy, signed(testWire{}), buildWire(t, testWire{signingKey: issuerKey, kid: "issuer-key-1"}), ErrHolderBindingMissing},
 		{"holder binding mismatch", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{cnf: &otherHolder}), ErrHolderBindingMismatch},
-		{"issuer key unresolved", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{signingKey: issuerKey, kid: "another-key"}), ErrIssuerKeyUnresolved},
+		{"issuer key unresolved", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{issuer: "https://unknown.example.test"}), ErrIssuerKeyUnresolved},
 		{"issuer signature invalid", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{tamperSignature: true}), ErrIssuerSignatureInvalid},
 		{"expired", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{exp: time.Now().Add(-time.Hour)}), ErrCredentialExpired},
 		{"not yet valid", profile.Final(), resolvingPolicy, signed(testWire{}), signed(testWire{nbf: ptr(time.Now().Add(time.Hour))}), ErrCredentialNotYetValid},
@@ -472,7 +447,7 @@ func TestVerifyInfersTheFlavor(t *testing.T) {
 	issuerKey := testutil.NewP256Key(t)
 	wire := []byte(buildWire(t, testWire{signingKey: issuerKey, typ: "JWT"}))
 	// With the flavor inferred, the SD-JWT VC typ rule applies to a "~" wire.
-	_, _, err := acceptor.Verify(t.Context(), wire, Policy{UnverifiedIssuer: true}, Options{})
+	_, _, err := acceptor.Verify(t.Context(), wire, resolving(), Options{})
 	require.ErrorIs(t, err, ErrCredentialTypInvalid)
 	require.Equal(t, credential.SDJwtVC, inferredFlavor(wire))
 	require.Equal(t, credential.JwtVc, inferredFlavor([]byte("a.b.c")))
@@ -509,11 +484,11 @@ func TestNewAcceptorValidatesInputs(t *testing.T) {
 	verification, err := verifier.NewVerificationDispatcher(verifier.WithDefaultConfig())
 	require.NoError(t, err)
 
-	_, err = NewAcceptor(profile.Options{}, nil, verification)
+	_, err = NewAcceptor(profile.Final(), nil, verification)
 	require.ErrorContains(t, err, "serialization dispatcher")
-	_, err = NewAcceptor(profile.Options{}, serialization, nil)
+	_, err = NewAcceptor(profile.Final(), serialization, nil)
 	require.ErrorContains(t, err, "verification dispatcher")
-	acceptor, err := NewAcceptor(profile.HAIP().Options(), serialization, verification)
+	acceptor, err := NewAcceptor(profile.HAIP(), serialization, verification)
 	require.NoError(t, err)
 	require.Equal(t, profile.HAIPOptions().IssuerX5C, acceptor.x5c)
 }

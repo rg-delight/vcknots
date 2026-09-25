@@ -29,19 +29,31 @@ func checkValidity(payload map[string]any, now time.Time, skew time.Duration) er
 	return nil
 }
 
+// sdAlgorithm returns the _sd_alg of an SD-JWT payload: sha-256 when absent
+// (RFC 9901 §4.1.1), and ErrSDAlgUnsupported for a value that is not a string
+// or not one of AcceptedSDAlgorithms, which RFC 9901 §7.1 requires the
+// recipient to understand.
+func sdAlgorithm(payload map[string]any) (string, error) {
+	raw, present := payload["_sd_alg"]
+	if !present {
+		return "sha-256", nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%w: _sd_alg must be a string", ErrSDAlgUnsupported)
+	}
+	if algorithm := strings.ToLower(text); slices.Contains(AcceptedSDAlgorithms(), algorithm) {
+		return algorithm, nil
+	}
+	return "", fmt.Errorf("%w: unsupported _sd_alg %q", ErrSDAlgUnsupported, text)
+}
+
 // checkDisclosureIntegrity requires every SD-JWT disclosure to be referenced
 // by exactly one digest in the payload or another disclosure.
 func checkDisclosureIntegrity(payload map[string]any, parsed *credential.Credential) error {
-	sdAlg := "sha-256"
-	if raw, present := payload["_sd_alg"]; present {
-		text, ok := raw.(string)
-		if !ok {
-			return fmt.Errorf("%w: _sd_alg must be a string", ErrSDAlgUnsupported)
-		}
-		sdAlg = strings.ToLower(text)
-		if !slices.Contains(AcceptedSDAlgorithms(), sdAlg) {
-			return fmt.Errorf("%w: unsupported _sd_alg %q", ErrSDAlgUnsupported, text)
-		}
+	sdAlg, err := sdAlgorithm(payload)
+	if err != nil {
+		return err
 	}
 	if parsed.SDJwt == nil || len(parsed.SDJwt.Disclosures) == 0 {
 		return nil

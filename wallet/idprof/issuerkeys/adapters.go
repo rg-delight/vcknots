@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -15,122 +14,11 @@ import (
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 )
 
-// This file adapts the ladder to the two hooks the rest of the library asks an
-// integrator for: the credential acceptor's issuer key resolution
-// (acceptance.Policy.ResolveIssuerKeys) and the Token Status
-// List checker's (statuslist.Checker.ResolveIssuerKeys). Both hooks receive the
-// issuer and the protected header of a JWT that has not been verified yet, and
-// both want the candidate public keys back; neither has room for the
-// diagnostics or the evidence of which mechanism produced the key that
-// verified, which is what the adapters keep for the caller.
-
-// KeyLookup adapts a Resolver to the credential acceptor's ResolveIssuerKeys
-// hook for one credential, and remembers what the ladder said about it.
-//
-// The acceptor's hook takes no context, so the lookup carries the context of
-// the acceptance call it was created for; it is meant to live exactly as long
-// as that call. The hook is called once per credential, and a KeyLookup keeps
-// the resolution of its most recent call.
-//
-// Keys returns the candidates the ladder produced whose Candidate.Issuer equals
-// the JWT `iss`, in ladder order.
-type KeyLookup struct {
-	resolver *Resolver
-	//nolint:containedctx // The acceptor's hook has no context parameter; see the type comment.
-	ctx      context.Context
-	template Request
-
-	// callerVerifiesX5C records that the caller authenticates an x5c chain
-	// itself and asks this lookup for keys only once a chain reached none of
-	// its anchors; see CallerVerifiesX5C.
-	callerVerifiesX5C bool
-
-	mu         sync.Mutex
-	resolution *Resolution
-	err        error
-}
-
-// CallerVerifiesX5C tells the lookup that the caller walks an x5c chain itself
-// - the credential acceptor does, against IssuerX509 - and asks for keys only
-// when the credential carries none or its chain reached no configured anchor
-// (acceptance.Policy.ResolveIssuerKeysWhenX5CUntrusted). A resolution
-// for a credential that carries x5c then reports the x5c rung as "certificate
-// chain is not trusted" instead of claiming the chain as usable. It returns l
-// for chaining.
-func (l *KeyLookup) CallerVerifiesX5C() *KeyLookup {
-	l.callerVerifiesX5C = true
-	return l
-}
-
-// NewKeyLookup returns a KeyLookup that resolves within ctx. template carries
-// everything the ladder needs that the JWT header does not: CredentialFormat,
-// CredentialIssuer, IssuerMetadataJWKS and, for the W3C `vc.issuer` binding,
-// Payload. Keys fills Issuer, KeyID, Algorithm and X5C from its arguments,
-// overwriting whatever the template held.
-func (r *Resolver) NewKeyLookup(ctx context.Context, template Request) *KeyLookup {
-	return &KeyLookup{resolver: r, ctx: ctx, template: template}
-}
-
-// Keys resolves the candidate public keys of a credential signed by issuer
-// under header. Its signature is acceptance.Policy's
-// ResolveIssuerKeys, so a caller passes the method value lookup.Keys.
-func (l *KeyLookup) Keys(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
-	return l.KeysFromClaims(issuer, header, l.template.Payload)
-}
-
-// KeysFromClaims is Keys for the acceptor's ResolveIssuerKeysFromClaims hook:
-// claims are the credential's issuer-signed claims, which the W3C JWT VC
-// `vc.issuer` binding (Mechanisms.CredentialIssuerBinding) reads. They replace
-// the template's Payload.
-func (l *KeyLookup) KeysFromClaims(issuer string, header map[string]any, claims map[string]any) ([]jose.JSONWebKey, error) {
-	request := requestFromHeader(l.template, issuer, header)
-	request.Payload = claims
-	resolution, err := l.resolver.resolve(l.ctx, request)
-	if l.callerVerifiesX5C && len(request.X5C) > 0 {
-		if resolution != nil {
-			markChainUntrusted(resolution)
-		}
-		var didOnly *DIDOnlyTrustError
-		if errors.As(err, &didOnly) {
-			markChainUntrusted(&Resolution{Diagnostics: didOnly.Diagnostics})
-		}
-	}
-	if err == nil {
-		resolution.Candidates = issuerCandidates(resolution.Candidates, issuer)
-	}
-	if err == nil && len(resolution.Candidates) == 0 {
-		err = l.ctx.Err()
-		if err == nil {
-			err = &UnresolvedError{Diagnostics: resolution.Diagnostics}
-		}
-	}
-
-	l.mu.Lock()
-	l.resolution, l.err = resolution, err
-	l.mu.Unlock()
-
-	if err != nil {
-		return nil, err
-	}
-	return candidateKeys(resolution.Candidates), nil
-}
-
-// Resolution returns what the ladder produced on the most recent Keys call:
-// the candidates and, whether or not any key was found, the per-rung
-// diagnostics. It is nil before Keys has been called.
-func (l *KeyLookup) Resolution() *Resolution {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.resolution
-}
-
-// Err returns the error the most recent Keys call returned, nil when it
-// returned keys or has not been called.
-func (l *KeyLookup) Err() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.err
-}
+// This file adapts the resolver to the Token Status List checker's issuer
+// key hook (statuslist.Checker.ResolveIssuerKeys), which receives the issuer
+// and the protected header of a JWT that has not been verified yet and wants
+// the candidate public keys back. The credential acceptor (wallet/acceptance)
+// calls Resolve itself.
 
 // CandidateFor returns the candidate whose key is key, compared by RFC 7638
 // JWK thumbprint, so members that carry no key material (`kid`, `alg`, `use`)

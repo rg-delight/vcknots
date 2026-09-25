@@ -14,9 +14,11 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/clientconfig"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/idprof"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
@@ -49,6 +51,37 @@ func LoadClientAuth() (wallet.ClientAuthConfig, error) {
 		clientconfig.WithPrivateJWKFile(DefaultClientPrivateJWKPath),
 		clientconfig.AllowInsecureFilePermissions(),
 	)
+}
+
+// SampleIssuerAcceptance is the credential acceptance policy of the
+// examples. The local sample server publishes JWT VC Issuer Metadata at
+// /.well-known/jwt-vc-issuer (SD-JWT VC -19 §4), which authenticates its
+// SD-JWT VCs; a DID issuer is accepted once the Credential Issuer's origin
+// links it with a DID Configuration. The sample server runs on plain http,
+// so the experimental AllowHTTP follows VCKNOTS_WALLET_HTTP_ALLOWED; never
+// set it in production. When issuerCAPath names a PEM file, a credential
+// carrying x5c is authenticated against the certificates in it.
+func SampleIssuerAcceptance(issuerCAPath string) (*acceptance.Policy, error) {
+	policy := &acceptance.Policy{IssuerKeys: &issuerkeys.Resolver{
+		Mechanisms: issuerkeys.Mechanisms{
+			JWTVCIssuerMetadata: true, RemoteJWKS: true,
+			DIDKey: true, DIDJWK: true, DIDWeb: true, DIDConfiguration: true,
+		},
+		AllowHTTP: env.IsHTTPAllowed(),
+	}}
+	if issuerCAPath == "" {
+		return policy, nil
+	}
+	pem, err := os.ReadFile(issuerCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read issuer CA certificates: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("failed to parse issuer CA certificates")
+	}
+	policy.IssuerX509 = &acceptance.IssuerX509TrustOptions{RootCAs: roots, AllowUnadvertisedRevocation: true}
+	return policy, nil
 }
 
 type MockKeyEntry struct {
@@ -172,14 +205,20 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 		return nil, err
 	}
 
+	issuerAcceptance, err := SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"))
+	if err != nil {
+		return nil, err
+	}
+
 	w, err := wallet.NewWalletWithConfig(wallet.Config{
-		CredStore:  credStore,
-		IDProfiler: idProf,
-		Receiver:   receiverDispatcher,
-		Serializer: serializerDispatcher,
-		Verifier:   verifierDispatcher,
-		Presenter:  presenterDispatcher,
-		ClientAuth: clientAuth,
+		CredentialAcceptance: issuerAcceptance,
+		CredStore:            credStore,
+		IDProfiler:           idProf,
+		Receiver:             receiverDispatcher,
+		Serializer:           serializerDispatcher,
+		Verifier:             verifierDispatcher,
+		Presenter:            presenterDispatcher,
+		ClientAuth:           clientAuth,
 		// Key is left unset so that NewWalletWithConfig generates a DPoP key
 		// of its own. Reusing the registered client authentication key would
 		// tie DPoP key rotation to the client assertion key.

@@ -41,7 +41,7 @@ paths in the configuration.
 | `walletAudience` | []string | `[]` | `RequestObjectValidationOptions.WalletAudience`. Requires `verifierCAFiles`. |
 | `issuerCAFiles` | []string | `[]` | PEM issuer trust anchors for credential `x5c` chains (`acceptance.IssuerX509TrustOptions.TrustAnchors`). |
 | `issuerAllowUnadvertisedRevocation` | bool | `false` | `acceptance.IssuerX509TrustOptions.AllowUnadvertisedRevocation`. Requires `issuerCAFiles`. |
-| `issuerJWKSFiles` | []string | `[]` | JWKS files of public issuer keys for credentials without `x5c`. Sets `acceptance.Policy.ResolveIssuerKeys`, which returns every configured key. Private keys are rejected. |
+| `issuerKeyResolution` | bool | `false` | Sets `acceptance.Policy.IssuerKeys` to an `issuerkeys.Resolver` that permits JWT VC Issuer Metadata (SD-JWT VC -19 §4) for an https `iss` without `x5c`, and a DID `iss` bound to the Credential Issuer's origin by a DID Configuration (OpenID4VCI 1.0 §14.4). |
 | `requireHolderBinding` | bool | `false` | `acceptance.Policy.RequireHolderBinding`. |
 | `redirectUri` | string | `""` | `Config.Issuance.RedirectURI`. Required by `receive-code` and `receive-code-wallet-initiated`. |
 | `authorizationRequestType` | string | `""` | `IssuanceRequest.AuthorizationRequestType`: `""`, `"scope"` or `"authorization_details"`. HAIP accepts `scope` only. |
@@ -55,12 +55,15 @@ paths in the configuration.
 | `additionalHolderKeys` | int | `0` | Extra ephemeral P-256 holder keys for a batch request in `receive-code` and `receive-code-wallet-initiated`. |
 | `followRedirect` | bool | `true` | Whether `present` opens the returned `redirect_uri`. |
 
-`Config.CredentialAcceptance` is always set, because the OpenID4VCI 1.0 methods
-refuse to run without it. With `issuerCAFiles` or `issuerJWKSFiles` the policy
-authenticates the issuer key; with neither, the driver sets
-`acceptance.Policy.UnverifiedIssuer`, so a run against a test issuer whose key
-the driver cannot authenticate says so in one place. Under HAIP an SD-JWT VC
-still requires `issuerCAFiles`. `requireHolderBinding` applies in both cases.
+`Config.CredentialAcceptance` is always set, because every issuance method
+refuses to request a credential without it, and the driver refuses to start
+without `issuerCAFiles` or `issuerKeyResolution`. The policy only selects which
+mechanisms are permitted; which one applies follows from the credential: an
+`x5c` header is authenticated by its chain against `issuerCAFiles` (a chain that
+is not trusted refuses the credential), and without `x5c` the `iss` selects JWT
+VC Issuer Metadata or a DID. A credential no permitted mechanism authenticates
+is refused. Under HAIP an SD-JWT VC requires `issuerCAFiles`.
+`requireHolderBinding` applies in every case.
 
 The TLS-configured HTTP client is the plugins' `HTTPClient` and the CRL client
 of `IssuerX509TrustOptions` and `RequestObjectValidationOptions`, so CRL
@@ -86,7 +89,7 @@ Example configuration:
   "walletAudience": ["https://self-issued.me/v2"],
   "issuerCAFiles": ["/path/to/issuer-trust-anchor.pem"],
   "issuerAllowUnadvertisedRevocation": false,
-  "issuerJWKSFiles": ["/path/to/issuer-jwks.json"],
+  "issuerKeyResolution": true,
   "requireHolderBinding": true,
   "profile": "final",
   "holderKeyFile": "/path/to/holder.jwk",

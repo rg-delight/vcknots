@@ -59,8 +59,25 @@ func (f *ladderFixture) jwtVCRequest(didValue, kid string) Request {
 		Algorithm:        "ES256",
 		CredentialFormat: FormatJWTVCJSON,
 		CredentialIssuer: f.credentialIssuer,
-		Payload:          map[string]any{"iss": didValue, "vc": map[string]any{"issuer": didValue}},
 	}
+}
+
+// publishMetadata publishes JWT VC Issuer Metadata for f.issuer carrying
+// keys inline.
+func (f *ladderFixture) publishMetadata(t *testing.T, keys ...jose.JSONWebKey) {
+	t.Helper()
+	f.origin.json(t, "/.well-known/jwt-vc-issuer/tenant", map[string]any{"issuer": f.issuer, "jwks": jwksObject(t, keys...)})
+}
+
+// linkDID publishes a DIF Well Known DID Configuration on the fixture origin
+// whose Domain Linkage Credential, signed by f.signer under kid, links
+// didValue to the origin.
+func (f *ladderFixture) linkDID(t *testing.T, didValue, kid string) {
+	t.Helper()
+	header, claims := domainLinkage(didValue, kid, f.originString())
+	f.origin.json(t, "/.well-known/did-configuration.json", map[string]any{
+		"linked_dids": []any{signJWT(t, f.signer, header, claims)},
+	})
 }
 
 // originString is the RFC 6454 serialization of the fixture origin.
@@ -184,7 +201,6 @@ func TestEveryMechanismSwitchedOff(t *testing.T) {
 	request := f.jwtVCRequest(didValue, didValue+"#issuer-key-1")
 	request.CredentialFormat = FormatSDJWTVC
 	request.X5C = x5cOf(leaf)
-	request.IssuerMetadataJWKS = keySet(f.signer.public)
 
 	// Only the x5c rung left standing: an X.509-only issuer policy.
 	resolver := f.origin.resolver(Mechanisms{X5C: true})
@@ -200,7 +216,6 @@ func TestEveryMechanismSwitchedOff(t *testing.T) {
 		RungX5C:                 nil,
 		RungJWTVCIssuerMetadata: {SwitchJWTVCIssuerMetadata},
 		RungDID:                 {SwitchDIDWeb},
-		RungIssuerMetadataJWKS:  {SwitchIssuerMetadataJWKS},
 	}
 	for rung, disabledBy := range want {
 		if got := diagnosticFor(t, diagnostics, rung).DisabledBy; !slices.Equal(got, disabledBy) {

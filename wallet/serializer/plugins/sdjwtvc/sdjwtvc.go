@@ -179,6 +179,57 @@ func parseDisclosure(encodedDisclosure string, sdAlg string) (credential.SDJwtDi
 	return disc, nil
 }
 
+// nonDisclosableClaims are the registered claims SD-JWT VC §2.2.2.3 says
+// "MUST NOT be included in Disclosures", including any of their sub-claims.
+var nonDisclosableClaims = map[string]bool{
+	"iss": true, "nbf": true, "exp": true, "cnf": true, "vct": true,
+	"vct#integrity": true, "aka_vcts": true, "status": true,
+}
+
+// isNonDisclosableClaim reports whether a root-level Disclosure names one of
+// nonDisclosableClaims.
+func isNonDisclosableClaim(name string) bool {
+	return nonDisclosableClaims[name]
+}
+
+// checkNonDisclosableSubClaims refuses a digest (an _sd member or an array
+// element "..." reference, RFC 9901 §4.2) anywhere inside a plaintext
+// non-disclosable claim: its sub-claims must not be selectively disclosed
+// either (SD-JWT VC §2.2.2.3).
+func checkNonDisclosableSubClaims(payload map[string]any) error {
+	for name := range nonDisclosableClaims {
+		if value, present := payload[name]; present && containsDigest(value) {
+			return types.NewInvalidCredentialError(fmt.Sprintf("a sub-claim of %q is disclosed", name), types.ErrRegisteredClaimDisclosed)
+		}
+	}
+	return nil
+}
+
+// containsDigest reports whether value carries an SD-JWT digest reference.
+func containsDigest(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if _, present := typed["_sd"]; present {
+			return true
+		}
+		if _, present := typed["..."]; present && len(typed) == 1 {
+			return true
+		}
+		for _, child := range typed {
+			if containsDigest(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if containsDigest(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // computeDisclosureHash computes the hash of a disclosure using the specified algorithm
 func computeDisclosureHash(disclosure string, algorithm string) (string, error) {
 	var h hash.Hash
@@ -198,15 +249,35 @@ func computeDisclosureHash(disclosure string, algorithm string) (string, error) 
 	return base64.RawURLEncoding.EncodeToString(hashBytes), nil
 }
 
-// normalizeSDHashAlgorithm applies RFC 9901 defaulting behavior for _sd_alg.
-// Unknown or empty values fall back to sha-256.
-func normalizeSDHashAlgorithm(algorithm string) string {
+// sdHashAlgorithm returns the _sd_alg of an SD-JWT payload. An absent claim
+// means sha-256 (RFC 9901 §4.1.1). A value that is not a string, or names a
+// hash this plugin does not implement, is refused: the verifier must
+// understand the hash algorithm (RFC 9901 §7.1), and digesting the
+// disclosures with another one would not check what the issuer committed to.
+func sdHashAlgorithm(payload map[string]any) (string, error) {
+	raw, present := payload["_sd_alg"]
+	if !present {
+		return defaultHashAlgorithm, nil
+	}
+	algorithm, ok := raw.(string)
+	if !ok {
+		return "", types.NewInvalidCredentialError("_sd_alg must be a string", nil)
+	}
 	switch strings.ToLower(algorithm) {
 	case "sha-256", "sha-384", "sha-512":
-		return strings.ToLower(algorithm)
+		return strings.ToLower(algorithm), nil
 	default:
-		return defaultHashAlgorithm
+		return "", types.NewInvalidCredentialError(fmt.Sprintf("unsupported _sd_alg %q", algorithm), nil)
 	}
+}
+
+// keyBindingHashAlgorithm is the hash of a Key Binding JWT sd_hash: the
+// _sd_alg of the SD-JWT (RFC 9901 §4.3.1), sha-256 when none is given.
+func keyBindingHashAlgorithm(sdAlg string) (string, error) {
+	if sdAlg == "" {
+		return defaultHashAlgorithm, nil
+	}
+	return sdHashAlgorithm(map[string]any{"_sd_alg": sdAlg})
 }
 
 // KeyBindingJWT represents the structure of a Key Binding JWT
@@ -240,7 +311,11 @@ func createKeyBindingJWT(
 	transactionData []string,
 	transactionDataHashesAlg string,
 ) (string, error) {
-	sdHash, err := computeDisclosureHash(sdJwtWithDisclosures, normalizeSDHashAlgorithm(sdAlg))
+	hashAlgorithm, err := keyBindingHashAlgorithm(sdAlg)
+	if err != nil {
+		return "", err
+	}
+	sdHash, err := computeDisclosureHash(sdJwtWithDisclosures, hashAlgorithm)
 	if err != nil {
 		return "", fmt.Errorf("failed to hash SD-JWT for sd_hash: %w", err)
 	}
@@ -392,10 +467,9 @@ func (s *SdJwtVcSerializer) DeserializeCredential(flavor credential.SupportedSer
 		return nil, types.NewInvalidJWTError("SD-JWT payload is not valid JSON", err)
 	}
 
-	// Get _sd_alg (default to sha-256 per spec)
-	sdAlg := defaultHashAlgorithm
-	if algVal, ok := payloadMap["_sd_alg"].(string); ok {
-		sdAlg = normalizeSDHashAlgorithm(algVal)
+	sdAlg, err := sdHashAlgorithm(payloadMap)
+	if err != nil {
+		return nil, err
 	}
 
 	// Parse _sd hashes and preserve them for caller-side processing.
@@ -423,6 +497,9 @@ func (s *SdJwtVcSerializer) DeserializeCredential(flavor credential.SupportedSer
 			allClaims[k] = v
 		}
 	}
+	if err := checkNonDisclosableSubClaims(payloadMap); err != nil {
+		return nil, err
+	}
 	rootDigests := make(map[string]bool, len(sdHashes))
 	for _, digest := range sdHashes {
 		if rootDigests[digest] {
@@ -442,6 +519,9 @@ func (s *SdJwtVcSerializer) DeserializeCredential(flavor credential.SupportedSer
 		}
 		if disc.IsArrayElement || disc.Name == "" || disc.Name == "_sd" || disc.Name == "..." {
 			return nil, types.NewInvalidCredentialError("invalid root object disclosure", nil)
+		}
+		if isNonDisclosableClaim(disc.Name) {
+			return nil, types.NewInvalidCredentialError(fmt.Sprintf("claim %q is disclosed", disc.Name), types.ErrRegisteredClaimDisclosed)
 		}
 		if _, exists := payloadMap[disc.Name]; exists {
 			return nil, types.NewInvalidCredentialError("disclosure overwrites a plaintext claim", nil)
@@ -589,9 +669,9 @@ func (s *SdJwtVcSerializer) SerializePresentation(
 		return nil, nil, types.NewInvalidJWTError("SD-JWT payload is not valid JSON", err)
 	}
 
-	sdAlg := defaultHashAlgorithm
-	if algVal, ok := payloadMap["_sd_alg"].(string); ok {
-		sdAlg = normalizeSDHashAlgorithm(algVal)
+	sdAlg, err := sdHashAlgorithm(payloadMap)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// Filter disclosures based on selected claims

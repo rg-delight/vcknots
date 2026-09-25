@@ -22,6 +22,11 @@ var (
 	ErrUnsupportedAlgorithm = common.NewCodedError("serializer_unsupported_algorithm", "unsupported cryptographic algorithm")
 	ErrPluginNotFound       = common.NewCodedError("serializer_plugin_not_found", "serialization plugin not found")
 	ErrNilPlugin            = common.NewCodedError("serializer_nil_plugin", "serialization plugin cannot be nil")
+	// ErrRegisteredClaimDisclosed reports an SD-JWT VC that selectively
+	// discloses a registered claim SD-JWT VC forbids in Disclosures (iss,
+	// nbf, exp, cnf, vct, vct#integrity, aka_vcts, status), or one of its
+	// sub-claims (SD-JWT VC §2.2.2.3). It is wrapped by ErrInvalidCredential.
+	ErrRegisteredClaimDisclosed = common.NewCodedError("serializer_registered_claim_disclosed", "SD-JWT VC discloses a claim that must not be selectively disclosed")
 )
 
 // SerializePresentationOptions is a marker interface for presentation serialization options

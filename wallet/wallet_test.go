@@ -21,9 +21,9 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/receiver"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
@@ -127,17 +127,6 @@ func createTestControllerWithDefaults(t *testing.T) *Wallet {
 		t.Fatalf("Failed to create controller with defaults: %v", err)
 	}
 	return controller
-}
-
-// acceptIssuerKeyPolicy authenticates credentials signed by issuerKey. SD-JWT
-// VC §3.5 leaves issuer key resolution to ecosystem policy, so the tests model
-// a wallet that holds the issuer key out of band.
-func acceptIssuerKeyPolicy(issuerKey *ecdsa.PrivateKey) *acceptance.Policy {
-	return &acceptance.Policy{
-		ResolveIssuerKeys: func(string, map[string]any) ([]jose.JSONWebKey, error) {
-			return []jose.JSONWebKey{{Key: &issuerKey.PublicKey, Algorithm: "ES256"}}, nil
-		},
-	}
 }
 
 func mustParseURL(t *testing.T, rawURL string) *url.URL {
@@ -671,8 +660,26 @@ func TestClientAuthConfig_SignatureAlgorithmDefaultsToES256(t *testing.T) {
 // These tests only validate SD-JWT parsing/metadata round-trip, not signature verification.
 // If SD-JWT deserialization later requires signature verification, replace this with a
 // valid ES256 signature (preferred) or change alg to "none" accordingly.
+// walletTestIssuer signs the credentials of the legacy issuance fixtures with
+// an x5c chain to mockserver.CredentialTrustAnchors, so mockIssuerAcceptance
+// authenticates them.
+var walletTestIssuer = mockserver.MustGenerateKeyPair("wallet-test-issuer")
+
+// signWalletTestCredential signs claims as walletTestIssuer with typ and x5c.
+func signWalletTestCredential(typ string, claims map[string]interface{}) string {
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: walletTestIssuer.PrivateKey},
+		(&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader("x5c", walletTestIssuer.CertificateChain()))
+	if err != nil {
+		panic(err)
+	}
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		panic(err)
+	}
+	return token
+}
+
 func createWalletTestSDJWT() string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"vc+sd-jwt"}`))
 	disclosures := []string{
 		"WyIyR0xDNDJzS1F2ZUNmR2ZyeU5STjl3IiwgImdpdmVuX25hbWUiLCAiSm9obiJd",
 		"WyI2SWo3dE0tYTVpVlBHYm9TNXRtdlZBIiwgImVtYWlsIiwgImpvaG5kb2VAZXhhbXBsZS5jb20iXQ",
@@ -693,13 +700,7 @@ func createWalletTestSDJWT() string {
 		"vct":     "https://credentials.example.com/identity_credential",
 		"_sd_alg": "sha-256",
 	}
-	payloadBytes, _ := json.Marshal(payload)
-	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
-
-	jwt := header + "." + payloadEncoded + "." + signature
-
-	result := jwt
+	result := signWalletTestCredential("vc+sd-jwt", payload)
 	for _, disclosure := range disclosures {
 		result += "~" + disclosure
 	}
@@ -709,7 +710,6 @@ func createWalletTestSDJWT() string {
 }
 
 func createWalletTestJwtVCCredential() string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT"}`))
 	now := time.Now().Unix()
 	payload := map[string]interface{}{
 		"iat": now,
@@ -723,11 +723,7 @@ func createWalletTestJwtVCCredential() string {
 			},
 		},
 	}
-	payloadBytes, _ := json.Marshal(payload)
-	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadBytes)
-	signature := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
-
-	return header + "." + payloadEncoded + "." + signature
+	return signWalletTestCredential("JWT", payload)
 }
 
 func TestController_GenerateDID_ErrorPaths_Integration(t *testing.T) {

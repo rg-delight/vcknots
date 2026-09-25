@@ -16,25 +16,17 @@ import (
 // The DID is the credential's `iss`; a `kid` that names a verification method
 // of another DID gives the rung nothing. A DID document proves only that
 // whoever controls the DID published these keys, not that the controller is the
-// Credential Issuer, so a resolved key becomes a candidate only once something
-// binds the DID to that issuer:
+// Credential Issuer, so a resolved key becomes a candidate only once a DIF Well
+// Known DID Configuration served by the Credential Issuer's origin links that
+// origin to the DID (OpenID4VCI 1.0 §14.4, mechanism 1). The other mechanism
+// §14.4 lists, a `credential_issuer` member in the credential's own issuer
+// object, is the signer's own statement and binds nothing, so it is not used.
 //
-//  1. the Credential Issuer Metadata `jwks` names the same key (non-normative,
-//     see Mechanisms.IssuerMetadataJWKS);
-//  2. the credential's own `vc.issuer` object names both the DID and the
-//     Credential Issuer (self-asserted, see Mechanisms.CredentialIssuerBinding);
-//  3. a DIF Well Known DID Configuration served by the Credential Issuer's
-//     origin links that origin to the DID.
-//
-// A key with none of them is refused outright, with ErrDIDOnlyTrustUnsupported,
-// rather than being dropped so the ladder can fall through to a weaker rung:
-// "signed by a DID that claims to be this issuer" is a situation a caller must
-// see, not one to resolve by trying something else.
-func (r *Resolver) didRung(
-	ctx context.Context,
-	request Request,
-	metadataKeys []jose.JSONWebKey,
-) ([]Candidate, MechanismDiagnostic, error) {
+// A key without that binding is refused outright, with
+// ErrDIDOnlyTrustUnsupported: "signed by a DID that claims to be this issuer"
+// is a situation a caller must see, not one to resolve by trying something
+// else.
+func (r *Resolver) didRung(ctx context.Context, request Request) ([]Candidate, MechanismDiagnostic, error) {
 	diagnostic := MechanismDiagnostic{Mechanism: RungDID}
 
 	didValue := didReference(request.Issuer)
@@ -72,70 +64,31 @@ func (r *Resolver) didRung(
 		return nil, diagnostic, nil
 	}
 
-	// The `vc.issuer` binding is a read of the credential this call already
-	// holds; the DID Configuration binding is an outbound request, so it is
-	// made only if the cheaper bindings have not already answered for a key.
-	credentialIssuerBound := r.credentialIssuerBinds(request)
-	didConfigurationBound := r.lazyDIDConfigurationBinding(ctx, didValue, request)
-
-	var candidates []Candidate
-	for _, key := range keys {
-		mechanism, bound := r.didBinding(key, metadataKeys, credentialIssuerBound, didConfigurationBound)
-		if !bound {
-			continue
+	// A DID Configuration that cannot be retrieved or does not verify simply
+	// does not bind; the caller is told the DID was unbound, which is the
+	// accurate statement either way.
+	bound := false
+	if r.Mechanisms.DIDConfiguration {
+		bound, _ = r.didConfigurationBinds(ctx, didValue, request)
+	}
+	if !bound {
+		diagnostic.Failure = "DID-only trust not accepted without a DID Configuration binding"
+		if !r.Mechanisms.DIDConfiguration {
+			diagnostic.DisabledBy = []string{SwitchDIDConfiguration}
 		}
+		return nil, diagnostic, newMechanismError(ErrDIDOnlyTrustUnsupported, diagnostic.Failure)
+	}
+	candidates := make([]Candidate, 0, len(keys))
+	for _, key := range keys {
 		candidates = append(candidates, Candidate{
 			Key:       key,
 			Issuer:    didValue,
-			Mechanism: mechanism,
+			Mechanism: MechanismDIDConfigurationBinding,
 			DID:       didValue,
 		})
 	}
-	if len(candidates) == 0 {
-		diagnostic.Failure = "DID-only trust not accepted without metadata/config binding"
-		diagnostic.DisabledBy = r.switchedOffBindings(request)
-		return nil, diagnostic, newMechanismError(ErrDIDOnlyTrustUnsupported, diagnostic.Failure)
-	}
 	diagnostic.CandidateCount = len(candidates)
 	return candidates, diagnostic, nil
-}
-
-// switchedOffBindings names the binding switches that are off and would have
-// applied to request's format. They are what a holder can turn on to let a DID
-// the ladder refused as unbound become bound.
-func (r *Resolver) switchedOffBindings(request Request) []string {
-	var off []string
-	if !r.Mechanisms.IssuerMetadataJWKS {
-		off = append(off, SwitchIssuerMetadataJWKS)
-	}
-	if request.CredentialFormat == FormatJWTVCJSON {
-		if !r.Mechanisms.CredentialIssuerBinding {
-			off = append(off, SwitchCredentialIssuerBinding)
-		}
-		if !r.Mechanisms.DIDConfiguration {
-			off = append(off, SwitchDIDConfiguration)
-		}
-	}
-	return off
-}
-
-// didBinding reports which binding makes key usable for this issuer.
-func (r *Resolver) didBinding(
-	key jose.JSONWebKey,
-	metadataKeys []jose.JSONWebKey,
-	credentialIssuerBound bool,
-	didConfigurationBound func() bool,
-) (Mechanism, bool) {
-	if anyPublicKeyMatches(metadataKeys, key) {
-		return MechanismDIDMetadataBinding, true
-	}
-	if credentialIssuerBound {
-		return MechanismDIDCredentialIssuerBinding, true
-	}
-	if didConfigurationBound() {
-		return MechanismDIDConfigurationBinding, true
-	}
-	return "", false
 }
 
 // didMethodSwitch reports the Mechanisms switch that governs the DID's method,
@@ -250,60 +203,6 @@ func originAuthority(u *url.URL) string {
 		return host
 	}
 	return host + ":" + port
-}
-
-// credentialIssuerBinds reports whether the credential's own signed claims link
-// its DID issuer to this Credential Issuer.
-//
-// The evidence is inside the signature being verified, so it is only worth
-// anything for a format that carries such a claim: the W3C JWT VC `vc.issuer`
-// object. Both members must agree - the object's `id` with the credential's
-// `iss`, its `credential_issuer` with the issuance's Credential Issuer - or the
-// signer has not stated the link this rung needs.
-func (r *Resolver) credentialIssuerBinds(request Request) bool {
-	if request.CredentialFormat != FormatJWTVCJSON || !r.Mechanisms.CredentialIssuerBinding {
-		return false
-	}
-	if !strings.HasPrefix(request.Issuer, "did:") {
-		return false
-	}
-	credential, ok := request.Payload["vc"].(map[string]any)
-	if !ok {
-		return false
-	}
-	issuer, ok := credential["issuer"].(map[string]any)
-	if !ok {
-		return false
-	}
-	id, _ := issuer["id"].(string)
-	credentialIssuer, _ := issuer["credential_issuer"].(string)
-	return id == request.Issuer && credentialIssuer == request.CredentialIssuer
-}
-
-// lazyDIDConfigurationBinding returns a predicate that retrieves the Credential
-// Issuer's DID Configuration the first time it is asked, and remembers the
-// answer.
-//
-// It is lazy because the retrieval is an outbound request whose answer is only
-// needed for a key the cheaper bindings did not already cover, and memoised
-// because the answer is the same for every key of one DID.
-func (r *Resolver) lazyDIDConfigurationBinding(ctx context.Context, didValue string, request Request) func() bool {
-	var asked, bound bool
-	return func() bool {
-		if asked {
-			return bound
-		}
-		asked = true
-		if request.CredentialFormat != FormatJWTVCJSON || !r.Mechanisms.DIDConfiguration {
-			return false
-		}
-		// A DID Configuration that cannot be retrieved or does not verify
-		// simply does not bind. It is not the rung's failure: another binding
-		// may still cover the key, and if none does the caller is told the DID
-		// was unbound, which is the accurate statement either way.
-		bound, _ = r.didConfigurationBinds(ctx, didValue, request)
-		return bound
-	}
 }
 
 // didResolver returns the DID resolver to use.

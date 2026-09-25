@@ -27,6 +27,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/credstore/plugins/local"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
@@ -81,8 +82,11 @@ type configuration struct {
 	WalletAudience                      []string `json:"walletAudience"`
 	IssuerCAFiles                       []string `json:"issuerCAFiles"`
 	IssuerAllowUnadvertisedRevocation   bool     `json:"issuerAllowUnadvertisedRevocation"`
-	IssuerJWKSFiles                     []string `json:"issuerJWKSFiles"`
-	RequireHolderBinding                bool     `json:"requireHolderBinding"`
+	// IssuerKeyResolution turns on JWT VC Issuer Metadata (SD-JWT VC -19 §4)
+	// for an https iss and DID resolution bound by a DID Configuration
+	// (OpenID4VCI 1.0 §14.4) for a DID iss.
+	IssuerKeyResolution  bool `json:"issuerKeyResolution"`
+	RequireHolderBinding bool `json:"requireHolderBinding"`
 	// FollowRedirect controls whether present opens a verifier-returned
 	// redirect_uri in the driver's own TLS-configured client. Absent means true.
 	FollowRedirect *bool `json:"followRedirect"`
@@ -217,32 +221,6 @@ func readTrustAnchors(paths []string) ([]*x509.Certificate, error) {
 	return anchors, nil
 }
 
-// readIssuerKeys parses JWKS-formatted files and rejects any private key so the
-// operator cannot accidentally hand signing material to the acceptance policy.
-func readIssuerKeys(paths []string) ([]jose.JSONWebKey, error) {
-	var keys []jose.JSONWebKey
-	for _, path := range paths {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		var set jose.JSONWebKeySet
-		if err := json.Unmarshal(raw, &set); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
-		if len(set.Keys) == 0 {
-			return nil, fmt.Errorf("JWKS file contains no keys: %s", path)
-		}
-		for i := range set.Keys {
-			if !set.Keys[i].IsPublic() {
-				return nil, fmt.Errorf("JWKS file contains a non-public key: %s", path)
-			}
-			keys = append(keys, set.Keys[i])
-		}
-	}
-	return keys, nil
-}
-
 // newHTTPClient builds the driver's single TLS-configured client, used for both
 // plugin traffic and same-device redirect following.
 func newHTTPClient(config configuration) (*http.Client, error) {
@@ -339,35 +317,33 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		requestObjectValidation.CRL.HTTPClient = httpClient
 	}
 
-	// Credential acceptance. The OpenID4VCI Final and HAIP issuance paths
-	// require a policy, so absent issuer trust the driver states in one place
-	// that it accepts unauthenticated issuers, which is what a conformance
-	// driver run against arbitrary test issuers needs.
-	acceptancePolicy := &acceptance.Policy{
-		RequireHolderBinding: config.RequireHolderBinding,
-		UnverifiedIssuer:     true,
+	// Credential acceptance. Every issuance path requires a policy, and the
+	// policy only says which of the specified mechanisms it permits: x5c
+	// against issuerCAFiles, and with issuerKeyResolution JWT VC Issuer
+	// Metadata and DID Configuration bound DIDs. A credential no permitted
+	// mechanism authenticates is refused.
+	if len(config.IssuerCAFiles) == 0 && !config.IssuerKeyResolution {
+		return nil, fmt.Errorf("issuer trust is required: set issuerCAFiles, issuerKeyResolution or both")
 	}
-	if len(config.IssuerCAFiles) > 0 || len(config.IssuerJWKSFiles) > 0 {
-		acceptancePolicy.UnverifiedIssuer = false
-		if len(config.IssuerCAFiles) > 0 {
-			anchors, err := readTrustAnchors(config.IssuerCAFiles)
-			if err != nil {
-				return nil, err
-			}
-			acceptancePolicy.IssuerX509 = &acceptance.IssuerX509TrustOptions{
-				TrustAnchors:                anchors,
-				AllowUnadvertisedRevocation: config.IssuerAllowUnadvertisedRevocation,
-				HTTPClient:                  httpClient,
-			}
+	acceptancePolicy := &acceptance.Policy{RequireHolderBinding: config.RequireHolderBinding}
+	if len(config.IssuerCAFiles) > 0 {
+		anchors, err := readTrustAnchors(config.IssuerCAFiles)
+		if err != nil {
+			return nil, err
 		}
-		if len(config.IssuerJWKSFiles) > 0 {
-			keys, err := readIssuerKeys(config.IssuerJWKSFiles)
-			if err != nil {
-				return nil, err
-			}
-			acceptancePolicy.ResolveIssuerKeys = func(issuer string, header map[string]any) ([]jose.JSONWebKey, error) {
-				return keys, nil
-			}
+		acceptancePolicy.IssuerX509 = &acceptance.IssuerX509TrustOptions{
+			TrustAnchors:                anchors,
+			AllowUnadvertisedRevocation: config.IssuerAllowUnadvertisedRevocation,
+			HTTPClient:                  httpClient,
+		}
+	}
+	if config.IssuerKeyResolution {
+		acceptancePolicy.IssuerKeys = &issuerkeys.Resolver{
+			HTTPClient: httpClient,
+			Mechanisms: issuerkeys.Mechanisms{
+				JWTVCIssuerMetadata: true, RemoteJWKS: true,
+				DIDKey: true, DIDJWK: true, DIDWeb: true, DIDConfiguration: true,
+			},
 		}
 	}
 

@@ -80,7 +80,7 @@ func newReceiveCredentialTestServer(t *testing.T) (*url.URL, <-chan url.Values, 
 
 	issuerKeyPair := mockserver.MustGenerateKeyPair("issuer-key-id")
 	jwtBuilder := mockserver.MustNewJWTBuilder(issuerKeyPair)
-	defaultCredentialJWT, err := jwtBuilder.CreateSignedJWT(server.URL, map[string]interface{}{
+	defaultCredentialJWT, err := jwtBuilder.CreateSignedCredentialJWT(server.URL, map[string]interface{}{
 		"sub": "did:key:z6Mkio4WDmdtgEo4f9Hq6i6tnW8WFwknQQ4KHUY99BGY4EVr",
 		"vc": map[string]interface{}{
 			"@context": []string{
@@ -253,8 +253,9 @@ func TestController_ReceiveCredential_TxCodeOmitted_Integration(t *testing.T) {
 				},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
+		Acceptance: mockIssuerAcceptance(),
+		Type:       receiverTypes.Oid4vci,
+		Key:        newMockKeyEntry(),
 	}
 
 	_, err := controller.ReceiveCredential(req)
@@ -290,9 +291,10 @@ func TestController_ReceiveCredential_TxCodeProvided_Integration(t *testing.T) {
 				},
 			},
 		},
-		Type:   receiverTypes.Oid4vci,
-		Key:    newMockKeyEntry(),
-		TxCode: "123456",
+		Acceptance: mockIssuerAcceptance(),
+		Type:       receiverTypes.Oid4vci,
+		Key:        newMockKeyEntry(),
+		TxCode:     "123456",
 	}
 
 	_, err := controller.ReceiveCredential(req)
@@ -476,6 +478,7 @@ func TestController_ReceiveCredential_SDJwtSpecified_StoresMimeAndCanGetByID(t *
 				},
 			},
 		},
+		Acceptance:      mockIssuerAcceptance(),
 		Type:            receiverTypes.Oid4vci,
 		Key:             newMockKeyEntry(),
 		RequestedFormat: credential.SDJwtVC,
@@ -562,6 +565,7 @@ func TestController_ReceiveCredential_AttachesProofWhenCryptographicBindingMetho
 				},
 			},
 		},
+		Acceptance:      mockIssuerAcceptance(),
 		Type:            receiverTypes.Oid4vci,
 		Key:             newMockKeyEntry(),
 		RequestedFormat: credential.JwtVc,
@@ -612,6 +616,7 @@ func TestController_ReceiveCredential_OmitsProofWhenBindingNotRequired_AllowsNil
 				},
 			},
 		},
+		Acceptance:      mockIssuerAcceptance(),
 		Type:            receiverTypes.Oid4vci,
 		RequestedFormat: credential.JwtVc,
 	}
@@ -663,8 +668,9 @@ func TestController_ReceiveCredential_WithMockServer_Integration(t *testing.T) {
 				},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
+		Acceptance: mockIssuerAcceptance(),
+		Type:       receiverTypes.Oid4vci,
+		Key:        newMockKeyEntry(),
 	}
 
 	// First test metadata fetch to debug
@@ -734,8 +740,9 @@ func TestController_ReceiveCredential_RejectsUnsupportedCredentialConfigurationI
 				},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  newMockKeyEntry(),
+		Acceptance: mockIssuerAcceptance(),
+		Type:       receiverTypes.Oid4vci,
+		Key:        newMockKeyEntry(),
 	}
 
 	credential, err := controller.ReceiveCredential(req)

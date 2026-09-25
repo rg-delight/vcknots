@@ -803,7 +803,7 @@ func (is *OID4VCIIssuerServer) CreateCredentialJWT(subject string, credentialCla
 	// Merge with provided credential claims
 	maps.Copy(claims, credentialClaims)
 
-	return is.jwtBuilder.CreateSignedJWT(issuer, claims)
+	return is.jwtBuilder.CreateSignedCredentialJWT(issuer, claims)
 }
 
 // SetCustomCredential sets a custom credential response for testing

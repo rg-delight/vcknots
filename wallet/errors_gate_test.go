@@ -207,11 +207,11 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		"Wallet.VerifyCredentialForAcceptance: no policy": func(t *testing.T) error {
 			w, err := NewWalletWithConfig(Config{Storeless: true})
 			require.NoError(t, err)
-			_, _, err = w.VerifyCredentialForAcceptance(ctx, []byte("a.b.c"), credential.SDJwtVC, nil)
+			_, _, err = w.VerifyCredentialForAcceptance(ctx, CredentialAcceptanceRequest{Raw: []byte("a.b.c"), Flavor: credential.SDJwtVC})
 			return err
 		},
 		"Wallet.VerifyCredentialForAcceptance: not a credential": func(t *testing.T) error {
-			_, _, err := newFinalIssuanceFixture(t).wallet.VerifyCredentialForAcceptance(ctx, []byte("not a credential"), credential.SDJwtVC, nil)
+			_, _, err := newFinalIssuanceFixture(t).wallet.VerifyCredentialForAcceptance(ctx, CredentialAcceptanceRequest{Raw: []byte("not a credential"), Flavor: credential.SDJwtVC})
 			return err
 		},
 		"Wallet.GenerateDID: not a DID type": func(t *testing.T) error {
