@@ -25,7 +25,6 @@ func TestJWTVCIssuerMetadataRung(t *testing.T) {
 			wantKeyIDs:     []string{"issuer-key-1"},
 			diagnostics: map[string]wantDiagnostic{
 				RungJWTVCIssuerMetadata: {attempted: true, count: 1},
-				RungIssuerMetadataJWKS:  {failure: "issuer metadata carries no signing key"},
 			},
 			check: func(t *testing.T, f *ladderFixture, resolution *Resolution, _ error) {
 				if f.origin.requested("/.well-known/jwt-vc-issuer/tenant") != 1 {

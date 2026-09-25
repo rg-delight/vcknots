@@ -27,7 +27,7 @@ func TestDIDRungDIDConfiguration(t *testing.T) {
 		return f.jwtVCRequest(didValue, didValue+"#0")
 	}
 	didOnly := map[string]wantDiagnostic{
-		RungDID: {attempted: true, failure: "DID-only trust not accepted without metadata/config binding"},
+		RungDID: {attempted: true, failure: "DID-only trust not accepted without a DID Configuration binding"},
 	}
 	runLadderCases(t, []ladderCase{
 		{
@@ -50,7 +50,7 @@ func TestDIDRungDIDConfiguration(t *testing.T) {
 			},
 			wantErr: ErrDIDOnlyTrustUnsupported,
 			diagnostics: map[string]wantDiagnostic{
-				RungDID: {attempted: true, failure: "DID-only trust not accepted without metadata/config binding", disabledBy: []string{SwitchDIDConfiguration}},
+				RungDID: {attempted: true, failure: "DID-only trust not accepted without a DID Configuration binding", disabledBy: []string{SwitchDIDConfiguration}},
 			},
 			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
 				if f.origin.requestCount() != 0 {
@@ -200,33 +200,25 @@ func TestDIDRungDIDConfiguration(t *testing.T) {
 			wantErr: ErrDIDOnlyTrustUnsupported,
 		},
 		{
-			name:       "the DID Configuration does not apply to SD-JWT VC",
+			// OpenID4VCI 1.0 §14.4 binds a DID Issuer Identifier of any
+			// Credential Format to the Credential Issuer's domain.
+			name:       "the DID Configuration binds the DID of an SD-JWT VC",
 			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := linkage(t, f, nil)
 				request.CredentialFormat = FormatSDJWTVC
 				return request
 			},
-			wantErr: ErrDIDOnlyTrustUnsupported,
-			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
-				if f.origin.requestCount() != 0 {
-					t.Errorf("requests were made: %d", f.origin.requestCount())
-				}
-			},
+			wantMechanisms: []Mechanism{MechanismDIDConfigurationBinding},
 		},
 		{
-			name: "the metadata binding answers before the DID Configuration is requested",
+			name: "the DID Configuration binds the DID of an ldp_vc",
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := linkage(t, f, nil)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				request.CredentialFormat = FormatLDPVC
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismDIDMetadataBinding},
-			check: func(t *testing.T, f *ladderFixture, _ *Resolution, _ error) {
-				if f.origin.requested(configurationPath) != 0 {
-					t.Errorf("the DID Configuration was requested although the metadata bound the key")
-				}
-			},
+			wantMechanisms: []Mechanism{MechanismDIDConfigurationBinding},
 		},
 	})
 }

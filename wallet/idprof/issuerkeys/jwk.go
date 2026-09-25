@@ -1,8 +1,6 @@
 package issuerkeys
 
 import (
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 
 	"github.com/go-jose/go-jose/v4"
@@ -13,12 +11,6 @@ import (
 // an oversized chain before anything is parsed keeps one header from buying an
 // attacker unbounded certificate parsing.
 const maximumX5CChainLength = 16
-
-// comparableJWKMembers are the JWK members that carry public key material:
-// `crv`, `x` and `y` for EC and OKP keys (RFC 7517 and RFC 8037), `n` and `e`
-// for RSA keys. They are the members two representations of the same public key
-// always agree on.
-var comparableJWKMembers = [...]string{"crv", "x", "y", "n", "e"}
 
 // x5cChain returns the certification path of a credential JWT's `x5c` header,
 // or nothing when the header is absent, empty, longer than the cap, or carries
@@ -37,102 +29,6 @@ func x5cChain(values []string) []string {
 		}
 	}
 	return values
-}
-
-// leafPublicKey returns the public key of the first certificate of an `x5c`
-// chain, or false when the entry is not a parseable certificate.
-//
-// It is read for one purpose: a leaf whose public key the Credential Issuer
-// Metadata `jwks` also names is bound to the issuer by the metadata, whether or
-// not the chain itself reaches a trust anchor.
-func leafPublicKey(chain []string) (jose.JSONWebKey, bool) {
-	if len(chain) == 0 {
-		return jose.JSONWebKey{}, false
-	}
-	// RFC 7515 section 4.1.6 writes each `x5c` entry as base64 (not base64url)
-	// encoded DER.
-	der, err := base64.StdEncoding.DecodeString(chain[0])
-	if err != nil {
-		return jose.JSONWebKey{}, false
-	}
-	certificate, err := x509.ParseCertificate(der)
-	if err != nil {
-		return jose.JSONWebKey{}, false
-	}
-	key := jose.JSONWebKey{Key: certificate.PublicKey}
-	if !key.Valid() || !key.IsPublic() {
-		return jose.JSONWebKey{}, false
-	}
-	return key, true
-}
-
-// publicKeyMatches reports whether candidate and reference are the same public
-// key.
-//
-// The comparison is over the JWK members that carry key material: the `kty`
-// must be equal, and every comparable member the reference key has must be
-// present and equal on the candidate. It is deliberately not an RFC 7638
-// thumbprint comparison. A thumbprint is computed over a fixed member list per
-// key type and two representations of the same key do produce the same one, but
-// building it requires both sides to be complete and well-formed keys, while
-// the question here is narrower: does the key an issuer published in its
-// metadata describe the same key material as the one a DID document or a
-// certificate handed us. Members that carry no key material - `kid`, `alg`,
-// `use` - differ routinely between the two and must not make them disagree.
-func publicKeyMatches(candidate, reference jose.JSONWebKey) bool {
-	candidateMembers := publicKeyMembers(candidate)
-	referenceMembers := publicKeyMembers(reference)
-	if referenceMembers["kty"] == "" || candidateMembers["kty"] != referenceMembers["kty"] {
-		return false
-	}
-	present := 0
-	for _, member := range comparableJWKMembers {
-		value, ok := referenceMembers[member]
-		if !ok {
-			continue
-		}
-		present++
-		if candidateMembers[member] != value {
-			return false
-		}
-	}
-	return present > 0
-}
-
-// publicKeyMembers returns the JWK members of key that carry its identity, as
-// the strings its JSON representation writes them with. Serialising rather than
-// reading the Go key type keeps one encoding of a coordinate - the base64url
-// form RFC 7517 defines - as the only one compared.
-func publicKeyMembers(key jose.JSONWebKey) map[string]string {
-	if key.Key == nil {
-		return nil
-	}
-	raw, err := key.MarshalJSON()
-	if err != nil {
-		return nil
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return nil
-	}
-	members := make(map[string]string, len(comparableJWKMembers)+1)
-	for _, name := range append([]string{"kty"}, comparableJWKMembers[:]...) {
-		if value, ok := decoded[name].(string); ok {
-			members[name] = value
-		}
-	}
-	return members
-}
-
-// anyPublicKeyMatches reports whether one of candidates is the same public key
-// as reference.
-func anyPublicKeyMatches(candidates []jose.JSONWebKey, reference jose.JSONWebKey) bool {
-	for _, candidate := range candidates {
-		if publicKeyMatches(candidate, reference) {
-			return true
-		}
-	}
-	return false
 }
 
 // algCompatibleKeys returns the keys of a JWK Set that could have produced a

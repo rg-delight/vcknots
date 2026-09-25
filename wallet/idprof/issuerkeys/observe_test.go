@@ -33,11 +33,12 @@ func TestObserveLabelsIssuerKeyMaterialFetches(t *testing.T) {
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				didValue := f.origin.didWeb("bank")
 				f.origin.json(t, "/bank/did.json", didWebDocument(t, didValue, "issuer-key-1", f.signer.public))
-				request := f.jwtVCRequest(didValue, didValue+"#issuer-key-1")
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
-				return request
+				f.linkDID(t, didValue, didValue+"#issuer-key-1")
+				return f.jwtVCRequest(didValue, didValue+"#issuer-key-1")
 			},
-			wantPaths: []string{"/bank/did.json"},
+			// The DID Configuration's Domain Linkage Credential is verified
+			// with the DID's own key, so the document is read again.
+			wantPaths: []string{"/bank/did.json", "/.well-known/did-configuration.json", "/bank/did.json"},
 		},
 		"a DID Configuration": {
 			arrange: func(t *testing.T, f *ladderFixture) Request {

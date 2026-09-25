@@ -11,8 +11,7 @@ import (
 // instead of matching message text.
 //
 // Most of them never leave Resolve as its return value: a rung that fails is
-// recorded in Resolution.Diagnostics and the ladder carries on, because another
-// rung may still establish the key. They are still errors rather than plain
+// recorded in Resolution.Diagnostics. They are still errors rather than plain
 // strings because the rung code works with them internally, and because a
 // caller that drives one mechanism by hand - resolving a DID, say - gets the
 // same vocabulary as the ladder.
@@ -143,9 +142,9 @@ func (e *UnresolvedError) Unwrap() error { return ErrNoIssuerKeyResolved }
 // DID to the Credential Issuer, and carries what the ladder had done up to that
 // point.
 //
-// The ladder stops there instead of trying the issuer metadata rung, so the
-// diagnostics end with the DID rung. Its DisabledBy names the binding switches
-// that were off, which is what a holder can change to let the DID be bound.
+// The diagnostics end with the DID rung. Its DisabledBy names
+// SwitchDIDConfiguration when that switch was off, which is what a holder can
+// change to let the DID be bound.
 type DIDOnlyTrustError struct {
 	// Diagnostics reports one entry per rung the ladder ran, in ladder order.
 	Diagnostics []MechanismDiagnostic
@@ -153,7 +152,7 @@ type DIDOnlyTrustError struct {
 
 // Error states the condition. It carries no DID, key or URL.
 func (e *DIDOnlyTrustError) Error() string {
-	return "DID is not bound to the Credential Issuer by issuer metadata, a signed credential_issuer or a DID Configuration"
+	return "DID is not bound to the Credential Issuer by a DID Configuration"
 }
 
 // ErrorCode names the condition with ErrDIDOnlyTrustUnsupported's code.

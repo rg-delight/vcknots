@@ -30,18 +30,16 @@ var testNow = time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC)
 
 func fixedNow() time.Time { return testNow }
 
-// allMechanisms enables every rung and binding.
+// allMechanisms enables every rung and the DID Configuration binding.
 func allMechanisms() Mechanisms {
 	return Mechanisms{
-		X5C:                     true,
-		JWTVCIssuerMetadata:     true,
-		RemoteJWKS:              true,
-		DIDKey:                  true,
-		DIDJWK:                  true,
-		DIDWeb:                  true,
-		DIDConfiguration:        true,
-		CredentialIssuerBinding: true,
-		IssuerMetadataJWKS:      true,
+		X5C:                 true,
+		JWTVCIssuerMetadata: true,
+		RemoteJWKS:          true,
+		DIDKey:              true,
+		DIDJWK:              true,
+		DIDWeb:              true,
+		DIDConfiguration:    true,
 	}
 }
 

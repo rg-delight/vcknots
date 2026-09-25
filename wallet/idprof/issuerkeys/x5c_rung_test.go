@@ -14,10 +14,10 @@ func TestX5CRung(t *testing.T) {
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismJWTVCIssuerMetadata},
 			wantDNSName:    "127.0.0.1",
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C: {attempted: true, count: 1},
@@ -29,10 +29,10 @@ func TestX5CRung(t *testing.T) {
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismJWTVCIssuerMetadata},
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C: {failure: failureDisabled, disabledBy: []string{SwitchX5C}},
 			},
@@ -41,10 +41,10 @@ func TestX5CRung(t *testing.T) {
 			name: "no x5c header is reported as not present",
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismJWTVCIssuerMetadata},
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C: {failure: "not present"},
 			},
@@ -56,10 +56,10 @@ func TestX5CRung(t *testing.T) {
 				for range 17 {
 					request.X5C = append(request.X5C, x5cOf(leaf)...)
 				}
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantMechanisms: []Mechanism{MechanismJWTVCIssuerMetadata},
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C: {failure: "not present"},
 			},
@@ -71,13 +71,12 @@ func TestX5CRung(t *testing.T) {
 				request.CredentialFormat = FormatJWTVCJSON
 				request.Issuer = f.origin.url() + "/other"
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
 			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
-				RungX5C:                {failure: "issuer must match credential issuer metadata"},
-				RungIssuerMetadataJWKS: {failure: "issuer is not the credential issuer"},
+				RungX5C: {failure: "issuer must match credential issuer metadata"},
 			},
 		},
 		{
@@ -87,22 +86,26 @@ func TestX5CRung(t *testing.T) {
 				request.CredentialFormat = FormatJWTVCJSON
 				request.Issuer = f.credentialIssuer
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
-			wantDNSName:    "127.0.0.1",
+			// JWT VC Issuer Metadata is defined for SD-JWT VC only, so the
+			// chain is the only evidence; the rung reports it usable.
+			wantErr: ErrNoIssuerKeyResolved,
+			diagnostics: map[string]wantDiagnostic{
+				RungX5C:                 {attempted: true, count: 1},
+				RungJWTVCIssuerMetadata: {failure: "not applicable for this credential format"},
+			},
 		},
 		{
-			name: "no rung applies to a Data Integrity credential",
+			name: "no rung applies to a Data Integrity credential with a URL issuer",
 			arrange: func(t *testing.T, f *ladderFixture) Request {
 				request := f.sdJWTRequest()
 				request.CredentialFormat = FormatLDPVC
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			wantErr: ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C:                 {failure: "not applicable for this credential format"},
 				RungJWTVCIssuerMetadata: {failure: "not applicable for this credential format"},
@@ -115,11 +118,11 @@ func TestX5CRung(t *testing.T) {
 				request.Issuer = "http://issuer.example.test/tenant"
 				request.CredentialIssuer = request.Issuer
 				request.X5C = x5cOf(leaf)
-				request.IssuerMetadataJWKS = keySet(f.signer.public)
+				f.publishMetadata(t, f.signer.public)
 				return request
 			},
-			mechanisms:     func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
-			wantMechanisms: []Mechanism{MechanismCredentialIssuerMetadataJWKS},
+			mechanisms: func(m *Mechanisms) { m.JWTVCIssuerMetadata = false },
+			wantErr:    ErrNoIssuerKeyResolved,
 			diagnostics: map[string]wantDiagnostic{
 				RungX5C: {failure: "issuer identifier is not https"},
 			},
