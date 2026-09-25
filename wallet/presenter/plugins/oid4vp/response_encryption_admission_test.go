@@ -104,7 +104,14 @@ func TestDraft24DirectPostJWTRefusedAtParseWithoutEncryptionKey(t *testing.T) {
 	require.True(t, errors.Is(err, ErrResponseEncryptionKeyMissing), "want ErrResponseEncryptionKeyMissing, got %v", err)
 	require.Equal(t, int32(0), verifier.calls.Load(), "a response encryption refusal must not be POSTed")
 
+	// Draft 24 §8.3 encrypts with JARM, whose alg is the Verifier's
+	// authorization_encrypted_response_alg; the OpenID4VP 1.0 metadata alone
+	// names none.
 	values.Set("client_metadata", responseEncryptionClientMetadataParam())
+	_, err = parseDraft24ForTest(p, finalQueryURI(values))
+	require.True(t, errors.Is(err, ErrResponseEncryptionKeyUnusable), "want ErrResponseEncryptionKeyUnusable, got %v", err)
+
+	values.Set("client_metadata", draft24JARMClientMetadataParam())
 	_, err = parseDraft24ForTest(p, finalQueryURI(values))
 	require.NoError(t, err)
 }
@@ -146,9 +153,10 @@ func TestHAIPDirectPostJWTEncryptionAdmission(t *testing.T) {
 
 	t.Run("Draft24 is exempt from the HAIP enc rule", func(t *testing.T) {
 		f := newRequestObjectFixture(t, "verifier.example")
-		claims := f.claims()
-		claims["client_id"] = draft24X509ClientID
-		claims["client_metadata"] = metadataClaim(t, encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"}))
+		claims := f.draft24Claims()
+		jarm := encryptionMetadataWith([]jose.JSONWebKey{usable}, []string{"A128GCM"})
+		jarm.AuthorizationEncryptedResponseAlg = "ECDH-ES"
+		claims["client_metadata"] = metadataClaim(t, jarm)
 		uri := "openid4vp://authorize?" + url.Values{"client_id": {draft24X509ClientID}, "request": {f.sign(t, claims, nil)}}.Encode()
 		p := f.presenter()
 		p.Profile = profile.HAIP()

@@ -10,14 +10,18 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// encryptAuthorizationResponseJWE encrypts payload as an OID4VP 1.0 §8.3
-// authorization response JWE. Metadata of a parsed request is encrypted under
-// the rules that request was admitted with, so a Draft24 request is not held
-// to HAIP after consent; other metadata follows the presenter's profile.
+// encryptAuthorizationResponseJWE encrypts payload as the encrypted
+// authorization response of the request metadata was admitted with: an
+// OID4VP 1.0 §8.3 JWE under the rules that request was admitted under, or a
+// Draft 24 §8.3 JARM JWE for a Draft 24 request, so a Draft 24 request is not
+// held to HAIP after consent. Other metadata follows the presenter's profile.
 func (p *Oid4vpPresenter) encryptAuthorizationResponseJWE(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
 	rules := p.Profile.Options().ResponseEncryption
-	if metadata != nil && metadata.encryptionRulesSet {
-		rules = metadata.encryptionRules
+	if metadata != nil && metadata.encryption != nil {
+		if metadata.encryption.draft24JARM {
+			return encryptDraft24JARMResponse(payloadBytes, metadata)
+		}
+		rules = metadata.encryption.rules
 	}
 	return encryptAuthorizationResponse(payloadBytes, metadata, rules)
 }
@@ -31,7 +35,12 @@ func encryptAuthorizationResponse(payloadBytes []byte, metadata *VerifierMetadat
 		return "", err
 	}
 
-	options := (&jose.EncrypterOptions{}).WithContentType("json")
+	return encryptResponseJWE(payloadBytes, selection, (&jose.EncrypterOptions{}).WithContentType("json"))
+}
+
+// encryptResponseJWE encrypts payload to the selected key as a compact JWE,
+// naming the key's kid in the JWE header when it has one.
+func encryptResponseJWE(payloadBytes []byte, selection *responseEncryption, options *jose.EncrypterOptions) (string, error) {
 	encrypter, err := jose.NewEncrypter(
 		selection.enc,
 		jose.Recipient{
@@ -109,20 +118,14 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 		allowedEncryptions = gcmContentEncryptions
 	}
 
-	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, rules, metadata.AuthorizationEncryptedResponseAlg)
+	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, rules)
 	if key == nil {
 		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
 	}
 
-	// The key's own alg wins, then authorization_encrypted_response_alg, then
-	// ECDH-ES.
+	// §8.3: "The JWE alg algorithm used MUST be equal to the alg value of the
+	// chosen jwk."
 	algName := key.Algorithm
-	if algName == "" {
-		algName = metadata.AuthorizationEncryptedResponseAlg
-	}
-	if algName == "" {
-		algName = "ECDH-ES"
-	}
 	if rules.ECDHESOnly && algName != "ECDH-ES" {
 		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q: %w", algName, ErrResponseEncryptionKeyUnusable)
 	}
@@ -164,13 +167,13 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 // selectUsableVerifierEncryptionKey iterates client_metadata.jwks.keys in order
 // and returns the first key usable for response encryption, skipping unusable
 // keys silently (RFC 7517 §5, "ignore unusable keys").
-func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, rules profile.ResponseEncryptionRules, legacyAlg string) *jose.JSONWebKey {
+func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, rules profile.ResponseEncryptionRules) *jose.JSONWebKey {
 	if set == nil {
 		return nil
 	}
 	for i := range set.Keys {
 		key := &set.Keys[i]
-		if usableVerifierEncryptionKey(key, rules, legacyAlg) {
+		if usableVerifierEncryptionKey(key, rules) {
 			return key
 		}
 	}
@@ -182,7 +185,25 @@ func selectUsableVerifierEncryptionKey(set *jose.JSONWebKeySet, rules profile.Re
 // P-384/P-521 unless rules.P256Only) and alg must be present (OID4VP 1.0
 // §8.3: "The `alg` parameter MUST be present in the JWKs.") and a supported
 // key agreement algorithm.
-func usableVerifierEncryptionKey(key *jose.JSONWebKey, rules profile.ResponseEncryptionRules, legacyAlg string) bool {
+func usableVerifierEncryptionKey(key *jose.JSONWebKey, rules profile.ResponseEncryptionRules) bool {
+	if !ecdhEncryptionKey(key, rules.P256Only) {
+		return false
+	}
+	// OID4VP 1.0 §8.3: "The alg parameter MUST be present in the JWKs." The
+	// draft-era authorization_encrypted_response_alg never stands in for it.
+	if _, err := parseJWEKeyAlgorithm(key.Algorithm); err != nil {
+		return false
+	}
+	if rules.ECDHESOnly && key.Algorithm != "ECDH-ES" {
+		return false
+	}
+	return true
+}
+
+// ecdhEncryptionKey reports whether key can be the recipient of an ECDH-ES
+// family key agreement: use "enc" or absent, and an EC public key on P-256,
+// or on P-384 or P-521 unless p256Only.
+func ecdhEncryptionKey(key *jose.JSONWebKey, p256Only bool) bool {
 	if key == nil || key.Key == nil {
 		return false
 	}
@@ -195,32 +216,12 @@ func usableVerifierEncryptionKey(key *jose.JSONWebKey, rules profile.ResponseEnc
 	}
 	switch publicKey.Curve {
 	case elliptic.P256():
+		return true
 	case elliptic.P384(), elliptic.P521():
-		if rules.P256Only {
-			return false
-		}
+		return !p256Only
 	default:
 		return false
 	}
-	algName := key.Algorithm
-	if algName == "" {
-		// OID4VP 1.0 §8.3 requires alg on every JWK used for encryption. A
-		// verifier that still advertises the draft-era
-		// authorization_encrypted_response_alg member instead is accepted on the
-		// Final profile for interoperability; RequireJWKAlg keeps the strict
-		// rule.
-		if rules.RequireJWKAlg || legacyAlg == "" {
-			return false
-		}
-		algName = legacyAlg
-	}
-	if _, err := parseJWEKeyAlgorithm(algName); err != nil {
-		return false
-	}
-	if rules.ECDHESOnly && algName != "ECDH-ES" {
-		return false
-	}
-	return true
 }
 
 // verifierEncryptionRequested reports whether client_metadata asks for an
@@ -253,69 +254,59 @@ func (p *Oid4vpPresenter) createJARMResponse(vpTokenJSON []byte, state string, m
 	}
 	return p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
 }
-func (p *Oid4vpPresenter) encryptJARMPayload(payload map[string]interface{}, encAlg, encEnc string, verifierJWKS *jose.JSONWebKeySet) (string, error) {
-	// Marshal payload to JSON
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal JARM payload: %w", err)
-	}
 
-	encryptionKey, err := selectVerifierEncryptionKey(verifierJWKS)
+// selectDraft24JARMEncryption selects the key agreement, content encryption
+// and key of a Draft 24 encrypted Authorization Response. Draft 24 §8.3 has
+// the Wallet "use the JWT Secured Authorization Response Mode for OAuth 2.0
+// (JARM)", whose client metadata names the algorithms: the JWE alg is
+// authorization_encrypted_response_alg, required to encrypt at all, and the
+// enc is authorization_encrypted_response_enc, A128CBC-HS256 when absent
+// (JARM §3). The key comes from client_metadata.jwks (Draft 24 §8.3): one
+// whose use is enc or absent, whose alg, when present, is the requested alg,
+// and whose key type the alg can use. A failure wraps
+// ErrResponseEncryptionKeyUnusable or ErrResponseEncryptionEncUnsupported.
+func selectDraft24JARMEncryption(metadata *VerifierMetadata) (*responseEncryption, error) {
+	if metadata == nil {
+		return nil, fmt.Errorf("verifier metadata is required for encrypted authorization response: %w", ErrResponseEncryptionKeyMissing)
+	}
+	if metadata.AuthorizationEncryptedResponseAlg == "" {
+		return nil, fmt.Errorf("a Draft 24 encrypted response requires authorization_encrypted_response_alg: %w", ErrResponseEncryptionKeyUnusable)
+	}
+	alg, err := parseJWEKeyAlgorithm(metadata.AuthorizationEncryptedResponseAlg)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("%w: %w", err, ErrResponseEncryptionKeyUnusable)
 	}
-
-	keyAlg, err := parseJWEKeyAlgorithm(encAlg)
+	encName := metadata.AuthorizationEncryptedResponseEnc
+	if encName == "" {
+		encName = "A128CBC-HS256"
+	}
+	enc, err := parseJWEContentEncryption(encName)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("%w: %w", err, ErrResponseEncryptionEncUnsupported)
 	}
-	contentEnc, err := parseJWEContentEncryption(encEnc)
-	if err != nil {
-		return "", err
-	}
-
-	// Create encrypter
-	encrypter, err := jose.NewEncrypter(
-		contentEnc,
-		jose.Recipient{
-			Algorithm: keyAlg,
-			Key:       encryptionKey.Key,
-			KeyID:     encryptionKey.KeyID,
-		},
-		nil,
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to create encrypter: %w", err)
-	}
-
-	// Encrypt the payload
-	jwe, err := encrypter.Encrypt(payloadBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt JARM payload: %w", err)
-	}
-
-	// Serialize to compact form
-	serialized, err := jwe.CompactSerialize()
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize JWE: %w", err)
-	}
-
-	return serialized, nil
-}
-func selectVerifierEncryptionKey(verifierJWKS *jose.JSONWebKeySet) (*jose.JSONWebKey, error) {
-	if verifierJWKS == nil || len(verifierJWKS.Keys) == 0 {
-		return nil, fmt.Errorf("verifier JWKS not available for encryption")
-	}
-
-	for i := range verifierJWKS.Keys {
-		key := &verifierJWKS.Keys[i]
-		if key.Use == "enc" {
-			return key, nil
+	for i := range metadata.Jwks.Keys {
+		key := &metadata.Jwks.Keys[i]
+		if key.Algorithm != "" && key.Algorithm != string(alg) {
+			continue
+		}
+		// Every supported alg is an ECDH-ES key agreement.
+		if ecdhEncryptionKey(key, false) {
+			return &responseEncryption{key: key, alg: alg, enc: enc}, nil
 		}
 	}
-
-	return &verifierJWKS.Keys[0], nil
+	return nil, fmt.Errorf("no client_metadata.jwks key can be used with %s: %w", alg, ErrResponseEncryptionKeyUnusable)
 }
+
+// encryptDraft24JARMResponse encrypts payload, the JSON Authorization
+// Response parameters, as an encrypted-only JARM response (Draft 24 §8.3).
+func encryptDraft24JARMResponse(payloadBytes []byte, metadata *VerifierMetadata) (string, error) {
+	selection, err := selectDraft24JARMEncryption(metadata)
+	if err != nil {
+		return "", err
+	}
+	return encryptResponseJWE(payloadBytes, selection, nil)
+}
+
 func parseJWEKeyAlgorithm(alg string) (jose.KeyAlgorithm, error) {
 	switch alg {
 	case "ECDH-ES":

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/trustknots/vcknots/wallet/profile"
 	"maps"
 	"slices"
 	"strings"
@@ -30,6 +29,7 @@ func newDraft24RequestBuilder() *draft24RequestBuilder {
 	// Draft 24 authenticated an X.509 Request Object without reading aud; a
 	// caller opts into the check by naming its WalletAudience.
 	core.audienceOptional = true
+	core.draft24JARM = true
 	return &draft24RequestBuilder{requestCore: core}
 }
 
@@ -211,8 +211,9 @@ func (b *draft24RequestBuilder) Build() (*CredentialPresentationRequest, error) 
 		b.req.RequestObjectVerification.Delivery = b.requestSource.delivery()
 	}
 	if b.req.ClientMetadata != nil {
-		// Draft 24 is outside every 1.0 profile: OpenID4VP 1.0 rules.
-		b.req.ClientMetadata.admitEncryptionRules(profile.ResponseEncryptionRules{})
+		// Draft 24 is outside every 1.0 profile; its encrypted responses
+		// follow JARM (Draft 24 §8.3).
+		b.req.ClientMetadata.admitDraft24JARM()
 	}
 	return b.req, nil
 }

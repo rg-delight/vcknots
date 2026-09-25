@@ -99,6 +99,9 @@ type requestCore struct {
 	// audienceOptional skips the aud check when no WalletAudience is
 	// configured.
 	audienceOptional bool
+	// draft24JARM selects the JARM response encryption rules of Draft 24
+	// §8.3 instead of OpenID4VP 1.0 §8.3.
+	draft24JARM bool
 	// preRegistry is the presenter's registry of pre-registered clients, nil
 	// when it has none. preRegisteredClient is the registry entry of this
 	// request's pre-registered Client Identifier, nil for every other prefix.

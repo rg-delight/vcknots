@@ -79,6 +79,14 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 				endpoint, err := url.Parse(server.URL)
 				require.NoError(t, err)
 				request := &types.PresentationRequest{State: "state", CredentialQueryID: "identity"}
+				if draft {
+					// Draft 24 posts only under direct_post and
+					// direct_post.jwt (Draft 24 §8.2, §8.3.1).
+					request.ResponseMode = string(OAuthAuthzReqResponseModeDirectPost)
+					if encrypted {
+						request.ResponseMode = string(OAuthAuthzReqResponseModeDirectPostJWT)
+					}
+				}
 				if encrypted {
 					request.ClientMetadata = &VerifierMetadata{
 						AuthorizationEncryptedResponseAlg:   "ECDH-ES",
@@ -122,16 +130,10 @@ func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
 				require.Equal(t, "state", payload["state"])
 				if draft {
 					require.Equal(t, "credential~kb-jwt", payload["vp_token"])
-					var encoded []byte
-					if encrypted {
-						// Draft 24 JARM carries presentation_submission as a JSON string.
-						value, ok := payload["presentation_submission"].(string)
-						require.True(t, ok)
-						encoded = []byte(value)
-					} else {
-						encoded, err = json.Marshal(payload["presentation_submission"])
-						require.NoError(t, err)
-					}
+					// Draft 24 §8.3 carries presentation_submission as a JSON
+					// object in the JWE payload.
+					encoded, err := json.Marshal(payload["presentation_submission"])
+					require.NoError(t, err)
 					var actual types.PresentationSubmission
 					require.NoError(t, json.Unmarshal(encoded, &actual))
 					require.Equal(t, submission, actual)

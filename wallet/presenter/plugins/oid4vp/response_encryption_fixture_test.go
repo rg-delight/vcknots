@@ -36,6 +36,36 @@ func responseEncryptionMetadata() *VerifierMetadata {
 	}
 }
 
+// draft24JARMMetadata is Verifier metadata a Draft 24 direct_post.jwt request
+// is admitted with: the JARM algorithms (Draft 24 §8.3) and the fixture key.
+func draft24JARMMetadata() *VerifierMetadata {
+	metadata := responseEncryptionMetadata()
+	metadata.EncryptedResponseEncValuesSupported = nil
+	metadata.AuthorizationEncryptedResponseAlg = "ECDH-ES"
+	metadata.AuthorizationEncryptedResponseEnc = "A256GCM"
+	return metadata
+}
+
+// draft24JARMClientMetadataParam is draft24JARMMetadata as the JSON text of a
+// client_metadata query parameter.
+func draft24JARMClientMetadataParam() string {
+	encoded, err := json.Marshal(draft24JARMMetadata())
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+// draft24JARMClientMetadataClaim is draft24JARMMetadata as the JSON object of
+// a client_metadata Request Object claim.
+func draft24JARMClientMetadataClaim() map[string]any {
+	var claim map[string]any
+	if err := json.Unmarshal([]byte(draft24JARMClientMetadataParam()), &claim); err != nil {
+		panic(err)
+	}
+	return claim
+}
+
 // responseEncryptionClientMetadataParam is responseEncryptionMetadata as the
 // JSON text of a client_metadata query parameter.
 func responseEncryptionClientMetadataParam() string {

@@ -152,6 +152,7 @@ const draft24X509ClientID = "x509_san_dns:verifier.example"
 func (f *requestObjectFixture) draft24Claims() map[string]any {
 	claims := f.claims()
 	claims["client_id"] = draft24X509ClientID
+	claims["client_metadata"] = draft24JARMClientMetadataClaim()
 	delete(claims, "dcql_query")
 	claims["presentation_definition"] = map[string]any{"id": "pid-definition"}
 	return claims

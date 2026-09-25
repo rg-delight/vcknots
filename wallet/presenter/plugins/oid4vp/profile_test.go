@@ -160,8 +160,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 // constrained by the HAIP profile.
 func TestFinalAndHAIPProfileDraft24Exempt(t *testing.T) {
 	f := newRequestObjectFixture(t, "verifier.example")
-	claims := f.claims()
-	claims["client_id"] = draft24X509ClientID
+	claims := f.draft24Claims()
 	// A Draft24-legal request would fail every HAIP checkpoint, yet the Draft24
 	// builder must ignore the profile entirely.
 	token := f.sign(t, claims, nil)

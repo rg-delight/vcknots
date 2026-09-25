@@ -20,7 +20,7 @@ import (
 func TestResponseEncryptionFollowsTheRequestVersion(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
-	metadata, err := json.Marshal(&VerifierMetadata{Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
+	metadata, err := json.Marshal(&VerifierMetadata{AuthorizationEncryptedResponseAlg: "ECDH-ES", Jwks: jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
 		Key: &key.PublicKey, KeyID: "p384", Use: "enc", Algorithm: "ECDH-ES",
 	}}}})
 	require.NoError(t, err)

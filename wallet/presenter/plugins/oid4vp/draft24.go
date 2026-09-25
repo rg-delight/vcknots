@@ -120,25 +120,27 @@ func (p *Oid4vpPresenter) SubmitPresentationExchangeResponse(ctx context.Context
 	return &types.SubmitResult{RedirectURI: redirectURI, Encrypted: encrypted}, nil
 }
 
-// postPresentationExchangeResponse posts a Presentation Exchange response.
-// mode is the request's response_mode; "" with an
-// authorization_encrypted_response_alg in metadata sends the JARM shape.
+// postPresentationExchangeResponse posts a Presentation Exchange response to
+// the Response URI: in the clear under direct_post (Draft 24 §8.2), and as an
+// encrypted-only JARM response under direct_post.jwt (Draft 24 §8.3.1). No
+// other response mode is answered by POST.
 func (p *Oid4vpPresenter) postPresentationExchangeResponse(ctx context.Context, endpoint string, vpToken []byte, submission types.PresentationSubmission, state, mode string, metadata *VerifierMetadata) (string, bool, error) {
 	submissionJSON, err := json.Marshal(submission)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to marshal presentation_submission: %w", err)
 	}
-	form := url.Values{"vp_token": {string(vpToken)}, "presentation_submission": {string(submissionJSON)}}
-	if state != "" {
-		form.Set("state", state)
-	}
+	var form url.Values
 	encrypted := false
-	switch {
-	case mode == string(OAuthAuthzReqResponseModeDirectPostJWT):
-		// OID4VP 1.0 Section 8.3: the JWE payload carries the response
-		// parameters as top-level JSON members, so presentation_submission
-		// is the object itself. direct_post.jwt is never answered in
-		// plaintext.
+	switch OAuthAuthzReqResponseMode(mode) {
+	case OAuthAuthzReqResponseModeDirectPost:
+		form = url.Values{"vp_token": {string(vpToken)}, "presentation_submission": {string(submissionJSON)}}
+		if state != "" {
+			form.Set("state", state)
+		}
+	case OAuthAuthzReqResponseModeDirectPostJWT:
+		// Draft 24 §8.3: the JWE payload is the JSON of the response
+		// parameters, presentation_submission as an object, without iss, exp
+		// or aud. direct_post.jwt is never answered in plaintext.
 		payload := map[string]any{
 			"vp_token":                string(vpToken),
 			"presentation_submission": json.RawMessage(submissionJSON),
@@ -150,26 +152,14 @@ func (p *Oid4vpPresenter) postPresentationExchangeResponse(ctx context.Context, 
 		if err != nil {
 			return "", false, fmt.Errorf("failed to marshal authorization response: %w", err)
 		}
-		token, err := p.encryptAuthorizationResponseJWE(payloadBytes, metadata)
-		if err != nil {
-			return "", false, fmt.Errorf("failed to create Draft24 encrypted authorization response: %w", err)
-		}
-		form = url.Values{"response": {token}}
-		encrypted = true
-	case mode == "" && metadata != nil && metadata.AuthorizationEncryptedResponseAlg != "":
-		// A caller that names no response mode and asks for encryption
-		// through authorization_encrypted_response_alg gets the JARM shape,
-		// with presentation_submission as a JSON string.
-		payload := map[string]any{"vp_token": string(vpToken), "presentation_submission": string(submissionJSON)}
-		if state != "" {
-			payload["state"] = state
-		}
-		token, err := p.encryptJARMPayload(payload, metadata.AuthorizationEncryptedResponseAlg, metadata.AuthorizationEncryptedResponseEnc, &metadata.Jwks)
+		token, err := encryptDraft24JARMResponse(payloadBytes, metadata)
 		if err != nil {
 			return "", false, fmt.Errorf("failed to create Draft24 JARM response: %w", err)
 		}
 		form = url.Values{"response": {token}}
 		encrypted = true
+	default:
+		return "", false, fmt.Errorf("response_mode %q is not supported for a Presentation Exchange response", mode)
 	}
 	body, err := postAuthorizationResponse(ctx, p.httpClient(), endpoint, form)
 	if err != nil {

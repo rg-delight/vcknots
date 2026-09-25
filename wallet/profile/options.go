@@ -149,7 +149,6 @@ func HAIPOptions() Options {
 			ECDHESOnly:             true,
 			P256Only:               true,
 			GCMOnly:                true,
-			RequireJWKAlg:          true,
 			RequireVerifierGCMBoth: true,
 		},
 		AlwaysKeyBindingWhenConfirmed: true,
@@ -204,7 +203,6 @@ func (o Options) weakened(floor Options) []string {
 	flag("ResponseEncryption.ECDHESOnly", enc.ECDHESOnly, floorEnc.ECDHESOnly)
 	flag("ResponseEncryption.P256Only", enc.P256Only, floorEnc.P256Only)
 	flag("ResponseEncryption.GCMOnly", enc.GCMOnly, floorEnc.GCMOnly)
-	flag("ResponseEncryption.RequireJWKAlg", enc.RequireJWKAlg, floorEnc.RequireJWKAlg)
 	flag("ResponseEncryption.RequireVerifierGCMBoth", enc.RequireVerifierGCMBoth, floorEnc.RequireVerifierGCMBoth)
 	flag("AlwaysKeyBindingWhenConfirmed", o.AlwaysKeyBindingWhenConfirmed, floor.AlwaysKeyBindingWhenConfirmed)
 	return names
@@ -234,9 +232,9 @@ func (r X5CRules) Union(s X5CRules) X5CRules {
 
 // ResponseEncryptionRules restrict the JWE of an encrypted Authorization
 // Response (OpenID4VP 1.0 §8.3). The zero value is OpenID4VP 1.0: ECDH-ES
-// family key agreement on P-256, P-384 or P-521, any content encryption the
-// library supports, and a JWK without alg accepted when the Verifier names
-// the draft-era authorization_encrypted_response_alg.
+// family key agreement on P-256, P-384 or P-521 with the alg the Verifier's
+// JWK names (§8.3: "The alg parameter MUST be present in the JWKs"), and any
+// content encryption the library supports.
 type ResponseEncryptionRules struct {
 	// ECDHESOnly accepts only the key agreement alg ECDH-ES.
 	ECDHESOnly bool
@@ -244,9 +242,6 @@ type ResponseEncryptionRules struct {
 	P256Only bool
 	// GCMOnly accepts only the content encryption A128GCM and A256GCM.
 	GCMOnly bool
-	// RequireJWKAlg refuses a Verifier key without alg, as OpenID4VP 1.0
-	// §8.3 states.
-	RequireJWKAlg bool
 	// RequireVerifierGCMBoth refuses Verifier metadata whose
 	// encrypted_response_enc_values_supported does not list both A128GCM and
 	// A256GCM.

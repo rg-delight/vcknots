@@ -184,20 +184,31 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
 
-	// encryptionRules records the response encryption rules the request
-	// carrying this metadata was admitted under, so the response is encrypted
-	// under the same rules; encryptionRulesSet is false for metadata no parse
-	// admitted, which follows the presenter's profile. Neither is read from or
-	// written to JSON.
-	encryptionRules    profile.ResponseEncryptionRules
-	encryptionRulesSet bool
+	// encryption records how the request carrying this metadata was admitted
+	// to have its response encrypted, so the response is encrypted the same
+	// way; nil for metadata no parse admitted, which follows the presenter's
+	// profile. It is not read from or written to JSON.
+	encryption *responseEncryptionPolicy
 }
 
-// admitEncryptionRules records the response encryption rules the request
-// carrying m was admitted under.
+// responseEncryptionPolicy is how an admitted request's response is
+// encrypted: OpenID4VP 1.0 §8.3 under rules, or the JARM rules of Draft 24
+// §8.3 when draft24JARM is set.
+type responseEncryptionPolicy struct {
+	rules       profile.ResponseEncryptionRules
+	draft24JARM bool
+}
+
+// admitEncryptionRules records that the request carrying m was admitted over
+// OpenID4VP 1.0 under rules.
 func (m *VerifierMetadata) admitEncryptionRules(rules profile.ResponseEncryptionRules) {
-	m.encryptionRules = rules
-	m.encryptionRulesSet = true
+	m.encryption = &responseEncryptionPolicy{rules: rules}
+}
+
+// admitDraft24JARM records that the request carrying m was admitted over
+// Draft 24, whose encrypted responses follow JARM (Draft 24 §8.3).
+func (m *VerifierMetadata) admitDraft24JARM() {
+	m.encryption = &responseEncryptionPolicy{draft24JARM: true}
 }
 
 // FetchKeyWithKID returns the key of v.Jwks whose kid is kid, or an error when

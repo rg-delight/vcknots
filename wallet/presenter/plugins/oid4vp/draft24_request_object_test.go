@@ -185,8 +185,7 @@ func TestDraft24InsecureX509SanDNSBindsTheResponseEndpoint(t *testing.T) {
 	p := &Oid4vpPresenter{HTTPClient: f.server.Client(), InsecureSkipX509Verify: true}
 	for _, mode := range []string{"direct_post", "direct_post.jwt"} {
 		t.Run(mode, func(t *testing.T) {
-			claims := f.claims()
-			claims["client_id"] = "x509_san_dns:verifier.example"
+			claims := f.draft24Claims()
 			claims["response_mode"] = mode
 			parse := func() (*CredentialPresentationRequest, error) {
 				return parseDraft24RequestObjectForTest(p, f.sign(t, claims, nil), "x509_san_dns:verifier.example")
