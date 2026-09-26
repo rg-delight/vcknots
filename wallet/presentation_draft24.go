@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/google/uuid"
@@ -158,6 +159,18 @@ func (w *Wallet) submitPresentationExchange(ctx context.Context, h *oid4vp.Admit
 	flavor, err := w.validateSerializationFlavor(saved)
 	if err != nil {
 		return nil, err
+	}
+	// Presentation Exchange limit_disclosure "required" bounds what each
+	// presentation discloses, decided before anything is serialized.
+	limits, err := draft24DisclosureLimits(req.RawPresentationDefinition, p.Credentials, credentials)
+	if err != nil {
+		return nil, err
+	}
+	p.Credentials = slices.Clone(p.Credentials)
+	for index, limit := range limits {
+		if limit != nil {
+			p.Credentials[index].DisclosedClaims = limit
+		}
 	}
 	descriptorMap, err := buildDraft24DescriptorMap(len(saved), *flavor, descriptorIDs)
 	if err != nil {
