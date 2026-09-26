@@ -39,6 +39,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		return nil, err
 	}
 	var issuer, configurationID, issuerState, hint string
+	grantFromMetadata := false
 	if req.CredentialOffer != nil {
 		if strings.TrimSpace(req.CredentialIssuer) != "" {
 			return nil, invalidArgument("credential issuer must be empty when a credential offer is provided")
@@ -50,6 +51,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		}
 		issuer, configurationID = offered.issuer, offered.configurationID
 		issuerState, hint = offered.grant.IssuerState, strings.TrimSpace(offered.grant.AuthorizationServer)
+		grantFromMetadata = offered.grantFromMetadata
 	} else {
 		// OpenID4VCI 1.0 Section 5: a wallet-initiated issuance names the
 		// issuer and the configuration itself.
@@ -76,6 +78,9 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	}
 	if as.TokenEndpoint == nil {
 		return nil, invalidMetadata("token endpoint is missing on authorization server")
+	}
+	if err := checkOfferedAuthorizationCodeGrant(grantFromMetadata, as); err != nil {
+		return nil, err
 	}
 	config, err := w.finalCredentialConfiguration(transport, md, configurationID)
 	if err != nil {

@@ -36,7 +36,8 @@ func (w *Wallet) Draft13() *Draft13Issuance {
 }
 
 // BeginIssuance starts a Draft 13 Authorization Code Flow (Section 3.4): it
-// requires an offer with an authorization_code grant, pushes the
+// requires an offer with an authorization_code grant, or without grants when
+// the authorization server supports that grant (Section 4.1.1), pushes the
 // authorization request when the server supports PAR, and returns the state
 // holding the URL to open in the holder's browser.
 func (d *Draft13Issuance) BeginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
@@ -212,7 +213,7 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	if err := d.checkOfferIssuer(transport, req.CredentialOffer); err != nil {
 		return nil, err
 	}
-	grant := req.CredentialOffer.Grants["authorization_code"]
+	grant, grantFromMetadata := offerGrant(req.CredentialOffer, string(receiverTypes.AuthorizationCode))
 	if grant == nil {
 		return nil, ErrDraft13AuthorizationCodeGrantMissing
 	}
@@ -227,6 +228,9 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	md, as := discovery.issuerMetadata, discovery.asMetadata
 	if as.AuthorizationEndpoint == nil {
 		return nil, ErrDraft13AuthorizationEndpointMissing
+	}
+	if err := checkOfferedAuthorizationCodeGrant(grantFromMetadata, as); err != nil {
+		return nil, err
 	}
 	configurationID, config, err := selectDraft13Configuration(req.CredentialOffer, req.CredentialConfigurationID, md)
 	if err != nil {

@@ -70,6 +70,11 @@ var (
 	// ErrNonceEndpointRequired reports a key attestation under HAIP from an
 	// issuer without a Nonce Endpoint (HAIP Section 4.5.1).
 	ErrNonceEndpointRequired = common.NewCodedError("nonce_endpoint_required", "key attestation requires a c_nonce but the issuer advertises no nonce_endpoint")
+	// ErrAuthorizationCodeGrantUnsupported reports a Credential Offer without
+	// grants whose authorization server does not support the
+	// authorization_code grant, the only grant a wallet can use without
+	// parameters from the offer (OpenID4VCI 1.0 and Draft 13 Section 4.1.1).
+	ErrAuthorizationCodeGrantUnsupported = common.NewCodedError("authorization_code_grant_unsupported", "the credential offer names no grant and the authorization server does not support the authorization_code grant")
 	// ErrPreAuthorizedGrantMissing reports an offer without a usable
 	// pre-authorized_code grant.
 	ErrPreAuthorizedGrantMissing = common.NewCodedError("pre_authorized_grant_missing", "credential offer carries no pre-authorized_code grant")

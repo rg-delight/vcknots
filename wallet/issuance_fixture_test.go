@@ -89,6 +89,9 @@ type finalIssuanceFixture struct {
 	// fixture sets it to true.
 	anonymousAccess       *bool
 	issParameterSupported bool
+	// grantTypesSupported, when set, is the authorization server's
+	// grant_types_supported.
+	grantTypesSupported []string
 	// walletProfile selects the wallet and plugin profile; HAIP also serves
 	// TLS (HAIP Section 4).
 	walletProfile           profile.Profile
@@ -422,6 +425,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		if f.issParameterSupported {
 			metadata["authorization_response_iss_parameter_supported"] = true
+		}
+		if f.grantTypesSupported != nil {
+			metadata["grant_types_supported"] = f.grantTypesSupported
 		}
 		if f.authMethodsSupported != nil {
 			metadata["token_endpoint_auth_methods_supported"] = f.authMethodsSupported

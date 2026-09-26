@@ -67,8 +67,11 @@ const (
 // IssuanceRequest starts an Authorization Code Flow issuance.
 type IssuanceRequest struct {
 	// CredentialOffer is the offer the holder accepted; it must carry an
-	// authorization_code grant. Nil starts a wallet-initiated issuance
-	// (OpenID4VCI 1.0 Section 5), which only the 1.0 methods support.
+	// authorization_code grant, or no grants at all, in which case the
+	// authorization server metadata must support the authorization_code grant
+	// (OpenID4VCI 1.0 and Draft 13 Section 4.1.1). Nil starts a
+	// wallet-initiated issuance (OpenID4VCI 1.0 Section 5), which only the 1.0
+	// methods support.
 	CredentialOffer *CredentialOffer
 	// CredentialIssuer is the Credential Issuer Identifier of a
 	// wallet-initiated issuance. It must be empty when CredentialOffer is set.
