@@ -125,9 +125,9 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		}
 	}
 
-	identifier := ""
-	if len(grant.CredentialIdentifiers) > 0 {
-		identifier = grant.CredentialIdentifiers[0]
+	identifier, err := selectCredentialIdentifier(grant, req.CredentialIdentifier)
+	if err != nil {
+		return nil, err
 	}
 	// lastNonce is the c_nonce of the last body built; an invalid_nonce retry
 	// replaces it.

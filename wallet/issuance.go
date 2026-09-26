@@ -101,6 +101,10 @@ type PreAuthorizedIssuanceRequest struct {
 
 // CredentialRequest holds the per-request inputs of RequestCredential.
 type CredentialRequest struct {
+	// CredentialIdentifier selects the Credential Dataset to request: one of
+	// the grant's CredentialIdentifiers. Empty selects the first. It must be
+	// empty when the grant has none.
+	CredentialIdentifier string
 	// HolderKeys are the keys the credentials are bound to, one key proof
 	// each. More than one requests a batch (OpenID4VCI 1.0 Section 8.2), up to
 	// the issuer's batch_size. Draft 13 takes at most one.
@@ -175,10 +179,13 @@ func (a *IssuanceAuthorization) RequestURIExpired(now time.Time) bool {
 }
 
 // IssuanceGrant is the state between the token exchange and
-// RequestCredential. It is a bearer secret (AccessToken) and is used once:
-// discard it after RequestCredential, keeping only the Deferred or
-// Notification of its result. A call that stopped before sending anything,
-// such as with *KeyAttestationRequiredError, may be repeated with it.
+// RequestCredential. It is a bearer secret (AccessToken) and is used once
+// per Credential Dataset: discard it after RequestCredential, keeping only the
+// Deferred or Notification of its result, unless CredentialIdentifiers lists
+// more datasets the holder wants, each requested with its own
+// RequestCredential (CredentialRequest.CredentialIdentifier). A call that
+// stopped before sending anything, such as with *KeyAttestationRequiredError,
+// may be repeated with it.
 type IssuanceGrant struct {
 	Version                   IssuanceVersion `json:"version"`
 	Profile                   profile.Profile `json:"profile"`
@@ -189,8 +196,12 @@ type IssuanceGrant struct {
 	AuthorizationServer string                                       `json:"authorization_server"`
 	AccessToken         *receiverTypes.CredentialIssuanceAccessToken `json:"access_token"`
 	// CredentialIdentifiers are the Section 6.2 credential_identifiers of the
-	// requested configuration; the Credential Request names the first. Empty
-	// means it names the configuration (Section 8.2).
+	// requested configuration, each naming a Credential Dataset the access
+	// token can be used for, in the order the server listed them. A
+	// Credential Request names one of them (CredentialRequest.
+	// CredentialIdentifier, the first by default). Empty means the request
+	// names the configuration (1.0 Section 8.2) or, in Draft 13, its format
+	// (Draft 13 Section 7.2).
 	CredentialIdentifiers []string `json:"credential_identifiers,omitempty"`
 	// CNonce is the c_nonce the key proofs and a key attestation must carry;
 	// empty when the issuer has no Nonce Endpoint.

@@ -341,7 +341,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	}
 	mode := authorizationDetailsOptional
 	if a.AuthorizationDetailsRequested {
-		mode = authorizationDetailsRequired
+		mode = authorizationDetailsEntryRequired
 	}
 	return d.newGrant(discovery, a.CredentialConfigurationID, token, mode)
 }
@@ -402,7 +402,7 @@ func (d *Draft13Issuance) newGrant(discovery *issuanceDiscovery, configurationID
 	}
 	identifiers, err := credentialIdentifiersFor(token, configurationID, mode)
 	if err != nil {
-		if mode == authorizationDetailsRequired {
+		if mode != authorizationDetailsOptional {
 			return nil, err
 		}
 		// Authorization details for another configuration do not stop a
@@ -489,9 +489,9 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if endpoint.String() == "" {
 		return nil, ErrDraft13CredentialEndpointMissing
 	}
-	identifier := ""
-	if len(grant.CredentialIdentifiers) > 0 {
-		identifier = grant.CredentialIdentifiers[0]
+	identifier, err := selectCredentialIdentifier(grant, req.CredentialIdentifier)
+	if err != nil {
+		return nil, err
 	}
 	token := *grant.AccessToken
 	dpop := dpopProofFactory(ctx, dpopKey, http.MethodPost, endpoint.String(), token.Token)

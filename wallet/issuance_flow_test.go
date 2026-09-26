@@ -996,15 +996,14 @@ func flowTestOpenIDCredentialDetail(configurationID string, identifiers ...strin
 
 // After an authorization_details request the Token Response must carry a
 // usable openid_credential entry for the configuration: a missing entry, a
-// foreign configuration, no identifiers or more than one fail closed.
+// foreign configuration or no identifiers fail closed.
 func TestCredentialIdentifiersRequiredModeRejectsUnusableResponses(t *testing.T) {
 	cases := map[string]*receiverTypes.CredentialIssuanceAccessToken{
-		"no access token":                 nil,
-		"missing authorization_details":   {Token: "access-1"},
-		"foreign configuration":           {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("other", "id-other")}},
-		"empty credential_identifiers":    {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid")}},
-		"blank credential_identifiers":    {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", " ")}},
-		"multiple credential_identifiers": {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", "id-1", "id-2")}},
+		"no access token":               nil,
+		"missing authorization_details": {Token: "access-1"},
+		"foreign configuration":         {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("other", "id-other")}},
+		"empty credential_identifiers":  {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid")}},
+		"blank credential_identifiers":  {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", " ")}},
 	}
 	for name, accessToken := range cases {
 		t.Run(name, func(t *testing.T) {

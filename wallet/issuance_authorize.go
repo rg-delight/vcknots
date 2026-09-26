@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -567,26 +568,37 @@ func sameOriginAndPath(registered, actual *url.URL) bool {
 }
 
 // authorizationDetailsMode records whether the request used
-// authorization_details, which OpenID4VCI 1.0 Section 6.2 makes "REQUIRED
-// when the authorization_details parameter is used ... OPTIONAL when scope
-// parameter was used" in the Token Response.
+// authorization_details, which makes them REQUIRED in the Token Response
+// (OpenID4VCI 1.0 Section 6.2: "REQUIRED when the authorization_details
+// parameter ... is used ... OPTIONAL when scope parameter was used"; Draft 13
+// Section 6.2 likewise), and what the entry must then carry.
 type authorizationDetailsMode int
 
 const (
+	// authorizationDetailsOptional: the request used scope, or no parameter
+	// (Pre-Authorized Code Flow).
 	authorizationDetailsOptional authorizationDetailsMode = iota
+	// authorizationDetailsRequired (OpenID4VCI 1.0 Section 6.2): the entry
+	// for the configuration and its credential_identifiers, "REQUIRED. A
+	// non-empty array".
 	authorizationDetailsRequired
+	// authorizationDetailsEntryRequired (Draft 13 Section 6.2): the entry for
+	// the configuration; its credential_identifiers are OPTIONAL, and without
+	// them the Credential Request names the format (Draft 13 Section 7.2).
+	authorizationDetailsEntryRequired
 )
 
-// credentialIdentifiersFor selects the credential_identifiers of the Token
-// Response entry for configurationID (Section 6.2). The selected identifier is
-// the first; an entry without identifiers, or no entry, names the
-// configuration instead in optional mode. In required mode those cases, an
-// entry for another configuration only, and more than one identifier are
-// ErrAuthorizationDetailsMissing.
+// credentialIdentifiersFor returns the credential_identifiers of the Token
+// Response entry for configurationID (Section 6.2), in the order the server
+// listed them: each names a Credential Dataset the access token can be used
+// for. An entry without identifiers, or no entry, yields none, so the request
+// names the configuration instead, unless mode requires the entry (both
+// required modes) or its identifiers (authorizationDetailsRequired), which is
+// then ErrAuthorizationDetailsMissing.
 func credentialIdentifiersFor(token *receiverTypes.CredentialIssuanceAccessToken, configurationID string, mode authorizationDetailsMode) ([]string, error) {
-	required := mode == authorizationDetailsRequired
+	entryRequired := mode != authorizationDetailsOptional
 	if token == nil {
-		if required {
+		if entryRequired {
 			return nil, fmt.Errorf("token response is missing an access token with authorization_details for %q: %w", configurationID, ErrAuthorizationDetailsMissing)
 		}
 		return nil, nil
@@ -601,25 +613,40 @@ func credentialIdentifiersFor(token *receiverTypes.CredentialIssuanceAccessToken
 			continue
 		}
 		identifiers := nonEmptyCredentialIdentifiers(detail.CredentialIdentifiers)
-		switch {
-		case len(identifiers) == 0 && required:
+		if len(identifiers) == 0 && mode == authorizationDetailsRequired {
 			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries no credential_identifiers: %w", configurationID, ErrAuthorizationDetailsMissing)
-		case len(identifiers) == 0:
-			return nil, nil
-		case len(identifiers) > 1 && required:
-			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries %d credential_identifiers, but this wallet requests exactly one credential: %w", configurationID, len(identifiers), ErrAuthorizationDetailsMissing)
 		}
-		return identifiers[:1], nil
+		if len(identifiers) == 0 {
+			return nil, nil
+		}
+		return identifiers, nil
 	}
 	switch {
-	case entries == 0 && required:
+	case entries == 0 && entryRequired:
 		return nil, fmt.Errorf("token response for credential_configuration_id %q carries no authorization_details: %w", configurationID, ErrAuthorizationDetailsMissing)
 	case entries == 0:
 		return nil, nil
-	case required:
+	case entryRequired:
 		return nil, fmt.Errorf("token response authorization_details carries no entry for credential_configuration_id %q: %w", configurationID, ErrAuthorizationDetailsMissing)
 	}
 	return nil, fmt.Errorf("access token authorization_details contains no entry for credential_configuration_id %q: %w", configurationID, receiverTypes.ErrInvalidTokenResponse)
+}
+
+// selectCredentialIdentifier returns the credential_identifier the Credential
+// Request names: requested, which must be one of the grant's identifiers, or
+// the first of them; "" when the grant has none and the request names the
+// configuration (OpenID4VCI 1.0 Section 8.2, Draft 13 Section 7.2).
+func selectCredentialIdentifier(grant *IssuanceGrant, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	switch {
+	case requested != "" && !slices.Contains(grant.CredentialIdentifiers, requested):
+		return "", invalidArgument("credential_identifier %q is not one of the grant's credential_identifiers %v", requested, grant.CredentialIdentifiers)
+	case requested != "":
+		return requested, nil
+	case len(grant.CredentialIdentifiers) > 0:
+		return grant.CredentialIdentifiers[0], nil
+	}
+	return "", nil
 }
 
 // nonEmptyCredentialIdentifiers drops blank identifiers.
