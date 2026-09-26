@@ -1,18 +1,20 @@
 package oid4vp
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // draft24RequestBuilder parses and authenticates one OpenID4VP Draft 24
 // Authorization Request, which carries a Presentation Exchange
-// presentation_definition or a Draft 24 dcql_query. Draft 24 is outside every
-// protocol profile, so HAIP never applies here.
+// presentation_definition, by value or by reference. A Draft 24 dcql_query is
+// refused (VersionMismatchError). Draft 24 is outside every protocol profile,
+// so HAIP never applies here.
 type draft24RequestBuilder struct {
 	requestCore
 	// supportedTransactionDataTypes lists the transaction_data types the
@@ -21,6 +23,9 @@ type draft24RequestBuilder struct {
 	// requestURIPost are the presenter's request_uri POST settings (Draft 24
 	// Section 5.11).
 	requestURIPost requestURIPostSettings
+	// sealedDefinition is the Presentation Definition a sealed admission
+	// recorded for its presentation_definition_uri, nil otherwise.
+	sealedDefinition *resolvedDefinition
 }
 
 func newDraft24RequestBuilder() *draft24RequestBuilder {
@@ -100,13 +105,13 @@ func (b *draft24RequestBuilder) validate() error {
 	}
 	// Draft 24 Section 5.1 names three ways to express the Presentation
 	// Definition - by value, by reference in presentation_definition_uri, or
-	// through a scope the Wallet maps to one - besides DCQL. Resolving a
-	// reference or a scope is the Wallet's own step after admission, so their
-	// presence is what is required here.
+	// through a scope the Wallet maps to one - besides DCQL. Build resolves
+	// a reference once the request is authenticated; mapping a scope is the
+	// Wallet's own step after admission.
 	hasDefinition := b.req.PresentationDefinition != nil && b.req.PresentationDefinition.ID != ""
 	hasDefinitionReference := b.req.PresentationDefinitionURI != "" || b.req.Scope != ""
-	if !hasDefinition && !hasDefinitionReference && (b.req.DcqlQuery == nil || len(b.req.DcqlQuery.Credentials) == 0) {
-		return newAuthorizationRequestError(InvalidRequestError, "presentation_definition, presentation_definition_uri, scope or dcql_query is required for Draft24")
+	if !hasDefinition && !hasDefinitionReference {
+		return newAuthorizationRequestError(InvalidRequestError, "presentation_definition, presentation_definition_uri or scope is required for Draft24")
 	}
 	if b.req.ResponseType == "" {
 		return newAuthorizationRequestError(InvalidRequestError, "response_type is required")
@@ -138,6 +143,7 @@ func (b *draft24RequestBuilder) WithQueryParams(params map[string][]string) *dra
 		return b
 	}
 	b.requestSource = sourceQuery
+	b.queryParams = params
 
 	singleParams := make(map[string]any)
 	for key, values := range params {
@@ -209,6 +215,9 @@ func (b *draft24RequestBuilder) Build() (*CredentialPresentationRequest, error) 
 	if b.req.RequestObjectVerification != nil {
 		b.req.RequestObjectVerification.Delivery = b.requestSource.delivery()
 	}
+	if err := b.resolvePresentationDefinitionURI(); err != nil {
+		return nil, err
+	}
 	if b.req.ClientMetadata != nil {
 		// Draft 24 is outside every 1.0 profile; its encrypted responses
 		// follow JARM (Draft 24 §8.3).
@@ -226,6 +235,29 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		return
 	}
 	params = withoutIssuerClaim(params)
+
+	// The version decision comes before every rule of Draft 24 alone (see
+	// VersionMismatchError): a dcql_query request is answered as OpenID4VP
+	// 1.0 or not at all.
+	if err := versionMismatch(profile.VersionDraft24, params); err != nil {
+		b.errValidation = err
+		return
+	}
+	// Draft 24 §5.1: "Exactly one of the following parameters MUST be present
+	// in the Authorization Request: dcql_query, presentation_definition,
+	// presentation_definition_uri, or a scope value representing a
+	// Presentation Definition"; §6 (invalid_request): "The request contains
+	// more than one out of the following three options".
+	present := []string{}
+	for _, name := range []string{"dcql_query", "presentation_definition", "presentation_definition_uri"} {
+		if _, exists := params[name]; exists {
+			present = append(present, name)
+		}
+	}
+	if len(present) > 1 {
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "only one of %s may be present", strings.Join(present, " and "))
+		return
+	}
 
 	missing := []string{}
 	getParam := func(key string, required bool) string {
@@ -281,6 +313,16 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 	}
 
 	if redirectURIFromParam != "" && redirectURIFromClientID != "" && redirectURIFromParam != redirectURIFromClientID {
+		if mode, _ := params["response_mode"].(string); isDirectPostMode(OAuthAuthzReqResponseMode(mode)) {
+			// §8.2 refuses redirect_uri beside direct_post whatever its
+			// value; the error goes to the Response URI the Client
+			// Identifier binds.
+			b.req.ResponseMode = OAuthAuthzReqResponseMode(mode)
+			b.req.State, _ = params["state"].(string)
+			b.req.ResponseURI = redirectURIFromClientID
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+			return
+		}
 		b.errValidation = fmt.Errorf("redirect_uri mismatch between parameter and one derived from client_id")
 		return
 	}
@@ -299,13 +341,17 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 	// Response Mode direct_post is used)."
 	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
 	responseURIFromParam := getParam("response_uri", responseURIRequired)
-	if isDirectPostMode(b.req.ResponseMode) {
-		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
-			b.errValidation = err
-			return
-		}
-	}
 	b.req.ResponseURI = responseURIFromParam
+	// Draft 24 §8.2: "If the redirect_uri Authorization Request parameter is
+	// present when the Response Mode is direct_post, the Wallet MUST return
+	// an invalid_request Authorization Response error"; direct_post.jwt is
+	// direct_post with JARM (§8.3.1).
+	if isDirectPostMode(b.req.ResponseMode) && redirectURIFromParam != "" {
+		b.req.RedirectURI = ""
+		b.req.ResponseURI = redirectURIFromClientID
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+		return
+	}
 	if redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
 		b.req.RedirectURI = ""
 		if responseURIFromParam == "" {
@@ -329,22 +375,19 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		} else {
 			data, err = json.Marshal(raw)
 		}
-		var definition PresentationDefinition
 		if err == nil {
-			err = json.Unmarshal(data, &definition)
+			err = b.req.setPresentationDefinition(data)
 		}
 		if err != nil {
 			b.errValidation = fmt.Errorf("invalid presentation_definition: %w", err)
 			return
 		}
-		b.req.PresentationDefinition = &definition
-		// PresentationDefinition keeps only the id; the wire value is kept
-		// for a caller that renders or forwards the whole definition.
-		b.req.RawPresentationDefinition = json.RawMessage(bytes.Clone(data))
 	}
 
-	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs)
+	// Draft 24 §5.10.4: with the https scheme "The client_metadata
+	// parameter, if present in the Authorization Request, MUST be ignored".
+	if cm, exists := params["client_metadata"]; exists && cm != nil && !b.federationClient() {
+		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs, draft24Metadata)
 		if err != nil {
 			b.errValidation = err
 			return
@@ -357,15 +400,6 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 	if b.preRegisteredClient != nil && b.preRegisteredClient.Metadata != nil {
 		registeredMetadata := *b.preRegisteredClient.Metadata
 		b.req.ClientMetadata = &registeredMetadata
-	}
-
-	if rawDcqlQuery, exists := params["dcql_query"]; exists {
-		dcqlQuery, err := parseDraft24DcqlQuery(rawDcqlQuery)
-		if err != nil {
-			b.errValidation = err
-			return
-		}
-		b.req.DcqlQuery = dcqlQuery
 	}
 
 	if len(missing) == 1 && missing[0] == "nonce" {
@@ -389,29 +423,13 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 
 // validateTransactionData applies the rules of the 1.0 path to Draft 24
 // transaction_data (Draft 24 Section 5.1): each credential_ids member names an
-// input descriptor or a credential query, and the credential it names must be
-// an SD-JWT VC, whose Key Binding JWT is the only place the hashes can go
-// (Draft 24 Appendix A.4.5). The descriptors of a definition passed by
-// reference are not known yet; the wallet checks them when it presents.
+// input descriptor, and the credential it names must be an SD-JWT VC, whose
+// Key Binding JWT is the only place the hashes can go (Draft 24 Appendix
+// A.4.5). The descriptors of a definition passed by reference are checked
+// once Build has resolved it.
 func (b *draft24RequestBuilder) validateTransactionData() error {
 	check := func(int, string) error { return nil }
-	switch {
-	case b.req.DcqlQuery != nil:
-		queries := make(map[string]CredentialQuery, len(b.req.DcqlQuery.Credentials))
-		for _, query := range b.req.DcqlQuery.Credentials {
-			queries[query.ID] = query
-		}
-		check = func(i int, id string) error {
-			query, known := queries[id]
-			if !known {
-				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references an unknown credential query", i)
-			}
-			if !isDraft24SDJWTFormat(query.Format) {
-				return newAuthorizationRequestError(InvalidTransactionDataError, "transaction_data[%d].credential_ids references a %s credential query, which cannot carry transaction data", i, query.Format)
-			}
-			return nil
-		}
-	case len(b.req.RawPresentationDefinition) > 0:
+	if len(b.req.RawPresentationDefinition) > 0 {
 		formats, err := draft24DescriptorFormats(b.req.RawPresentationDefinition)
 		if err != nil {
 			return newAuthorizationRequestError(InvalidRequestError, "invalid presentation_definition: %v", err)
@@ -463,31 +481,4 @@ func draft24DescriptorFormats(raw json.RawMessage) (map[string][]string, error) 
 		formats[descriptor.ID] = slices.Sorted(maps.Keys(accepted))
 	}
 	return formats, nil
-}
-
-// parseDraft24DcqlQuery decodes a Draft 24 dcql_query without the 1.0
-// validation. Credential matching still decides which formats can be
-// presented.
-func parseDraft24DcqlQuery(raw any) (*DcqlQuery, error) {
-	queryMap, err := decodeDcqlQueryObject(raw)
-	if err != nil {
-		return nil, err
-	}
-	// require_cryptographic_holder_binding and trusted_authorities are 1.0
-	// members the Draft 24 decoder ignores; the input is not mutated.
-	if credentials, ok := queryMap["credentials"].([]any); ok {
-		queryMap = maps.Clone(queryMap)
-		filtered := make([]any, len(credentials))
-		for i, item := range credentials {
-			filtered[i] = item
-			if query, ok := item.(map[string]any); ok {
-				query = maps.Clone(query)
-				delete(query, "require_cryptographic_holder_binding")
-				delete(query, "trusted_authorities")
-				filtered[i] = query
-			}
-		}
-		queryMap["credentials"] = filtered
-	}
-	return dcqlQueryFromObject(queryMap)
 }

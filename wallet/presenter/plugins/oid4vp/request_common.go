@@ -119,6 +119,13 @@ type requestCore struct {
 	// request's pre-registered Client Identifier, nil for every other prefix.
 	preRegistry         *preRegisteredRegistry
 	preRegisteredClient *PreRegisteredClient
+	// queryParams are the plain parameters of a sourceQuery parse, kept for
+	// AdmitUnderVersion.
+	queryParams map[string][]string
+	// resolvedDefinition is the Presentation Definition a Draft 24 parse
+	// fetched from presentation_definition_uri (or took from its seal), which
+	// Seal records; nil otherwise.
+	resolvedDefinition *resolvedDefinition
 }
 
 // preRegisteredRegistry is where a pre-registered Client Identifier is
@@ -167,15 +174,6 @@ func isDCAPIMode(mode OAuthAuthzReqResponseMode) bool {
 	return mode == OAuthAuthzReqResponseModeDCAPI || mode == OAuthAuthzReqResponseModeDCAPIJWT
 }
 
-// validateRedirectAndResponseURIExclusivity refuses a direct_post request that
-// carries both redirect_uri and response_uri (OID4VP 1.0 §5.1, §8.2).
-func validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam string) error {
-	if redirectURIFromParam != "" && responseURIFromParam != "" {
-		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not both be present in the same request")
-	}
-	return nil
-}
-
 // withoutIssuerClaim drops iss, which a Wallet must ignore in a Request Object
 // (OID4VP 1.0 §5).
 func withoutIssuerClaim(params map[string]any) map[string]any {
@@ -189,35 +187,6 @@ func withoutIssuerClaim(params map[string]any) map[string]any {
 		}
 	}
 	return filtered
-}
-
-// parseClientMetadataParam decodes the client_metadata parameter, which
-// arrives as a JSON object (Request Object claim) or a JSON string (query
-// parameter).
-func parseClientMetadataParam(cm any, requireKeyIDs bool) (*VerifierMetadata, error) {
-	var rawMetadata []byte
-	switch value := cm.(type) {
-	case map[string]any:
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal client_metadata: %w", err)
-		}
-		rawMetadata = encoded
-	case string:
-		rawMetadata = []byte(value)
-	default:
-		return nil, fmt.Errorf("client_metadata must be a string or map")
-	}
-	var clientMeta VerifierMetadata
-	if err := json.Unmarshal(rawMetadata, &clientMeta); err != nil {
-		return nil, fmt.Errorf("invalid client_metadata: %w", err)
-	}
-	if requireKeyIDs {
-		if err := validateClientMetadataJWKKeyIDs(rawMetadata); err != nil {
-			return nil, newAuthorizationRequestError(InvalidRequestError, "%w", err)
-		}
-	}
-	return &clientMeta, nil
 }
 
 // fetchRequestObject retrieves a Request Object from request_uri (OID4VP 1.0
@@ -374,6 +343,10 @@ func decodeRequestObject(obj string, algorithms []jose.SignatureAlgorithm) (*jwt
 	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode request object claims: %w", err)
 	}
+	// RFC 9101 §4: the claims are a JSON object; null decodes to none.
+	if claims == nil {
+		return nil, nil, newAuthorizationRequestError(InvalidRequestError, "request object claims must be a JSON object")
+	}
 	return parsed, claims, nil
 }
 
@@ -522,7 +495,7 @@ func (c *requestCore) authenticateX509RequestObject(obj string, parsed *jwt.JSON
 		return err
 	}
 	verified := make(commonJOSE.Claims)
-	if err := parsed.Claims(certificates[0].PublicKey, &verified); err != nil {
+	if err := commonJOSE.VerifyClaims(parsed, certificates[0].PublicKey, &verified); err != nil {
 		return fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	if !verifyChain {

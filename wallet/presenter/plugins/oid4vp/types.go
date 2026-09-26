@@ -113,8 +113,10 @@ type CredentialPresentationRequest struct {
 	// it is not accepted from or serialized into authorization request data.
 	RequestObjectVerification *RequestObjectVerification `json:"-"`
 	// PresentationDefinitionURI is the Draft24 presentation_definition_uri
-	// parameter as it arrived. This library does not dereference it; a Wallet
-	// that accepts the parameter resolves it after admitting the request.
+	// parameter as it arrived. The Draft 24 entry points dereference it once
+	// the request is authenticated (Draft 24 §5.5) and report the definition
+	// in PresentationDefinition and RawPresentationDefinition; a sealed
+	// admission carries that definition to the re-admission.
 	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
 	// VerifierFederation is the Trust Chain that authenticated an
 	// openid_federation Verifier, signed or (when allowed) unsigned. It is
@@ -122,8 +124,8 @@ type CredentialPresentationRequest struct {
 	VerifierFederation     *FederationEvidence     `json:"-"`
 	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
 	// RawPresentationDefinition is the Draft24 presentation_definition
-	// exactly as it arrived; PresentationDefinition keeps only its id. It is
-	// nil on the Final path.
+	// exactly as it arrived, or as presentation_definition_uri served it;
+	// PresentationDefinition keeps only its id. It is nil on the Final path.
 	RawPresentationDefinition json.RawMessage   `json:"-"`
 	DcqlQuery                 *DcqlQuery        `json:"dcql_query"`                            // required
 	ClientMetadata            *VerifierMetadata `json:"client_metadata,omitempty"`             // optional
@@ -189,6 +191,13 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseAlg   string             `json:"authorization_encrypted_response_alg,omitempty"`
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
+	// VPFormatsSupported is the OpenID4VP 1.0 vp_formats_supported member
+	// (§5.1, §11.1), keyed by Credential Format Identifier, each value as it
+	// arrived. A Draft 24 request carries VPFormats instead; each wire
+	// contract drops the other's member (see CheckSDJWTPresentationAlgorithms).
+	VPFormatsSupported map[string]json.RawMessage `json:"vp_formats_supported,omitempty"`
+	// VPFormats is the Draft 24 vp_formats member (Draft 24 §10.1).
+	VPFormats map[string]json.RawMessage `json:"vp_formats,omitempty"`
 
 	// encryption records how the request carrying this metadata was admitted
 	// to have its response encrypted, so the response is encrypted the same

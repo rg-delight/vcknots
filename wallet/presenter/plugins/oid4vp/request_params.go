@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // setParamsWithAnyMap sets the request fields from the Authorization Request
@@ -16,6 +18,17 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		return
 	}
 	params = withoutIssuerClaim(params)
+
+	// The version decision comes before every rule of OpenID4VP 1.0 alone
+	// (see VersionMismatchError). A Digital Credentials API request has no
+	// Draft 24 counterpart, so Presentation Exchange is simply missing
+	// dcql_query there.
+	if !b.requestSource.isDCAPI() {
+		if err := versionMismatch(profile.VersionFinal, params); err != nil {
+			b.errValidation = err
+			return
+		}
+	}
 
 	missing := []string{}
 	getParam := func(key string, required bool) string {
@@ -74,6 +87,16 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	}
 
 	if redirectURIFromParam != "" && redirectURIFromClientID != "" && redirectURIFromParam != redirectURIFromClientID {
+		if mode, _ := params["response_mode"].(string); isDirectPostMode(OAuthAuthzReqResponseMode(mode)) {
+			// §8.2 refuses redirect_uri beside direct_post whatever its
+			// value; the error goes to the Response URI the Client
+			// Identifier binds.
+			b.req.ResponseMode = OAuthAuthzReqResponseMode(mode)
+			b.req.State, _ = params["state"].(string)
+			b.req.ResponseURI = redirectURIFromClientID
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+			return
+		}
 		b.errValidation = fmt.Errorf("redirect_uri mismatch between parameter and one derived from client_id")
 		return
 	}
@@ -94,16 +117,19 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
 	responseURIFromParam := getParam("response_uri", responseURIRequired)
 
-	// OID4VP 1.0 §8.2: redirect_uri and response_uri are mutually exclusive
-	// when response_mode is direct_post (or direct_post.jwt).
-	if isDirectPostMode(b.req.ResponseMode) {
-		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
-			b.errValidation = err
-			return
-		}
-	}
-
 	b.req.ResponseURI = responseURIFromParam
+
+	// OID4VP 1.0 §8.2: "If the redirect_uri Authorization Request parameter
+	// is present when the Response Mode is direct_post, the Wallet MUST
+	// return an invalid_request Authorization Response error", and §8.3.1
+	// applies §8.2 to direct_post.jwt.
+	if isDirectPostMode(b.req.ResponseMode) && redirectURIFromParam != "" {
+		// The error response may only go where the Client Identifier binds
+		// the Response URI (§5.9.3), never to a URI the request chose.
+		b.req.ResponseURI = redirectURIFromClientID
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+		return
+	}
 
 	// OID4VP 1.0 §5.9.3 binds the Response URI to the redirect_uri Client
 	// Identifier the same way it binds the Redirect URI, so a foreign
@@ -145,13 +171,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	// Presentation Exchange belongs to the Draft 24 entry points.
-	for _, unsupported := range []string{"presentation_definition", "presentation_definition_uri", "presentation_submission"} {
-		if _, exists := params[unsupported]; exists {
-			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s is not supported; use dcql_query instead", unsupported)
-			return
-		}
-	}
+	// Presentation Exchange parameters beside dcql_query are unrecognized
+	// OpenID4VP 1.0 parameters, which the Wallet ignores (§5); without
+	// dcql_query the request was refused as a Draft 24 one above.
 
 	// Requesting Credentials via the scope parameter is not supported by this wallet.
 	if scope, exists := params["scope"]; exists {
@@ -161,8 +183,11 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs)
+	// OID4VP 1.0 §5.9.3: with openid_federation "The client_metadata
+	// parameter, if present in the Authorization Request, MUST be ignored";
+	// the Trust Chain supplies the metadata (adoptFederationVerifierMetadata).
+	if cm, exists := params["client_metadata"]; exists && cm != nil && !b.federationClient() {
+		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs, finalMetadata)
 		if err != nil {
 			b.errValidation = err
 			return

@@ -160,6 +160,18 @@ func (w *Wallet) submitPresentationExchange(ctx context.Context, h *oid4vp.Admit
 	if err != nil {
 		return nil, err
 	}
+	// Presentation Exchange limit_disclosure "required" bounds what each
+	// presentation discloses, decided before anything is serialized.
+	limits, err := draft24DisclosureLimits(req.RawPresentationDefinition, p.Credentials, credentials)
+	if err != nil {
+		return nil, err
+	}
+	p.Credentials = slices.Clone(p.Credentials)
+	for index, limit := range limits {
+		if limit != nil {
+			p.Credentials[index].DisclosedClaims = limit
+		}
+	}
 	descriptorMap, err := buildDraft24DescriptorMap(len(saved), *flavor, descriptorIDs)
 	if err != nil {
 		return nil, err
@@ -228,15 +240,11 @@ func buildDraft24DescriptorMap(count int, flavor credential.SupportedSerializati
 // Each SD-JWT VC gets its own presentation with a Key Binding JWT; every
 // other format is one presentation of all credentials under one key.
 //
-// Each transaction_data entry is carried by the one credential whose input
-// descriptors own it (Draft 24 Section 5.1), and only an SD-JWT VC Key Binding
-// JWT can carry it (Appendix A.4.5).
+// Each transaction_data entry is carried by the credential it is assigned to
+// (Draft 24 Section 5.1, assignTransactionData), and only an SD-JWT VC Key
+// Binding JWT can carry it (Appendix A.4.5).
 func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentationRequest, p Presentation, credentials []resolvedCredential, flavor credential.SupportedSerializationFlavor) ([]byte, error) {
-	var presentedDescriptors []string
-	for _, selection := range p.Credentials {
-		presentedDescriptors = append(presentedDescriptors, selection.QueryIDs...)
-	}
-	transactionDataOwners, err := assignTransactionDataOwners(req.TransactionData, presentedDescriptors)
+	transactionData, err := assignTransactionData(req.TransactionData, p.Credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -281,13 +289,7 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 				sdOpts.SelectedClaims = append([]string(nil), disclosed...)
 				sdOpts.LimitDisclosureToSelectedClaims = true
 			}
-			var owned []string
-			for _, entry := range req.TransactionData {
-				if slices.Contains(p.Credentials[index].QueryIDs, transactionDataOwners[entry]) && !slices.Contains(owned, entry) {
-					owned = append(owned, entry)
-				}
-			}
-			if len(owned) > 0 {
+			if owned := transactionData.selectionEntries(index, req.TransactionData); len(owned) > 0 {
 				sdOpts.TransactionData = owned
 				sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
 				if sdOpts.TransactionDataHashesAlg == "" {
@@ -303,6 +305,15 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", presented.id, err)
 		}
+		// Draft 24 Appendix B.4.2: "If present, the alg JOSE header ... MUST
+		// match one of the array values" of sd-jwt_alg_values and
+		// kb-jwt_alg_values.
+		if err := req.ClientMetadata.CheckSDJWTPresentationAlgorithms(string(serialized)); err != nil {
+			return nil, fmt.Errorf("credential %s: %w", presented.id, err)
+		}
+		if err := checkDraft24DescriptorAlgorithms(req, p.Credentials[index].QueryIDs, string(serialized)); err != nil {
+			return nil, fmt.Errorf("credential %s: %w", presented.id, err)
+		}
 		tokens = append(tokens, string(serialized))
 	}
 	if len(tokens) == 1 {
@@ -317,4 +328,49 @@ func sameHolderKey(a, b IKeyEntry) bool {
 	thumbprintA, errA := publicA.Thumbprint(crypto.SHA256)
 	thumbprintB, errB := publicB.Thumbprint(crypto.SHA256)
 	return errA == nil && errB == nil && bytes.Equal(thumbprintA, thumbprintB)
+}
+
+// checkDraft24DescriptorAlgorithms applies the SD-JWT VC algorithm lists of
+// the format member of the input descriptors a presentation answers (or of
+// the definition, for a descriptor without one) to it, the way the Verifier's
+// vp_formats applies. Draft 24 §5.4: "The Wallet MUST ignore any format
+// property inside a presentation_definition object if that format was not
+// included in the vp_formats property of the metadata" (CX-VP A08).
+func checkDraft24DescriptorAlgorithms(req *oid4vp.CredentialPresentationRequest, descriptorIDs []string, presentation string) error {
+	if len(req.RawPresentationDefinition) == 0 {
+		return nil
+	}
+	var definition struct {
+		Format           map[string]json.RawMessage `json:"format"`
+		InputDescriptors []struct {
+			ID     string                     `json:"id"`
+			Format map[string]json.RawMessage `json:"format"`
+		} `json:"input_descriptors"`
+	}
+	if err := json.Unmarshal(req.RawPresentationDefinition, &definition); err != nil {
+		return fmt.Errorf("%w: presentation_definition: %w", ErrInvalidArgument, err)
+	}
+	var verifierFormats map[string]json.RawMessage
+	if req.ClientMetadata != nil {
+		verifierFormats = req.ClientMetadata.VPFormats
+	}
+	for _, descriptor := range definition.InputDescriptors {
+		if !slices.Contains(descriptorIDs, descriptor.ID) {
+			continue
+		}
+		formats := descriptor.Format
+		if len(formats) == 0 {
+			formats = definition.Format
+		}
+		applied := map[string]json.RawMessage{}
+		for name, value := range formats {
+			if _, listed := verifierFormats[name]; len(verifierFormats) == 0 || listed {
+				applied[name] = value
+			}
+		}
+		if err := (&oid4vp.VerifierMetadata{VPFormats: applied}).CheckSDJWTPresentationAlgorithms(presentation); err != nil {
+			return fmt.Errorf("input descriptor %q: %w", descriptor.ID, err)
+		}
+	}
+	return nil
 }

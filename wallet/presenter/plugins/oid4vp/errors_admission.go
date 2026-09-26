@@ -35,6 +35,12 @@ var (
 	// Identifier "is the Verifier's Redirect URI (or Response URI when
 	// Response Mode direct_post is used)".
 	ErrResponseURIClientIDMismatch = common.NewCodedError("response_uri_client_id_mismatch", "response_uri does not match the redirect_uri Client Identifier")
+	// ErrRedirectURIWithDirectPost reports a direct_post or direct_post.jwt
+	// request that carries the redirect_uri parameter. OpenID4VP 1.0 Section
+	// 8.2 (and Draft 24 Section 8.2): "If the redirect_uri Authorization
+	// Request parameter is present when the Response Mode is direct_post, the
+	// Wallet MUST return an invalid_request Authorization Response error."
+	ErrRedirectURIWithDirectPost = common.NewCodedError("redirect_uri_with_direct_post", "redirect_uri must not be present with response_mode direct_post or direct_post.jwt")
 	// ErrResponseEncryptionKeyMissing reports a direct_post.jwt or dc_api.jwt
 	// request whose Verifier metadata carries no jwks to encrypt the
 	// Authorization Response to (OpenID4VP 1.0 Section 8.3).

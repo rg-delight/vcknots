@@ -86,10 +86,12 @@ func (w *Wallet) submitDCQLPresentation(ctx context.Context, h *oid4vp.AdmittedR
 	return w.presenter.SubmitDCQLResponse(ctx, h, vpToken)
 }
 
-// dcqlAnswer is one (credential query, credential) pair of a vp_token.
+// dcqlAnswer is one (credential query, credential) pair of a vp_token;
+// selection indexes the CredentialSelection it came from.
 type dcqlAnswer struct {
 	match      oid4vp.DCQLMatch
 	credential resolvedCredential
+	selection  int
 }
 
 // buildDCQLVPToken checks p against the query and serializes every answer
@@ -130,6 +132,7 @@ func (w *Wallet) buildDCQLVPToken(ctx context.Context, h *oid4vp.AdmittedRequest
 			answers = append(answers, dcqlAnswer{
 				match:      oid4vp.DCQLMatch{QueryID: queryID, CandidateID: presented.id, Claims: claims},
 				credential: presented,
+				selection:  index,
 			})
 		}
 	}
@@ -146,13 +149,10 @@ func (w *Wallet) buildDCQLVPToken(ctx context.Context, h *oid4vp.AdmittedRequest
 // serializeDCQLAnswers renders one presentation per answer, applying the
 // transaction_data assignment, disclosure limits and key binding rules.
 func (w *Wallet) serializeDCQLAnswers(req *oid4vp.CredentialPresentationRequest, p Presentation, answers []dcqlAnswer) (map[string][]string, error) {
-	presentedQueries := make([]string, 0, len(answers))
-	for _, answer := range answers {
-		presentedQueries = append(presentedQueries, answer.match.QueryID)
-	}
 	// OID4VP 1.0 Section 5.1: each transaction_data entry is authorized by
-	// one presented credential, decided before anything is serialized.
-	transactionDataOwners, err := assignTransactionDataOwners(req.TransactionData, presentedQueries)
+	// the credential the Holder assigned it to, decided before anything is
+	// serialized.
+	transactionData, err := assignTransactionData(req.TransactionData, p.Credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -171,12 +171,9 @@ func (w *Wallet) serializeDCQLAnswers(req *oid4vp.CredentialPresentationRequest,
 		if err != nil {
 			return nil, err
 		}
-		// Section 8.4: the presentation carries every entry this query owns.
+		// Section 8.4: the presentation carries every entry assigned to it.
 		// Only an SD-JWT VC Key Binding JWT carries transaction_data_hashes.
-		owned, err := ownedTransactionData(req.TransactionData, queryID, transactionDataOwners)
-		if err != nil {
-			return nil, err
-		}
+		owned := transactionData.carried(answer.selection, queryID, req.TransactionData)
 		sdOpts, sdJWT := options.(*sdjwtvc.SdJwtVcPresentationOptions)
 		if len(owned) > 0 && (!sdJWT || flavor != credential.SDJwtVC) {
 			return nil, fmt.Errorf("transaction_data for credential query %q requires an SD-JWT VC with key binding (invalid_transaction_data)", queryID)
@@ -215,6 +212,13 @@ func (w *Wallet) serializeDCQLAnswers(req *oid4vp.CredentialPresentationRequest,
 		serialized, _, err := w.serializer.SerializePresentation(flavor, presentation, key, options)
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", answer.credential.id, err)
+		}
+		if flavor == credential.SDJwtVC {
+			// OID4VP 1.0 Appendix B.3.4: the Verifier's sd-jwt_alg_values and
+			// kb-jwt_alg_values.
+			if err := req.ClientMetadata.CheckSDJWTPresentationAlgorithms(string(serialized)); err != nil {
+				return nil, fmt.Errorf("credential %s: %w", answer.credential.id, err)
+			}
 		}
 		vpToken[queryID] = append(vpToken[queryID], string(serialized))
 	}

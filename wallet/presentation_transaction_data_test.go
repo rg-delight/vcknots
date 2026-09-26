@@ -253,49 +253,141 @@ func TestWallet_TransactionDataBindingChecksReferencedQueries(t *testing.T) {
 	require.NoError(t, validateTransactionDataHolderBinding(req))
 }
 
-// transactionDataForQuery applies the OID4VP 1.0 Final Section 5.1 credential_ids
-// filter and assignTransactionDataOwners the "MUST use only one of the
-// referenced Credentials" rule. Both are exercised here on inputs the public
-// request parser rejects before buildDCQLVPToken can see them.
-func TestTransactionDataQueryFilterAndOwnership(t *testing.T) {
-	first := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["pid"]}`))
-	both := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"example","credential_ids":["addr","pid"]}`))
-	entries := []string{first, both}
+// assignTransactionData applies OID4VP 1.0 Section 5.1 ("If there is more
+// than one element in the array, the Wallet MUST use only one of the
+// referenced Credentials") and Section 8.4 (the respective presentation MUST
+// carry it) to the Holder's selections. The inputs here are ones the public
+// request parser refuses or that need no credential store.
+func TestAssignTransactionData(t *testing.T) {
+	pidOnly := encodedTransactionData(`{"type":"example","credential_ids":["pid"]}`)
+	either := encodedTransactionData(`{"type":"example","credential_ids":["addr","pid"]}`)
+	entries := []string{pidOnly, either}
+	pid := CredentialSelection{CredentialID: "a", QueryIDs: []string{"pid"}}
+	addr := CredentialSelection{CredentialID: "b", QueryIDs: []string{"addr"}}
+	secondPID := CredentialSelection{CredentialID: "c", QueryIDs: []string{"pid"}}
+	with := func(selection CredentialSelection, indexes ...int) CredentialSelection {
+		selection.TransactionData = indexes
+		return selection
+	}
 
-	matched, err := transactionDataForQuery(entries, "pid")
-	require.NoError(t, err)
-	require.Equal(t, entries, matched)
-	matched, err = transactionDataForQuery(entries, "addr")
-	require.NoError(t, err)
-	require.Equal(t, []string{both}, matched)
-	matched, err = transactionDataForQuery(entries, "other")
-	require.NoError(t, err)
-	require.Empty(t, matched)
-	_, err = transactionDataForQuery([]string{"not-base64!"}, "pid")
+	t.Run("default: first presented referenced query", func(t *testing.T) {
+		assignment, err := assignTransactionData(entries, []CredentialSelection{pid, addr})
+		require.NoError(t, err)
+		require.Equal(t, []string{pidOnly}, assignment.carried(0, "pid", entries))
+		require.Equal(t, []string{either}, assignment.carried(1, "addr", entries))
+		// With only pid presented, pid authorizes the entry naming both.
+		assignment, err = assignTransactionData(entries, []CredentialSelection{pid})
+		require.NoError(t, err)
+		require.Equal(t, entries, assignment.carried(0, "pid", entries))
+	})
+	t.Run("default: several credentials of one query need the Holder's choice", func(t *testing.T) {
+		_, err := assignTransactionData([]string{pidOnly}, []CredentialSelection{pid, secondPID})
+		require.ErrorIs(t, err, ErrTransactionDataAssignmentRequired)
+	})
+	t.Run("default: an entry referencing nothing presented", func(t *testing.T) {
+		_, err := assignTransactionData([]string{either}, []CredentialSelection{{CredentialID: "x", QueryIDs: []string{"other"}}})
+		require.ErrorContains(t, err, "references no selected credential (invalid_transaction_data)")
+	})
+	t.Run("explicit: the Holder's credential carries it", func(t *testing.T) {
+		assignment, err := assignTransactionData([]string{pidOnly}, []CredentialSelection{with(pid), with(secondPID, 0)})
+		require.NoError(t, err)
+		require.Empty(t, assignment.carried(0, "pid", entries))
+		require.Equal(t, []string{pidOnly}, assignment.carried(1, "pid", []string{pidOnly}))
+		// "either" assigned to addr goes to the addr presentation.
+		assignment, err = assignTransactionData(entries, []CredentialSelection{with(pid, 0), with(addr, 1)})
+		require.NoError(t, err)
+		require.Equal(t, []string{either}, assignment.carried(1, "addr", entries))
+	})
+	t.Run("explicit: the query every assigned credential answers", func(t *testing.T) {
+		// credential_ids [addr, pid]: selection 0 answers pid only, selection
+		// 2 answers both, so pid carries it in both presentations.
+		both := CredentialSelection{CredentialID: "d", QueryIDs: []string{"pid", "addr"}}
+		assignment, err := assignTransactionData([]string{either}, []CredentialSelection{with(pid, 0), addr, with(both, 0)})
+		require.NoError(t, err)
+		require.Equal(t, []string{either}, assignment.carried(0, "pid", []string{either}))
+		require.Equal(t, []string{either}, assignment.carried(2, "pid", []string{either}))
+		require.Empty(t, assignment.carried(2, "addr", []string{either}))
+	})
+	t.Run("explicit: several credentials of one query when the Holder says so", func(t *testing.T) {
+		assignment, err := assignTransactionData([]string{pidOnly}, []CredentialSelection{with(pid, 0), with(secondPID, 0)})
+		require.NoError(t, err)
+		require.Equal(t, []string{pidOnly}, assignment.carried(0, "pid", []string{pidOnly}))
+		require.Equal(t, []string{pidOnly}, assignment.carried(1, "pid", []string{pidOnly}))
+	})
+	for name, selections := range map[string][]CredentialSelection{
+		"two referenced queries":           {with(pid, 1), with(addr, 1), with(secondPID, 0)},
+		"a credential the entry names not": {with(addr, 0), with(pid, 1)},
+		"an entry assigned to nobody":      {with(pid, 0), addr},
+		"an index out of range":            {with(pid, 0, 1, 2)},
+		"an index twice":                   {with(pid, 0, 0, 1)},
+		"a negative index":                 {with(pid, -1)},
+	} {
+		t.Run("explicit refused: "+name, func(t *testing.T) {
+			_, err := assignTransactionData(entries, selections)
+			require.ErrorIs(t, err, ErrTransactionDataAssignmentInvalid)
+		})
+	}
+	t.Run("explicit refused: the request carries none", func(t *testing.T) {
+		_, err := assignTransactionData(nil, []CredentialSelection{with(pid, 0)})
+		require.ErrorIs(t, err, ErrTransactionDataAssignmentInvalid)
+	})
+	_, err := assignTransactionData([]string{"not-base64!"}, []CredentialSelection{pid})
 	require.ErrorContains(t, err, "transaction_data entry 0")
+}
 
-	selections := []string{"pid", "addr"}
-	owners, err := assignTransactionDataOwners(entries, selections)
+// CX-VP A02: with credential_ids ["pid"] and pid answered by two credentials
+// (multiple: true), the same transaction was bound into both Key Binding JWTs.
+// OpenID4VP 1.0 Section 5.1 lets one referenced Credential authorize it, so
+// the library asks the Holder which (ErrTransactionDataAssignmentRequired) and
+// then binds it into that credential's presentation alone - or into several,
+// only when the Holder's assignment names each.
+func TestWallet_TransactionDataFollowsTheHoldersAssignment(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	holder := fixture.key.PublicKey()
+	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Hanako"})
+	entries, _, err := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{first: "pid", both: "addr"}, owners)
+	var identities []string
+	for _, entry := range entries {
+		if entry.Credential.Types[0] == "urn:test:identity" {
+			identities = append(identities, entry.Entry.Id)
+		}
+	}
+	require.Len(t, identities, 2)
+	const query = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","multiple":true,"meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["pid"]}`)
+	digest := sha256.Sum256([]byte(entry))
+	hash := base64.RawURLEncoding.EncodeToString(digest[:])
+	submit := func(first, second []int) (map[string][]string, error) {
+		request := parsedPresentationRequest(t, fixture, presentationURIWithTransactionData(t, fixture.baseURL, query, []string{entry}))
+		_, err := presentSelections(t, fixture.wallet, request, fixture.key, []CredentialSelection{
+			{CredentialID: identities[0], QueryIDs: []string{"pid"}, TransactionData: first},
+			{CredentialID: identities[1], QueryIDs: []string{"pid"}, TransactionData: second},
+		})
+		if err != nil {
+			select {
+			case <-fixture.posted:
+				t.Fatal("a refused assignment still sent a presentation")
+			default:
+			}
+			return nil, err
+		}
+		return postedVPToken(t, fixture), nil
+	}
 
-	// With only "pid" presented, the entry listing both is authorized by it.
-	owners, err = assignTransactionDataOwners(entries, selections[:1])
+	_, err = submit(nil, nil)
+	require.ErrorIs(t, err, ErrTransactionDataAssignmentRequired)
+
+	tokens, err := submit(nil, []int{0})
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{first: "pid", both: "pid"}, owners)
+	require.Len(t, tokens["pid"], 2)
+	require.Empty(t, transactionDataHashesOf(t, tokens["pid"][0]))
+	require.Equal(t, []string{hash}, transactionDataHashesOf(t, tokens["pid"][1]))
 
-	owners, err = assignTransactionDataOwners([]string{both, both}, selections)
+	tokens, err = submit([]int{0}, []int{0})
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{both: "addr"}, owners)
-
-	owners, err = assignTransactionDataOwners(nil, selections)
-	require.NoError(t, err)
-	require.Nil(t, owners)
-
-	_, err = assignTransactionDataOwners([]string{both}, []string{"other"})
-	require.ErrorContains(t, err, "references no selected credential (invalid_transaction_data)")
-	_, err = assignTransactionDataOwners([]string{"not-base64!"}, selections)
-	require.ErrorContains(t, err, "transaction_data entry 0")
+	require.Equal(t, []string{hash}, transactionDataHashesOf(t, tokens["pid"][0]))
+	require.Equal(t, []string{hash}, transactionDataHashesOf(t, tokens["pid"][1]))
 }
 
 // OID4VP 1.0 Section 8.4: the presentation that authorizes a transaction_data

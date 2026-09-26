@@ -59,6 +59,14 @@ type Draft24RequestReadmitter interface {
 	ReadmitDraft24Request(ctx context.Context, sealed SealedAdmission, key []byte) (AdmittedRequest, error)
 }
 
+// VersionAdmitter admits, under the other OpenID4VP version, a request an
+// entry point refused as written for that version (oid4vp.VersionMismatchError).
+// refused is the error the refusing parse returned; only the plugin that
+// produced it acts on it.
+type VersionAdmitter interface {
+	AdmitUnderVersion(ctx context.Context, refused error) (AdmittedRequest, error)
+}
+
 // DCAPIRequestParser parses and admits OpenID4VP 1.0 Appendix A requests
 // delivered through the W3C Digital Credentials API.
 type DCAPIRequestParser interface {

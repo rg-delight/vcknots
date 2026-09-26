@@ -62,6 +62,10 @@ const (
 	// EndpointRequestObject is the request_uri fetch of an Authorization
 	// Request (OpenID4VP 1.0 Section 5.10, RFC 9101).
 	EndpointRequestObject Endpoint = "request_object"
+	// EndpointPresentationDefinition is the presentation_definition_uri
+	// fetch of an OpenID4VP Draft 24 Authorization Request (Draft 24 Section
+	// 5.5).
+	EndpointPresentationDefinition Endpoint = "presentation_definition"
 	// EndpointResponse is the Authorization Response or error response POST to
 	// the verifier's Response Endpoint (OpenID4VP 1.0 Section 8.2).
 	EndpointResponse Endpoint = "response_endpoint"

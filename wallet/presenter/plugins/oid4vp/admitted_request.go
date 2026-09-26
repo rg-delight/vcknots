@@ -2,6 +2,7 @@ package oid4vp
 
 import (
 	"bytes"
+	"encoding/json"
 	"maps"
 	"net/url"
 	"slices"
@@ -45,28 +46,29 @@ type AdmittedRequest struct {
 // admissionFacts are what a parse observed about the Request Object's
 // arrival: how it came and from which request_uri, the outer client_id it was
 // bound to, the wallet_nonce sent for it, the instant it was authenticated at
-// (the first admission's, for a re-admission) and the profile and profile
-// Options it was admitted under.
+// (the first admission's, for a re-admission), the text form of the profile it
+// was admitted under (profile.Profile.String, which names every option) and
+// the Presentation Definition it resolved from presentation_definition_uri.
 type admissionFacts struct {
-	source         requestSource
-	requestURI     string
-	outerClientID  string
-	walletNonce    string
-	admittedAt     time.Time
-	profile        string
-	profileOptions string
+	source             requestSource
+	requestURI         string
+	outerClientID      string
+	walletNonce        string
+	admittedAt         time.Time
+	profile            string
+	resolvedDefinition *resolvedDefinition
 }
 
 // recordAdmission copies the facts of core's parse onto the handle.
-func (r *AdmittedRequest) recordAdmission(core *requestCore, profileName string) {
+func (r *AdmittedRequest) recordAdmission(core *requestCore, profileText string) {
 	r.admission = admissionFacts{
-		source:         core.requestSource,
-		requestURI:     core.requestURI,
-		outerClientID:  core.expectedClientID,
-		walletNonce:    core.sentWalletNonce,
-		admittedAt:     core.admissionInstant(),
-		profile:        profileName,
-		profileOptions: canonicalProfileOptions(core.options),
+		source:             core.requestSource,
+		requestURI:         core.requestURI,
+		outerClientID:      core.expectedClientID,
+		walletNonce:        core.sentWalletNonce,
+		admittedAt:         core.admissionInstant(),
+		profile:            profileText,
+		resolvedDefinition: core.resolvedDefinition,
 	}
 }
 
@@ -278,6 +280,8 @@ func cloneVerifierMetadata(src *VerifierMetadata) *VerifierMetadata {
 	dst.ResponseTypes = slices.Clone(src.ResponseTypes)
 	dst.Contacts = slices.Clone(src.Contacts)
 	dst.EncryptedResponseEncValuesSupported = slices.Clone(src.EncryptedResponseEncValuesSupported)
+	dst.VPFormatsSupported = cloneRawMembers(src.VPFormatsSupported)
+	dst.VPFormats = cloneRawMembers(src.VPFormats)
 	// A JSONWebKey's key material is immutable; copying the entries is enough.
 	dst.Jwks = jose.JSONWebKeySet{Keys: slices.Clone(src.Jwks.Keys)}
 	return &dst
@@ -321,4 +325,15 @@ func cloneJSONValue(value any) any {
 	default:
 		return v
 	}
+}
+
+func cloneRawMembers(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for name, value := range src {
+		dst[name] = bytes.Clone(value)
+	}
+	return dst
 }

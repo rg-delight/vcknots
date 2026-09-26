@@ -303,6 +303,7 @@ func (p *Oid4vpPresenter) newRequestBuilder(ctx context.Context) (*requestBuilde
 func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*CredentialPresentationRequest, error), wire wireContract) (*AdmittedRequest, error) {
 	req, err := build()
 	if err != nil {
+		p.recordVersionRetry(core, err)
 		core.attachErrorResponseTarget(err)
 		var authzErr *AuthorizationRequestError
 		if p.SendParseErrorResponses && errors.As(err, &authzErr) && authzErr.ResponseURI() != "" {
@@ -316,6 +317,6 @@ func (p *Oid4vpPresenter) finishParse(core *requestCore, build func() (*Credenti
 	if err != nil {
 		return nil, err
 	}
-	handle.recordAdmission(core, p.admissionProfile(wire))
+	handle.recordAdmission(core, p.admissionProfile(wire).String())
 	return handle, nil
 }

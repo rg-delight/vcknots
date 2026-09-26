@@ -167,3 +167,40 @@ func TestDraft24PostsOnlyUnderDirectPostModes(t *testing.T) {
 		})
 	}
 }
+
+// Draft 24 §8.1: vp_token is "a JSON String or JSON object that MUST contain a
+// single Verifiable Presentation or an array of JSON Strings and JSON objects".
+// Encrypted under JARM (§8.3), the array of several SD-JWT presentations and
+// an ldp_vp object stay JSON inside the JWE; they were embedded as the string
+// of their encoding (R4 MEDIUM-3, CX-VP A09).
+func TestDraft24JARMEmbedsStructuredVPTokenAsJSON(t *testing.T) {
+	recipient := newEncryptionKey(t)
+	metadata := &VerifierMetadata{
+		AuthorizationEncryptedResponseAlg: "ECDH-ES",
+		AuthorizationEncryptedResponseEnc: "A256GCM",
+		Jwks:                              jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &recipient.PublicKey, KeyID: "recipient"}}},
+	}
+	for name, tc := range map[string]struct {
+		vpToken string
+		want    any
+	}{
+		"single compact presentation": {`credential~kb-jwt`, "credential~kb-jwt"},
+		"array of presentations":      {`["one~kb","two~kb"]`, []any{"one~kb", "two~kb"}},
+		"ldp_vp object":               {`{"type":["VerifiablePresentation"],"proof":{"type":"DataIntegrityProof"}}`, map[string]any{"type": []any{"VerifiablePresentation"}, "proof": map[string]any{"type": "DataIntegrityProof"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, endpoint, forms := draft24ResponseServer(t)
+			_, err := sendPresentationExchangeForTest(p, endpoint, []byte(tc.vpToken), draft24TestSubmission, &types.PresentationRequest{
+				ResponseMode: string(OAuthAuthzReqResponseModeDirectPostJWT), ClientMetadata: metadata,
+			})
+			require.NoError(t, err)
+			jwe, err := jose.ParseEncrypted((<-forms).Get("response"), []jose.KeyAlgorithm{jose.ECDH_ES}, []jose.ContentEncryption{jose.A256GCM})
+			require.NoError(t, err)
+			plaintext, err := jwe.Decrypt(recipient)
+			require.NoError(t, err)
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(plaintext, &payload))
+			require.Equal(t, tc.want, payload["vp_token"])
+		})
+	}
+}

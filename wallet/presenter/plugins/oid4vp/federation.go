@@ -247,7 +247,7 @@ func verifyRequestObjectWithKeySet(parsed *jwt.JSONWebToken, jwks jose.JSONWebKe
 	}
 	for i := range candidates {
 		claims := make(commonJOSE.Claims)
-		if err := parsed.Claims(candidates[i], &claims); err == nil {
+		if err := commonJOSE.VerifyClaims(parsed, candidates[i], &claims); err == nil {
 			return claims, nil
 		}
 	}
@@ -264,10 +264,14 @@ func (b *requestCore) adoptFederationVerifierMetadata(metadata map[string]any) e
 	if err != nil {
 		return fmt.Errorf("%w: verifier metadata is not serializable: %w", federation.ErrMetadataDerivationFailed, err)
 	}
-	var verifierMetadata VerifierMetadata
-	if err := json.Unmarshal(encoded, &verifierMetadata); err != nil {
+	contract := finalMetadata
+	if b.draft24JARM {
+		contract = draft24Metadata
+	}
+	verifierMetadata, err := decodeVerifierMetadata(encoded, contract)
+	if err != nil {
 		return fmt.Errorf("%w: verifier metadata is not OpenID4VP verifier metadata: %w", federation.ErrMetadataDerivationFailed, err)
 	}
-	b.req.ClientMetadata = &verifierMetadata
+	b.req.ClientMetadata = verifierMetadata
 	return nil
 }

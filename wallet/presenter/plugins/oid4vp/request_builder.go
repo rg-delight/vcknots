@@ -107,6 +107,7 @@ func (b *requestBuilder) WithQueryParams(params map[string][]string) *requestBui
 	}
 
 	b.requestSource = sourceQuery
+	b.queryParams = params
 
 	singleParams := make(map[string]any)
 	for key, values := range params {

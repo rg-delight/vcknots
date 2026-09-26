@@ -103,8 +103,8 @@ func (p *Oid4vpPresenter) parseDCAPIUnsigned(ctx context.Context, invocation typ
 		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API unsigned request data is required")
 	}
 	var params map[string]any
-	if err := json.Unmarshal(invocation.Request.Data, &params); err != nil {
-		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API unsigned request data must be a JSON object: %v", err)
+	if err := json.Unmarshal(invocation.Request.Data, &params); err != nil || params == nil {
+		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API unsigned request data must be a JSON object")
 	}
 	// A.2: "The client_id parameter MUST be omitted in unsigned requests
 	// defined in Appendix A.3.1. The Wallet MUST ignore any client_id parameter
@@ -184,7 +184,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(ctx context.Context, invocation types
 	}
 	verify := func(publicKey any) (map[string]any, error) {
 		verified := commonJOSE.Claims{}
-		if err := parsed.Claims(publicKey, &verified); err != nil {
+		if err := commonJOSE.VerifyClaims(parsed, publicKey, &verified); err != nil {
 			return nil, fmt.Errorf("failed to verify DC API request object signature: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		}
 		return map[string]any(verified), nil
@@ -272,7 +272,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(ctx context.Context, invocation 
 			continue
 		}
 		verify := func(publicKey any) (map[string]any, error) {
-			verifiedIndex, _, payload, verifyErr := parsed.VerifyMulti(publicKey)
+			verifiedIndex, _, payload, verifyErr := commonJOSE.VerifyMultiSignature(parsed, publicKey)
 			if verifyErr != nil {
 				return nil, fmt.Errorf("failed to verify DC API multi-signed request: %w: %w", verifyErr, ErrRequestObjectSignatureInvalid)
 			}
@@ -313,6 +313,12 @@ func (b *requestBuilder) finishDCAPIRequestObject(certificates []*x509.Certifica
 	verified, err := verify(certificates[0].PublicKey)
 	if err != nil {
 		return nil, err
+	}
+	// RFC 9101 §4: the Request Object's claims are a JSON object. A payload
+	// such as the JSON literal null decodes to no claims at all and is
+	// refused before anything is written into it.
+	if verified == nil {
+		return nil, newAuthorizationRequestError(InvalidRequestError, "DC API request object claims must be a JSON object")
 	}
 	if payloadClientID, ok := verified["client_id"].(string); ok && payloadClientID != "" && payloadClientID != clientID {
 		authzErr := newAuthorizationRequestError(InvalidRequestError, "DC API signature client_id does not match the request object client_id")
