@@ -34,16 +34,29 @@ func (m *CredentialIssuerMetadata) UnmarshalJSON(data []byte) error {
 }
 
 // UnmarshalJSON implements json.Unmarshaler. It refuses an encryption_required
-// member that is not a JSON boolean, including null.
+// member that is not a JSON boolean, including null. jwks is a JWK Set
+// (OpenID4VCI 1.0 Section 12.2.4); a bare array of JWKs, which the
+// specification's own credential_issuer_metadata example publishes, is read
+// as the set of those keys rather than refusing the whole metadata.
 func (e *CredentialRequestEncryption) UnmarshalJSON(data []byte) error {
 	type encryption CredentialRequestEncryption
 	var decoded encryption
 	wire := struct {
 		*encryption
+		Jwks     json.RawMessage `json:"jwks"`
 		Required json.RawMessage `json:"encryption_required"`
 	}{encryption: &decoded}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+	if trimmed := bytes.TrimSpace(wire.Jwks); len(trimmed) > 0 {
+		target := any(&decoded.Jwks)
+		if trimmed[0] == '[' {
+			target = &decoded.Jwks.Keys
+		}
+		if err := json.Unmarshal(trimmed, target); err != nil {
+			return fmt.Errorf("credential request encryption jwks: %w", err)
+		}
 	}
 	if len(wire.Required) > 0 {
 		var required bool

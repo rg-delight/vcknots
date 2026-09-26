@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -364,13 +365,19 @@ var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
 
 // UnmarshalJSON implements json.Unmarshaler. It accepts a JWA algorithm name or
 // a numeric COSE algorithm identifier, which it maps to the matching JWA name.
+// A COSE identifier without a JWA counterpart is kept as its decimal text:
+// OpenID4VCI 1.0 Section 12.2.4 leaves the identifiers of
+// credential_signing_alg_values_supported to the Credential Format (mso_mdoc
+// uses COSE identifiers, Appendix A.2), and one the wallet does not know must
+// not make the whole metadata unreadable.
 func (c *SignatureAlgorithm) UnmarshalJSON(raw []byte) error {
 	var coseID int64
 	if err := json.Unmarshal(raw, &coseID); err == nil {
 		// COSE algorithm identifier
 		alg, ok := coseAlgToJWA[coseID]
 		if !ok {
-			return fmt.Errorf("unsupported COSE algorithm identifier %d", coseID)
+			*c = SignatureAlgorithm(strconv.FormatInt(coseID, 10))
+			return nil
 		}
 		*c = SignatureAlgorithm(alg)
 		return nil
