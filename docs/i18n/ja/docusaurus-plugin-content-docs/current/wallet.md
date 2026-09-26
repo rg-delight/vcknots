@@ -36,9 +36,9 @@ wallet は **OpenID4VCI 1.0** と **OpenID4VP 1.0** を実装しています。
 | 保存前の Credential 受理判定 | `Config.CredentialAcceptance` または `CredentialRequest.Acceptance`（`acceptance.Policy`）、`VerifyCredentialForAcceptance` | Credential を要求する前に必須です。Issuer の鍵は、`iss` と `x5c` が選ぶ方式で確立します（SD-JWT VC -19 §2.5）。 |
 | `direct_post` / `direct_post.jwt` 上の OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation`、`PresentCredential` | 要求には `*oid4vp.AdmittedRequest` ハンドルを通じて応答します。 |
 | Verifier の認証 | `oid4vp.Oid4vpPresenter`（`RequestObjectValidation`、`PreRegisteredClients`） | `x509_san_dns`、`x509_hash`、`redirect_uri`、pre-registered client、`verifier_attestation`、`openid_federation` に対応します。[Verifier の認証](#verifier-authentication)を参照してください。 |
-| `request_uri` の GET / POST と `wallet_nonce` | `ParsePresentationRequest`、`Draft24().ParsePresentationRequest` | `request_uri` はライブラリ自身が取得します。POST では毎回新しい `wallet_nonce` を送ります。ただし `Oid4vpPresenter.OmitWalletNonce` を設定すると送りません（OID4VP 1.0 §5.10 で Wallet 側は OPTIONAL）。`Oid4vpPresenter.WalletMetadata` があれば `wallet_metadata` も送ります。`RequestObjectValidationOptions.RequestURIPolicy` で、取得の前に `request_uri` と `client_id` の関連を確かめられます。 |
+| `request_uri` の GET / POST と `wallet_nonce` | `ParsePresentationRequest`、`Draft24().ParsePresentationRequest` | `request_uri` はライブラリ自身が取得します。POST では毎回新しい `wallet_nonce` を送ります。ただし `Oid4vpPresenter.OmitWalletNonce` を設定すると送りません（OID4VP 1.0 §5.10 で Wallet 側は OPTIONAL）。`Oid4vpPresenter.WalletMetadata` があれば `wallet_metadata` も送ります。`RequestObjectValidationOptions.RequestURIPolicy` で、取得の前に `request_uri` と `client_id` の関連を確かめられます（`oid4vp.RequestURISameHost` は Client Identifier が名指す host に結び付けます）。 |
 | DCQL | `SelectCredentials`、`oid4vp.ResolveSatisfiableDCQLCredentials`、`oid4vp.ValidateDCQLMatches` | `credential_sets`、`claims`、`claim_sets`、`values`、nested / array の claim path、`multiple`、`aki` と `openid_federation` 種別の `trusted_authorities` に対応します。 |
-| `transaction_data` | `Config.SupportedTransactionDataTypes` | key binding つきの `dc+sd-jwt` 提示に限ります。 |
+| `transaction_data` | `Config.SupportedTransactionDataTypes`、`CredentialSelection.TransactionData` | key binding つきの `dc+sd-jwt` 提示に限ります。各 entry を、提示するどの Credential で承認するかは Holder が割り当てます。 |
 | W3C Digital Credentials API（`dc_api`、`dc_api.jwt`、unsigned / signed / multi-signed） | `ParseDCAPIRequest` + `SubmitPresentation` | プロトコル処理のみです。platform が認証した origin は呼出し側が渡します。 |
 | OpenID4VCI Draft 13 | `Draft13()`、`ReceiveCredential` | `Config.Profiles` に `profile.Draft13()` が必要です。HAIP とは併用できません。 |
 | OpenID4VP Draft 24（Presentation Exchange） | `Draft24()` + `SubmitPresentation` | `Config.Profiles` に `profile.Draft24()` が必要です。HAIP とは併用できません。 |
@@ -566,7 +566,7 @@ token エンドポイントでのクライアント認証です。
 
 ## 6. Walletのメソッド
 
-`*Wallet` のメソッドは 25 個です。
+`*Wallet` のメソッドは 26 個です。
 
 | 領域 | メソッド |
 | --- | --- |
@@ -574,7 +574,7 @@ token エンドポイントでのクライアント認証です。
 | Credential の検査 | `VerifyCredential`、`VerifyCredentialForAcceptance` |
 | OpenID4VCI 1.0 | `ResolveCredentialOffer`、`BeginIssuance`、`AuthorizeIssuance`、`AuthorizePreAuthorizedIssuance`、`RequestCredential`、`RequestDeferredCredential`、`NotifyIssuer` |
 | OpenID4VCI の一括呼出しとメタデータ | `ReceiveCredential`、`FetchCredentialIssuerMetadata` |
-| OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`ReadmitPresentationRequest`、`ParseDCAPIRequest`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation` |
+| OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`ReadmitPresentationRequest`、`AdmitPresentationRequestUnderVersion`、`ParseDCAPIRequest`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation` |
 | OpenID4VP の一括呼出し | `PresentCredential`、`PresentCredentialWithOptions` |
 | Draft ビュー | `Draft13()`（`BeginIssuance`、`AuthorizeIssuance`、`AuthorizePreAuthorizedIssuance`、`RequestCredential`、`RequestDeferredCredential`、`NotifyIssuer`）、`Draft24()`（`ParsePresentationRequest`、`ParsePresentationRequestObject`、`ReadmitPresentationRequest`） |
 
@@ -1088,8 +1088,8 @@ func presentWithConsent(ctx context.Context, w *wallet.Wallet, uri string, holde
 **封をした受理。**
 `h.Seal(key)` は `presenterTypes.SealedAdmission` を返します。
 最初の受理で観測した事実の記録を、呼出し側が持つ鍵で HMAC-SHA256 によって封をしたものです。
-記録には、ライブラリが取得したままの Request Object、取得元の `request_uri`、参照渡しで届いたこと、ライブラリが送った `wallet_nonce`、外側の `client_id`、Request Object を認証した時刻、受理したときのプロファイルとその `profile.Options` の正規形を含みます。
-`w.ReadmitPresentationRequest(ctx, sealed, key)`（Draft 24 の要求には `w.Draft24().ReadmitPresentationRequest`）は、同じ鍵で封が検証でき、記録が wallet のプロファイルとその Options、メソッドのプロトコルの版を名指し、`MaxReadmitAge` より新しいときだけ記録を受け付けます。
+記録には、ライブラリが取得したままの Request Object、取得元の `request_uri`、参照渡しで届いたこと、ライブラリが送った `wallet_nonce`、外側の `client_id`、Request Object を認証した時刻、受理したときのプロファイルのテキスト形式（`profile.Profile.String`、すべての option を名指します）、Draft 24 の要求では `presentation_definition_uri` から取得した Presentation Definition を含みます。
+`w.ReadmitPresentationRequest(ctx, sealed, key)`（Draft 24 の要求には `w.Draft24().ReadmitPresentationRequest`）は、同じ鍵で封が検証でき、記録が wallet のプロファイル（テキスト形式で比べます）とメソッドのプロトコルの版を名指し、`MaxReadmitAge` より新しいときだけ記録を受け付けます。
 そのうえで、記録した `request_uri` に `RequestURIPolicy` を適用し、Request Object を改めて認証します。
 署名、Client Identifier Prefix が選ぶ client の認証、`wallet_nonce` の echo、プロファイルのすべての option を、参照渡しで届いた Request Object として検証します。
 `request_uri` は取得し直しません。
@@ -1134,10 +1134,10 @@ func answer(ctx context.Context, w *wallet.Wallet, sealed presenterTypes.SealedA
 
 * **鍵。** `oid4vp.MinSealKeyBytes`（32）バイト以上の乱数で、wallet の運用者だけが知るものにします。短い鍵は `oid4vp.ErrSealKeyTooShort` です。ライブラリは鍵を保存しません。鍵を入れ替えると、古い鍵で封をした受理は使えなくなります。
 * **封ができるもの。** ライブラリが `request_uri` から Request Object を取得した要求（`RequestObjectVerification.Delivery == "reference"`）だけです。値で渡された Request Object、プレーンなパラメータ、DC API の要求は `oid4vp.ErrAdmissionNotSealable` です。引き継ぐべき届き方の事実がないからです。
-* **拒否。** 形式が壊れた記録、`v2` 以外の版、正規の padding なし base64url でない記録やタグ、改ざんされた記録やタグ、別の鍵、別のプロファイル、別のプロファイルの Options（`profile.Final().With(profile.HAIPOptions())` は `profile.Final()` とは別です）、別のプロトコルの版の記録、`Oid4vpPresenter.MaxReadmitAge`（既定は `oid4vp.DefaultMaxReadmitAge` の 15 分）より古い記録、presenter の時計より後に受理したことになっている記録は `oid4vp.ErrSealedAdmissionInvalid`（コード `sealed_admission_invalid`）です。何かを認証したり取得したりする前に判定します。`RequestURIPolicy` が拒否する `request_uri` は、取得の前と同じく `ErrRequestURINotAssociated` です。
+* **拒否。** 形式が壊れた記録、`v3` 以外の版、正規の padding なし base64url でない記録やタグ、改ざんされた記録やタグ、別の鍵、別のプロファイル（`profile.Final().With(profile.HAIPOptions())` は `profile.Final()` とは別です）、別のプロトコルの版の記録、`Oid4vpPresenter.MaxReadmitAge`（既定は `oid4vp.DefaultMaxReadmitAge` の 15 分）より古い記録、presenter の時計より後に受理したことになっている記録は `oid4vp.ErrSealedAdmissionInvalid`（コード `sealed_admission_invalid`）です。何かを認証したり取得したりする前に判定します。`RequestURIPolicy` が拒否する `request_uri` は、取得の前と同じく `ErrRequestURINotAssociated` です。記録した Presentation Definition の URI を、改めて認証した Request Object が名指さない場合も `ErrSealedAdmissionInvalid` です。
 * **時計。** 再受理では、Request Object の `iat`、`exp`、`nbf` を最初の受理の時刻で判定します。そのため、同意が `exp` を過ぎても応答は拒否されません。その期間の上限は `MaxReadmitAge` で、より短い上限を設けたい wallet は `RequestObjectVerification.ExpiresAt` で `exp` を読めます。それ以外はすべて現在の時計で判定します。証明書チェーンとその有効期間、失効（失効リストは改めて取得します）、Verifier Attestation、OpenID Federation の Trust Chain です。最初の受理の後に期限切れや失効となった証明書は、再受理を拒否します。
 * **再利用。** ライブラリは状態を持たないので、同じ封は `MaxReadmitAge` まで何度でも再受理できます。封と鍵を持つ者は、同じ要求に何度でも応答できます。要求ごとに一度だけ応答する wallet は `Oid4vpPresenter.ConsumeSealedAdmission(ctx, sealID, notAfter)` を設定します。再受理が成功すると、最後に封の識別子（タグ）と、どのみち再受理できなくなる時刻を渡して呼び出します。hook は識別子を不可分に記録し、既に見た識別子にはエラーを返します。そのとき再受理は `oid4vp.ErrSealedAdmissionConsumed`（コード `sealed_admission_consumed`）で拒否されます。失敗した再受理は封を消費しません。再受理したハンドルにもう一度封をすると同じ封になるので、識別子も同じです。wallet が構築する presenter には hook がありません。設定するには `Config.Presenter` で `Oid4vpPresenter` を注入します。
-* **形式。** `v2.` + base64url（JSON の記録）+ `.` + base64url（HMAC-SHA256 のタグ）で、どちらも正規の padding なしの表記です。タグは版を名指すラベルと記録を覆います。記録は、持っている者なら誰でも読めます。封が守るのは完全性であって機密性ではないので、Request Object を置いてよい場所に保管してください。
+* **形式。** `v3.` + base64url（JSON の記録）+ `.` + base64url（HMAC-SHA256 のタグ）で、どちらも正規の padding なしの表記です。タグは版を名指すラベルと記録を覆います。記録は、持っている者なら誰でも読めます。封が守るのは完全性であって機密性ではないので、Request Object を置いてよい場所に保管してください。
 
 **保持した Request Object。**
 プロファイルが値渡しの Request Object を認める場合（HAIP 以外）は、代わりに Request Object（`h.RequestObject()`）を保持しておき、もう一度解析することもできます。
@@ -1190,6 +1190,17 @@ Request Object がどう届いたかはライブラリが観測するもので�
 `client_metadata.jwks` のすべての要素は、他の要素と重ならない `kid` を持たなければなりません（OpenID4VP 1.0 §5.1。`ErrClientMetadataJWKKeyIDMissing`、`ErrClientMetadataJWKKeyIDDuplicate`）。
 `RequestObjectValidationOptions.RequestURIPolicy(clientID, requestURI)` を使うと、trust framework の中の wallet は `request_uri` を `client_id` に結び付けられます。
 これは取得の前に呼ばれ（封をした受理の再受理では、記録した `request_uri` に対して呼ばれ）、拒否は `ErrRequestURINotAssociated` になります。
+`oid4vp.RequestURISameHost` はそのようなポリシーの 1 つです。
+`https` を求め、`x509_san_dns`、`redirect_uri`、`openid_federation` の Client Identifier が名指す host と一致させます。
+host を名指さない prefix は受け入れます。
+
+`client_metadata` のうち、要求の版が使うメンバ（1.0 では `jwks`、`encrypted_response_enc_values_supported`、`vp_formats_supported`、Draft 24 では `jwks`、`vp_formats`、JARM のメンバ）は正しい形でなければなりません。
+それ以外のメンバは、型が合うときだけ保持し、要求を拒否する理由にはしません（OpenID4VP 1.0 §5.1「Other metadata parameters MUST be ignored」）。
+もう一方の版の形式のメンバは読まず、`openid_federation` の要求の `client_metadata` は読みません（§5.9.3）。
+Issuer 署名の JWT または KB-JWT のアルゴリズムが、Verifier の `sd-jwt_alg_values` / `kb-jwt_alg_values` にない提示は、送る前に `ErrVPFormatAlgUnsupported` で失敗します。
+
+`redirect_uri` を持つ `direct_post` / `direct_post.jwt` の要求は `invalid_request` です（`ErrRedirectURIWithDirectPost`、§8.2）。
+`redirect_uri` の Client Identifier によって `response_uri` を省略した要求も同じです。
 
 `RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロはどのプロファイルでも無制限です）、`Now`、`ClockSkew` を持ちます。
 `iat` が未来の Request Object は拒否するので、受け入れる Verifier の時計のずれに合わせて `ClockSkew` を設定してください。
@@ -1221,9 +1232,15 @@ holder が候補から選ぶ wallet は `oid4vp.ResolveDCQLClaimSets` と `oid4v
 各 entry は要求内の credential query を参照しなければなりません。
 transaction data を運ぶのは Key Binding JWT 付きの `dc+sd-jwt` の提示だけです。
 参照される `dc+sd-jwt` の query は holder binding を要求していなければならず、他の形式に割り当てられた entry は何かを送る前に失敗します。
-各 entry は提示する Credential の 1 つに束縛され（§5.1）、ハッシュアルゴリズムは entry の `transaction_data_hashes_alg` から決まります（既定は `sha-256`）。
+各 entry は、Holder が割り当てた提示 Credential に束縛されます（§5.1「the Wallet MUST use only one of the referenced Credentials」）。
+`CredentialSelection.TransactionData` は、その Credential で承認する entry の index を列挙します。
+割り当てがある場合、すべての entry を割り当てなければならず、1 つの entry を割り当てる Credential は、その `credential_ids` のうち同じ 1 つの query に答えるものでなければなりません。
+同じ query の複数の Credential に載せるのは、割り当てがそれぞれを名指すときだけです（`ErrTransactionDataAssignmentInvalid`）。
+割り当てがない場合、entry は `credential_ids` のうち最初に提示される query に載ります。
+その query に答える Credential が複数ある（`multiple: true`）ときは、すべてに載せずに `ErrTransactionDataAssignmentRequired` で失敗します。
+ハッシュアルゴリズムは entry の `transaction_data_hashes_alg` から決まります（既定は `sha-256`）。
 Draft 24 の要求も同じ規則に従います。
-`credential_ids` は input descriptor（または Draft 24 の credential query）を指し、それぞれ SD-JWT VC（`vc+sd-jwt`）を受け付けなければなりません。
+`credential_ids` は input descriptor を指し、それぞれ SD-JWT VC（`vc+sd-jwt`）を受け付けなければなりません。
 
 ### 応答モードと暗号化
 
@@ -1296,17 +1313,35 @@ func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data js
 ### Draft 24
 
 `w.Draft24().ParsePresentationRequest` と `ParsePresentationRequestObject` は、Presentation Exchange の `presentation_definition` を持つ OpenID4VP Draft 24 の要求を受け付けます。
+定義は値で渡されても、`presentation_definition_uri` で参照されてもかまいません。
+参照はライブラリが要求の認証後に取得し（§5.5、パラメータなしの `GET`、`https`、リダイレクトなし、失敗は `invalid_presentation_definition_uri` / `_reference`）、`PresentationDefinition` と `RawPresentationDefinition` に報告します。
+封をした受理は、取得した定義を再受理へ運びます。
 `w.Draft24().ReadmitPresentationRequest` は、Draft 24 の要求の封をした受理を再び受理します。
 ハンドルには `SubmitPresentation`（`vp_token` と `presentation_submission`）と `DeclinePresentation` で応答します。
 `SelectCredentials` は input descriptor ごとに最も新しい Credential を選び、`QueryIDs` は input descriptor の id を指定します。
 SD-JWT VC では key binding が常に必須で、nil でない `DisclosedClaims` が開示を制限します。
+`limit_disclosure` が `required` の input descriptor は、提示をその `fields` が名指すクレームに限ります。
+選択的に開示できない Credential や、それを超える開示は、何かを送る前に `ErrLimitDisclosureUnsatisfiable` で失敗します。
+input descriptor の `format` のアルゴリズムの列挙は `vp_formats` と同じく適用します。
+ただし `vp_formats` にない形式は無視します（§5.4）。
 `Config.Experimental.Hooks.PresentationExchangeResponse` はテストのために応答を書き換えます。
+
+**プロトコルの版。**
+2 つの版は要求の構文が同じなので、入口は、片方の版だけの規則より前に、クエリ言語で版を決めます（`oid4vp.VersionMismatchError`、コード `oid4vp_version_mismatch`）。
+`dcql_query` がなく `presentation_definition` または `presentation_definition_uri` を持つ要求が OpenID4VP 1.0 の入口に届くと、Draft 24 を名指して拒否します。
+外側が `response_mode=direct_post.jwt` で、署名付きの `request_uri` の中身が PE の場合も同じです。
+`dcql_query` の要求が Draft 24 の入口に届くと、1.0 を名指して拒否します。
+ライブラリは Draft 24 の DCQL の応答（§8.1）を実装していません。
+`w.AdmitPresentationRequestUnderVersion(ctx, err)` は、拒否した要求を、エラーが名指す版で受理します。
+`request_uri` は取得し直さず、送った `wallet_nonce` とともに参照渡しで届いた Request Object として認証します。
+PE のパラメータも持つ 1.0 の要求は、それを無視します（§5）。
+クエリ言語を 2 つ以上持つ Draft 24 の要求は `invalid_request` です。
 
 Draft 24 の入口は、1.0 ではなく Draft 24 の規則を適用します。
 
 * **Client Identifier Scheme**（Draft 24 §5.10.4）: `redirect_uri`（署名なしのみ。Response URI は Client Identifier と一致しなければならず、省略時は Client Identifier になります）、`https` の OpenID Federation の Entity Identifier、`verifier_attestation`、`x509_san_dns`、コロンのない pre-registered client を受け付けます。pre-registered client は `PreRegisteredClients` / `ResolvePreRegisteredClient` で解決し、登録されたメタデータを `client_metadata` より優先します（§5.1）。`did` と `x509_san_uri` は未対応として拒否し（`ErrRequestObjectClientAuthUnsupported`）、`web-origin` は DC API 専用として拒否します（`ErrClientIDPrefixReserved`）。1.0 の prefix である `x509_hash`、`decentralized_identifier`、`openid_federation`、`origin` は Draft 24 の scheme ではありません。Request Object を `client_metadata` の鍵で検証することはなく、Draft 22 より前の `client_id_scheme` パラメータは無視します。
 * **`request_uri`**: POST では毎回新しい `wallet_nonce` を送り、Request Object はそれを echo しなければなりません。`WalletMetadata` があればそれも送ります（§5.11）。`request_uri_method` は大文字と小文字を区別します。`OmitWalletNonce` を設定すると POST に `wallet_nonce` を含めず、echo も検査しません。echo が求められるのは Wallet が送った場合だけだからです。
-* **応答**: 応答するのは `direct_post` と `direct_post.jwt` だけです。`direct_post.jwt` は暗号化した JARM の応答です（§8.3）。JWE の `alg` は `authorization_encrypted_response_alg`（必須）、`enc` は `authorization_encrypted_response_enc`（なければ A128CBC-HS256）で、鍵は `use` が `enc` かなしで、`alg` があればそれが一致する `client_metadata.jwks` の鍵です。`client_metadata.jwks` に `kid` は要らず、HAIP は適用しません。
+* **応答**: 応答するのは `direct_post` と `direct_post.jwt` だけです。`direct_post.jwt` は暗号化した JARM の応答です（§8.3）。`vp_token` は、1 つのコンパクトな提示なら文字列、配列や `ldp_vp` のオブジェクトなら JSON のまま埋め込みます（§8.1）。JWE の `alg` は `authorization_encrypted_response_alg`（必須）、`enc` は `authorization_encrypted_response_enc`（なければ A128CBC-HS256）で、鍵は `use` が `enc` かなしで、`alg` があればそれが一致する `client_metadata.jwks` の鍵です。`client_metadata.jwks` に `kid` は要らず、HAIP は適用しません。
 
 ```go
 import (

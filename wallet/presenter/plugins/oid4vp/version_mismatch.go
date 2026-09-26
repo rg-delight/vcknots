@@ -11,50 +11,47 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// Protocol version decision.
-//
-// OpenID4VP 1.0 and Draft 24 share one Authorization Request syntax, so a
-// Wallet that serves both learns which version a request is written for only
-// from what the request carries. This library decides by the query language,
-// before any rule that only one of the two versions has:
-//
-//   - A request with presentation_definition or presentation_definition_uri
-//     and no dcql_query is a Draft 24 (DIF Presentation Exchange) request.
-//     OpenID4VP 1.0 has no Presentation Exchange; its entry points refuse such
-//     a request with a *VersionMismatchError naming VersionDraft24.
-//   - A request with dcql_query and no Presentation Exchange parameter reaching
-//     a Draft 24 entry point is refused with a *VersionMismatchError naming
-//     VersionFinal. This library answers dcql_query only under OpenID4VP 1.0:
-//     it does not implement the Draft 24 DCQL response (Draft 24 §8.1, a
-//     vp_token whose values are single presentations).
-//
-// The decision reads the parameters of the Request Object before it is
-// authenticated, because authenticating it is itself version specific (the
-// Client Identifier syntax, aud and the response encryption rules differ).
-// It authenticates nothing: AdmitUnderVersion authenticates the request again,
-// under every rule of the version it names. A request_uri the refusing parse
-// fetched is not fetched again - some Verifiers serve a Request Object once -
-// and the re-admission authenticates the Request Object as delivered by
-// reference, with the wallet_nonce sent for it.
-//
-// A request that carries both dcql_query and a Presentation Exchange parameter
-// is not a mismatch: an OpenID4VP 1.0 entry point ignores the unrecognized
-// Presentation Exchange parameters (OpenID4VP 1.0 §5: "The Wallet MUST ignore
-// any unrecognized parameters"), and a Draft 24 entry point refuses the request
-// with invalid_request (Draft 24 §5.1: "Exactly one of the following parameters
-// MUST be present").
-
 // ErrProtocolVersionMismatch reports an Authorization Request that an entry
 // point of one OpenID4VP version refused because it is written for the other
 // version. The error in the chain is a *VersionMismatchError.
 var ErrProtocolVersionMismatch = common.NewCodedError("oid4vp_version_mismatch", "the authorization request is written for another OpenID4VP version")
 
 // VersionMismatchError reports an Authorization Request an entry point
-// refused as written for another OpenID4VP version (see the package
-// documentation of the version decision). errors.Is(err,
+// refused as written for another OpenID4VP version. errors.Is(err,
 // ErrProtocolVersionMismatch) holds. A caller that serves both versions hands
 // the error to AdmitUnderVersion, which admits the same request under Version
 // without fetching its request_uri again.
+//
+// OpenID4VP 1.0 and Draft 24 share one Authorization Request syntax, so a
+// Wallet that serves both learns which version a request is written for only
+// from what it carries. The entry points decide by the query language, before
+// any rule only one of the two versions has:
+//
+//   - A request with presentation_definition or presentation_definition_uri
+//     and no dcql_query is a Draft 24 (DIF Presentation Exchange) request.
+//     OpenID4VP 1.0 has no Presentation Exchange; its entry points refuse it
+//     naming VersionDraft24.
+//   - A request with dcql_query and no Presentation Exchange parameter that
+//     reaches a Draft 24 entry point is refused naming VersionFinal. This
+//     library answers dcql_query only under OpenID4VP 1.0: it does not
+//     implement the Draft 24 DCQL response (Draft 24 §8.1, a vp_token whose
+//     values are single presentations). A caller that knows the Verifier
+//     speaks Draft 24 refuses such a request instead of re-admitting it.
+//   - A request with both is not a mismatch: an OpenID4VP 1.0 entry point
+//     ignores the unrecognized Presentation Exchange parameters (§5: "The
+//     Wallet MUST ignore any unrecognized parameters"), and a Draft 24 entry
+//     point refuses it with invalid_request (Draft 24 §5.1: "Exactly one of
+//     the following parameters MUST be present").
+//   - A Digital Credentials API request has no Draft 24 counterpart and is
+//     never a mismatch.
+//
+// The decision reads the parameters before the Request Object is
+// authenticated, because authentication is itself version specific (the
+// Client Identifier syntax, aud, the response encryption rules). It admits
+// nothing: AdmitUnderVersion authenticates the request again under every rule
+// of the version it names. Only what precedes reading the parameters comes
+// first: the outer client_id syntax of the entry point, the request_uri
+// fetch (and RequestURIPolicy), and the Request Object's typ and bounds.
 type VersionMismatchError struct {
 	// Parsed is the version of the entry point that refused the request.
 	Parsed profile.Version
