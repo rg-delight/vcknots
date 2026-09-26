@@ -311,6 +311,9 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 		if err := req.ClientMetadata.CheckSDJWTPresentationAlgorithms(string(serialized)); err != nil {
 			return nil, fmt.Errorf("credential %s: %w", presented.id, err)
 		}
+		if err := checkDraft24DescriptorAlgorithms(req, p.Credentials[index].QueryIDs, string(serialized)); err != nil {
+			return nil, fmt.Errorf("credential %s: %w", presented.id, err)
+		}
 		tokens = append(tokens, string(serialized))
 	}
 	if len(tokens) == 1 {
@@ -325,4 +328,49 @@ func sameHolderKey(a, b IKeyEntry) bool {
 	thumbprintA, errA := publicA.Thumbprint(crypto.SHA256)
 	thumbprintB, errB := publicB.Thumbprint(crypto.SHA256)
 	return errA == nil && errB == nil && bytes.Equal(thumbprintA, thumbprintB)
+}
+
+// checkDraft24DescriptorAlgorithms applies the SD-JWT VC algorithm lists of
+// the format member of the input descriptors a presentation answers (or of
+// the definition, for a descriptor without one) to it, the way the Verifier's
+// vp_formats applies. Draft 24 §5.4: "The Wallet MUST ignore any format
+// property inside a presentation_definition object if that format was not
+// included in the vp_formats property of the metadata" (CX-VP A08).
+func checkDraft24DescriptorAlgorithms(req *oid4vp.CredentialPresentationRequest, descriptorIDs []string, presentation string) error {
+	if len(req.RawPresentationDefinition) == 0 {
+		return nil
+	}
+	var definition struct {
+		Format           map[string]json.RawMessage `json:"format"`
+		InputDescriptors []struct {
+			ID     string                     `json:"id"`
+			Format map[string]json.RawMessage `json:"format"`
+		} `json:"input_descriptors"`
+	}
+	if err := json.Unmarshal(req.RawPresentationDefinition, &definition); err != nil {
+		return fmt.Errorf("%w: presentation_definition: %w", ErrInvalidArgument, err)
+	}
+	var verifierFormats map[string]json.RawMessage
+	if req.ClientMetadata != nil {
+		verifierFormats = req.ClientMetadata.VPFormats
+	}
+	for _, descriptor := range definition.InputDescriptors {
+		if !slices.Contains(descriptorIDs, descriptor.ID) {
+			continue
+		}
+		formats := descriptor.Format
+		if len(formats) == 0 {
+			formats = definition.Format
+		}
+		applied := map[string]json.RawMessage{}
+		for name, value := range formats {
+			if _, listed := verifierFormats[name]; len(verifierFormats) == 0 || listed {
+				applied[name] = value
+			}
+		}
+		if err := (&oid4vp.VerifierMetadata{VPFormats: applied}).CheckSDJWTPresentationAlgorithms(presentation); err != nil {
+			return fmt.Errorf("input descriptor %q: %w", descriptor.ID, err)
+		}
+	}
+	return nil
 }
