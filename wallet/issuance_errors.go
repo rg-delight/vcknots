@@ -173,6 +173,10 @@ var (
 	// one-call flow keeps no state to poll with; Draft13().RequestCredential
 	// returns the DeferredIssuance for RequestDeferredCredential.
 	ErrDraft13CredentialDeferred = common.NewCodedError("draft13_credential_deferred", "the issuer deferred the credential; ReceiveCredential cannot poll for it, use Draft13().RequestCredential")
+	// ErrCryptographicBindingMethodUnsupported reports a Credential
+	// Configuration whose cryptographic_binding_methods_supported lists no
+	// method the wallet can bind a key proof with (jwk or did:key).
+	ErrCryptographicBindingMethodUnsupported = common.NewCodedError("cryptographic_binding_method_unsupported", "the credential configuration lists no cryptographic binding method the wallet supports")
 	// ErrDraft13ProofTransformFailed reports that
 	// Config.Experimental.Hooks.KeyProof refused the key proof.
 	ErrDraft13ProofTransformFailed = common.NewCodedError("draft13_proof_transform_failed", "proof transform failed")

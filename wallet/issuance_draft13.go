@@ -569,13 +569,19 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 			}
 		}
 	}
+	if key == nil && !draft13ProofRequired(config) {
+		return request, nil
+	}
 	if err := ensureJWTProofSupported(&config); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrProofTypeUnsupported, err)
 	}
 	if key == nil {
 		return nil, ErrDraft13HolderKeyMissing
 	}
-	binding := resolveCredentialRequestProofBindingMethod(&config)
+	binding, err := resolveCredentialRequestProofBindingMethod(&config)
+	if err != nil {
+		return nil, err
+	}
 	keyID := ""
 	if binding == credentialRequestProofBindingMethodKID {
 		did, err := d.w.GenerateDID(DIDCreateOptions{TypeID: "did:key", PublicKey: key.PublicKey()})

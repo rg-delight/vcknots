@@ -49,25 +49,39 @@ const (
 	credentialRequestProofBindingMethodJWK credentialRequestProofBindingMethod = "jwk"
 )
 
-// resolveCredentialRequestProofBindingMethod binds the key proof by kid (a
-// DID URL) unless the configuration lists jwk before any DID method.
-func resolveCredentialRequestProofBindingMethod(credentialConfiguration *receiverTypes.CredentialConfiguration) credentialRequestProofBindingMethod {
-	if credentialConfiguration == nil {
-		return credentialRequestProofBindingMethodKID
+// resolveCredentialRequestProofBindingMethod selects how the key proof names
+// the key the credential is bound to (Draft 13 Section 7.2.1.1: kid, a DID
+// URL, or jwk, never both) from the configuration's
+// cryptographic_binding_methods_supported, taken in the issuer's order: the
+// first method the wallet can produce, jwk or did:key. A configuration that
+// lists none takes a did:key kid, which binds a W3C VC through its subject DID
+// and an SD-JWT VC through the key. A list with no method the wallet can
+// produce (did:web, cose_key, ...) is ErrCryptographicBindingMethodUnsupported:
+// a proof by any other method would bind the credential to a key the issuer
+// does not accept.
+func resolveCredentialRequestProofBindingMethod(credentialConfiguration *receiverTypes.CredentialConfiguration) (credentialRequestProofBindingMethod, error) {
+	if credentialConfiguration == nil || credentialConfiguration.CryptographicBindingMethodsSupported == nil || len(*credentialConfiguration.CryptographicBindingMethodsSupported) == 0 {
+		return credentialRequestProofBindingMethodKID, nil
 	}
-	if credentialConfiguration.Format == "jwt_vc_json" || credentialConfiguration.CryptographicBindingMethodsSupported == nil {
-		return credentialRequestProofBindingMethodKID
-	}
-	for _, method := range *credentialConfiguration.CryptographicBindingMethodsSupported {
-		normalized := strings.ToLower(strings.TrimSpace(method))
-		if strings.HasPrefix(normalized, "did:") {
-			return credentialRequestProofBindingMethodKID
+	methods := *credentialConfiguration.CryptographicBindingMethodsSupported
+	for _, method := range methods {
+		switch strings.TrimSpace(method) {
+		case string(credentialRequestProofBindingMethodJWK):
+			return credentialRequestProofBindingMethodJWK, nil
+		case "did:key":
+			return credentialRequestProofBindingMethodKID, nil
 		}
-		if normalized == string(credentialRequestProofBindingMethodJWK) {
-			return credentialRequestProofBindingMethodJWK
-		}
 	}
-	return credentialRequestProofBindingMethodKID
+	return "", fmt.Errorf("%w: cryptographic_binding_methods_supported %v", ErrCryptographicBindingMethodUnsupported, methods)
+}
+
+// draft13ProofRequired reports whether a Draft 13 Credential Request must
+// carry a key proof: Section 7.2 makes it "REQUIRED if the
+// proof_types_supported parameter is non-empty and present" for the
+// configuration, and a configuration that lists binding methods binds the
+// credential to the key the proof names.
+func draft13ProofRequired(config receiverTypes.CredentialConfiguration) bool {
+	return (config.ProofTypesSupported != nil && len(*config.ProofTypesSupported) > 0) || configurationRequiresBinding(config)
 }
 
 // proofJWTContent builds the header and claims of a "jwt" key proof (Draft 13
