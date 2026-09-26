@@ -57,17 +57,20 @@ type draft13Fixture struct {
 	authorizationServers     bool
 	asIssuerOverride         string
 	asMetadataExtra          map[string]any
-	tokenForms               []url.Values
-	tokenHeaders             []http.Header
-	credentialRequests       []map[string]any
-	deferredRequests         []map[string]any
-	notificationRequests     []map[string]any
-	tokenResponse            func(form url.Values) (int, any)
-	credentialResponse       func(call int, request map[string]any) (int, any)
-	deferredResponse         func(call int) (int, any)
-	notificationResponse     func() (int, any)
-	credentialCalls          int
-	deferredCalls            int
+	// issuerMetadataExtra, when set, adds members to (or replaces members of)
+	// the unsigned Credential Issuer Metadata document.
+	issuerMetadataExtra  func(base string) map[string]any
+	tokenForms           []url.Values
+	tokenHeaders         []http.Header
+	credentialRequests   []map[string]any
+	deferredRequests     []map[string]any
+	notificationRequests []map[string]any
+	tokenResponse        func(form url.Values) (int, any)
+	credentialResponse   func(call int, request map[string]any) (int, any)
+	deferredResponse     func(call int) (int, any)
+	notificationResponse func() (int, any)
+	credentialCalls      int
+	deferredCalls        int
 }
 
 // newDraft13Fixture builds the fixture; configure changes the wallet's Config
@@ -126,6 +129,11 @@ func newDraft13Fixture(t *testing.T, configure ...func(*Config)) *draft13Fixture
 		}
 		if f.authorizationServers {
 			metadata["authorization_servers"] = []string{base}
+		}
+		if f.issuerMetadataExtra != nil {
+			for name, value := range f.issuerMetadataExtra(base) {
+				metadata[name] = value
+			}
 		}
 		draft13WriteJSON(w, http.StatusOK, metadata)
 	})

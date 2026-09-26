@@ -155,35 +155,6 @@ func (o *Oid4vciReceiver) fetchIssuerMetadata(ctx context.Context, endpoint comm
 	return &metadata, nil
 }
 
-// DiscoverDraft13CredentialIssuer resolves the OpenID4VCI Draft 13 Section 11.2
-// Credential Issuer Metadata of issuer, a Credential Issuer Identifier. Draft
-// 13 Section 11.2.2 forms the metadata URL by appending the well-known path to
-// the identifier, after removing a terminating "/" from its path, and answers
-// with application/json only. The document's credential_issuer must equal
-// issuer. The receiver's OpenID4VCI 1.0 profile options do not apply.
-func (o *Oid4vciReceiver) DiscoverDraft13CredentialIssuer(ctx context.Context, issuer common.URIField) (*types.CredentialIssuerMetadata, error) {
-	identifier := url.URL(issuer)
-	if identifier.RawQuery != "" || identifier.Fragment != "" {
-		return nil, stageError(StageIssuerMetadata, fmt.Errorf("%w: a Credential Issuer Identifier has no query or fragment", common.ErrInvalidInput))
-	}
-	requestURL := draft13IssuerMetadataURL(identifier)
-	var metadata types.CredentialIssuerMetadata
-	if err := o.fetchIssuerMetadataDocument(ctx, requestURL, identifier.String(), IssuerMetadataSigningOptions{}, profile.Options{}, &metadata); err != nil {
-		return nil, stageError(StageIssuerMetadata, fmt.Errorf("failed to fetch issuer metadata: %w", err))
-	}
-	return &metadata, nil
-}
-
-// draft13IssuerMetadataURL is the Draft 13 Section 11.2.2 metadata URL of a
-// Credential Issuer Identifier: the identifier, without a terminating "/",
-// followed by the well-known path.
-func draft13IssuerMetadataURL(identifier url.URL) url.URL {
-	metadataURL := identifier
-	metadataURL.Path = strings.TrimSuffix(identifier.Path, "/") + wellKnownCredentialIssuer
-	metadataURL.RawPath = ""
-	return metadataURL
-}
-
 // issuerMetadataSigningOptions resolves the signed metadata policy for one
 // fetch. HAIP Section 4.1 requires signed Credential Issuer Metadata to be
 // supported "When Ecosystem policies require Issuer Authentication to a higher
@@ -360,6 +331,11 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 	if err := requireMatchingCredentialIssuer(target.CredentialIssuer, identifier); err != nil {
 		return err
 	}
+	// SignedMetadata names only a verified signature. A signed_metadata member
+	// of an unsigned document (Draft 13 Section 11.2.3) is not verified here;
+	// DiscoverDraft13CredentialIssuer verifies it, and it stays readable in
+	// RawDocument.
+	target.SignedMetadata = ""
 	// Section 12.2.2 allows metadata members this library does not model, and a
 	// Credential Issuer may publish extensions of its own. The accepted bytes
 	// are kept so a caller reads the document the issuer published rather than
@@ -374,7 +350,7 @@ func (o *Oid4vciReceiver) fetchIssuerMetadataDocument(ctx context.Context, reque
 // payload", so the verified payload is the complete document and nothing is
 // merged from an unsigned one.
 func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, options profile.Options, target *types.CredentialIssuerMetadata) error {
-	verification, payload, err := o.verifySignedIssuerMetadata(ctx, compact, identifier, signing, options)
+	verification, payload, err := o.verifySignedIssuerMetadata(ctx, compact, identifier, signing, options, finalSignedMetadataRules)
 	if err != nil {
 		return err
 	}
@@ -395,13 +371,27 @@ func (o *Oid4vciReceiver) decodeSignedIssuerMetadata(ctx context.Context, compac
 	return nil
 }
 
+// signedMetadataRules are the version-specific rules of signed Credential
+// Issuer Metadata.
+type signedMetadataRules struct {
+	// typ is the typ JOSE header the JWT must carry; "" requires none.
+	typ string
+	// requireIss requires the iss claim.
+	requireIss bool
+}
+
+// finalSignedMetadataRules: OpenID4VCI 1.0 Section 12.2.3 requires typ
+// openidvci-issuer-metadata+jwt and makes iss OPTIONAL.
+var finalSignedMetadataRules = signedMetadataRules{typ: signedIssuerMetadataJWTType}
+
 // verifySignedIssuerMetadata authenticates the signer of a signed Credential
 // Issuer Metadata JWT and returns the verified payload. Key resolution is the
 // x5c JOSE header, which HAIP Section 4.1 requires: "Key resolution for the
 // signed Credential Issuer Metadata MUST be supported using the `x5c` JOSE
 // header parameter"; the same section forbids the trust anchor inside x5c and a
 // self-signed signing certificate, which Options.SignedMetadataX5C applies.
-func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, options profile.Options) (*types.MetadataVerification, []byte, error) {
+// rules add what the version requires of the JWT (typ, iss).
+func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compact string, identifier string, signing IssuerMetadataSigningOptions, options profile.Options, rules signedMetadataRules) (*types.MetadataVerification, []byte, error) {
 	if len(signing.TrustAnchors) == 0 && signing.RootCAs == nil {
 		return nil, nil, fmt.Errorf("%w: no trust anchors are configured", ErrIssuerMetadataSignatureInvalid)
 	}
@@ -421,9 +411,9 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 			ErrIssuerMetadataSignatureInvalid)
 	}
 	typ, _ := signed.Signatures[0].Header.ExtraHeaders[jose.HeaderType].(string)
-	if typ != signedIssuerMetadataJWTType {
+	if rules.typ != "" && typ != rules.typ {
 		return nil, nil, fmt.Errorf("%w: typ must be %q, got %q",
-			ErrIssuerMetadataSignatureInvalid, signedIssuerMetadataJWTType, typ)
+			ErrIssuerMetadataSignatureInvalid, rules.typ, typ)
 	}
 
 	chain, err := commonX509.DecodeX5CFromJWTHeader(compact)
@@ -480,6 +470,7 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	}
 
 	var claims struct {
+		Iss string `json:"iss"`
 		Sub string `json:"sub"`
 		Iat *int64 `json:"iat"`
 		Exp *int64 `json:"exp"`
@@ -506,6 +497,10 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 	}
 	if claims.Iat == nil {
 		return nil, nil, fmt.Errorf("%w: the required iat claim is missing",
+			ErrIssuerMetadataSignatureInvalid)
+	}
+	if rules.requireIss && strings.TrimSpace(claims.Iss) == "" {
+		return nil, nil, fmt.Errorf("%w: the required iss claim is missing",
 			ErrIssuerMetadataSignatureInvalid)
 	}
 	verification := &types.MetadataVerification{
