@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -9,6 +10,7 @@ import (
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	presenterTypes "github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/jwtvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/ldpvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
@@ -78,6 +80,29 @@ func (w *Wallet) ParsePresentationRequestObject(ctx context.Context, requestObje
 // there. See oid4vp.Oid4vpPresenter.ReadmitRequest.
 func (w *Wallet) ReadmitPresentationRequest(ctx context.Context, sealed presenterTypes.SealedAdmission, key []byte) (*oid4vp.AdmittedRequest, error) {
 	return admittedOID4VPRequest(w.presenter.ReadmitRequest(ctx, presenterTypes.Oid4vp, sealed, key))
+}
+
+// AdmitPresentationRequestUnderVersion admits the request a parse of this
+// wallet refused with an *oid4vp.VersionMismatchError (errors.Is(err,
+// oid4vp.ErrProtocolVersionMismatch)) under the OpenID4VP version the error
+// names: a Presentation Exchange request that reached an OpenID4VP 1.0 entry
+// point is admitted as a Draft 24 request, which needs Config.Profiles to
+// enable profile.Draft24 (ErrProfileForbidsDraft otherwise), and a dcql_query
+// request that reached a Draft 24 entry point as an OpenID4VP 1.0 request. A
+// Request Object the refusing parse fetched from request_uri is not fetched
+// again; it is authenticated as delivered by reference, under every rule of
+// the version that admits it. A dcql_query request that is really written for
+// Draft 24 is not answerable (this library does not implement the Draft 24
+// DCQL response); a caller that knows the Verifier speaks Draft 24 refuses it
+// instead of re-admitting it. See oid4vp.Oid4vpPresenter.AdmitUnderVersion.
+func (w *Wallet) AdmitPresentationRequestUnderVersion(ctx context.Context, refused error) (*oid4vp.AdmittedRequest, error) {
+	var mismatch *oid4vp.VersionMismatchError
+	if errors.As(refused, &mismatch) && mismatch.Version == profile.VersionDraft24 {
+		if err := w.requireDraft24(); err != nil {
+			return nil, err
+		}
+	}
+	return admittedOID4VPRequest(w.presenter.AdmitUnderVersion(ctx, presenterTypes.Oid4vp, refused))
 }
 
 // ParseDCAPIRequest parses and admits an OpenID4VP 1.0 request delivered

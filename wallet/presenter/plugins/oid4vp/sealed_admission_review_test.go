@@ -103,8 +103,9 @@ func resealRecord(t *testing.T, record sealedAdmissionRecord) types.SealedAdmiss
 }
 
 // Probe B: a seal made under profile.Final().With(profile.HAIPOptions()) was
-// re-admitted under plain profile.Final(), whose name it shares, dropping
-// every HAIP option. The record now carries the canonical profile Options.
+// re-admitted under plain profile.Final(), whose version it shares, dropping
+// every HAIP option. The record carries the profile's text form, which names
+// every option (LIB-PROFILE L-6).
 func TestSealedAdmissionBindsTheProfileOptions(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	strict, err := profile.Final().With(profile.HAIPOptions())
@@ -112,7 +113,7 @@ func TestSealedAdmissionBindsTheProfileOptions(t *testing.T) {
 	_, strictSeal := f.admitSealed(t, f.sealedPresenter(strict, f.now), f.claims())
 	_, err = f.sealedPresenter(profile.Final(), f.now).ReadmitRequest(context.Background(), strictSeal, sealKey)
 	require.ErrorIs(t, err, ErrSealedAdmissionInvalid)
-	require.ErrorContains(t, err, "profile options")
+	require.ErrorContains(t, err, `sealed under the profile "haip", not "final"`)
 	_, err = f.sealedPresenter(strict, f.now).ReadmitRequest(context.Background(), strictSeal, sealKey)
 	require.NoError(t, err)
 
@@ -121,7 +122,16 @@ func TestSealedAdmissionBindsTheProfileOptions(t *testing.T) {
 	require.ErrorIs(t, err, ErrSealedAdmissionInvalid)
 
 	record := decodeSealedRecord(t, strings.Split(string(strictSeal), ".")[1])
-	require.Equal(t, canonicalProfileOptions(profile.HAIPOptions()), record.ProfileOptions)
+	require.Equal(t, "haip", record.Profile)
+
+	// A profile that is neither preset spells out its options, so a seal
+	// never re-admits under a profile that differs in one option.
+	strictResponse, err := profile.Final().With(profile.Options{RequireDirectPostJWT: true})
+	require.NoError(t, err)
+	_, strictResponseSeal := f.admitSealed(t, f.sealedPresenter(strictResponse, f.now), f.claims())
+	require.Equal(t, "final;RequireDirectPostJWT", decodeSealedRecord(t, strings.Split(string(strictResponseSeal), ".")[1]).Profile)
+	_, err = f.sealedPresenter(profile.Final(), f.now).ReadmitRequest(context.Background(), strictResponseSeal, sealKey)
+	require.ErrorIs(t, err, ErrSealedAdmissionInvalid)
 }
 
 // A tag or record spelled with non-zero padding bits decodes, under the

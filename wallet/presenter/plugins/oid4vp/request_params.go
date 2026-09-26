@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // setParamsWithAnyMap sets the request fields from the Authorization Request
@@ -16,6 +18,17 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		return
 	}
 	params = withoutIssuerClaim(params)
+
+	// The version decision comes before every rule of OpenID4VP 1.0 alone
+	// (see VersionMismatchError). A Digital Credentials API request has no
+	// Draft 24 counterpart, so Presentation Exchange is simply missing
+	// dcql_query there.
+	if !b.requestSource.isDCAPI() {
+		if err := versionMismatch(profile.VersionFinal, params); err != nil {
+			b.errValidation = err
+			return
+		}
+	}
 
 	missing := []string{}
 	getParam := func(key string, required bool) string {
@@ -148,13 +161,9 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	// Presentation Exchange belongs to the Draft 24 entry points.
-	for _, unsupported := range []string{"presentation_definition", "presentation_definition_uri", "presentation_submission"} {
-		if _, exists := params[unsupported]; exists {
-			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%s is not supported; use dcql_query instead", unsupported)
-			return
-		}
-	}
+	// Presentation Exchange parameters beside dcql_query are unrecognized
+	// OpenID4VP 1.0 parameters, which the Wallet ignores (§5); without
+	// dcql_query the request was refused as a Draft 24 one above.
 
 	// Requesting Credentials via the scope parameter is not supported by this wallet.
 	if scope, exists := params["scope"]; exists {

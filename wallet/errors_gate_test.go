@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -276,6 +277,10 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Wallet.ReadmitPresentationRequest: short key": func(t *testing.T) error {
 			_, err := newSDJWTPresentationFixture(t).wallet.ReadmitPresentationRequest(ctx, "v1.a.b", []byte("short"))
+			return err
+		},
+		"Wallet.AdmitPresentationRequestUnderVersion: not a version refusal": func(t *testing.T) error {
+			_, err := newSDJWTPresentationFixture(t).wallet.AdmitPresentationRequestUnderVersion(ctx, errors.New("refused"))
 			return err
 		},
 		"Wallet.ParseDCAPIRequest: empty invocation": func(t *testing.T) error {

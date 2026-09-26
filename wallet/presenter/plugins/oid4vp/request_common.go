@@ -119,6 +119,13 @@ type requestCore struct {
 	// request's pre-registered Client Identifier, nil for every other prefix.
 	preRegistry         *preRegisteredRegistry
 	preRegisteredClient *PreRegisteredClient
+	// queryParams are the plain parameters of a sourceQuery parse, kept for
+	// AdmitUnderVersion.
+	queryParams map[string][]string
+	// resolvedDefinition is the Presentation Definition a Draft 24 parse
+	// fetched from presentation_definition_uri (or took from its seal), which
+	// Seal records; nil otherwise.
+	resolvedDefinition *resolvedDefinition
 }
 
 // preRegisteredRegistry is where a pre-registered Client Identifier is

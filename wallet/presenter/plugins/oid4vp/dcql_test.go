@@ -238,20 +238,6 @@ func TestParseDcqlQuery_HolderBindingRequirement(t *testing.T) {
 	}
 }
 
-func TestParseDraft24DcqlQuery_IgnoresFinalHolderBindingField(t *testing.T) {
-	rawQuery := map[string]any{"id": "pid", "format": "dc+sd-jwt", "meta": map[string]any{}, "require_cryptographic_holder_binding": "ignored"}
-	query, err := parseDraft24DcqlQuery(map[string]any{"credentials": []any{rawQuery}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if query.Credentials[0].RequireCryptographicHolderBinding != nil {
-		t.Fatal("Final field was retained in Draft24 query")
-	}
-	if rawQuery["require_cryptographic_holder_binding"] != "ignored" {
-		t.Fatal("caller input was mutated")
-	}
-}
-
 func TestParseDCQLClaimSetsPreservesClaimIDsAndValues(t *testing.T) {
 	const raw = `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},
 		"claims":[{"id":"age","path":["age_over_18"],"values":[true]},
@@ -260,7 +246,7 @@ func TestParseDCQLClaimSetsPreservesClaimIDsAndValues(t *testing.T) {
 	for _, parser := range []struct {
 		name  string
 		parse func(any) (*DcqlQuery, error)
-	}{{"final", parseDcqlQuery}, {"draft24", parseDraft24DcqlQuery}} {
+	}{{"final", parseDcqlQuery}} {
 		t.Run(parser.name, func(t *testing.T) {
 			query, err := parser.parse(raw)
 			if err != nil {

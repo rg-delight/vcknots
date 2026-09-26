@@ -71,7 +71,7 @@ func TestSealedAdmissionReadmitsUnderHAIP(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
 	first, sealed := f.admitSealed(t, f.sealedPresenter(profile.HAIP(), f.now), claims)
-	require.True(t, strings.HasPrefix(string(sealed), "v2."), "the sealed admission is versioned: %q", sealed)
+	require.True(t, strings.HasPrefix(string(sealed), "v3."), "the sealed admission is versioned: %q", sealed)
 
 	later := f.sealedPresenter(profile.HAIP(), f.now.Add(time.Minute))
 	readmitted, err := later.ReadmitRequest(context.Background(), sealed, sealKey)

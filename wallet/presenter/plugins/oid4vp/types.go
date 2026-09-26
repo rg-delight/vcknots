@@ -113,8 +113,10 @@ type CredentialPresentationRequest struct {
 	// it is not accepted from or serialized into authorization request data.
 	RequestObjectVerification *RequestObjectVerification `json:"-"`
 	// PresentationDefinitionURI is the Draft24 presentation_definition_uri
-	// parameter as it arrived. This library does not dereference it; a Wallet
-	// that accepts the parameter resolves it after admitting the request.
+	// parameter as it arrived. The Draft 24 entry points dereference it once
+	// the request is authenticated (Draft 24 §5.5) and report the definition
+	// in PresentationDefinition and RawPresentationDefinition; a sealed
+	// admission carries that definition to the re-admission.
 	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
 	// VerifierFederation is the Trust Chain that authenticated an
 	// openid_federation Verifier, signed or (when allowed) unsigned. It is
@@ -122,8 +124,8 @@ type CredentialPresentationRequest struct {
 	VerifierFederation     *FederationEvidence     `json:"-"`
 	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
 	// RawPresentationDefinition is the Draft24 presentation_definition
-	// exactly as it arrived; PresentationDefinition keeps only its id. It is
-	// nil on the Final path.
+	// exactly as it arrived, or as presentation_definition_uri served it;
+	// PresentationDefinition keeps only its id. It is nil on the Final path.
 	RawPresentationDefinition json.RawMessage   `json:"-"`
 	DcqlQuery                 *DcqlQuery        `json:"dcql_query"`                            // required
 	ClientMetadata            *VerifierMetadata `json:"client_metadata,omitempty"`             // optional

@@ -29,11 +29,13 @@ import (
 // rule. Seal records what the first admission observed - the Request Object
 // as fetched, the request_uri it was fetched from, the delivery by reference,
 // the wallet_nonce the library sent for it, the outer client_id, the instant
-// it was authenticated at, and the profile and profile Options it was
-// admitted under - and seals the record with HMAC-SHA256 under a key only the
-// caller holds. ReadmitRequest (and ReadmitDraft24Request) accept the record
-// only when the seal verifies under that key, the profile and its Options are
-// the presenter's, and the record is younger than MaxReadmitAge. They then
+// it was authenticated at, the profile it was admitted under (its text form,
+// which names every option) and, for a Draft 24 request, the Presentation
+// Definition it fetched from presentation_definition_uri - and seals the
+// record with HMAC-SHA256 under a key only the caller holds.
+// ReadmitRequest (and ReadmitDraft24Request) accept the record only when the
+// seal verifies under that key, the profile is the presenter's, and the
+// record is younger than MaxReadmitAge. They then
 // apply RequestURIPolicy to the recorded request_uri and authenticate the
 // Request Object again: its signature, the client authentication its Client
 // Identifier Prefix selects, the wallet_nonce echo and every profile option.
@@ -49,7 +51,7 @@ import (
 // ConsumeSealedAdmission, which the re-admission calls with the seal's
 // identifier before it returns.
 //
-// The record is versioned: "v2." followed by the base64url JSON record and
+// The record is versioned: "v3." followed by the base64url JSON record and
 // the base64url HMAC-SHA256 tag, separated by ".". The tag covers a label
 // naming the version and the record, so a record is never read under a
 // version it was not sealed for. Both parts must be canonical unpadded
@@ -65,10 +67,10 @@ const MinSealKeyBytes = 32
 const DefaultMaxReadmitAge = 15 * time.Minute
 
 const (
-	sealedAdmissionVersion = "v2"
+	sealedAdmissionVersion = "v3"
 	// sealedAdmissionLabel is MACed before the record, so a tag made for
 	// another purpose or another version under the same key never verifies.
-	sealedAdmissionLabel = "vcknots/oid4vp/sealed-admission/v2"
+	sealedAdmissionLabel = "vcknots/oid4vp/sealed-admission/v3"
 	// maxSealedAdmissionBytes bounds a sealed admission before it is decoded:
 	// a record holds at most one bounded Request Object.
 	maxSealedAdmissionBytes = 2 * maxRequestObjectBytes
@@ -88,8 +90,8 @@ var (
 	ErrAdmissionNotSealable = common.NewCodedError("admission_not_sealable", "only a Request Object the presenter fetched from request_uri can be sealed")
 	// ErrSealedAdmissionInvalid reports a sealed admission that is not
 	// accepted: malformed, of an unknown version, altered, sealed under
-	// another key, recorded for another protocol version, profile or profile
-	// Options than the re-admission runs under, older than MaxReadmitAge, or
+	// another key, recorded for another protocol version or profile than
+	// the re-admission runs under, older than MaxReadmitAge, or
 	// admitted at an instant after the presenter's clock.
 	ErrSealedAdmissionInvalid = common.NewCodedError("sealed_admission_invalid", "the sealed admission is malformed, altered, sealed with another key, recorded for another profile or expired")
 	// ErrSealedAdmissionConsumed reports that Oid4vpPresenter.ConsumeSealedAdmission
@@ -99,30 +101,25 @@ var (
 
 // sealedAdmissionRecord is the sealed JSON record.
 type sealedAdmissionRecord struct {
-	Wire    string `json:"wire"`
-	Profile string `json:"profile"`
-	// ProfileOptions is the canonical JSON of the profile Options the
-	// request was admitted under, so profile.Final().With(profile.HAIPOptions())
-	// and profile.Final() are told apart.
-	ProfileOptions string `json:"profile_options"`
-	Delivery       string `json:"delivery"`
-	RequestURI     string `json:"request_uri"`
-	ClientID       string `json:"client_id"`
-	WalletNonce    string `json:"wallet_nonce,omitempty"`
-	AdmittedAt     string `json:"admitted_at"`
-	RequestObject  string `json:"request_object"`
-}
-
-// canonicalProfileOptions is the canonical representation of o a sealed
-// record carries: its JSON encoding, which encoding/json produces in field
-// order and therefore deterministically.
-func canonicalProfileOptions(o profile.Options) string {
-	encoded, err := json.Marshal(o)
-	if err != nil {
-		// profile.Options holds booleans and integers only.
-		panic(fmt.Sprintf("profile.Options does not encode: %v", err))
-	}
-	return string(encoded)
+	Wire string `json:"wire"`
+	// Profile is the text form of the profile the request was admitted under
+	// (profile.Profile.String), which names every option, so
+	// profile.Final().With(profile.HAIPOptions()) and profile.Final() are told
+	// apart and a new option never changes how an old record reads.
+	Profile       string `json:"profile"`
+	Delivery      string `json:"delivery"`
+	RequestURI    string `json:"request_uri"`
+	ClientID      string `json:"client_id"`
+	WalletNonce   string `json:"wallet_nonce,omitempty"`
+	AdmittedAt    string `json:"admitted_at"`
+	RequestObject string `json:"request_object"`
+	// PresentationDefinitionURI and PresentationDefinition are the
+	// presentation_definition_uri of a Draft 24 Request Object and the
+	// Presentation Definition fetched from it, exactly as served (Draft 24
+	// §5.5). The re-admission uses the definition only for the same URI in
+	// the re-authenticated Request Object, and does not fetch it again.
+	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
+	PresentationDefinition    string `json:"presentation_definition,omitempty"`
 }
 
 var (
@@ -135,8 +132,9 @@ var (
 // Request Object as fetched, the request_uri it was fetched from, the
 // delivery by reference, the wallet_nonce sent for it, the outer client_id,
 // the instant it was authenticated at (for a re-admitted handle, that of the
-// first admission) and the profile and profile Options it was admitted
-// under, and is sealed with HMAC-SHA256. ReadmitRequest (or ReadmitDraft24Request) accepts it only under
+// first admission), the profile it was admitted under and the Presentation
+// Definition resolved from a presentation_definition_uri, and is sealed with
+// HMAC-SHA256. ReadmitRequest (or ReadmitDraft24Request) accepts it only under
 // the same key, so a profile that requires delivery by reference (HAIP 1.0
 // §5.1) still refuses a Request Object handed over by value without a seal.
 //
@@ -155,15 +153,18 @@ func (r *AdmittedRequest) Seal(key []byte) (types.SealedAdmission, error) {
 		return "", ErrAdmissionNotSealable
 	}
 	record := sealedAdmissionRecord{
-		Wire:           sealedWireName(r.wire),
-		Profile:        r.admission.profile,
-		ProfileOptions: r.admission.profileOptions,
-		Delivery:       sourceReference.delivery(),
-		RequestURI:     r.admission.requestURI,
-		ClientID:       r.admission.outerClientID,
-		WalletNonce:    r.admission.walletNonce,
-		AdmittedAt:     r.admission.admittedAt.UTC().Format(time.RFC3339Nano),
-		RequestObject:  r.requestObject,
+		Wire:          sealedWireName(r.wire),
+		Profile:       r.admission.profile,
+		Delivery:      sourceReference.delivery(),
+		RequestURI:    r.admission.requestURI,
+		ClientID:      r.admission.outerClientID,
+		WalletNonce:   r.admission.walletNonce,
+		AdmittedAt:    r.admission.admittedAt.UTC().Format(time.RFC3339Nano),
+		RequestObject: r.requestObject,
+	}
+	if definition := r.admission.resolvedDefinition; definition != nil {
+		record.PresentationDefinitionURI = definition.uri
+		record.PresentationDefinition = definition.body
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -176,8 +177,7 @@ func (r *AdmittedRequest) Seal(key []byte) (types.SealedAdmission, error) {
 
 // ReadmitRequest re-admits an OpenID4VP 1.0 request from a sealed admission
 // (see AdmittedRequest.Seal). The seal must verify under key, name this
-// presenter's profile and profile Options, and be younger than
-// MaxReadmitAge. RequestURIPolicy is applied to the recorded request_uri, and
+// presenter's profile, and be younger than MaxReadmitAge. RequestURIPolicy is applied to the recorded request_uri, and
 // the Request Object is authenticated again as the one this library fetched
 // from it, with the wallet_nonce it sent. Its exp, iat and nbf are judged on
 // the clock of the first admission, so an exp that passed since then does not
@@ -242,6 +242,9 @@ func (p *Oid4vpPresenter) readmitDraft24Request(ctx context.Context, sealed type
 	builder.expectedClientID = record.ClientID
 	if err := builder.replayReference(opened); err != nil {
 		return nil, err
+	}
+	if record.PresentationDefinitionURI != "" {
+		builder.sealedDefinition = &resolvedDefinition{uri: record.PresentationDefinitionURI, body: record.PresentationDefinition}
 	}
 	builder.withRequestObject(record.RequestObject)
 	return p.finishReadmission(ctx, opened, func() (*AdmittedRequest, error) {
@@ -309,8 +312,8 @@ func (p *Oid4vpPresenter) readmitClock() (time.Time, time.Duration) {
 }
 
 // openSealedAdmission verifies sealed under key and returns its record, which
-// must be for wire, for the profile and profile Options this presenter admits
-// wire under, and younger than MaxReadmitAge.
+// must be for wire, for the profile this presenter admits wire under, and
+// younger than MaxReadmitAge.
 func (p *Oid4vpPresenter) openSealedAdmission(sealed types.SealedAdmission, key []byte, wire wireContract) (*openedSeal, error) {
 	if len(key) < MinSealKeyBytes {
 		return nil, ErrSealKeyTooShort
@@ -352,10 +355,10 @@ func (p *Oid4vpPresenter) openSealedAdmission(sealed types.SealedAdmission, key 
 	switch {
 	case record.Wire != sealedWireName(wire):
 		return invalid(fmt.Sprintf("the admission was sealed for %s, not %s", record.Wire, sealedWireName(wire)))
-	case record.Profile != p.admissionProfile(wire):
-		return invalid(fmt.Sprintf("the admission was sealed under the %s profile, not %s", record.Profile, p.admissionProfile(wire)))
-	case record.ProfileOptions != canonicalProfileOptions(p.admissionOptions(wire)):
-		return invalid(fmt.Sprintf("the admission was sealed under other %s profile options", record.Profile))
+	case record.Profile != p.admissionProfile(wire).String():
+		return invalid(fmt.Sprintf("the admission was sealed under the profile %q, not %q", record.Profile, p.admissionProfile(wire)))
+	case wire != wireDraft24 && record.PresentationDefinitionURI != "":
+		return invalid("an OpenID4VP 1.0 admission carries no Presentation Definition")
 	case record.Delivery != sourceReference.delivery():
 		return invalid("the sealed Request Object was not delivered by reference")
 	case record.RequestURI == "":
@@ -395,23 +398,12 @@ func sealedWireName(wire wireContract) string {
 	return sealedWireOpenID4VP1
 }
 
-// admissionOptions are the profile Options p admits a request of wire under:
-// none for the Draft 24 contract, and the presenter's profile Options
-// otherwise.
-func (p *Oid4vpPresenter) admissionOptions(wire wireContract) profile.Options {
+// admissionProfile is the profile p admits a request of wire under:
+// profile.Draft24() for the Draft 24 contract, which the presenter's profile
+// does not apply to, and the presenter's profile otherwise.
+func (p *Oid4vpPresenter) admissionProfile(wire wireContract) profile.Profile {
 	if wire == wireDraft24 {
-		return profile.Options{}
+		return profile.Draft24()
 	}
-	return p.Profile.Options()
-}
-
-// admissionProfile is the protocol version of the profile p admits a request
-// of wire under: Draft 24 for the Draft 24 contract, which the presenter's
-// profile does not apply to, and the presenter's profile otherwise. The
-// profile Options are sealed beside it (admissionOptions).
-func (p *Oid4vpPresenter) admissionProfile(wire wireContract) string {
-	if wire == wireDraft24 {
-		return profile.VersionDraft24.String()
-	}
-	return p.Profile.Version().String()
+	return p.Profile
 }

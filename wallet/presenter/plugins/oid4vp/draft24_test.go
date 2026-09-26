@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter/types"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 func TestPresentationRequest_ExplicitDraft24Boundary(t *testing.T) {
@@ -28,8 +30,15 @@ func TestPresentationRequest_ExplicitDraft24Boundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "definition", draft.PresentationDefinition.ID)
 	require.Nil(t, draft.DcqlQuery)
+	// OpenID4VP 1.0 has no Presentation Exchange: the Final entry point
+	// names the version the request is written for.
 	_, err = p.ParsePresentationRequest(draftURI)
-	require.ErrorContains(t, err, "presentation_definition is not supported")
+	require.ErrorIs(t, err, ErrProtocolVersionMismatch)
+	var mismatch *VersionMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, profile.VersionFinal, mismatch.Parsed)
+	require.Equal(t, profile.VersionDraft24, mismatch.Version)
+	require.Equal(t, "presentation_definition", mismatch.Parameter)
 
 	params.Del("presentation_definition")
 	params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"dc+sd-jwt","meta":{"vct_values":["urn:identity"]},"claims":[{"path":["given_name"]}]}]}`)
@@ -38,9 +47,13 @@ func TestPresentationRequest_ExplicitDraft24Boundary(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, final.PresentationDefinition)
 	require.Equal(t, "given_name", final.DcqlQuery.Credentials[0].Claims[0].Path[0])
-	draftDCQL, err := parseDraft24ForTest(p, finalURI)
-	require.NoError(t, err)
-	require.Equal(t, final.DcqlQuery, draftDCQL.DcqlQuery)
+	// Decision D1: the Draft 24 entry point refuses dcql_query and names
+	// OpenID4VP 1.0, the only version this library answers it under.
+	_, err = parseDraft24ForTest(p, finalURI)
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, profile.VersionDraft24, mismatch.Parsed)
+	require.Equal(t, profile.VersionFinal, mismatch.Version)
+	require.Equal(t, "dcql_query", mismatch.Parameter)
 }
 
 func TestPresent_FinalAndDraft24WireResponses(t *testing.T) {
@@ -175,15 +188,25 @@ func TestParseRequestRejectsInvalidOuterClientIDBeforeFetch(t *testing.T) {
 	}
 }
 
-func TestDraft24RetainsSyntacticDCQLParsing(t *testing.T) {
+// Draft 24 §8.1 answers a dcql_query with single presentations, not the
+// arrays of OpenID4VP 1.0 §8.1; this library does not implement it (decision
+// D1), so the Draft 24 entry point refuses the request at admission instead of
+// answering it in the wrong shape later.
+func TestDraft24RefusesDCQLAtAdmission(t *testing.T) {
 	params := url.Values{"client_id": {"redirect_uri:https://verifier.example/response"}, "response_type": {"vp_token"}, "response_mode": {"fragment"}, "nonce": {"n"}, "dcql_query": {`{"credentials":[{"id":"identity","format":"mso_mdoc"}]}`}}
 	p := &Oid4vpPresenter{}
-	request, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
-	require.NoError(t, err)
-	require.Equal(t, "mso_mdoc", request.DcqlQuery.Credentials[0].Format)
-	// Syntactic parsing is not evidence that mdoc presentation is implemented.
-	_, err = p.ParsePresentationRequest("openid4vp://present?" + params.Encode())
-	require.Error(t, err)
+	_, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
+	require.ErrorIs(t, err, ErrProtocolVersionMismatch)
+	// A caller that re-admits it as OpenID4VP 1.0 gets every 1.0 rule: here
+	// the format no presentation of this library answers.
+	_, err = p.AdmitUnderVersion(context.Background(), err)
+	assertAuthzErrorCode(t, err, VPFormatsNotSupportedError)
+
+	// Exactly one query language may be present (Draft 24 §5.1).
+	params.Set("presentation_definition", `{"id":"pd","input_descriptors":[{"id":"identity"}]}`)
+	_, err = parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
+	assertAuthzErrorCode(t, err, InvalidRequestError)
+	require.NotErrorIs(t, err, ErrProtocolVersionMismatch)
 }
 
 // TestParseDraft24KeepsRawPresentationDefinition pins that the Verifier's own
@@ -214,8 +237,7 @@ func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"id":"pd-1","input_descriptors":[{"id":"pid"}]}`, string(signed.RawPresentationDefinition))
 
-	// The Final path refuses presentation_definition outright, so it never
-	// holds one.
+	// The Final path never holds a Presentation Definition.
 	params.Del("presentation_definition")
 	params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"dc+sd-jwt","meta":{"vct_values":["urn:identity"]}}]}`)
 	final, err := p.ParsePresentationRequest("openid4vp://present?" + params.Encode())
@@ -224,9 +246,9 @@ func TestParseDraft24KeepsRawPresentationDefinition(t *testing.T) {
 }
 
 // Draft24 Section 5.1 lets a Verifier name its Presentation Definition by
-// reference (presentation_definition_uri) or through a scope instead of by
-// value. Resolving either is the Wallet's step after admission, so parsing
-// accepts the request and reports what arrived, unresolved.
+// reference (presentation_definition_uri, resolved by Build; see
+// draft24_presentation_definition_test.go) or through a scope, which the
+// Wallet maps after admission.
 func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 	base := func() url.Values {
 		return url.Values{
@@ -235,16 +257,6 @@ func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 		}
 	}
 	p := &Oid4vpPresenter{}
-
-	t.Run("presentation_definition_uri", func(t *testing.T) {
-		params := base()
-		params.Set("presentation_definition_uri", "https://verifier.example/pd/1")
-		req, err := parseDraft24ForTest(p, "openid4vp://present?"+params.Encode())
-		require.NoError(t, err)
-		require.Equal(t, "https://verifier.example/pd/1", req.PresentationDefinitionURI)
-		require.Nil(t, req.PresentationDefinition)
-		require.Nil(t, req.DcqlQuery)
-	})
 
 	t.Run("scope", func(t *testing.T) {
 		params := base()
@@ -259,6 +271,6 @@ func TestDraft24AcceptsPresentationDefinitionReferenceAtParse(t *testing.T) {
 	t.Run("none of them", func(t *testing.T) {
 		_, err := parseDraft24ForTest(p, "openid4vp://present?"+base().Encode())
 		assertAuthzErrorCode(t, err, InvalidRequestError)
-		require.ErrorContains(t, err, "presentation_definition, presentation_definition_uri, scope or dcql_query is required")
+		require.ErrorContains(t, err, "presentation_definition, presentation_definition_uri or scope is required")
 	})
 }

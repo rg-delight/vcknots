@@ -420,6 +420,8 @@ func TestParseRequestRejectsWebOriginClientIDFromTheWire(t *testing.T) {
 		// Request Object's own client_id claim, not from the early outer check.
 		f := newRequestObjectFixture(t)
 		claims := f.claims()
+		delete(claims, "dcql_query")
+		claims["presentation_definition"] = map[string]any{"id": "pd", "input_descriptors": []any{map[string]any{"id": "pid"}}}
 		claims["client_id"] = webOriginClientID
 		claims["response_mode"] = "direct_post"
 		claims["response_uri"] = "https://attacker.example/cb"

@@ -30,6 +30,10 @@ import (
 // testDcqlQueryParam is the URL-encoded form of
 // {"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}
 // for use in query-parameter style presentation request URIs.
+// testPresentationDefinitionParam is a Draft 24 presentation_definition
+// query parameter asking for one credential, input descriptor cred1.
+const testPresentationDefinitionParam = "%7B%22id%22%3A%22pd%22%2C%22input_descriptors%22%3A%5B%7B%22id%22%3A%22cred1%22%7D%5D%7D"
+
 const testDcqlQueryParam = "%7B%22credentials%22%3A%5B%7B%22id%22%3A%22cred1%22%2C%22format%22%3A%22jwt_vc_json%22%2C%22meta%22%3A%7B%22type_values%22%3A%5B%5B%22VerifiableCredential%22%5D%5D%7D%7D%5D%7D"
 
 func TestOid4vpPresenter_Present(t *testing.T) {
@@ -359,10 +363,9 @@ func draft24LegacyClaims(f *requestObjectFixture) map[string]any {
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "test-state",
-		"dcql_query": map[string]any{
-			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-			},
+		"presentation_definition": map[string]any{
+			"id":                "pd-legacy",
+			"input_descriptors": []any{map[string]any{"id": "cred1"}},
 		},
 		"response_uri":    "https://verifier.example/response",
 		"client_metadata": map[string]any{"client_name": "Test Client"},
@@ -400,11 +403,11 @@ func TestOid4vpPresenter_Draft24_ParsePresentationRequest(t *testing.T) {
 	}{
 		{
 			name: "Query parameters without authority",
-			uri:  "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
+			uri:  "openid4vp:?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&presentation_definition=" + testPresentationDefinitionParam + "&response_mode=direct_post&response_uri=https://example.com/response",
 		},
 		{
 			name: "Query parameters",
-			uri:  "openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&response_uri=https://example.com/response",
+			uri:  "openid4vp://present?client_id=redirect_uri:https://example.com/response&response_type=vp_token&nonce=test-nonce&presentation_definition=" + testPresentationDefinitionParam + "&response_mode=direct_post&response_uri=https://example.com/response",
 		},
 		{
 			name:       "request_uri with default GET method",
@@ -592,23 +595,25 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 			wantErr: true,
 			errSub:  "response_uri must use https scheme",
 		},
+		// OpenID4VP 1.0 §5: "The Wallet MUST ignore any unrecognized
+		// parameters"; Presentation Exchange beside dcql_query is one.
 		{
-			name:    "presentation_definition is rejected",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition=%7B%22id%22%3A%22def%22%7D&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
-			wantErr: true,
-			errSub:  "presentation_definition is not supported",
+			name: "presentation_definition beside dcql_query is ignored",
+			uri:  "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition=%7B%22id%22%3A%22def%22%7D&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
 		},
 		{
-			name:    "presentation_definition_uri is rejected",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition_uri=https://example.com/pd&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
-			wantErr: true,
-			errSub:  "presentation_definition_uri is not supported",
+			name: "presentation_definition_uri beside dcql_query is ignored",
+			uri:  "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition_uri=https://example.com/pd&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
 		},
 		{
-			name:    "presentation_submission is rejected",
-			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_submission=%7B%7D&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
+			name: "presentation_submission is ignored",
+			uri:  "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_submission=%7B%7D&dcql_query=" + testDcqlQueryParam + "&response_mode=fragment",
+		},
+		{
+			name:    "presentation_definition without dcql_query is a Draft 24 request",
+			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&presentation_definition=%7B%22id%22%3A%22def%22%7D&response_mode=fragment",
 			wantErr: true,
-			errSub:  "presentation_submission is not supported",
+			errSub:  "presentation_definition is a draft24 parameter",
 		},
 		{
 			name:    "non-empty scope is rejected with invalid_scope",
@@ -698,11 +703,6 @@ func TestOid4vpPresenter_SendsErrorAuthorizationResponse(t *testing.T) {
 			name:        "unsupported format posts vp_formats_not_supported",
 			extraParams: "&dcql_query=%7B%22credentials%22%3A%5B%7B%22id%22%3A%22c1%22%2C%22format%22%3A%22mso_mdoc%22%2C%22meta%22%3A%7B%7D%7D%5D%7D",
 			wantError:   "vp_formats_not_supported",
-		},
-		{
-			name:        "presentation_definition posts invalid_request",
-			extraParams: "&presentation_definition=%7B%22id%22%3A%22def%22%7D&dcql_query=" + testDcqlQueryParam,
-			wantError:   "invalid_request",
 		},
 	}
 
@@ -1017,7 +1017,7 @@ func TestOid4vpPresenter_Draft24_RequestParameterJWT_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req == nil || req.ClientID == "" || req.DcqlQuery == nil {
+	if req == nil || req.ClientID == "" || req.PresentationDefinition == nil {
 		t.Fatalf("expected populated request from 'request' param")
 	}
 }
@@ -1075,10 +1075,9 @@ func TestOid4vpPresenter_Draft24_RequestObject_WithX5C_X509SanDNS_SuccessAndFail
 		"response_type": "vp_token",
 		"response_mode": "direct_post",
 		"state":         "s",
-		"dcql_query": map[string]any{
-			"credentials": []any{
-				map[string]any{"id": "cred1", "format": "jwt_vc_json", "meta": map[string]any{"type_values": []any{[]any{"VerifiableCredential"}}}},
-			},
+		"presentation_definition": map[string]any{
+			"id":                "pd",
+			"input_descriptors": []any{map[string]any{"id": "cred1"}},
 		},
 		"response_uri": "https://verifier.example.org/response",
 	}

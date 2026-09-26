@@ -202,6 +202,21 @@ func (d *PresentationDispatcher) ParseDraft24RequestObject(ctx context.Context, 
 	return req, nil
 }
 
+// AdmitUnderVersion admits, under the OpenID4VP version refused names, the
+// request a parse of the plugin registered for protocol refused as written for
+// that version (oid4vp.VersionMismatchError).
+func (d *PresentationDispatcher) AdmitUnderVersion(ctx context.Context, protocol types.SupportedPresentationProtocol, refused error) (types.AdmittedRequest, error) {
+	admitter, err := capability[types.VersionAdmitter](d, protocol, "admit_under_version")
+	if err != nil {
+		return nil, err
+	}
+	req, err := admitter.AdmitUnderVersion(ctx, refused)
+	if err != nil {
+		return nil, types.NewPresenterError(protocol, "", "admit_under_version", err)
+	}
+	return req, nil
+}
+
 // ReadmitRequest re-admits an OpenID4VP 1.0 request from a sealed admission
 // through the plugin registered for protocol.
 func (d *PresentationDispatcher) ReadmitRequest(ctx context.Context, protocol types.SupportedPresentationProtocol, sealed types.SealedAdmission, key []byte) (types.AdmittedRequest, error) {
