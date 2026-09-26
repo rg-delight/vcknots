@@ -101,15 +101,15 @@ type finalIssuanceFixture struct {
 	// proofTypesSupported, when set, is published verbatim.
 	proofTypesSupported map[string]any
 	// credentialFormat, when set, replaces the configuration's dc+sd-jwt.
-	credentialFormat         string
-	bindingMethods           []string
-	batchSize                int
-	parExpiresIn             int
+	credentialFormat string
+	bindingMethods   []string
+	batchSize        int
+	parExpiresIn     int
 	// parResponse, when set, is the PAR endpoint's 201 body.
 	parResponse map[string]any
 	// requirePAR is the authorization server's
 	// require_pushed_authorization_requests (RFC 9126 Section 5).
-	requirePAR bool
+	requirePAR               bool
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
 	authSigningAlgsSupported []jose.SignatureAlgorithm
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
