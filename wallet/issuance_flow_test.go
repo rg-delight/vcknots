@@ -739,7 +739,7 @@ func TestIssuanceHolderKeyIsOnlyNeededForTheCredentialRequest(t *testing.T) {
 }
 
 // RFC 9126 Section 2.2: the request_uri lifetime bounds opening the
-// authorization URL. No stated lifetime is not an expiry the wallet invents.
+// authorization URL.
 func TestIssuanceAuthorizationRequestURIExpiry(t *testing.T) {
 	expiry := time.Now().Add(time.Minute)
 	authorization := &IssuanceAuthorization{RequestURIExpiresAt: expiry}
@@ -748,11 +748,6 @@ func TestIssuanceAuthorizationRequestURIExpiry(t *testing.T) {
 	require.True(t, authorization.RequestURIExpired(expiry.Add(time.Second)))
 	require.False(t, (&IssuanceAuthorization{}).RequestURIExpired(time.Now()))
 	require.False(t, (*IssuanceAuthorization)(nil).RequestURIExpired(time.Now()))
-
-	withoutLifetime := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
-		f.parExpiresIn = 0
-	})
-	require.True(t, flowTestBegin(t, withoutLifetime).RequestURIExpiresAt.IsZero())
 
 	withoutPAR := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.omitPAREndpoint = true

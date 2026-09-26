@@ -93,12 +93,9 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	if err := w.checkPrivateKeyJWT(as); err != nil {
 		return nil, err
 	}
-	// HAIP Section 4 requires PAR (Options.RequirePAR); OpenID4VCI 1.0 does
-	// not, so a Final issuer without a PAR endpoint gets the parameters
-	// inline.
-	usePAR := as.PushedAuthorizationRequestEndpoint != nil
-	if !usePAR && w.options().RequirePAR {
-		return nil, invalidMetadata("%w requires a pushed authorization request endpoint on the authorization server", profile.Refused("RequirePAR"))
+	usePAR, err := pushedAuthorizationRequired(as, w.options().RequirePAR)
+	if err != nil {
+		return nil, err
 	}
 	scope, details, err := authorizationRequestParameters(req.AuthorizationRequestType, configurationID, config, w.options().RequireScopeAuthorization)
 	if err != nil {
@@ -148,12 +145,8 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 			return nil, err
 		}
 		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, auth)
-		if err != nil {
-			return nil, fmt.Errorf("failed to push authorization request: %w", err)
-		}
-		requestURI = pushed.RequestURI
-		if pushed.ExpiresIn > 0 {
-			authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+		if requestURI, err = acceptPushedAuthorization(authorization, pushed, err); err != nil {
+			return nil, err
 		}
 	}
 	authorization.AuthorizationURL = authorizationRequestURL(as.AuthorizationEndpoint, clientID, request, requestURI)
@@ -470,6 +463,44 @@ func newPKCE() (verifier, challenge, state string, err error) {
 	}
 	digest := sha256.Sum256([]byte(verifier))
 	return verifier, base64.RawURLEncoding.EncodeToString(digest[:]), state, nil
+}
+
+// pushedAuthorizationRequired reports whether the authorization request is
+// pushed: whenever the server has a PAR endpoint. A server without one is
+// refused when the profile requires PAR (Options.RequirePAR, HAIP Section 4)
+// or the server itself does (RFC 9126 Section 5
+// require_pushed_authorization_requests); otherwise, as OpenID4VCI 1.0 and
+// Draft 13 allow, the parameters travel inline.
+func pushedAuthorizationRequired(as *receiverTypes.AuthorizationServerMetadata, profileRequiresPAR bool) (bool, error) {
+	if as.PushedAuthorizationRequestEndpoint != nil {
+		return true, nil
+	}
+	if profileRequiresPAR {
+		return false, invalidMetadata("%w requires a pushed authorization request endpoint on the authorization server", profile.Refused("RequirePAR"))
+	}
+	if as.RequirePushedAuthorizationRequests != nil && *as.RequirePushedAuthorizationRequests {
+		return false, invalidMetadata("the authorization server requires pushed authorization requests (RFC 9126 Section 5) and advertises no pushed_authorization_request_endpoint")
+	}
+	return false, nil
+}
+
+// acceptPushedAuthorization checks the RFC 9126 Section 2.2 response of a
+// pushed authorization request (request_uri and a positive expires_in, both
+// REQUIRED), records the request_uri's expiry on authorization and returns
+// the request_uri. A pushed request that failed is never replaced by the
+// parameters inline.
+func acceptPushedAuthorization(authorization *IssuanceAuthorization, pushed *receiverTypes.PushedAuthorizationResponse, err error) (string, error) {
+	if err != nil {
+		return "", fmt.Errorf("failed to push authorization request: %w", err)
+	}
+	if pushed == nil || strings.TrimSpace(pushed.RequestURI) == "" {
+		return "", fmt.Errorf("%w: the response carries no request_uri", receiverTypes.ErrPARResponseInvalid)
+	}
+	if pushed.ExpiresIn <= 0 {
+		return "", fmt.Errorf("%w: expires_in must be a positive integer, got %d", receiverTypes.ErrPARResponseInvalid, pushed.ExpiresIn)
+	}
+	authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+	return pushed.RequestURI, nil
 }
 
 // authorizationRequestURL builds the authorization request URL. With a PAR

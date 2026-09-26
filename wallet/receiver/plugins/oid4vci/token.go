@@ -137,7 +137,25 @@ func (o *Oid4vciReceiver) PushAuthorizationRequest(ctx context.Context, endpoint
 	if err := o.postForm(observe.WithEndpoint(ctx, observe.EndpointPushedAuthorization), endpointURL, formData, auth, &response); err != nil {
 		return nil, stageError(StagePAR, fmt.Errorf("failed to push authorization request: %w", err))
 	}
+	if err := validatePushedAuthorizationResponse(response); err != nil {
+		return nil, stageError(StagePAR, err)
+	}
 	return &response, nil
+}
+
+// validatePushedAuthorizationResponse applies RFC 9126 Section 2.2 to a
+// successful response: request_uri "REQUIRED" and expires_in "REQUIRED ... a
+// positive integer". A response without them leaves nothing to send to the
+// authorization endpoint, and the wallet never falls back to sending the
+// parameters inline instead.
+func validatePushedAuthorizationResponse(response types.PushedAuthorizationResponse) error {
+	if strings.TrimSpace(response.RequestURI) == "" {
+		return fmt.Errorf("%w: the response carries no request_uri", types.ErrPARResponseInvalid)
+	}
+	if response.ExpiresIn <= 0 {
+		return fmt.Errorf("%w: expires_in must be a positive integer, got %d", types.ErrPARResponseInvalid, response.ExpiresIn)
+	}
+	return nil
 }
 
 // RequestToken sends an OpenID4VCI 1.0 Section 6.1 Token Request. Under

@@ -105,6 +105,11 @@ type finalIssuanceFixture struct {
 	bindingMethods           []string
 	batchSize                int
 	parExpiresIn             int
+	// parResponse, when set, is the PAR endpoint's 201 body.
+	parResponse map[string]any
+	// requirePAR is the authorization server's
+	// require_pushed_authorization_requests (RFC 9126 Section 5).
+	requirePAR bool
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
 	authSigningAlgsSupported []jose.SignatureAlgorithm
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
@@ -426,6 +431,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		if f.issParameterSupported {
 			metadata["authorization_response_iss_parameter_supported"] = true
 		}
+		if f.requirePAR {
+			metadata["require_pushed_authorization_requests"] = true
+		}
 		if f.grantTypesSupported != nil {
 			metadata["grant_types_supported"] = f.grantTypesSupported
 		}
@@ -442,6 +450,10 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		f.parForm = r.Form
 		f.parHeaders = r.Header.Clone()
 		f.pushedState = r.Form.Get("state")
+		if f.parResponse != nil {
+			mockserver.JSONResponse(w, http.StatusCreated, f.parResponse)
+			return
+		}
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": f.parExpiresIn})
 	case "/authorize":
 		f.authorizeCalls++

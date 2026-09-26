@@ -268,18 +268,18 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		RedirectURI:                   redirectURI,
 		AuthorizationDetailsRequested: len(details) > 0,
 	}
+	usePAR, err := pushedAuthorizationRequired(as, false)
+	if err != nil {
+		return nil, err
+	}
 	requestURI := ""
-	if as.PushedAuthorizationRequestEndpoint != nil {
+	if usePAR {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, d.tokenAuthentication(ctx, as, false))
-		if err != nil {
-			return nil, fmt.Errorf("failed to push authorization request: %w", err)
-		}
-		requestURI = pushed.RequestURI
-		if pushed.ExpiresIn > 0 {
-			authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+		if requestURI, err = acceptPushedAuthorization(authorization, pushed, err); err != nil {
+			return nil, err
 		}
 	}
 	authorization.AuthorizationURL = authorizationRequestURL(as.AuthorizationEndpoint, clientID, request, requestURI)

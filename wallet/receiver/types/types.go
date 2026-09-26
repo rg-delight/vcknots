@@ -23,13 +23,17 @@ var (
 	ErrTokenRequestFailed        = common.NewCodedError("token_request_failed", "token request failed")
 	ErrInvalidTokenResponse      = common.NewCodedError("token_response_invalid", "invalid token response")
 	ErrNonceResponseInvalid      = common.NewCodedError("nonce_response_invalid", "invalid nonce response")
-	ErrProofGenerationFailed     = common.NewCodedError("proof_generation_failed", "proof generation failed")
-	ErrUseDPoPNonce              = common.NewCodedError("dpop_nonce_required", "use DPoP nonce")
-	ErrInvalidProofType          = common.NewCodedError("proof_type_unsupported", "invalid or unsupported proof type")
-	ErrNetworkFailed             = common.NewCodedError("network_request_failed", "network request failed")
-	ErrTimeoutExpired            = common.NewCodedError("request_timeout_expired", "request timeout expired")
-	ErrPluginNotFound            = common.NewCodedError("receiver_plugin_not_found", "receiver plugin not found")
-	ErrNilPlugin                 = common.NewCodedError("receiver_plugin_nil", "receiver plugin cannot be nil")
+	// ErrPARResponseInvalid reports an RFC 9126 Section 2.2 pushed
+	// authorization response without a request_uri or without a positive
+	// expires_in, both REQUIRED.
+	ErrPARResponseInvalid    = common.NewCodedError("par_response_invalid", "invalid pushed authorization response")
+	ErrProofGenerationFailed = common.NewCodedError("proof_generation_failed", "proof generation failed")
+	ErrUseDPoPNonce          = common.NewCodedError("dpop_nonce_required", "use DPoP nonce")
+	ErrInvalidProofType      = common.NewCodedError("proof_type_unsupported", "invalid or unsupported proof type")
+	ErrNetworkFailed         = common.NewCodedError("network_request_failed", "network request failed")
+	ErrTimeoutExpired        = common.NewCodedError("request_timeout_expired", "request timeout expired")
+	ErrPluginNotFound        = common.NewCodedError("receiver_plugin_not_found", "receiver plugin not found")
+	ErrNilPlugin             = common.NewCodedError("receiver_plugin_nil", "receiver plugin cannot be nil")
 )
 
 // ReceiverError represents an error during credential receiving operations
@@ -464,10 +468,13 @@ type AuthorizationServerMetadata struct {
 	Issuer                                     common.URIField `json:"issuer"`
 	// AuthorizationResponseIssParameterSupported advertises RFC 9207 support:
 	// the authorization response then carries iss, which the wallet validates.
-	AuthorizationResponseIssParameterSupported         *bool                      `json:"authorization_response_iss_parameter_supported,omitempty"`
-	AuthorizationEndpoint                              *common.URIField           `json:"authorization_endpoint,omitempty"`
-	TokenEndpoint                                      *common.URIField           `json:"token_endpoint,omitempty"`
-	PushedAuthorizationRequestEndpoint                 *common.URIField           `json:"pushed_authorization_request_endpoint,omitempty"`
+	AuthorizationResponseIssParameterSupported *bool            `json:"authorization_response_iss_parameter_supported,omitempty"`
+	AuthorizationEndpoint                      *common.URIField `json:"authorization_endpoint,omitempty"`
+	TokenEndpoint                              *common.URIField `json:"token_endpoint,omitempty"`
+	PushedAuthorizationRequestEndpoint         *common.URIField `json:"pushed_authorization_request_endpoint,omitempty"`
+	// RequirePushedAuthorizationRequests is the RFC 9126 Section 5 member: true
+	// means the server accepts authorization request data only through PAR.
+	RequirePushedAuthorizationRequests                 *bool                      `json:"require_pushed_authorization_requests,omitempty"`
 	ChallengeEndpoint                                  *common.URIField           `json:"challenge_endpoint,omitempty"`
 	DPoPSigningAlgValuesSupported                      *[]jose.SignatureAlgorithm `json:"dpop_signing_alg_values_supported,omitempty"`
 	JwksUri                                            *common.URIField           `json:"jwks_uri,omitempty"`
@@ -714,10 +721,12 @@ type PushedAuthorizationRequest struct {
 	IssuerState          string
 }
 
-// PushedAuthorizationResponse is the RFC 9126 pushed authorization response.
+// PushedAuthorizationResponse is the RFC 9126 Section 2.2 pushed
+// authorization response. Both members are REQUIRED: the request_uri, and its
+// lifetime in seconds as a positive integer.
 type PushedAuthorizationResponse struct {
 	RequestURI string `json:"request_uri"`
-	ExpiresIn  int    `json:"expires_in,omitempty"`
+	ExpiresIn  int    `json:"expires_in"`
 }
 
 // ClientAssertionFactory builds a client_assertion for one HTTP attempt; RFC

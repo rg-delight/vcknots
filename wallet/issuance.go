@@ -155,7 +155,7 @@ type IssuanceAuthorization struct {
 	// (OpenID4VCI 1.0 Section 6.2).
 	AuthorizationDetailsRequested bool `json:"authorization_details_requested,omitempty"`
 	// RequestURIExpiresAt is the RFC 9126 request_uri expiry; zero when the
-	// request was not pushed or the server stated no lifetime.
+	// request was not pushed.
 	RequestURIExpiresAt time.Time `json:"request_uri_expires_at,omitempty"`
 	// ClientInstanceKey is the ephemeral private key the Client Attestation
 	// of the Pushed Authorization Request bound, set when the wallet chose a
