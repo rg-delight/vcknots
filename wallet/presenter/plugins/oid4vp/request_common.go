@@ -372,6 +372,10 @@ func decodeRequestObject(obj string, algorithms []jose.SignatureAlgorithm) (*jwt
 	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode request object claims: %w", err)
 	}
+	// RFC 9101 §4: the claims are a JSON object; null decodes to none.
+	if claims == nil {
+		return nil, nil, newAuthorizationRequestError(InvalidRequestError, "request object claims must be a JSON object")
+	}
 	return parsed, claims, nil
 }
 

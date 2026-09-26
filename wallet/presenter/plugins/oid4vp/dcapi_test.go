@@ -638,3 +638,43 @@ func TestParseDCAPIRequestExpectedOriginsMatchExactly(t *testing.T) {
 		require.ErrorContains(t, err, "does not match any expected_origins entry", "expected %q, origin %q", tc.expected, tc.origin)
 	}
 }
+
+// SB16: a validly signed DC API request whose payload is the JSON literal
+// null decoded to a nil claims map, and the completion wrote client_id into it
+// (a panic). RFC 9101 §4 makes the Request Object a JSON object; a payload
+// that is not one is invalid_request, for the single- and multi-signed forms
+// alike, and so is unsigned request data that is null.
+func TestParseDCAPIRequestRefusesNullClaims(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	compact := signDCAPIMultiPart(t, f.key, f.leaf, f.clientID(), []byte("null"))
+	parts := strings.Split(compact, ".")
+	for name, invocation := range map[string]types.DCAPIInvocation{
+		"signed": {Origin: "https://verifier.example", Request: types.DCAPIRequest{
+			Protocol: DCAPIProtocolSigned, Data: dcapiRaw(t, map[string]any{"request": compact}),
+		}},
+		"multi-signed": {Origin: "https://verifier.example", Request: types.DCAPIRequest{
+			Protocol: DCAPIProtocolMultiSigned, Data: dcapiRaw(t, map[string]any{"request": map[string]any{
+				"payload":    parts[1],
+				"signatures": []any{map[string]any{"protected": parts[0], "signature": parts[2]}},
+			}}),
+		}},
+		"unsigned": {Origin: "https://verifier.example", Request: types.DCAPIRequest{
+			Protocol: DCAPIProtocolUnsigned, Data: json.RawMessage(" null "),
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := parseDCAPIForTest(f.presenter(), invocation)
+				require.ErrorContains(t, err, "must be a JSON object")
+			})
+		})
+	}
+}
+
+// The same holds for a Request Object passed by value or reference.
+func TestRequestObjectWithNullClaimsIsInvalidRequest(t *testing.T) {
+	f := newRequestObjectFixture(t)
+	compact := signDCAPIMultiPart(t, f.key, f.leaf, f.clientID(), []byte("null"))
+	_, err := parseRequestObjectForTest(f.presenter(), compact, f.clientID())
+	assertAuthzErrorCode(t, err, InvalidRequestError)
+}

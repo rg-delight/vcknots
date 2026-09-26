@@ -1,6 +1,7 @@
 package oid4vp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -143,7 +144,7 @@ func (p *Oid4vpPresenter) postPresentationExchangeResponse(ctx context.Context, 
 		// parameters, presentation_submission as an object, without iss, exp
 		// or aud. direct_post.jwt is never answered in plaintext.
 		payload := map[string]any{
-			"vp_token":                string(vpToken),
+			"vp_token":                draft24VPTokenMember(vpToken),
 			"presentation_submission": json.RawMessage(submissionJSON),
 		}
 		if state != "" {
@@ -167,4 +168,18 @@ func (p *Oid4vpPresenter) postPresentationExchangeResponse(ctx context.Context, 
 		return "", encrypted, fmt.Errorf("failed to send Draft24 presentation: %w", err)
 	}
 	return redirectURIFromVerifierResponse(body), encrypted, nil
+}
+
+// draft24VPTokenMember is the vp_token member of a Draft 24 JARM payload.
+// Draft 24 §8.1: vp_token is "a JSON String or JSON object that MUST contain a
+// single Verifiable Presentation or an array of JSON Strings and JSON objects
+// each of them containing a Verifiable Presentation". A compact presentation
+// (a JWT VP or an SD-JWT) is a JSON string; an array of presentations or an
+// ldp_vp object is embedded as JSON, never as the string of its encoding.
+func draft24VPTokenMember(vpToken []byte) any {
+	trimmed := bytes.TrimSpace(vpToken)
+	if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') && json.Valid(trimmed) {
+		return json.RawMessage(trimmed)
+	}
+	return string(vpToken)
 }
