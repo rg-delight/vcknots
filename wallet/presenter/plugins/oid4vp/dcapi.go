@@ -184,7 +184,7 @@ func (p *Oid4vpPresenter) parseDCAPISigned(ctx context.Context, invocation types
 	}
 	verify := func(publicKey any) (map[string]any, error) {
 		verified := commonJOSE.Claims{}
-		if err := parsed.Claims(publicKey, &verified); err != nil {
+		if err := commonJOSE.VerifyClaims(parsed, publicKey, &verified); err != nil {
 			return nil, fmt.Errorf("failed to verify DC API request object signature: %w: %w", err, ErrRequestObjectSignatureInvalid)
 		}
 		return map[string]any(verified), nil
@@ -272,7 +272,7 @@ func (p *Oid4vpPresenter) parseDCAPIMultiSigned(ctx context.Context, invocation 
 			continue
 		}
 		verify := func(publicKey any) (map[string]any, error) {
-			verifiedIndex, _, payload, verifyErr := parsed.VerifyMulti(publicKey)
+			verifiedIndex, _, payload, verifyErr := commonJOSE.VerifyMultiSignature(parsed, publicKey)
 			if verifyErr != nil {
 				return nil, fmt.Errorf("failed to verify DC API multi-signed request: %w: %w", verifyErr, ErrRequestObjectSignatureInvalid)
 			}

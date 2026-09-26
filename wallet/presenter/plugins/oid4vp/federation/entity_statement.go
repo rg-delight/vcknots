@@ -285,7 +285,7 @@ func verifyStatementSignature(raw string, jwks jose.JSONWebKeySet) error {
 		if key.Use != "" && key.Use != "sig" {
 			continue
 		}
-		if _, err := signed.Verify(key); err == nil {
+		if _, err := commonJOSE.VerifySignature(signed, key); err == nil {
 			return nil
 		}
 	}

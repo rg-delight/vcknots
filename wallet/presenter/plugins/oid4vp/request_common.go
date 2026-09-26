@@ -495,7 +495,7 @@ func (c *requestCore) authenticateX509RequestObject(obj string, parsed *jwt.JSON
 		return err
 	}
 	verified := make(commonJOSE.Claims)
-	if err := parsed.Claims(certificates[0].PublicKey, &verified); err != nil {
+	if err := commonJOSE.VerifyClaims(parsed, certificates[0].PublicKey, &verified); err != nil {
 		return fmt.Errorf("failed to verify request object with x5c certificate: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	if !verifyChain {

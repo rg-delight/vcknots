@@ -141,7 +141,7 @@ func (r *Resolver) fetchSignedJWKS(ctx context.Context, location string, chain *
 		if key.Use != "" && key.Use != "sig" {
 			continue
 		}
-		if verified, err := signed.Verify(key); err == nil {
+		if verified, err := commonJOSE.VerifySignature(signed, key); err == nil {
 			payload = verified
 			break
 		}

@@ -165,7 +165,7 @@ func (b *requestCore) authenticateVerifierAttestationRequestObject(
 	}
 
 	verified := make(commonJOSE.Claims)
-	if err := parsed.Claims(attestation.confirmation, &verified); err != nil {
+	if err := commonJOSE.VerifyClaims(parsed, attestation.confirmation, &verified); err != nil {
 		return fmt.Errorf("request object is not signed by the verifier attestation confirmation key: %w: %w", err, ErrRequestObjectSignatureInvalid)
 	}
 	if err := b.requireWalletNonceEcho(verified); err != nil {
@@ -300,7 +300,7 @@ func verifyVerifierAttestationSignature(
 	}
 	for i := range candidates {
 		claims := make(commonJOSE.Claims)
-		if err := parsed.Claims(candidates[i], &claims); err == nil {
+		if err := commonJOSE.VerifyClaims(parsed, candidates[i], &claims); err == nil {
 			return claims, nil
 		}
 	}

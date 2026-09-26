@@ -247,7 +247,7 @@ func verifyRequestObjectWithKeySet(parsed *jwt.JSONWebToken, jwks jose.JSONWebKe
 	}
 	for i := range candidates {
 		claims := make(commonJOSE.Claims)
-		if err := parsed.Claims(candidates[i], &claims); err == nil {
+		if err := commonJOSE.VerifyClaims(parsed, candidates[i], &claims); err == nil {
 			return claims, nil
 		}
 	}
