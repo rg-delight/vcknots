@@ -225,11 +225,12 @@ type CredentialIssuerMetadata struct {
 	AuthorizationServers             []common.URIField                  `json:"authorization_servers,omitempty"`
 	Display                          []CredentialIssuerMetadataDisplay  `json:"display,omitempty"`
 	CredentialConfigurationSupported map[string]CredentialConfiguration `json:"credential_configurations_supported,omitempty"`
-	// SignedMetadata holds the OpenID4VCI 1.0 §12.2.3 signed Credential Issuer
-	// Metadata. §12.2.3 requires the issuer to secure the metadata with a JWS
-	// (alg MUST NOT be none or a MAC identifier, typ MUST be
-	// openidvci-issuer-metadata+jwt) and to return it with media type
-	// application/jwt; the wallet retains the compact serialization here.
+	// SignedMetadata is the compact JWS of signed Credential Issuer Metadata
+	// the receiver verified: the OpenID4VCI 1.0 §12.2.3 application/jwt
+	// response (typ openidvci-issuer-metadata+jwt), or the Draft 13 §11.2.3
+	// signed_metadata member, whose verified claims the metadata carries. It
+	// is empty whenever MetadataSignature is nil; an unverified
+	// signed_metadata member stays readable in RawDocument only.
 	SignedMetadata string `json:"signed_metadata,omitempty"`
 	// MetadataSignature records the outcome of verifying SignedMetadata so
 	// callers can audit the signer. It is internal state and never serialized
