@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/trustknots/vcknots/wallet/common/observe"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
@@ -121,7 +122,9 @@ func (b *draft24RequestBuilder) fetchPresentationDefinition(uri string) ([]byte,
 	if err != nil {
 		return nil, newAuthorizationRequestError(InvalidPresentationDefinitionReferenceError, "presentation_definition_uri: %v", err)
 	}
-	if !json.Valid(body) || !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
+	// RFC 8259 §8.1: JSON exchanged between systems is UTF-8; a body that is
+	// not would not survive the seal byte for byte.
+	if !utf8.Valid(body) || !json.Valid(body) || !bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
 		return nil, newAuthorizationRequestError(InvalidPresentationDefinitionReferenceError, "presentation_definition_uri does not serve a JSON object")
 	}
 	return body, nil

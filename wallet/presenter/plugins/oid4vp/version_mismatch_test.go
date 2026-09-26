@@ -184,3 +184,32 @@ func TestDCAPIPresentationExchangeIsNotAVersionMismatch(t *testing.T) {
 	require.NotErrorIs(t, err, ErrProtocolVersionMismatch)
 	assertAuthzErrorCode(t, err, InvalidRequestError)
 }
+
+// The other direction: a dcql_query Request Object that reached the Draft 24
+// entry point is admitted as OpenID4VP 1.0 under the presenter's profile. A
+// presenter requiring delivery by reference (HAIP 1.0 §5.1) accepts the one it
+// fetched from request_uri, and refuses the same Request Object passed by
+// value.
+func TestDraft24EntryPointHandsADCQLRequestToFinal(t *testing.T) {
+	f := newRequestObjectFixture(t, "verifier.example")
+	claims := f.claims()
+	claims["client_id"] = draft24X509ClientID
+	fetches := f.countingDraft24Handler(t, claims)
+	byReference, err := profile.Final().With(profile.Options{RequireSignedRequestByReference: true})
+	require.NoError(t, err)
+	p := f.sealedPresenter(byReference, f.now)
+	uri := "openid4vp://authorize?" + url.Values{"client_id": {draft24X509ClientID}, "request_uri": {f.server.URL + "/request-object"}}.Encode()
+	_, err = p.ParseDraft24Request(context.Background(), uri)
+	require.ErrorIs(t, err, ErrProtocolVersionMismatch)
+	admitted, err := p.AdmitUnderVersion(context.Background(), err)
+	require.NoError(t, err)
+	handle := admitted.(*AdmittedRequest)
+	require.False(t, handle.Draft24())
+	require.EqualValues(t, 1, fetches.Load())
+	require.Equal(t, "reference", handle.Request().RequestObjectVerification.Delivery)
+
+	_, err = p.ParseDraft24RequestObject(context.Background(), f.sign(t, claims, nil), types.RequestObjectSource{ClientID: draft24X509ClientID})
+	require.ErrorIs(t, err, ErrProtocolVersionMismatch)
+	_, err = p.AdmitUnderVersion(context.Background(), err)
+	require.ErrorIs(t, err, ErrRequestURIRequired)
+}

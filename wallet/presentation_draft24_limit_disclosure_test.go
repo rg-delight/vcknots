@@ -102,8 +102,32 @@ func TestJSONPathLeafName(t *testing.T) {
 		require.True(t, ok, path)
 		require.Equal(t, want, name, path)
 	}
+	names, ok := jsonPathMemberNames("$.address['locality'][0]")
+	require.True(t, ok)
+	require.Equal(t, []string{"address", "locality"}, names)
 	for _, path := range []string{"", "given_name", "$", "$.*", "$[?(@.age > 18)]", "$.a[", "$.a[b]"} {
 		_, ok := jsonPathLeafName(path)
 		require.False(t, ok, path)
 	}
+}
+
+// A nested selectively disclosable claim is reachable only through its
+// parent's disclosure (RFC 9901, recursive disclosures), so a required
+// $.address.city discloses address and city - and nothing else.
+func TestWallet_Draft24LimitDisclosureRequiredKeepsTheParentOfANestedClaim(t *testing.T) {
+	fixture := newSDJWTPresentationFixture(t)
+	given, givenHash := sdDisclosure(t, "salt-given", "given_name", "Taro")
+	postal, postalHash := sdDisclosure(t, "salt-postal", "postal_code", "12345")
+	city, cityHash := sdDisclosure(t, "salt-city", "city", "Milliways")
+	address, addressHash := sdDisclosure(t, "salt-address", "address", map[string]any{"_sd": []any{postalHash, cityHash}})
+	storeSDJWT(t, fixture, map[string]any{"_sd": []any{givenHash, addressHash}}, given, address, postal, city)
+	definition := `{"id":"limited","input_descriptors":[{"id":"identity","format":{"vc+sd-jwt":{}},` +
+		`"constraints":{"limit_disclosure":"required","fields":[{"path":["$.address.city"]}]}}]}`
+	request := parseDraft24(t, fixture.wallet, limitedDisclosureURI(fixture.baseURL, definition))
+	selections, err := fixture.wallet.SelectCredentials(t.Context(), request)
+	require.NoError(t, err)
+	_, err = presentSelections(t, fixture.wallet, request, fixture.key, selections)
+	require.NoError(t, err)
+	form := <-fixture.posted
+	require.ElementsMatch(t, []string{"address", "city"}, disclosedNames(t, form.Get("vp_token")))
 }

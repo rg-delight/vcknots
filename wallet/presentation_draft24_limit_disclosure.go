@@ -61,12 +61,17 @@ func draft24DisclosureLimits(rawDefinition json.RawMessage, selections []Credent
 			required = true
 			for _, field := range descriptor.Constraints.Fields {
 				for _, path := range field.Path {
-					name, ok := jsonPathLeafName(path)
+					// The listed claim and the claims enclosing it: a nested
+					// selectively disclosable claim is reachable only through
+					// the disclosure of its parent (RFC 9901, recursive disclosures).
+					names, ok := jsonPathMemberNames(path)
 					if !ok {
 						return nil, fmt.Errorf("%w: input descriptor %q lists the path %q, which names no claim this library can disclose alone", ErrLimitDisclosureUnsatisfiable, descriptor.ID, path)
 					}
-					if !slices.Contains(allowed, name) {
-						allowed = append(allowed, name)
+					for _, name := range names {
+						if !slices.Contains(allowed, name) {
+							allowed = append(allowed, name)
+						}
 					}
 				}
 			}
@@ -105,26 +110,39 @@ func draft24DisclosureLimits(rawDefinition json.RawMessage, selections []Credent
 // array indexes or wildcards - which is the name of the disclosure that
 // carries the claim. A filter or script expression names no claim.
 func jsonPathLeafName(path string) (string, bool) {
-	rest, found := strings.CutPrefix(strings.TrimSpace(path), "$")
-	if !found {
+	names, ok := jsonPathMemberNames(path)
+	if !ok {
 		return "", false
 	}
+	return names[len(names)-1], true
+}
+
+// jsonPathMemberNames returns the member names of such a JSONPath expression
+// in order, the claim itself last. Array element disclosures (RFC 9901) carry
+// no name and are not selected by one.
+func jsonPathMemberNames(path string) ([]string, bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(path), "$")
+	if !found {
+		return nil, false
+	}
+	var names []string
 	name := ""
 	for rest != "" {
 		switch {
 		case strings.HasPrefix(rest, "["):
 			end := strings.Index(rest, "]")
 			if end < 0 {
-				return "", false
+				return nil, false
 			}
 			inner := strings.TrimSpace(rest[1:end])
 			rest = rest[end+1:]
 			switch {
 			case len(inner) >= 2 && (inner[0] == '\'' || inner[0] == '"') && inner[len(inner)-1] == inner[0]:
 				name = inner[1 : len(inner)-1]
+				names = append(names, name)
 			case inner == "*" || isJSONPathIndex(inner):
 			default:
-				return "", false
+				return nil, false
 			}
 		case strings.HasPrefix(rest, "."):
 			rest = strings.TrimLeft(rest, ".")
@@ -135,16 +153,17 @@ func jsonPathLeafName(path string) (string, bool) {
 			segment := rest[:end]
 			rest = rest[end:]
 			if segment == "" || strings.ContainsAny(segment, "?()@") {
-				return "", false
+				return nil, false
 			}
 			if segment != "*" {
 				name = segment
+				names = append(names, name)
 			}
 		default:
-			return "", false
+			return nil, false
 		}
 	}
-	return name, name != ""
+	return names, name != ""
 }
 
 func isJSONPathIndex(text string) bool {
@@ -160,7 +179,7 @@ func isJSONPathIndex(text string) bool {
 }
 
 // sdJWTDisclosureNames returns the claim names of the object property
-// disclosures of an SD-JWT (RFC 9901 Section 4.2.1: [salt, name, value]).
+// disclosures of an SD-JWT (RFC 9901: [salt, name, value]).
 func sdJWTDisclosureNames(raw []byte) []string {
 	parts := strings.Split(string(raw), "~")
 	names := []string{}

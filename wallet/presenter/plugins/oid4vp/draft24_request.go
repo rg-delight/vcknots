@@ -313,6 +313,16 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 	}
 
 	if redirectURIFromParam != "" && redirectURIFromClientID != "" && redirectURIFromParam != redirectURIFromClientID {
+		if mode, _ := params["response_mode"].(string); isDirectPostMode(OAuthAuthzReqResponseMode(mode)) {
+			// §8.2 refuses redirect_uri beside direct_post whatever its
+			// value; the error goes to the Response URI the Client
+			// Identifier binds.
+			b.req.ResponseMode = OAuthAuthzReqResponseMode(mode)
+			b.req.State, _ = params["state"].(string)
+			b.req.ResponseURI = redirectURIFromClientID
+			b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+			return
+		}
 		b.errValidation = fmt.Errorf("redirect_uri mismatch between parameter and one derived from client_id")
 		return
 	}

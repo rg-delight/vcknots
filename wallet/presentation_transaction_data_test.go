@@ -298,6 +298,16 @@ func TestAssignTransactionData(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []string{either}, assignment.carried(1, "addr", entries))
 	})
+	t.Run("explicit: the query every assigned credential answers", func(t *testing.T) {
+		// credential_ids [addr, pid]: selection 0 answers pid only, selection
+		// 2 answers both, so pid carries it in both presentations.
+		both := CredentialSelection{CredentialID: "d", QueryIDs: []string{"pid", "addr"}}
+		assignment, err := assignTransactionData([]string{either}, []CredentialSelection{with(pid, 0), addr, with(both, 0)})
+		require.NoError(t, err)
+		require.Equal(t, []string{either}, assignment.carried(0, "pid", []string{either}))
+		require.Equal(t, []string{either}, assignment.carried(2, "pid", []string{either}))
+		require.Empty(t, assignment.carried(2, "addr", []string{either}))
+	})
 	t.Run("explicit: several credentials of one query when the Holder says so", func(t *testing.T) {
 		assignment, err := assignTransactionData([]string{pidOnly}, []CredentialSelection{with(pid, 0), with(secondPID, 0)})
 		require.NoError(t, err)

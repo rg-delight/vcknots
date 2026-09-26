@@ -161,21 +161,29 @@ func assignTransactionData(encoded []string, selections []CredentialSelection) (
 	}
 	holders := make([][]int, len(encoded))
 	query := make([]string, len(encoded))
-	assign := func(entry, selection int) error {
-		answered := ""
+	// settle chooses the query that carries entry: the first of its
+	// credential_ids that every credential it is assigned to answers, so the
+	// entry is authorized through one referenced query only (Section 5.1).
+	settle := func(entry int) error {
 		for _, id := range referenced[entry] {
-			if slices.Contains(selections[selection].QueryIDs, id) {
-				answered = id
-				break
+			answeredByAll := true
+			for _, selection := range holders[entry] {
+				if !slices.Contains(selections[selection].QueryIDs, id) {
+					answeredByAll = false
+					break
+				}
+			}
+			if answeredByAll {
+				query[entry] = id
+				return nil
 			}
 		}
-		switch {
-		case answered == "":
+		return fmt.Errorf("%w: transaction_data[%d] references %v, and no one of them is answered by every credential it is assigned to; only one of the referenced credentials may authorize it", ErrTransactionDataAssignmentInvalid, entry, referenced[entry])
+	}
+	assign := func(entry, selection int) error {
+		if !slices.ContainsFunc(referenced[entry], func(id string) bool { return slices.Contains(selections[selection].QueryIDs, id) }) {
 			return fmt.Errorf("%w: transaction_data[%d] references %v, which the credential of selection %d does not answer", ErrTransactionDataAssignmentInvalid, entry, referenced[entry], selection)
-		case query[entry] != "" && query[entry] != answered:
-			return fmt.Errorf("%w: transaction_data[%d] is assigned to credentials of the queries %q and %q; only one of the referenced credentials may authorize it", ErrTransactionDataAssignmentInvalid, entry, query[entry], answered)
 		}
-		query[entry] = answered
 		holders[entry] = append(holders[entry], selection)
 		return nil
 	}
@@ -199,6 +207,9 @@ func assignTransactionData(encoded []string, selections []CredentialSelection) (
 			if len(holders[entry]) == 0 {
 				return nil, fmt.Errorf("%w: transaction_data[%d] is authorized by no presented credential (invalid_transaction_data)", ErrTransactionDataAssignmentInvalid, entry)
 			}
+			if err := settle(entry); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		for entry := range encoded {
@@ -220,9 +231,8 @@ func assignTransactionData(encoded []string, selections []CredentialSelection) (
 			case len(candidates) > 1:
 				return nil, fmt.Errorf("%w: transaction_data[%d] references the query %q, which %d presented credentials answer", ErrTransactionDataAssignmentRequired, entry, owner, len(candidates))
 			}
-			if err := assign(entry, candidates[0]); err != nil {
-				return nil, err
-			}
+			holders[entry] = candidates
+			query[entry] = owner
 		}
 	}
 	for entry := range encoded {
