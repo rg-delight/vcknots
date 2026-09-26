@@ -229,6 +229,9 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	if as.AuthorizationEndpoint == nil {
 		return nil, ErrDraft13AuthorizationEndpointMissing
 	}
+	if err := requireSecureAuthorizationEndpoint(transport, as.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
 	if err := checkOfferedAuthorizationCodeGrant(grantFromMetadata, as); err != nil {
 		return nil, err
 	}

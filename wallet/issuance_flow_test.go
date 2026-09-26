@@ -866,10 +866,17 @@ func TestIssuanceRefusesKeyAttestationWithUnlistedAlgorithm(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // flowTestTransportOnlyPlugin implements the OpenID4VCI 1.0 transport and
-// nothing else, as a plugin written outside this module may.
+// nothing else, as a plugin written outside this module may. It reports the
+// HTTP scheme policy of the plugin it wraps, so the fixture's plain http
+// authorization endpoint stays usable (receiverTypes.HTTPSchemePolicy).
 type flowTestTransportOnlyPlugin struct {
 	receiverTypes.Receiver
 	receiverTypes.OID4VCITransport
+}
+
+func (p *flowTestTransportOnlyPlugin) HTTPAllowed() bool {
+	policy, ok := p.Receiver.(receiverTypes.HTTPSchemePolicy)
+	return ok && policy.HTTPAllowed()
 }
 
 // A receiver plugin that only speaks HTTP is enough for a whole issuance: the

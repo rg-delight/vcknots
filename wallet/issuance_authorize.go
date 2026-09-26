@@ -77,6 +77,9 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	if as.AuthorizationEndpoint == nil {
 		return nil, invalidMetadata("authorization endpoint is missing on authorization server")
 	}
+	if err := requireSecureAuthorizationEndpoint(transport, as.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
 	if as.TokenEndpoint == nil {
 		return nil, invalidMetadata("token endpoint is missing on authorization server")
 	}
@@ -501,6 +504,24 @@ func acceptPushedAuthorization(authorization *IssuanceAuthorization, pushed *rec
 	}
 	authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
 	return pushed.RequestURI, nil
+}
+
+// requireSecureAuthorizationEndpoint refuses an authorization endpoint the
+// holder's browser would open without TLS: OpenID4VCI 1.0 Section 11 and
+// FAPI 2.0 Section 5.2.1 (HAIP Section 4) require TLS for every endpoint, and
+// the wallet never fetches this one itself, so the receiver's scheme check
+// does not reach it. Plain http is allowed only when the receiver allows it
+// (receiverTypes.HTTPSchemePolicy, experimental and never under
+// ForbidExperimental).
+func requireSecureAuthorizationEndpoint(transport any, endpoint *common.URIField) error {
+	endpointURL := url.URL(*endpoint)
+	if strings.EqualFold(endpointURL.Scheme, "https") {
+		return nil
+	}
+	if policy, ok := transport.(receiverTypes.HTTPSchemePolicy); ok && policy.HTTPAllowed() && strings.EqualFold(endpointURL.Scheme, "http") {
+		return nil
+	}
+	return invalidMetadata("the authorization endpoint %q does not use https", endpointURL.String())
 }
 
 // authorizationRequestURL builds the authorization request URL. With a PAR

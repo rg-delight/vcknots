@@ -91,6 +91,11 @@ func (r *exchangeResponse) statusError() *httpStatusError {
 // (whose c_nonce refresh is RequestCredential's job),
 // issuance_pending and the rest reach the caller from the first response.
 func (o *Oid4vciReceiver) do(ctx context.Context, ex exchange) (*exchangeResponse, error) {
+	// OpenID4VCI 1.0 Section 11 and HAIP Section 4: TLS on every exchange,
+	// not only at discovery.
+	if err := o.requireSecureTransport(o.Profile.Options()); err != nil {
+		return nil, err
+	}
 	if err := o.requireEndpointScheme(ex.url); err != nil {
 		return nil, err
 	}
@@ -206,10 +211,9 @@ func (o *Oid4vciReceiver) send(ctx context.Context, ex exchange, state attemptSt
 	return sent, &exchangeResponse{statusCode: response.StatusCode, header: response.Header, body: responseBody}, nil
 }
 
-// requireEndpointScheme refuses a non-https endpoint unless
-// Experimental.AllowHTTP is set.
+// requireEndpointScheme refuses a non-https endpoint unless HTTPAllowed.
 func (o *Oid4vciReceiver) requireEndpointScheme(endpointURL url.URL) error {
-	if !o.Experimental.AllowHTTP && !strings.EqualFold(endpointURL.Scheme, "https") {
+	if !o.HTTPAllowed() && !strings.EqualFold(endpointURL.Scheme, "https") {
 		return fmt.Errorf("unsupported URL scheme for OID4VCI endpoint: %q (https required)", endpointURL.Scheme)
 	}
 	return nil

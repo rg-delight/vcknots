@@ -107,6 +107,9 @@ type finalIssuanceFixture struct {
 	parExpiresIn     int
 	// parResponse, when set, is the PAR endpoint's 201 body.
 	parResponse map[string]any
+	// authorizationEndpoint, when set, replaces the authorization server's
+	// authorization_endpoint.
+	authorizationEndpoint string
 	// requirePAR is the authorization server's
 	// require_pushed_authorization_requests (RFC 9126 Section 5).
 	requirePAR               bool
@@ -430,6 +433,9 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		if f.issParameterSupported {
 			metadata["authorization_response_iss_parameter_supported"] = true
+		}
+		if f.authorizationEndpoint != "" {
+			metadata["authorization_endpoint"] = f.authorizationEndpoint
 		}
 		if f.requirePAR {
 			metadata["require_pushed_authorization_requests"] = true
