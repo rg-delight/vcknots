@@ -2,7 +2,12 @@ package issuerkeys
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -259,6 +264,96 @@ func TestStatusListKeysBindsTheTokenToTheCredentialLeaf(t *testing.T) {
 			t.Errorf("x5c failure = %q", got)
 		}
 	})
+}
+
+// TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost covers subject-less
+// (SAN-only) certificates: an empty subject identifies nobody, so two of them
+// do not bind a Status List Token to a credential by subject equality. The
+// token is bound by the same key (draft-ietf-oauth-status-list-21 Section
+// 11.3) or, for a credential with iss, by the issuer host binding.
+func TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost(t *testing.T) {
+	t.Parallel()
+
+	newKey := func(t *testing.T) crypto.Signer {
+		t.Helper()
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	// leafFor issues a leaf for key under the fixture CA with the subject
+	// common name commonName (none when empty) and the dNSName dnsName.
+	leafFor := func(t *testing.T, f *statusListFixture, key crypto.Signer, commonName, dnsName string) testCertificate {
+		t.Helper()
+		template := &x509.Certificate{
+			SerialNumber:          randomSerial(t),
+			NotBefore:             testNow.Add(-time.Hour),
+			NotAfter:              testNow.Add(time.Hour),
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageDigitalSignature,
+			DNSNames:              []string{dnsName},
+		}
+		if commonName != "" {
+			template.Subject = pkix.Name{CommonName: commonName}
+		}
+		return createCertificate(t, template, &f.ca, key)
+	}
+	resolve := func(t *testing.T, f *statusListFixture, issuer string, issuerCertificate, leaf testCertificate) error {
+		t.Helper()
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = issuerCertificate.certificate
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest(issuer, statusListHeader(leaf)))
+		return err
+	}
+	const emptyFailure = "certificate subject is empty and does not identify the credential issuer"
+
+	for _, test := range []struct {
+		name string
+		// issuer is the credential's iss; empty for a credential without one.
+		issuer string
+		// build returns the credential's issuer certificate and the token leaf.
+		build   func(t *testing.T, f *statusListFixture) (issuerCertificate, leaf testCertificate)
+		failure string // "" when the token leaf is accepted
+	}{
+		{name: "empty subjects without iss are refused", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
+			return leafFor(t, f, newKey(t), "", "credential.example.test"), leafFor(t, f, newKey(t), "", "attacker.example.test")
+		}, failure: emptyFailure},
+		{name: "an empty issuer subject without iss is refused", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
+			return leafFor(t, f, newKey(t), "", "credential.example.test"), leafFor(t, f, newKey(t), "status signer", "credential.example.test")
+		}, failure: emptyFailure},
+		{name: "the same key with empty subjects is accepted", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
+			key := newKey(t)
+			return leafFor(t, f, key, "", "credential.example.test"), leafFor(t, f, key, "", "status.example.test")
+		}},
+		{name: "the same key with another subject is accepted", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
+			key := newKey(t)
+			return leafFor(t, f, key, "credential issuer", "credential.example.test"), leafFor(t, f, key, "status signer", "credential.example.test")
+		}},
+		{name: "empty subjects with iss rest on the host binding", issuer: "https://issuer.example.test", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
+			return leafFor(t, f, newKey(t), "", "issuer.example.test"), leafFor(t, f, newKey(t), "", "issuer.example.test")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			f := newStatusListFixture(t)
+			issuerCertificate, leaf := test.build(t, f)
+			err := resolve(t, f, test.issuer, issuerCertificate, leaf)
+			if test.failure == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var unresolved *UnresolvedError
+			if !errors.As(err, &unresolved) {
+				t.Fatalf("err = %v, want *UnresolvedError", err)
+			}
+			if got := diagnosticFor(t, unresolved.Diagnostics, RungX5C).Failure; got != test.failure {
+				t.Errorf("x5c failure = %q, want %q", got, test.failure)
+			}
+		})
+	}
 }
 
 // TestStatusListKeysHAIPRules covers HAIP 1.0 Section 6.1 as the checker hands

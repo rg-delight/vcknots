@@ -3,7 +3,10 @@ package issuerkeys
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"fmt"
 	"net/http"
@@ -55,13 +58,16 @@ type X5CTrust struct {
 	// IssuerCertificate is the validated x5c leaf certificate of the
 	// credential whose status is checked (the credential acceptor's leaf).
 	// When it is set, a Status List Token with x5c must carry a leaf with the
-	// same subject, whether or not the credential carries `iss`: the token is
-	// bound to the Referenced Token by its signer
-	// (draft-ietf-oauth-status-list-21 Section 11.3), and the Issuer of an x5c
-	// credential is the subject of that certificate (SD-JWT VC -19 Section
-	// 2.5). It is required for a credential without `iss`, which names no
-	// other identity to bind the token to; set it for every credential that
-	// was accepted through its x5c.
+	// same public key or the same non-empty subject, whether or not the
+	// credential carries `iss`: the token is bound to the Referenced Token by
+	// its signer (draft-ietf-oauth-status-list-21 Section 11.3), and the
+	// Issuer of an x5c credential is the subject of that certificate (SD-JWT
+	// VC -19 Section 2.5). An empty subject identifies nobody, so when either
+	// subject is empty only the issuer host binding can speak for the leaf,
+	// and a credential without `iss` has none. It is required for a
+	// credential without `iss`, which names no other identity to bind the
+	// token to; set it for every credential that was accepted through its
+	// x5c.
 	IssuerCertificate *x509.Certificate
 }
 
@@ -88,8 +94,10 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 //     of trust.TrustAnchors, its leaf must name the issuer's host - in a
 //     dNSName or a URI subject alternative name, the binding the credential
 //     acceptor applies to the credential's own x5c - and, when
-//     trust.IssuerCertificate is set, carry that certificate's subject, or
-//     the token is refused (MechanismX5CTrustedChain). Without
+//     trust.IssuerCertificate is set, carry that certificate's public key or
+//     its subject (a leaf or an issuer certificate with an empty subject
+//     rests on the host binding alone), or the token is refused
+//     (MechanismX5CTrustedChain). Without
 //     x5c the keys come from the issuer's JWT VC Issuer Metadata, for the
 //     SD-JWT VC family whose web-based resolution that is
 //     (MechanismJWTVCIssuerMetadata).
@@ -101,7 +109,8 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 //     Token resolved the same way as a JWT VC.
 //   - No issuer (a credential without `iss`, whose Issuer is its x5c leaf
 //     subject): only an x5c chain reaching trust.TrustAnchors whose leaf
-//     carries the subject of trust.IssuerCertificate.
+//     carries the public key of trust.IssuerCertificate, or its subject when
+//     neither subject is empty.
 //   - Any other identifier is not resolved.
 //
 // A Resolver with Experimental set is refused, with an error wrapping
@@ -185,6 +194,51 @@ type x5cBinding struct {
 	issuerCertificate *x509.Certificate
 }
 
+// issuerCertificateFailure says why leaf, the Status List Token's x5c leaf,
+// does not speak for the issuer of the credential whose certificate is
+// binding.issuerCertificate, or returns "" when it does.
+//
+// draft-ietf-oauth-status-list-21 Section 11.3 binds the token to the
+// Referenced Token's issuer: the same key, or the same resolution path. A leaf
+// with the issuer certificate's public key is that signer. Otherwise the leaf
+// speaks for the issuer when it has the same subject, because the Issuer of an
+// x5c credential is its leaf subject (SD-JWT VC -19 Section 2.5) - but an
+// empty subject (no RDNs, as a certificate that names its holder only in a
+// subject alternative name has) identifies nobody, and two such certificates
+// would match each other. When either subject is empty, the leaf is accepted
+// only when it names the issuer URL's host (binding.issuerURL is set and
+// RequireLeafNamesIssuer has already held); a credential without iss has no
+// such name, and its token is refused.
+func (b x5cBinding) issuerCertificateFailure(leaf *x509.Certificate) string {
+	if samePublicKey(leaf.PublicKey, b.issuerCertificate.PublicKey) {
+		return ""
+	}
+	if emptySubject(leaf) || emptySubject(b.issuerCertificate) {
+		if b.issuerURL != nil {
+			return ""
+		}
+		return "certificate subject is empty and does not identify the credential issuer"
+	}
+	if !bytes.Equal(leaf.RawSubject, b.issuerCertificate.RawSubject) {
+		return "certificate subject is not the credential issuer"
+	}
+	return ""
+}
+
+// samePublicKey reports whether a and b are the same public key.
+func samePublicKey(a, b crypto.PublicKey) bool {
+	key, ok := a.(interface{ Equal(crypto.PublicKey) bool })
+	return ok && b != nil && key.Equal(b)
+}
+
+// emptySubject reports whether certificate's subject has no RDN. A subject
+// that does not parse is treated as empty: it identifies nobody either.
+func emptySubject(certificate *x509.Certificate) bool {
+	var rdns pkix.RDNSequence
+	rest, err := asn1.Unmarshal(certificate.RawSubject, &rdns)
+	return err != nil || len(rest) != 0 || len(rdns) == 0
+}
+
 func trustIssuerCertificate(trust *X5CTrust) *x509.Certificate {
 	if trust == nil {
 		return nil
@@ -252,8 +306,8 @@ func (r *Resolver) statusListX5CRoute(ctx context.Context, resolution *Resolutio
 	case binding.issuerCertificate != nil:
 		// draft-ietf-oauth-status-list-21 Section 11.3: the token is bound to
 		// the Referenced Token by its signer.
-		if !bytes.Equal(certificates[0].RawSubject, binding.issuerCertificate.RawSubject) {
-			return untrusted("certificate subject is not the credential issuer", nil)
+		if failure := binding.issuerCertificateFailure(certificates[0]); failure != "" {
+			return untrusted(failure, nil)
 		}
 	case binding.issuerURL == nil:
 		return untrusted("credential issuer certificate is not configured", nil)
