@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,13 +24,17 @@ var (
 	ErrTokenRequestFailed        = common.NewCodedError("token_request_failed", "token request failed")
 	ErrInvalidTokenResponse      = common.NewCodedError("token_response_invalid", "invalid token response")
 	ErrNonceResponseInvalid      = common.NewCodedError("nonce_response_invalid", "invalid nonce response")
-	ErrProofGenerationFailed     = common.NewCodedError("proof_generation_failed", "proof generation failed")
-	ErrUseDPoPNonce              = common.NewCodedError("dpop_nonce_required", "use DPoP nonce")
-	ErrInvalidProofType          = common.NewCodedError("proof_type_unsupported", "invalid or unsupported proof type")
-	ErrNetworkFailed             = common.NewCodedError("network_request_failed", "network request failed")
-	ErrTimeoutExpired            = common.NewCodedError("request_timeout_expired", "request timeout expired")
-	ErrPluginNotFound            = common.NewCodedError("receiver_plugin_not_found", "receiver plugin not found")
-	ErrNilPlugin                 = common.NewCodedError("receiver_plugin_nil", "receiver plugin cannot be nil")
+	// ErrPARResponseInvalid reports an RFC 9126 Section 2.2 pushed
+	// authorization response without a request_uri or without a positive
+	// expires_in, both REQUIRED.
+	ErrPARResponseInvalid    = common.NewCodedError("par_response_invalid", "invalid pushed authorization response")
+	ErrProofGenerationFailed = common.NewCodedError("proof_generation_failed", "proof generation failed")
+	ErrUseDPoPNonce          = common.NewCodedError("dpop_nonce_required", "use DPoP nonce")
+	ErrInvalidProofType      = common.NewCodedError("proof_type_unsupported", "invalid or unsupported proof type")
+	ErrNetworkFailed         = common.NewCodedError("network_request_failed", "network request failed")
+	ErrTimeoutExpired        = common.NewCodedError("request_timeout_expired", "request timeout expired")
+	ErrPluginNotFound        = common.NewCodedError("receiver_plugin_not_found", "receiver plugin not found")
+	ErrNilPlugin             = common.NewCodedError("receiver_plugin_nil", "receiver plugin cannot be nil")
 )
 
 // ReceiverError represents an error during credential receiving operations
@@ -220,11 +225,12 @@ type CredentialIssuerMetadata struct {
 	AuthorizationServers             []common.URIField                  `json:"authorization_servers,omitempty"`
 	Display                          []CredentialIssuerMetadataDisplay  `json:"display,omitempty"`
 	CredentialConfigurationSupported map[string]CredentialConfiguration `json:"credential_configurations_supported,omitempty"`
-	// SignedMetadata holds the OpenID4VCI 1.0 §12.2.3 signed Credential Issuer
-	// Metadata. §12.2.3 requires the issuer to secure the metadata with a JWS
-	// (alg MUST NOT be none or a MAC identifier, typ MUST be
-	// openidvci-issuer-metadata+jwt) and to return it with media type
-	// application/jwt; the wallet retains the compact serialization here.
+	// SignedMetadata is the compact JWS of signed Credential Issuer Metadata
+	// the receiver verified: the OpenID4VCI 1.0 §12.2.3 application/jwt
+	// response (typ openidvci-issuer-metadata+jwt), or the Draft 13 §11.2.3
+	// signed_metadata member, whose verified claims the metadata carries. It
+	// is empty whenever MetadataSignature is nil; an unverified
+	// signed_metadata member stays readable in RawDocument only.
 	SignedMetadata string `json:"signed_metadata,omitempty"`
 	// MetadataSignature records the outcome of verifying SignedMetadata so
 	// callers can audit the signer. It is internal state and never serialized
@@ -360,13 +366,19 @@ var coseAlgToJWA = map[int64]jose.SignatureAlgorithm{
 
 // UnmarshalJSON implements json.Unmarshaler. It accepts a JWA algorithm name or
 // a numeric COSE algorithm identifier, which it maps to the matching JWA name.
+// A COSE identifier without a JWA counterpart is kept as its decimal text:
+// OpenID4VCI 1.0 Section 12.2.4 leaves the identifiers of
+// credential_signing_alg_values_supported to the Credential Format (mso_mdoc
+// uses COSE identifiers, Appendix A.2), and one the wallet does not know must
+// not make the whole metadata unreadable.
 func (c *SignatureAlgorithm) UnmarshalJSON(raw []byte) error {
 	var coseID int64
 	if err := json.Unmarshal(raw, &coseID); err == nil {
 		// COSE algorithm identifier
 		alg, ok := coseAlgToJWA[coseID]
 		if !ok {
-			return fmt.Errorf("unsupported COSE algorithm identifier %d", coseID)
+			*c = SignatureAlgorithm(strconv.FormatInt(coseID, 10))
+			return nil
 		}
 		*c = SignatureAlgorithm(alg)
 		return nil
@@ -464,10 +476,13 @@ type AuthorizationServerMetadata struct {
 	Issuer                                     common.URIField `json:"issuer"`
 	// AuthorizationResponseIssParameterSupported advertises RFC 9207 support:
 	// the authorization response then carries iss, which the wallet validates.
-	AuthorizationResponseIssParameterSupported         *bool                      `json:"authorization_response_iss_parameter_supported,omitempty"`
-	AuthorizationEndpoint                              *common.URIField           `json:"authorization_endpoint,omitempty"`
-	TokenEndpoint                                      *common.URIField           `json:"token_endpoint,omitempty"`
-	PushedAuthorizationRequestEndpoint                 *common.URIField           `json:"pushed_authorization_request_endpoint,omitempty"`
+	AuthorizationResponseIssParameterSupported *bool            `json:"authorization_response_iss_parameter_supported,omitempty"`
+	AuthorizationEndpoint                      *common.URIField `json:"authorization_endpoint,omitempty"`
+	TokenEndpoint                              *common.URIField `json:"token_endpoint,omitempty"`
+	PushedAuthorizationRequestEndpoint         *common.URIField `json:"pushed_authorization_request_endpoint,omitempty"`
+	// RequirePushedAuthorizationRequests is the RFC 9126 Section 5 member: true
+	// means the server accepts authorization request data only through PAR.
+	RequirePushedAuthorizationRequests                 *bool                      `json:"require_pushed_authorization_requests,omitempty"`
 	ChallengeEndpoint                                  *common.URIField           `json:"challenge_endpoint,omitempty"`
 	DPoPSigningAlgValuesSupported                      *[]jose.SignatureAlgorithm `json:"dpop_signing_alg_values_supported,omitempty"`
 	JwksUri                                            *common.URIField           `json:"jwks_uri,omitempty"`
@@ -714,10 +729,12 @@ type PushedAuthorizationRequest struct {
 	IssuerState          string
 }
 
-// PushedAuthorizationResponse is the RFC 9126 pushed authorization response.
+// PushedAuthorizationResponse is the RFC 9126 Section 2.2 pushed
+// authorization response. Both members are REQUIRED: the request_uri, and its
+// lifetime in seconds as a positive integer.
 type PushedAuthorizationResponse struct {
 	RequestURI string `json:"request_uri"`
-	ExpiresIn  int    `json:"expires_in,omitempty"`
+	ExpiresIn  int    `json:"expires_in"`
 }
 
 // ClientAssertionFactory builds a client_assertion for one HTTP attempt; RFC

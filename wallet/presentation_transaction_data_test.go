@@ -92,10 +92,10 @@ func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry,
 	require.NoError(t, err)
 	issuer, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	saved, err := controller.ReceiveCredential(ReceiveCredentialRequest{
+	saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"identity"},
 			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}}},
-		Type: receiverTypes.Oid4vci, Key: holder,
+		Key: holder,
 	})
 	require.NoError(t, err)
 	require.Equal(t, wire, string(saved.Entry.Raw))

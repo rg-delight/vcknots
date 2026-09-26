@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/credential"
@@ -135,7 +137,7 @@ func (f *acceptanceFixture) receive(t *testing.T) (*SavedCredential, error) {
 	t.Helper()
 	issuer, err := url.Parse(f.server.URL)
 	require.NoError(t, err)
-	return f.wallet.ReceiveCredential(ReceiveCredentialRequest{
+	return f.wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer:           issuer,
 			CredentialConfigurationIDs: []string{"acceptance-config"},
@@ -143,8 +145,7 @@ func (f *acceptanceFixture) receive(t *testing.T) (*SavedCredential, error) {
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  f.holder,
+		Key: f.holder,
 	})
 }
 
@@ -155,7 +156,7 @@ func (f *acceptanceFixture) receiveUnder(t *testing.T, policy *acceptance.Policy
 	t.Helper()
 	issuer, err := url.Parse(f.server.URL)
 	require.NoError(t, err)
-	return f.wallet.ReceiveCredential(ReceiveCredentialRequest{
+	return f.wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer:           issuer,
 			CredentialConfigurationIDs: []string{"acceptance-config"},
@@ -163,7 +164,6 @@ func (f *acceptanceFixture) receiveUnder(t *testing.T, policy *acceptance.Policy
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
 			},
 		},
-		Type:       receiverTypes.Oid4vci,
 		Key:        f.holder,
 		Acceptance: policy,
 	})
@@ -510,7 +510,7 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 		require.ErrorIs(t, err, acceptance.ErrCredentialTypInvalid)
 
 		draft13 := final
-		draft13.IssuanceVersion = IssuanceVersionDraft13
+		draft13.Version = profile.VersionDraft13
 		w13, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final(), profile.Draft13()}, CredStore: newAcceptanceStore(t), CredentialAcceptance: acceptIssuerKeyPolicy(issuerKey)})
 		require.NoError(t, err)
 		_, _, err = w13.VerifyCredentialForAcceptance(context.Background(), draft13)
@@ -640,4 +640,26 @@ func TestVerifyCredentialForAcceptanceUsesTheWalletPolicy(t *testing.T) {
 	unconfigured, _ := newAcceptanceWallet(t, profile.Final(), nil)
 	_, _, err = unconfigured.VerifyCredentialForAcceptance(t.Context(), request(&holder))
 	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
+}
+
+// storeAndParseCredential verifies wire under policy and the Draft 13 profile
+// and stores it, as the Draft 13 issuance path does after a Credential
+// Response. Nothing is stored when verification fails.
+func (w *Wallet) storeAndParseCredential(ctx context.Context, policy *acceptance.Policy, credentialIssuer string, wire *string, flavor credential.SupportedSerializationFlavor, holderKey *jose.JSONWebKey) (*SavedCredential, error) {
+	parsed, verification, err := w.verifyCredentialUnder(ctx, profile.Draft13(), policy, []byte(*wire), flavor, holderKey, credentialIssuer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify credential: %w", err)
+	}
+	if w.credStore == nil {
+		return nil, ErrNoCredentialStore
+	}
+	saved := &SavedCredential{
+		Credential:   parsed,
+		Entry:        &credstoreTypes.CredentialEntry{Id: uuid.NewString(), ReceivedAt: time.Now(), Raw: []byte(*wire), MimeType: string(flavor)},
+		Verification: verification,
+	}
+	if err := w.saveCredentials([]*SavedCredential{saved}); err != nil {
+		return nil, err
+	}
+	return saved, nil
 }

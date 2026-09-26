@@ -363,8 +363,7 @@ func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
 			},
 		},
-		Type: receiverTypes.Oid4vci,
-		Key:  holder,
+		Key: holder,
 	}
 }
 
@@ -386,13 +385,13 @@ func TestReceiveCredentialDraftRequiresAPolicy(t *testing.T) {
 	w, err := NewWalletWithConfig(Config{CredStore: store, Receiver: receiving})
 	require.NoError(t, err)
 
-	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	_, err = w.ReceiveCredential(t.Context(), draftReceiveRequest(t, server, holder))
 	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
 	require.Equal(t, 0, acceptanceEntryCount(t, store))
 
 	request := draftReceiveRequest(t, server, holder)
 	request.Acceptance = acceptIssuerKeyPolicy(issuerKey)
-	saved, err := w.ReceiveCredential(request)
+	saved, err := w.ReceiveCredential(t.Context(), request)
 	require.NoError(t, err)
 	require.NotNil(t, saved.Verification.IssuerKey)
 	require.Equal(t, 1, acceptanceEntryCount(t, store))
@@ -419,7 +418,7 @@ func TestReceiveCredentialIsRefusedUnderHAIP(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = w.ReceiveCredential(draftReceiveRequest(t, server, holder))
+	_, err = w.ReceiveCredential(t.Context(), draftReceiveRequest(t, server, holder))
 	require.ErrorIs(t, err, ErrProfileForbidsDraft)
 	require.Equal(t, 0, acceptanceEntryCount(t, store))
 }

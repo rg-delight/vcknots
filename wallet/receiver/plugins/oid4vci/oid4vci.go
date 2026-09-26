@@ -79,12 +79,26 @@ func (o *Oid4vciReceiver) profileOptions() (profile.Options, error) {
 
 // requireSecureTransport rejects the experimental HTTP escape under
 // Options.ForbidExperimental (HAIP §4 requires TLS for issuer and
-// authorization server endpoints).
+// authorization server endpoints). Every exchange applies it (do), so a
+// receiver built with a HAIP profile and an experimental transport sends
+// nothing, whether or not the wallet constructed it.
 func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error {
 	if options.ForbidExperimental && o.Experimental != (experimental.Transport{}) {
 		return fmt.Errorf("%w: %w does not permit Experimental.Transport", common.ErrInvalidInput, profile.Refused("ForbidExperimental"))
 	}
 	return nil
+}
+
+// ValidateProfile reports whether the receiver's own settings satisfy its
+// profile: a draft profile is refused, and Options.ForbidExperimental
+// refuses Experimental.Transport. The wallet calls it on an injected plugin
+// before it accepts the plugin; every exchange applies the same rules.
+func (o *Oid4vciReceiver) ValidateProfile() error {
+	options, err := o.profileOptions()
+	if err != nil {
+		return err
+	}
+	return o.requireSecureTransport(options)
 }
 
 // ErrHTTPRedirectNotAllowed reports that an OpenID4VCI endpoint answered with

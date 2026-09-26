@@ -1,12 +1,14 @@
 package wallet
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -477,4 +480,27 @@ func TestResolveClientAssertionAudience(t *testing.T) {
 		&receiverTypes.AuthorizationServerMetadata{},
 		tokenEndpoint,
 	))
+}
+
+// generateDPoPProof builds one DPoP proof through jwtproof.DPoP; a nil or
+// empty nonce omits the claim. The wallet's own requests use
+// dpopProofFactory; this helper lets the tests pin the proof shape.
+func (w *Wallet) generateDPoPProof(key IKeyEntry, method, targetURL, accessToken string, nonce *string) (string, error) {
+	if key == nil {
+		return "", fmt.Errorf("dpop key is required")
+	}
+	options := jwtproof.DPoPOptions{Method: method, URL: targetURL, AccessToken: accessToken}
+	if nonce != nil {
+		options.Nonce = *nonce
+	}
+	proof, err := jwtproof.DPoP(context.Background(), key, options)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize dpop proof: %w", err)
+	}
+	return proof, nil
+}
+
+// generateClientAssertion is clientAssertion without a context.
+func (w *Wallet) generateClientAssertion(key IKeyEntry, clientID, audience string, alg jose.SignatureAlgorithm) (string, error) {
+	return clientAssertion(context.Background(), key, clientID, audience, alg)
 }

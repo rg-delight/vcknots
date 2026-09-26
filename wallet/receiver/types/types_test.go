@@ -41,9 +41,11 @@ func TestSignatureAlgorithmUnmarshalJSON(t *testing.T) {
 			expected: SignatureAlgorithm(jose.PS512),
 		},
 		{
-			name:    "unsupported COSE identifier",
-			raw:     `999`,
-			wantErr: true,
+			// OpenID4VCI 1.0 Section 12.2.4: an identifier the wallet does not
+			// know is kept, not a reason to refuse the metadata.
+			name:     "COSE identifier without a JWA name",
+			raw:      `999`,
+			expected: SignatureAlgorithm("999"),
 		},
 		{
 			name:    "invalid JSON",

@@ -25,7 +25,7 @@ func (w *Wallet) RequestDeferredCredential(ctx context.Context, d *DeferredIssua
 }
 
 func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssuance) (*IssuanceResult, error) {
-	if err := checkDeferred(d, IssuanceVersionFinal, w.profile); err != nil {
+	if err := checkDeferred(d, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
@@ -68,7 +68,7 @@ func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssua
 		}
 		request["credential_response_encryption"] = encryption
 	}
-	body, contentType, err := transport.EncodeCredentialRequest(request, md)
+	body, contentType, err := transport.EncodeCredentialRequest(request, w.issuance.CredentialEncryption.requestEncodingMetadata(md))
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode deferred credential request: %w", err)
 	}
@@ -110,14 +110,10 @@ func pendingDeferred(d *DeferredIssuance, w *Wallet, discovery *issuanceDiscover
 	return &IssuanceResult{Deferred: &pending}
 }
 
-// checkDeferred checks that d is a complete state of version, recorded under
-// current.
-func checkDeferred(d *DeferredIssuance, version IssuanceVersion, current profile.Profile) error {
+// checkDeferred checks that d is a complete state recorded under current.
+func checkDeferred(d *DeferredIssuance, current profile.Profile) error {
 	if d == nil {
 		return invalidArgument("deferred issuance is required")
-	}
-	if d.Version != version {
-		return fmt.Errorf("deferred issuance has version %q: %w", d.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("deferred issuance", d.Profile, current); err != nil {
 		return err

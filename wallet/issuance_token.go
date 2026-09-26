@@ -140,7 +140,6 @@ func (w *Wallet) newFinalGrant(
 		cNonce = nonce.CNonce
 	}
 	grant := &IssuanceGrant{
-		Version:                   IssuanceVersionFinal,
 		Profile:                   w.profile,
 		CredentialIssuer:          md.CredentialIssuer,
 		CredentialConfigurationID: configurationID,

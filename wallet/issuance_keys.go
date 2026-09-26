@@ -42,29 +42,6 @@ func dpopProofFactory(ctx context.Context, key IKeyEntry, method, endpoint, acce
 	}
 }
 
-// generateDPoPProof builds one DPoP proof; a nil or empty nonce omits the
-// claim.
-func (w *Wallet) generateDPoPProof(key IKeyEntry, method, targetURL, accessToken string, nonce *string) (string, error) {
-	if key == nil {
-		return "", fmt.Errorf("dpop key is required")
-	}
-	options := jwtproof.DPoPOptions{Method: method, URL: targetURL, AccessToken: accessToken}
-	if nonce != nil {
-		options.Nonce = *nonce
-	}
-	proof, err := jwtproof.DPoP(context.Background(), key, options)
-	if err != nil {
-		return "", fmt.Errorf("failed to serialize dpop proof: %w", err)
-	}
-	return proof, nil
-}
-
-// generateClientAssertion builds an RFC 7523 private_key_jwt client assertion
-// (iss and sub are clientID) signed with alg, one of ES256, ES384 or ES512.
-func (w *Wallet) generateClientAssertion(key IKeyEntry, clientID, audience string, alg jose.SignatureAlgorithm) (string, error) {
-	return clientAssertion(context.Background(), key, clientID, audience, alg)
-}
-
 func clientAssertion(ctx context.Context, key IKeyEntry, clientID, audience string, alg jose.SignatureAlgorithm) (string, error) {
 	if key == nil {
 		return "", fmt.Errorf("client auth key is required")

@@ -103,10 +103,18 @@ type offeredIssuance struct {
 	issuer          string
 	configurationID string
 	grant           *CredentialOfferGrant
+	// grantFromMetadata records an offer without grants, whose
+	// authorization_code grant is determined from the authorization server
+	// metadata (checkOfferedAuthorizationCodeGrant); grant is then empty.
+	grantFromMetadata bool
 }
 
 // fromOffer resolves the issuer, the selected configuration (requested, which
-// must be offered, or the first) and the grant of grantType.
+// must be offered, or the first) and the grant of grantType. An offer whose
+// grants are absent or empty leaves the grant type to the metadata
+// (OpenID4VCI 1.0 and Draft 13 Section 4.1.1), so it yields an empty
+// authorization_code grant marked grantFromMetadata; a pre-authorized_code
+// grant can only come from the offer.
 func fromOffer(offer *CredentialOffer, requested, grantType string, grantMissing error) (offeredIssuance, error) {
 	if offer.CredentialIssuer == nil || offer.CredentialIssuer.String() == "" {
 		return offeredIssuance{}, invalidArgument("credential offer names no credential issuer")
@@ -120,11 +128,38 @@ func fromOffer(offer *CredentialOffer, requested, grantType string, grantMissing
 	} else if !slices.Contains(offer.CredentialConfigurationIDs, configurationID) {
 		return offeredIssuance{}, fmt.Errorf("%w: credential configuration %q is not offered: %w", ErrInvalidArgument, configurationID, ErrUnknownCredentialConfiguration)
 	}
-	grant := offer.Grants[grantType]
-	if grant == nil {
+	offered := offeredIssuance{issuer: offer.CredentialIssuer.String(), configurationID: configurationID}
+	offered.grant, offered.grantFromMetadata = offerGrant(offer, grantType)
+	if offered.grant == nil {
 		return offeredIssuance{}, grantMissing
 	}
-	return offeredIssuance{issuer: offer.CredentialIssuer.String(), configurationID: configurationID, grant: grant}, nil
+	return offered, nil
+}
+
+// offerGrant returns the grant of grantType the offer names. An offer whose
+// grants are absent or empty names none, and then OpenID4VCI 1.0 and Draft 13
+// Section 4.1.1 say "the Wallet MUST determine the Grant Types the Credential
+// Issuer's Authorization Server supports using the respective metadata": for
+// the authorization_code grant, which needs no parameter from the offer,
+// offerGrant returns an empty grant and fromMetadata. The caller checks the
+// metadata with checkOfferedAuthorizationCodeGrant.
+func offerGrant(offer *CredentialOffer, grantType string) (grant *CredentialOfferGrant, fromMetadata bool) {
+	if len(offer.Grants) == 0 && grantType == string(receiverTypes.AuthorizationCode) {
+		return &CredentialOfferGrant{}, true
+	}
+	return offer.Grants[grantType], false
+}
+
+// checkOfferedAuthorizationCodeGrant applies OpenID4VCI 1.0 and Draft 13
+// Section 4.1.1 to an offer without grants: the authorization server metadata
+// decides, and RFC 8414 Section 2 reads an absent grant_types_supported as
+// ["authorization_code", "implicit"].
+func checkOfferedAuthorizationCodeGrant(fromMetadata bool, as *receiverTypes.AuthorizationServerMetadata) error {
+	if !fromMetadata || as.GrantTypesSupported == nil || slices.Contains(*as.GrantTypesSupported, receiverTypes.AuthorizationCode) {
+		return nil
+	}
+	return fmt.Errorf("%w: the credential offer names no grant and the authorization server grant_types_supported %v lacks authorization_code",
+		ErrAuthorizationCodeGrantUnsupported, *as.GrantTypesSupported)
 }
 
 // validateCredentialIssuerIdentifier applies the Credential Issuer Identifier

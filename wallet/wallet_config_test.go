@@ -128,7 +128,7 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 	t.Run("the experimental transport reaches the plugins the wallet builds", func(t *testing.T) {
 		w, err := NewWalletWithConfig(Config{Storeless: true, Experimental: experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}})
 		require.NoError(t, err)
-		require.True(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
+		require.True(t, receiverAllowsHTTP(t, w))
 		for _, plugin := range w.presenter.Plugins() {
 			require.True(t, plugin.(*oid4vp.Oid4vpPresenter).Experimental.Transport.AllowHTTP)
 		}
@@ -138,7 +138,7 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		t.Setenv("VCKNOTS_WALLET_HTTP_ALLOWED", "true")
 		w, err := NewWalletWithConfig(Config{Storeless: true})
 		require.NoError(t, err)
-		require.False(t, w.receiverAllowsHTTP(receiverTypes.Oid4vci))
+		require.False(t, receiverAllowsHTTP(t, w))
 		for _, plugin := range w.presenter.Plugins() {
 			require.False(t, plugin.(*oid4vp.Oid4vpPresenter).Experimental.Transport.AllowHTTP)
 		}
@@ -189,7 +189,7 @@ func TestSetReceiverRefusalReachesReceiveCredential(t *testing.T) {
 
 	issuer, err := url.Parse("https://issuer.example")
 	require.NoError(t, err)
-	_, err = w.ReceiveCredential(ReceiveCredentialRequest{
+	_, err = w.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer:           issuer,
 			CredentialConfigurationIDs: []string{"pid"},
@@ -197,7 +197,6 @@ func TestSetReceiverRefusalReachesReceiveCredential(t *testing.T) {
 				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
 			},
 		},
-		Type:       receiverTypes.Oid4vci,
 		Key:        newMockKeyEntry(),
 		Acceptance: mockIssuerAcceptance(),
 	})
@@ -209,4 +208,14 @@ func TestGenerateDIDRejectsATypeIDThatIsNotADID(t *testing.T) {
 	require.NoError(t, err)
 	_, err = w.GenerateDID(DIDCreateOptions{TypeID: "key"})
 	requireCoded(t, err, ErrInvalidArgument)
+}
+
+// receiverAllowsHTTP reports whether w's OpenID4VCI receiver accepts plain
+// http endpoints.
+func receiverAllowsHTTP(t *testing.T, w *Wallet) bool {
+	t.Helper()
+	transport, err := w.receiver.Draft13Transport(receiverTypes.Oid4vci)
+	require.NoError(t, err)
+	policy, ok := transport.(receiverTypes.HTTPSchemePolicy)
+	return ok && policy.HTTPAllowed()
 }

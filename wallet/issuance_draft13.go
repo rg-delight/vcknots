@@ -22,9 +22,10 @@ import (
 
 // Draft13Issuance runs OpenID4VCI Draft 13 issuances with the same staged
 // methods and state types as the Wallet's 1.0 methods; the states carry
-// IssuanceVersionDraft13. Differences from 1.0: an offer is required, the
-// c_nonce comes from the Token Response and the Credential Response, one key
-// proof is sent, and there are no key attestations or credential encryption.
+// profile.Draft13 as their Profile. Differences from 1.0: an offer is
+// required, the c_nonce comes from the Token Response and the Credential
+// Response, one key proof is sent, and there are no key attestations or
+// credential encryption.
 // Every method returns ErrProfileForbidsDraft under HAIP.
 type Draft13Issuance struct {
 	w *Wallet
@@ -36,7 +37,8 @@ func (w *Wallet) Draft13() *Draft13Issuance {
 }
 
 // BeginIssuance starts a Draft 13 Authorization Code Flow (Section 3.4): it
-// requires an offer with an authorization_code grant, pushes the
+// requires an offer with an authorization_code grant, or without grants when
+// the authorization server supports that grant (Section 4.1.1), pushes the
 // authorization request when the server supports PAR, and returns the state
 // holding the URL to open in the holder's browser.
 func (d *Draft13Issuance) BeginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
@@ -69,9 +71,14 @@ func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *Issuance
 	return result, classify(err)
 }
 
+// draft13DefaultPendingInterval is the wait, in seconds, of an
+// issuance_pending error that names no interval (Draft 13 Section 9.3).
+const draft13DefaultPendingInterval = 5
+
 // RequestDeferredCredential sends one Draft 13 Deferred Credential Request
 // (Section 9). While the issuer answers issuance_pending, the result's
-// Deferred carries the interval it named.
+// Deferred carries the interval it named, or the Section 9.3 default of five
+// seconds. The library never shortens the issuer's interval.
 func (d *Draft13Issuance) RequestDeferredCredential(ctx context.Context, deferred *DeferredIssuance) (*IssuanceResult, error) {
 	result, err := d.requestDeferredCredential(ctx, deferred)
 	return result, classify(err)
@@ -212,7 +219,7 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	if err := d.checkOfferIssuer(transport, req.CredentialOffer); err != nil {
 		return nil, err
 	}
-	grant := req.CredentialOffer.Grants["authorization_code"]
+	grant, grantFromMetadata := offerGrant(req.CredentialOffer, string(receiverTypes.AuthorizationCode))
 	if grant == nil {
 		return nil, ErrDraft13AuthorizationCodeGrantMissing
 	}
@@ -227,6 +234,12 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	md, as := discovery.issuerMetadata, discovery.asMetadata
 	if as.AuthorizationEndpoint == nil {
 		return nil, ErrDraft13AuthorizationEndpointMissing
+	}
+	if err := requireSecureAuthorizationEndpoint(transport, as.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
+	if err := checkOfferedAuthorizationCodeGrant(grantFromMetadata, as); err != nil {
+		return nil, err
 	}
 	configurationID, config, err := selectDraft13Configuration(req.CredentialOffer, req.CredentialConfigurationID, md)
 	if err != nil {
@@ -253,7 +266,6 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		IssuerState:          grant.IssuerState,
 	}
 	authorization := &IssuanceAuthorization{
-		Version:                       IssuanceVersionDraft13,
 		Profile:                       profile.Draft13(),
 		State:                         state,
 		CodeVerifier:                  verifier,
@@ -264,18 +276,18 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		RedirectURI:                   redirectURI,
 		AuthorizationDetailsRequested: len(details) > 0,
 	}
+	usePAR, err := pushedAuthorizationRequired(as, false)
+	if err != nil {
+		return nil, err
+	}
 	requestURI := ""
-	if as.PushedAuthorizationRequestEndpoint != nil {
+	if usePAR {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, d.tokenAuthentication(ctx, as, false))
-		if err != nil {
-			return nil, fmt.Errorf("failed to push authorization request: %w", err)
-		}
-		requestURI = pushed.RequestURI
-		if pushed.ExpiresIn > 0 {
-			authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+		if requestURI, err = acceptPushedAuthorization(authorization, pushed, err); err != nil {
+			return nil, err
 		}
 	}
 	authorization.AuthorizationURL = authorizationRequestURL(as.AuthorizationEndpoint, clientID, request, requestURI)
@@ -300,7 +312,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err != nil {
 		return nil, err
 	}
-	if err := d.w.checkAuthorizationState(a, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := d.w.checkAuthorizationState(a, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
@@ -337,7 +349,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	}
 	mode := authorizationDetailsOptional
 	if a.AuthorizationDetailsRequested {
-		mode = authorizationDetailsRequired
+		mode = authorizationDetailsEntryRequired
 	}
 	return d.newGrant(discovery, a.CredentialConfigurationID, token, mode)
 }
@@ -353,6 +365,11 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	grant := req.CredentialOffer.Grants[string(receiverTypes.PreAuthorizedCode)]
 	if grant == nil || strings.TrimSpace(grant.PreAuthorizedCode) == "" {
 		return nil, ErrDraft13PreAuthorizedCodeGrantMissing
+	}
+	// Section 6.1: tx_code "MUST be present if a tx_code object was present
+	// in the Credential Offer (including if the object was empty)", as in 1.0.
+	if err := checkTxCode(grant, req.TxCode); err != nil {
+		return nil, err
 	}
 	hint := strings.TrimSpace(req.AuthorizationServer)
 	if hint == "" {
@@ -393,12 +410,15 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 // newGrant collects the Token Response into a Draft 13 grant; its c_nonce is
 // the Token Response's (Draft 13 Section 6.2).
 func (d *Draft13Issuance) newGrant(discovery *issuanceDiscovery, configurationID string, token *receiverTypes.CredentialIssuanceAccessToken, mode authorizationDetailsMode) (*IssuanceGrant, error) {
-	if token == nil || strings.TrimSpace(token.Token) == "" {
-		return nil, fmt.Errorf("%w: token response did not contain an access token", receiverTypes.ErrInvalidTokenResponse)
+	// RFC 6749 Sections 5.1 and 7.1: token_type is REQUIRED, and a client
+	// "MUST NOT use an access token if it does not understand the token
+	// type"; the wallet presents Bearer (RFC 6750) and DPoP (RFC 9449).
+	if err := d.w.checkTokenType(token); err != nil {
+		return nil, err
 	}
 	identifiers, err := credentialIdentifiersFor(token, configurationID, mode)
 	if err != nil {
-		if mode == authorizationDetailsRequired {
+		if mode != authorizationDetailsOptional {
 			return nil, err
 		}
 		// Authorization details for another configuration do not stop a
@@ -406,7 +426,6 @@ func (d *Draft13Issuance) newGrant(discovery *issuanceDiscovery, configurationID
 		identifiers = nil
 	}
 	grant := &IssuanceGrant{
-		Version:                   IssuanceVersionDraft13,
 		Profile:                   profile.Draft13(),
 		CredentialIssuer:          discovery.issuerMetadata.CredentialIssuer,
 		CredentialConfigurationID: configurationID,
@@ -452,7 +471,7 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if err := d.w.requireDraft13(); err != nil {
 		return nil, err
 	}
-	if err := checkGrant(grant, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := checkGrant(grant, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	if len(req.HolderKeys) > 1 {
@@ -485,9 +504,9 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if endpoint.String() == "" {
 		return nil, ErrDraft13CredentialEndpointMissing
 	}
-	identifier := ""
-	if len(grant.CredentialIdentifiers) > 0 {
-		identifier = grant.CredentialIdentifiers[0]
+	identifier, err := selectCredentialIdentifier(grant, req.CredentialIdentifier)
+	if err != nil {
+		return nil, err
 	}
 	token := *grant.AccessToken
 	dpop := dpopProofFactory(ctx, dpopKey, http.MethodPost, endpoint.String(), token.Token)
@@ -522,7 +541,6 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 		return &IssuanceResult{
 			CredentialResponse: draft13CredentialResponse(response),
 			Deferred: &DeferredIssuance{
-				Version:                   IssuanceVersionDraft13,
 				Profile:                   profile.Draft13(),
 				CredentialIssuer:          md.CredentialIssuer,
 				CredentialConfigurationID: grant.CredentialConfigurationID,
@@ -559,7 +577,7 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 			}
 		}
 	}
-	if !shouldAttachCredentialRequestProof(ReceiveCredentialRequest{}, &config) {
+	if key == nil && !draft13ProofRequired(config) {
 		return request, nil
 	}
 	if err := ensureJWTProofSupported(&config); err != nil {
@@ -568,7 +586,10 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 	if key == nil {
 		return nil, ErrDraft13HolderKeyMissing
 	}
-	binding := resolveCredentialRequestProofBindingMethod(&config)
+	binding, err := resolveCredentialRequestProofBindingMethod(&config)
+	if err != nil {
+		return nil, err
+	}
 	keyID := ""
 	if binding == credentialRequestProofBindingMethodKID {
 		did, err := d.w.GenerateDID(DIDCreateOptions{TypeID: "did:key", PublicKey: key.PublicKey()})
@@ -605,7 +626,6 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, policy *acceptan
 	result := &IssuanceResult{CredentialResponse: draft13CredentialResponse(response)}
 	if response.NotificationID != "" {
 		result.Notification = &IssuanceNotification{
-			Version:           IssuanceVersionDraft13,
 			Profile:           profile.Draft13(),
 			CredentialIssuer:  md.CredentialIssuer,
 			NotificationID:    response.NotificationID,
@@ -661,7 +681,7 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err := d.w.requireDraft13(); err != nil {
 		return nil, err
 	}
-	if err := checkDeferred(deferred, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := checkDeferred(deferred, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	policy, err := d.w.deferredAcceptancePolicy(deferred)
@@ -687,7 +707,13 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err != nil {
 		var endpointError *receiverTypes.Draft13CredentialEndpointError
 		if errors.As(err, &endpointError) && errors.Is(endpointError, receiverTypes.ErrDraft13IssuancePending) {
-			return pendingDeferred(deferred, d.w, discovery, endpointError.Interval), nil
+			interval := endpointError.Interval
+			if interval <= 0 {
+				// Section 9.3: "If interval member is not present, the Wallet
+				// MUST use 5 as the default value."
+				interval = draft13DefaultPendingInterval
+			}
+			return pendingDeferred(deferred, d.w, discovery, interval), nil
 		}
 		return nil, fmt.Errorf("deferred credential request failed: %w", err)
 	}
@@ -702,7 +728,7 @@ func (d *Draft13Issuance) notifyIssuer(ctx context.Context, n *IssuanceNotificat
 	if err := d.w.requireDraft13(); err != nil {
 		return err
 	}
-	if err := checkNotification(n, IssuanceVersionDraft13, profile.Draft13(), event, description); err != nil {
+	if err := checkNotification(n, profile.Draft13(), event, description); err != nil {
 		return err
 	}
 	transport, discovery, dpopKey, err := d.credentialStage(ctx, nil, n.CredentialIssuer, n.AccessToken, n.DPoPKeyThumbprint, ErrNotificationDPoPKeyMissing)

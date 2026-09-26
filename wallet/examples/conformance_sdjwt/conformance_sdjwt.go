@@ -12,126 +12,20 @@ package main
 //  3. Execute: go run conformance_sdjwt.go "<openid-credential-offer-uri>"
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/examples/common"
-	"github.com/trustknots/vcknots/wallet/receiver"
 )
 
 const preAuthorizedGrantType = "urn:ietf:params:oauth:grant-type:pre-authorized_code"
 
-const (
-	credentialOfferRequestTimeout  = 10 * time.Second
-	maxCredentialOfferResponseSize = 1 << 20
-)
-
 var txCodeInDescriptionPattern = regexp.MustCompile(`<([^<>]+)>`)
-
-var credentialOfferHTTPClient = &http.Client{
-	Timeout: credentialOfferRequestTimeout,
-	CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-		if !strings.EqualFold(req.URL.Scheme, "https") {
-			return fmt.Errorf("credential_offer_uri redirect must use HTTPS")
-		}
-		return nil
-	},
-}
-
-func fetchCredentialOffer(credentialOfferURI string) (string, error) {
-	parsedURI, err := url.Parse(credentialOfferURI)
-	if err != nil {
-		return "", fmt.Errorf("invalid credential_offer_uri: %w", err)
-	}
-	if !strings.EqualFold(parsedURI.Scheme, "https") {
-		return "", fmt.Errorf("credential_offer_uri must use HTTPS")
-	}
-
-	resp, err := credentialOfferHTTPClient.Get(parsedURI.String())
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch credential_offer_uri: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCredentialOfferResponseSize+1))
-	if err != nil {
-		return "", fmt.Errorf("failed to read credential_offer_uri response: %w", err)
-	}
-	if int64(len(body)) > maxCredentialOfferResponseSize {
-		return "", fmt.Errorf("credential_offer_uri response exceeds %d bytes", maxCredentialOfferResponseSize)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("credential_offer_uri request failed: status=%d", resp.StatusCode)
-	}
-	if strings.TrimSpace(string(body)) == "" {
-		return "", fmt.Errorf("credential_offer_uri response body is empty")
-	}
-
-	return string(body), nil
-}
-
-// parseCredentialOffer resolves an openid-credential-offer:// URI into a wallet.CredentialOffer.
-// It supports both by_value (credential_offer param) and by_reference (credential_offer_uri param).
-func parseCredentialOffer(offerURI string, logger *slog.Logger) *wallet.CredentialOffer {
-	parsed, err := url.Parse(offerURI)
-	if err != nil {
-		logger.Error("Failed to parse offer URI", "error", err)
-		panic(err)
-	}
-
-	var offerJSON string
-	if v := parsed.Query().Get("credential_offer"); v != "" {
-		// by_value: JSON is embedded directly in the URL parameter
-		offerJSON = v
-	} else if uri := parsed.Query().Get("credential_offer_uri"); uri != "" {
-		offerJSON, err = fetchCredentialOffer(uri)
-		if err != nil {
-			logger.Error("Failed to fetch credential_offer_uri", "error", err)
-			panic(err)
-		}
-	} else {
-		panic(fmt.Errorf("neither credential_offer nor credential_offer_uri found in URI"))
-	}
-
-	logger.Info("Credential offer received")
-
-	var offerData struct {
-		CredentialIssuer           string                                  `json:"credential_issuer"`
-		CredentialConfigurationIDs []string                                `json:"credential_configuration_ids"`
-		Grants                     map[string]*wallet.CredentialOfferGrant `json:"grants"`
-	}
-	if err := json.Unmarshal([]byte(offerJSON), &offerData); err != nil {
-		logger.Error("Failed to parse credential offer JSON", "error", err)
-		panic(err)
-	}
-
-	issuerURL, err := url.Parse(offerData.CredentialIssuer)
-	if err != nil {
-		logger.Error("Failed to parse credential_issuer URL", "error", err)
-		panic(err)
-	}
-
-	logger.Info("Parsed credential offer",
-		"issuer", offerData.CredentialIssuer,
-		"configuration_ids", offerData.CredentialConfigurationIDs,
-	)
-
-	return &wallet.CredentialOffer{
-		CredentialIssuer:           issuerURL,
-		CredentialConfigurationIDs: offerData.CredentialConfigurationIDs,
-		Grants:                     offerData.Grants,
-	}
-}
 
 func validateAnonymousPreAuthorizedFlow(offer *wallet.CredentialOffer) error {
 	if offer == nil {
@@ -204,8 +98,19 @@ func main() {
 
 	logger.Info("Wallet initialized")
 
-	mockKey := common.NewMockKeyEntry()
-	offer := parseCredentialOffer(os.Args[1], logger)
+	ctx := context.Background()
+	holderKey := common.NewMockKeyEntry()
+	// ResolveCredentialOffer takes the by_value (credential_offer) and the
+	// by_reference (credential_offer_uri) forms of OpenID4VCI 1.0 Section 4.1.
+	offer, err := w.ResolveCredentialOffer(ctx, os.Args[1])
+	if err != nil {
+		logger.Error("Failed to resolve credential offer", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("Parsed credential offer",
+		"issuer", offer.CredentialIssuer.String(),
+		"configuration_ids", offer.CredentialConfigurationIDs,
+	)
 	if err := validateAnonymousPreAuthorizedFlow(offer); err != nil {
 		logger.Error("Invalid test plan / offer for this sample", "error", err)
 		logger.Error("Set Authorization Code Flow Variant to issuer_initiated and disable client_attestation-based client authentication")
@@ -217,17 +122,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	savedCredential, err := w.ReceiveCredential(wallet.ReceiveCredentialRequest{
+	// OpenID4VCI 1.0 Pre-Authorized Code Flow: the Token Request (Section
+	// 6), then the Credential Request (Section 8) with a key proof for the
+	// holder key.
+	grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{
 		CredentialOffer: offer,
-		Type:            receiver.Oid4vci,
-		Key:             mockKey,
-		RequestedFormat: credential.SDJwtVC,
 		TxCode:          txCode,
+	})
+	if err != nil {
+		logger.Error("Failed to obtain an access token", "error", err)
+		os.Exit(1)
+	}
+	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{
+		HolderKeys: []wallet.IKeyEntry{holderKey},
 	})
 	if err != nil {
 		logger.Error("Failed to receive credential", "error", err)
 		os.Exit(1)
 	}
+	if result.Deferred != nil || len(result.Credentials) == 0 {
+		logger.Error("The issuer deferred the credential; this sample does not poll")
+		os.Exit(1)
+	}
+	savedCredential := result.Credentials[0]
 
 	logger.Info("=== Credential Received ===")
 	logger.Info("Entry ID", "id", savedCredential.Entry.Id)
