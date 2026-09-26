@@ -553,20 +553,26 @@ func subjectDIDKey(claims map[string]any) (*jose.JSONWebKey, error) {
 	return &key, nil
 }
 
-// rawCredentialBytes unwraps a credentials element (Section 8.3: an object
-// whose credential member is a string or a JSON object).
+// rawCredentialBytes returns the credential of a credentials element: the
+// value of its credential member, as a string (a JWT-based or SD-JWT
+// credential) or, for a JSON credential such as ldp_vc, its JSON encoding.
+// OpenID4VCI 1.0 Section 8.3 defines the element as an object "containing
+// ... credential: REQUIRED" and, like the whole response, lets the issuer add
+// members the wallet ignores, so only the credential member is read, and only
+// one level down: a JSON credential keeps whatever members it has.
 func rawCredentialBytes(value any) ([]byte, error) {
-	switch credentialValue := value.(type) {
-	case string:
-		return []byte(credentialValue), nil
-	case []byte:
-		return credentialValue, nil
-	case map[string]any:
-		if inner, ok := credentialValue["credential"]; ok && len(credentialValue) == 1 {
-			return rawCredentialBytes(inner)
-		}
+	element, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("credentials element is %T, not an object", value)
 	}
-	raw, err := json.Marshal(value)
+	credentialValue, ok := element["credential"]
+	if !ok {
+		return nil, fmt.Errorf("credentials element has no credential member")
+	}
+	if text, ok := credentialValue.(string); ok {
+		return []byte(text), nil
+	}
+	raw, err := json.Marshal(credentialValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal credential value: %w", err)
 	}

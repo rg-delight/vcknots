@@ -387,7 +387,9 @@ func TestRequestCredential_NotificationAcceptedAfterStoreAndDeleted(t *testing.T
 }
 
 // OpenID4VCI 1.0 Section 8.3: each credentials entry is an object whose
-// credential member carries the issued credential.
+// credential member carries the issued credential; members the wallet does
+// not know are ignored, and a JSON credential is taken as it is, even when it
+// has a member named credential itself.
 func TestRawCredentialBytesUnwrapsFinalCredentialsEnvelope(t *testing.T) {
 	raw, err := rawCredentialBytes(map[string]any{"credential": "eyJ.abc.def~"})
 	require.NoError(t, err)
@@ -397,9 +399,32 @@ func TestRawCredentialBytesUnwrapsFinalCredentialsEnvelope(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, `{"kind":"object"}`, string(raw))
 
-	raw, err = rawCredentialBytes(map[string]any{"credential": "x", "other": 1})
+	raw, err = rawCredentialBytes(map[string]any{"credential": "x", "vendor_extension": "ignored"})
 	require.NoError(t, err)
-	require.JSONEq(t, `{"credential":"x","other":1}`, string(raw))
+	require.Equal(t, "x", string(raw))
+
+	raw, err = rawCredentialBytes(map[string]any{"credential": map[string]any{"credential": "inner", "type": []any{"VerifiableCredential"}}})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"credential":"inner","type":["VerifiableCredential"]}`, string(raw))
+
+	_, err = rawCredentialBytes("eyJ.abc.def~")
+	require.Error(t, err)
+}
+
+// An element with an extension member next to credential issues the
+// credential intact (Section 8.3), end to end.
+func TestRequestCredentialIgnoresUnknownMembersOfACredentialsElement(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.credentialHandler = func(w http.ResponseWriter, _ *http.Request) {
+			f.writeDefaultCredentialResponse(w, map[string]any{"credentials": []any{
+				map[string]any{"credential": f.issuedCredential, "vendor_extension": "ignored"},
+			}})
+		}
+	})
+	result, err := fixture.receive(fixture.issuanceRequest())
+	require.NoError(t, err)
+	require.Len(t, result.Credentials, 1)
+	require.Equal(t, fixture.issuedCredential, string(result.Credentials[0].Entry.Raw))
 }
 
 // OpenID4VCI 1.0 Section 8.3 does not fix the order of the credentials array.
