@@ -26,6 +26,7 @@ func notifyTestEndpoint(f *finalIssuanceFixture) {
 func (f *finalIssuanceFixture) notifyTestNotification() *IssuanceNotification {
 	return &IssuanceNotification{
 		Version:          IssuanceVersionFinal,
+		Profile:          f.wallet.profile,
 		CredentialIssuer: f.server.URL,
 		NotificationID:   "notification-1",
 		AccessToken:      &receiverTypes.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "DPoP"},

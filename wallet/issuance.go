@@ -9,6 +9,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/attestation"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -24,6 +25,12 @@ import (
 // IssuanceNotification) are JSON and hold identifiers and secrets only. Every
 // stage re-discovers the issuer and authorization server metadata, checks the
 // state against the wallet's Config, and takes no endpoint from the state.
+// Each state records the profile of the flow (its Profile field, in the text
+// form of profile.Profile), and a stage refuses a state recorded under
+// another profile than the wallet runs (ErrIssuanceProfileMismatch), so a
+// flow never continues under other Options than it began with. A caller that
+// runs the stages in different processes builds each stage's wallet with
+// the state's Profile.
 //
 // The state is a bearer secret: it holds a PKCE verifier, an access token or a
 // response decryption key. Store it where only the wallet can read it, protect
@@ -117,6 +124,9 @@ type CredentialRequest struct {
 // discard it after AuthorizeIssuance, whether that succeeded or failed.
 type IssuanceAuthorization struct {
 	Version IssuanceVersion `json:"version"`
+	// Profile is the profile the flow runs under: the wallet's 1.0 profile,
+	// or profile.Draft13 for a Draft 13 state.
+	Profile profile.Profile `json:"profile"`
 	// AuthorizationURL is the authorization request to open in the holder's
 	// browser.
 	AuthorizationURL string `json:"authorization_url"`
@@ -168,6 +178,7 @@ func (a *IssuanceAuthorization) RequestURIExpired(now time.Time) bool {
 // such as with *KeyAttestationRequiredError, may be repeated with it.
 type IssuanceGrant struct {
 	Version                   IssuanceVersion `json:"version"`
+	Profile                   profile.Profile `json:"profile"`
 	CredentialIssuer          string          `json:"credential_issuer"`
 	CredentialConfigurationID string          `json:"credential_configuration_id"`
 	// AuthorizationServer is the RFC 8414 issuer identifier of the server
@@ -199,6 +210,7 @@ type IssuanceGrant struct {
 // fails.
 type DeferredIssuance struct {
 	Version                   IssuanceVersion                              `json:"version"`
+	Profile                   profile.Profile                              `json:"profile"`
 	CredentialIssuer          string                                       `json:"credential_issuer"`
 	CredentialConfigurationID string                                       `json:"credential_configuration_id"`
 	TransactionID             string                                       `json:"transaction_id"`
@@ -232,6 +244,7 @@ type DeferredIssuance struct {
 // (AccessToken) and is used once: discard it after NotifyIssuer.
 type IssuanceNotification struct {
 	Version           IssuanceVersion                              `json:"version"`
+	Profile           profile.Profile                              `json:"profile"`
 	CredentialIssuer  string                                       `json:"credential_issuer"`
 	NotificationID    string                                       `json:"notification_id"`
 	AccessToken       *receiverTypes.CredentialIssuanceAccessToken `json:"access_token"`

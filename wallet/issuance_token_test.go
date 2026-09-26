@@ -778,6 +778,7 @@ func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
 
 	_, err := fixture.wallet.RequestCredential(context.Background(), &IssuanceGrant{
 		Version:                   IssuanceVersionFinal,
+		Profile:                   fixture.wallet.profile,
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "pid",
 		AuthorizationServer:       fixture.server.URL,
@@ -787,6 +788,7 @@ func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
 
 	_, err = fixture.wallet.RequestDeferredCredential(context.Background(), &DeferredIssuance{
 		Version:                   IssuanceVersionFinal,
+		Profile:                   fixture.wallet.profile,
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "pid",
 		TransactionID:             "tx-1",

@@ -8,6 +8,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/internal/jwtproof"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -44,6 +45,12 @@ var (
 	// ErrIssuanceVersionMismatch reports a state of the other OpenID4VCI
 	// version: a Draft 13 state given to a 1.0 method or the reverse.
 	ErrIssuanceVersionMismatch = common.NewCodedError("issuance_version_mismatch", "issuance state belongs to another OpenID4VCI version")
+	// ErrIssuanceProfileMismatch reports a state recorded under another
+	// profile than the wallet runs: a stage never continues a flow under
+	// other Options than the flow began with, since a weaker profile would
+	// skip checks (DPoP, the Authorization Response iss, scope-only
+	// requests) the earlier stages relied on.
+	ErrIssuanceProfileMismatch = common.NewCodedError("issuance_profile_mismatch", "issuance state was recorded under another profile")
 	// ErrIssuanceStateMismatch reports a state that is incomplete or does not
 	// fit the wallet: another client_id, redirect_uri or DPoP key than Config
 	// names, or an authorization server the issuer no longer delegates to.
@@ -207,4 +214,13 @@ func classifyKeepingMessage(err error) error {
 		return classified
 	}
 	return &messageError{msg: err.Error(), err: classified}
+}
+
+// checkStateProfile refuses a state recorded under another profile than
+// current, the profile of the stage that continues it.
+func checkStateProfile(state string, recorded, current profile.Profile) error {
+	if recorded != current {
+		return fmt.Errorf("the %s was recorded under the %s profile, the wallet runs %s: %w", state, recorded, current, ErrIssuanceProfileMismatch)
+	}
+	return nil
 }

@@ -718,6 +718,8 @@ OpenID4VCI 1.0 の発行は段階ごとに進み、各段階は次の段階が�
 状態が持つのは識別子と秘密だけです。
 各段階は Issuer と認可サーバーのメタデータを再取得し、状態がまだ wallet に合っているか（同じ `ClientAuth.ClientID`、`Issuance.RedirectURI`、DPoP 鍵であり、Issuer がまだその認可サーバーに委任しているか）を確認して、合わなければ `ErrIssuanceStateMismatch` で拒否します。
 別の OpenID4VCI バージョンの状態は `ErrIssuanceVersionMismatch` で拒否します。
+各状態はフローのプロファイルを `Profile`（JSON の `"profile"`、`profile.Profile` のテキスト形式）に記録します。wallet が別のプロファイルで動く段階は、何も送る前にその状態を拒否します（`ErrIssuanceProfileMismatch`）。そのため、フローが開始時と異なる Option で続くことはありません。
+段階を別プロセスで実行する呼出し側は、各段階の wallet を状態の `Profile` で構築します。
 
 **状態の JSON は bearer secret です。**
 PKCE の `code_verifier`、フローの一時的な Client Instance Key、アクセストークン、または応答復号用の一時鍵を含みます。

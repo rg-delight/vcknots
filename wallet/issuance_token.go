@@ -141,6 +141,7 @@ func (w *Wallet) newFinalGrant(
 	}
 	grant := &IssuanceGrant{
 		Version:                   IssuanceVersionFinal,
+		Profile:                   w.profile,
 		CredentialIssuer:          md.CredentialIssuer,
 		CredentialConfigurationID: configurationID,
 		AuthorizationServer:       discovery.authorizationServer,

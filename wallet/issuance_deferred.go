@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -24,7 +25,7 @@ func (w *Wallet) RequestDeferredCredential(ctx context.Context, d *DeferredIssua
 }
 
 func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssuance) (*IssuanceResult, error) {
-	if err := checkDeferred(d, IssuanceVersionFinal); err != nil {
+	if err := checkDeferred(d, IssuanceVersionFinal, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
@@ -109,13 +110,17 @@ func pendingDeferred(d *DeferredIssuance, w *Wallet, discovery *issuanceDiscover
 	return &IssuanceResult{Deferred: &pending}
 }
 
-// checkDeferred checks that d is a complete state of version.
-func checkDeferred(d *DeferredIssuance, version IssuanceVersion) error {
+// checkDeferred checks that d is a complete state of version, recorded under
+// current.
+func checkDeferred(d *DeferredIssuance, version IssuanceVersion, current profile.Profile) error {
 	if d == nil {
 		return invalidArgument("deferred issuance is required")
 	}
 	if d.Version != version {
 		return fmt.Errorf("deferred issuance has version %q: %w", d.Version, ErrIssuanceVersionMismatch)
+	}
+	if err := checkStateProfile("deferred issuance", d.Profile, current); err != nil {
+		return err
 	}
 	if d.CredentialIssuer == "" || d.CredentialConfigurationID == "" || strings.TrimSpace(d.TransactionID) == "" {
 		return fmt.Errorf("deferred issuance does not name its credential issuer, configuration and transaction: %w", ErrIssuanceStateMismatch)

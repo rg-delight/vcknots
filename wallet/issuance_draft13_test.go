@@ -800,6 +800,7 @@ func TestDraft13DeferredRequiresTheDPoPKeyOfTheToken(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	deferred := &DeferredIssuance{
 		Version:                   IssuanceVersionDraft13,
+		Profile:                   profile.Draft13(),
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "degree",
 		TransactionID:             "transaction-1",
@@ -876,6 +877,7 @@ func TestDraft13NotifyIssuer(t *testing.T) {
 	ctx := context.Background()
 	notification := &IssuanceNotification{
 		Version:          IssuanceVersionDraft13,
+		Profile:          profile.Draft13(),
 		CredentialIssuer: fixture.server.URL,
 		NotificationID:   "notification-1",
 		AccessToken:      &receiverTypes.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "Bearer"},
