@@ -191,6 +191,13 @@ type VerifierMetadata struct {
 	AuthorizationEncryptedResponseAlg   string             `json:"authorization_encrypted_response_alg,omitempty"`
 	AuthorizationEncryptedResponseEnc   string             `json:"authorization_encrypted_response_enc,omitempty"`
 	EncryptedResponseEncValuesSupported []string           `json:"encrypted_response_enc_values_supported,omitempty"`
+	// VPFormatsSupported is the OpenID4VP 1.0 vp_formats_supported member
+	// (§5.1, §11.1), keyed by Credential Format Identifier, each value as it
+	// arrived. A Draft 24 request carries VPFormats instead; each wire
+	// contract drops the other's member (see CheckSDJWTPresentationAlgorithms).
+	VPFormatsSupported map[string]json.RawMessage `json:"vp_formats_supported,omitempty"`
+	// VPFormats is the Draft 24 vp_formats member (Draft 24 §10.1).
+	VPFormats map[string]json.RawMessage `json:"vp_formats,omitempty"`
 
 	// encryption records how the request carrying this metadata was admitted
 	// to have its response encrypted, so the response is encrypted the same

@@ -374,8 +374,10 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 		}
 	}
 
-	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs)
+	// Draft 24 §5.10.4: with the https scheme "The client_metadata
+	// parameter, if present in the Authorization Request, MUST be ignored".
+	if cm, exists := params["client_metadata"]; exists && cm != nil && !b.federationClient() {
+		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs, draft24Metadata)
 		if err != nil {
 			b.errValidation = err
 			return

@@ -2,6 +2,7 @@ package oid4vp
 
 import (
 	"bytes"
+	"encoding/json"
 	"maps"
 	"net/url"
 	"slices"
@@ -279,6 +280,8 @@ func cloneVerifierMetadata(src *VerifierMetadata) *VerifierMetadata {
 	dst.ResponseTypes = slices.Clone(src.ResponseTypes)
 	dst.Contacts = slices.Clone(src.Contacts)
 	dst.EncryptedResponseEncValuesSupported = slices.Clone(src.EncryptedResponseEncValuesSupported)
+	dst.VPFormatsSupported = cloneRawMembers(src.VPFormatsSupported)
+	dst.VPFormats = cloneRawMembers(src.VPFormats)
 	// A JSONWebKey's key material is immutable; copying the entries is enough.
 	dst.Jwks = jose.JSONWebKeySet{Keys: slices.Clone(src.Jwks.Keys)}
 	return &dst
@@ -322,4 +325,15 @@ func cloneJSONValue(value any) any {
 	default:
 		return v
 	}
+}
+
+func cloneRawMembers(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for name, value := range src {
+		dst[name] = bytes.Clone(value)
+	}
+	return dst
 }

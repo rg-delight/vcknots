@@ -213,6 +213,13 @@ func (w *Wallet) serializeDCQLAnswers(req *oid4vp.CredentialPresentationRequest,
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", answer.credential.id, err)
 		}
+		if flavor == credential.SDJwtVC {
+			// OID4VP 1.0 Appendix B.3.4: the Verifier's sd-jwt_alg_values and
+			// kb-jwt_alg_values.
+			if err := req.ClientMetadata.CheckSDJWTPresentationAlgorithms(string(serialized)); err != nil {
+				return nil, fmt.Errorf("credential %s: %w", answer.credential.id, err)
+			}
+		}
 		vpToken[queryID] = append(vpToken[queryID], string(serialized))
 	}
 	return vpToken, nil

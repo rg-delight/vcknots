@@ -173,8 +173,11 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 		}
 	}
 
-	if cm, exists := params["client_metadata"]; exists && cm != nil {
-		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs)
+	// OID4VP 1.0 §5.9.3: with openid_federation "The client_metadata
+	// parameter, if present in the Authorization Request, MUST be ignored";
+	// the Trust Chain supplies the metadata (adoptFederationVerifierMetadata).
+	if cm, exists := params["client_metadata"]; exists && cm != nil && !b.federationClient() {
+		metadata, err := parseClientMetadataParam(cm, b.requireClientMetadataJWKKeyIDs, finalMetadata)
 		if err != nil {
 			b.errValidation = err
 			return

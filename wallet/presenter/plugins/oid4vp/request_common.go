@@ -189,35 +189,6 @@ func withoutIssuerClaim(params map[string]any) map[string]any {
 	return filtered
 }
 
-// parseClientMetadataParam decodes the client_metadata parameter, which
-// arrives as a JSON object (Request Object claim) or a JSON string (query
-// parameter).
-func parseClientMetadataParam(cm any, requireKeyIDs bool) (*VerifierMetadata, error) {
-	var rawMetadata []byte
-	switch value := cm.(type) {
-	case map[string]any:
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal client_metadata: %w", err)
-		}
-		rawMetadata = encoded
-	case string:
-		rawMetadata = []byte(value)
-	default:
-		return nil, fmt.Errorf("client_metadata must be a string or map")
-	}
-	var clientMeta VerifierMetadata
-	if err := json.Unmarshal(rawMetadata, &clientMeta); err != nil {
-		return nil, fmt.Errorf("invalid client_metadata: %w", err)
-	}
-	if requireKeyIDs {
-		if err := validateClientMetadataJWKKeyIDs(rawMetadata); err != nil {
-			return nil, newAuthorizationRequestError(InvalidRequestError, "%w", err)
-		}
-	}
-	return &clientMeta, nil
-}
-
 // fetchRequestObject retrieves a Request Object from request_uri (OID4VP 1.0
 // §5.10). The URI must use https unless HTTP is allowed for local tests,
 // redirects are not followed and the body is bounded. form is the POST body;

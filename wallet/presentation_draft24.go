@@ -305,6 +305,12 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 		if err != nil {
 			return nil, fmt.Errorf("failed to serialize selected credential %s: %w", presented.id, err)
 		}
+		// Draft 24 Appendix B.4.2: "If present, the alg JOSE header ... MUST
+		// match one of the array values" of sd-jwt_alg_values and
+		// kb-jwt_alg_values.
+		if err := req.ClientMetadata.CheckSDJWTPresentationAlgorithms(string(serialized)); err != nil {
+			return nil, fmt.Errorf("credential %s: %w", presented.id, err)
+		}
 		tokens = append(tokens, string(serialized))
 	}
 	if len(tokens) == 1 {
