@@ -400,8 +400,11 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 // newGrant collects the Token Response into a Draft 13 grant; its c_nonce is
 // the Token Response's (Draft 13 Section 6.2).
 func (d *Draft13Issuance) newGrant(discovery *issuanceDiscovery, configurationID string, token *receiverTypes.CredentialIssuanceAccessToken, mode authorizationDetailsMode) (*IssuanceGrant, error) {
-	if token == nil || strings.TrimSpace(token.Token) == "" {
-		return nil, fmt.Errorf("%w: token response did not contain an access token", receiverTypes.ErrInvalidTokenResponse)
+	// RFC 6749 Sections 5.1 and 7.1: token_type is REQUIRED, and a client
+	// "MUST NOT use an access token if it does not understand the token
+	// type"; the wallet presents Bearer (RFC 6750) and DPoP (RFC 9449).
+	if err := d.w.checkTokenType(token); err != nil {
+		return nil, err
 	}
 	identifiers, err := credentialIdentifiersFor(token, configurationID, mode)
 	if err != nil {
