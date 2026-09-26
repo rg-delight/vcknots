@@ -37,6 +37,24 @@ type CredentialSelection struct {
 	DisclosedClaims []string
 	// Key is the holder key for this credential. Nil uses Presentation.Key.
 	Key IKeyEntry
+	// TransactionData are the indexes, into the request's transaction_data
+	// (oid4vp.CredentialPresentationRequest.TransactionData), of the
+	// transactions the Holder authorizes with this credential: its Key
+	// Binding JWT carries their hashes (OID4VP 1.0 Sections 5.1 and 8.4,
+	// Draft 24 Section 5.1). An entry is carried by the presentation of the
+	// first credential query in its credential_ids that QueryIDs holds.
+	//
+	// When every selection leaves it nil, each entry goes to the one
+	// presented credential that answers the first query of its
+	// credential_ids that is presented, and an entry that several presented
+	// credentials could authorize fails with
+	// ErrTransactionDataAssignmentRequired. When any selection sets it, the
+	// assignment is the Holder's: every entry must be assigned, and an entry
+	// assigned to several credentials is carried by each of them only when
+	// they all answer the same referenced query (the Wallet "MUST use only
+	// one of the referenced Credentials"), else
+	// ErrTransactionDataAssignmentInvalid.
+	TransactionData []int
 }
 
 // Presentation is what SubmitPresentation sends for an admitted request.

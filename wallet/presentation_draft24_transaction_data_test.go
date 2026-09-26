@@ -45,6 +45,40 @@ func TestWallet_Draft24TransactionDataAttachedOnlyToItsOwner(t *testing.T) {
 	require.Empty(t, transactionDataHashesOf(t, tokens[1]))
 }
 
+// Draft 24 Section 5.1 names input descriptors in credential_ids; the
+// Holder's CredentialSelection.TransactionData decides which of the referenced
+// credentials authorizes the entry, as on the 1.0 path.
+func TestWallet_Draft24TransactionDataFollowsTheHoldersAssignment(t *testing.T) {
+	fixture := transactionDataFixture(t)
+	ids := draft24SelectionCredentialIDs(t, fixture)
+	entry := encodedTransactionData(`{"type":"example","credential_ids":["identity","address"]}`)
+	raw, err := json.Marshal([]string{entry})
+	require.NoError(t, err)
+	uri := "openid4vp://present?" + url.Values{
+		"client_id":               {"redirect_uri:" + fixture.baseURL + "/response"},
+		"response_uri":            {fixture.baseURL + "/response"},
+		"response_type":           {"vp_token"},
+		"response_mode":           {"direct_post"},
+		"nonce":                   {"presentation-nonce"},
+		"presentation_definition": {`{"id":"definition-1","input_descriptors":[{"id":"identity","format":{"vc+sd-jwt":{}}},{"id":"address","format":{"vc+sd-jwt":{}}}]}`},
+		"transaction_data":        {string(raw)},
+	}.Encode()
+	request := parseDraft24(t, fixture.wallet, uri)
+
+	_, err = presentSelections(t, fixture.wallet, request, fixture.key, []CredentialSelection{
+		{CredentialID: ids["urn:test:identity"], QueryIDs: []string{"identity"}, DisclosedClaims: []string{"given_name"}, TransactionData: []int{}},
+		{CredentialID: ids["urn:test:address"], QueryIDs: []string{"address"}, DisclosedClaims: []string{"street_address"}, TransactionData: []int{0}},
+	})
+	require.NoError(t, err)
+	form := <-fixture.posted
+	var tokens []string
+	require.NoError(t, json.Unmarshal([]byte(form.Get("vp_token")), &tokens))
+	require.Len(t, tokens, 2)
+	digest := sha256.Sum256([]byte(entry))
+	require.Empty(t, transactionDataHashesOf(t, tokens[0]))
+	require.Equal(t, []string{base64.RawURLEncoding.EncodeToString(digest[:])}, transactionDataHashesOf(t, tokens[1]))
+}
+
 // A presentation that cannot carry transaction data fails with
 // invalid_transaction_data instead of dropping it. The request is built
 // directly, as for a definition passed by reference whose descriptors name no

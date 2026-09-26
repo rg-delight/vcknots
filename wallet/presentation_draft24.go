@@ -6,7 +6,6 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sort"
 
 	"github.com/google/uuid"
@@ -228,15 +227,11 @@ func buildDraft24DescriptorMap(count int, flavor credential.SupportedSerializati
 // Each SD-JWT VC gets its own presentation with a Key Binding JWT; every
 // other format is one presentation of all credentials under one key.
 //
-// Each transaction_data entry is carried by the one credential whose input
-// descriptors own it (Draft 24 Section 5.1), and only an SD-JWT VC Key Binding
-// JWT can carry it (Appendix A.4.5).
+// Each transaction_data entry is carried by the credential it is assigned to
+// (Draft 24 Section 5.1, assignTransactionData), and only an SD-JWT VC Key
+// Binding JWT can carry it (Appendix A.4.5).
 func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentationRequest, p Presentation, credentials []resolvedCredential, flavor credential.SupportedSerializationFlavor) ([]byte, error) {
-	var presentedDescriptors []string
-	for _, selection := range p.Credentials {
-		presentedDescriptors = append(presentedDescriptors, selection.QueryIDs...)
-	}
-	transactionDataOwners, err := assignTransactionDataOwners(req.TransactionData, presentedDescriptors)
+	transactionData, err := assignTransactionData(req.TransactionData, p.Credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -281,13 +276,7 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 				sdOpts.SelectedClaims = append([]string(nil), disclosed...)
 				sdOpts.LimitDisclosureToSelectedClaims = true
 			}
-			var owned []string
-			for _, entry := range req.TransactionData {
-				if slices.Contains(p.Credentials[index].QueryIDs, transactionDataOwners[entry]) && !slices.Contains(owned, entry) {
-					owned = append(owned, entry)
-				}
-			}
-			if len(owned) > 0 {
+			if owned := transactionData.selectionEntries(index, req.TransactionData); len(owned) > 0 {
 				sdOpts.TransactionData = owned
 				sdOpts.TransactionDataHashesAlg = req.TransactionDataHashesAlg
 				if sdOpts.TransactionDataHashesAlg == "" {
