@@ -76,7 +76,9 @@ func (p TrustPolicy) now() time.Time {
 // ValidateClientAttestation authenticates a Wallet Attestation under policy,
 // then checks typ, sub against the client_id, cnf.jwk against the client key,
 // a present aud against the authorization server (HAIP §4.4.1 forbids reuse
-// across Issuers) and exp. Failures wrap ErrClientAttestationInvalid.
+// across Issuers; an absent aud is accepted because the Client Attestation
+// JWT defines none, see ClientProvider) and exp. Failures wrap
+// ErrClientAttestationInvalid.
 func ValidateClientAttestation(ctx context.Context, attestation *ClientAttestation, request ClientRequest, policy TrustPolicy) error {
 	if err := validateClient(ctx, attestation, request, policy); err != nil {
 		return fmt.Errorf("%w: %w", ErrClientAttestationInvalid, err)
