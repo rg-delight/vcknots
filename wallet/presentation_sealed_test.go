@@ -156,7 +156,7 @@ func TestWallet_ReadmitPresentationRequestUnderHAIP(t *testing.T) {
 
 	later := verifier.wallet(t, profile.HAIP())
 	_, err = later.ParsePresentationRequestObject(t.Context(), admitted.RequestObject(), presenterTypes.RequestObjectSource{ClientID: verifier.clientID})
-	require.ErrorIs(t, err, oid4vp.ErrHAIPRequestURIRequired)
+	require.ErrorIs(t, err, oid4vp.ErrRequestURIRequired)
 
 	_, err = later.ReadmitPresentationRequest(t.Context(), sealed, bytes.Repeat([]byte{0x24}, oid4vp.MinSealKeyBytes))
 	require.ErrorIs(t, err, oid4vp.ErrSealedAdmissionInvalid)

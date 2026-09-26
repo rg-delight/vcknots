@@ -69,7 +69,7 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 		},
 		"HAIP refuses experimental hooks": {
 			config: Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true, Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}},
-			want:   ErrProfileForbidsDraft,
+			want:   ErrInvalidArgument,
 		},
 		"transaction data types with an injected presenter": {
 			config: Config{Storeless: true, Presenter: presenterWith(t, &oid4vp.Oid4vpPresenter{}), SupportedTransactionDataTypes: []string{"example"}},

@@ -108,7 +108,7 @@ func TestParsePresentationRequestReturnsRequestObjectSentinels(t *testing.T) {
 			"client_id": {f.clientID()},
 			"request":   {f.sign(t, f.claims(), nil)},
 		}.Encode()
-		if _, err := p.ParsePresentationRequest(uri); !errors.Is(err, ErrHAIPRequestURIRequired) {
+		if _, err := p.ParsePresentationRequest(uri); !errors.Is(err, ErrRequestURIRequired) {
 			t.Fatalf("HAIP request_uri required: %v", err)
 		}
 	})

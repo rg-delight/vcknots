@@ -437,8 +437,8 @@ func (o *Oid4vciReceiver) verifySignedIssuerMetadata(ctx context.Context, compac
 		}
 		if containsAnchor {
 			return nil, nil, fmt.Errorf(
-				"%w: HAIP forbids including the trust anchor certificate in the x5c header",
-				ErrIssuerMetadataSignatureInvalid)
+				"%w: %w forbids including the trust anchor certificate in the x5c header",
+				ErrIssuerMetadataSignatureInvalid, profile.Refused("SignedMetadataX5C.ExcludeAnchor"))
 		}
 	}
 	if options.SignedMetadataX5C.RejectSelfSigned {
@@ -620,10 +620,10 @@ func (o *Oid4vciReceiver) ValidateCredentialConfigurationForProfile(config types
 		return err
 	}
 	if options.RequireIssuerMetadataScopes && strings.TrimSpace(config.Scope) == "" {
-		return fmt.Errorf("HAIP requires a scope for every credential configuration")
+		return fmt.Errorf("%w requires a scope for every credential configuration", profile.Refused("RequireIssuerMetadataScopes"))
 	}
 	if format := strings.ToLower(strings.TrimSpace(config.Format)); !options.AllowedCredentialFormats.Allows(format) {
-		return fmt.Errorf("HAIP requires credential format %s, got %q", strings.ReplaceAll(options.AllowedCredentialFormats.String(), ",", " or "), config.Format)
+		return fmt.Errorf("%w requires credential format %s, got %q", profile.Refused("AllowedCredentialFormats"), strings.ReplaceAll(options.AllowedCredentialFormats.String(), ",", " or "), config.Format)
 	}
 	return nil
 }
@@ -638,7 +638,7 @@ func requireNonceEndpointForKeyBinding(options profile.Options, metadata *types.
 	}
 	for id, config := range metadata.CredentialConfigurationSupported {
 		if config.CryptographicBindingMethodsSupported != nil && len(*config.CryptographicBindingMethodsSupported) > 0 {
-			return fmt.Errorf("HAIP requires nonce_endpoint when credential configuration %q advertises cryptographic_binding_methods_supported", id)
+			return fmt.Errorf("%w requires nonce_endpoint when credential configuration %q advertises cryptographic_binding_methods_supported", profile.Refused("RequireNonceEndpointForKeyBinding"), id)
 		}
 	}
 	return nil

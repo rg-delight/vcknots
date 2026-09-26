@@ -51,12 +51,16 @@ DCQL の `trusted_authorities` で評価するのは `aki` と `openid_federatio
 
 ### プロファイル（Final、HAIP、Draft）
 
-プロファイルは、プロトコルの版と、wallet がその上に加える制約の組です（パッケージ `profile`）。
+プロファイルは、プロトコルの版と、wallet がその上に適用する Option の組です（パッケージ `profile`）。`Profile.Version()` は `profile.VersionFinal`（OpenID4VCI 1.0 と OpenID4VP 1.0）、`VersionDraft13`、`VersionDraft24` のいずれかで、`Profile.Options()` が制約です。プロファイルは比較可能な値です。2 つのプロファイルは、どう構築したかにかかわらず、同じ規則を適用するときにちょうど `==` になります。
 
-* **Final**（`profile.Final()`）は追加制約のない OpenID4VCI 1.0 と OpenID4VP 1.0 です。`profile.Profile` のゼロ値は Final です。
-* **HAIP**（`profile.HAIP()`）は Final に `profile.HAIPOptions()` を加えたものです。HAIP 1.0 の要件を 1 つずつ `Options` のフィールドで表し、各フィールドには要件を定める HAIP の節を記しています。これらはこのプロファイルの Must option です。
-* `Profile.With(options)` はプロファイルを強めます。たとえば `profile.Final().With(profile.Options{RequireDPoP: true})` は Final に HAIP の要件を 1 つ加えます。プロファイルが持つ option を弱めることはできません（`profile.ErrProfileMustOption`）。
-* **Draft 13**（`profile.Draft13()`）と **Draft 24**（`profile.Draft24()`）は Draft のビューを有効にします。option は持ちません。HAIP は 1.0 仕様だけのプロファイルなので、HAIP とも、Options が `profile.HAIPOptions()` を覆う 1.0 プロファイルとも併用できません。
+* **Final**（`profile.Final()`）は追加制約のない OpenID4VCI 1.0 と OpenID4VP 1.0 です。`profile.Profile` のゼロ値は、プロファイルを読むすべての箇所で Final です。
+* **HAIP**（`profile.HAIP()`）は版ではありません。Final に `profile.HAIPOptions()` を加えたものです。HAIP 1.0 の要件を 1 つずつ `Options` のフィールドで表し、各フィールドには要件を定める HAIP の節を記しています。`profile.HAIP() == profile.Final().With(profile.HAIPOptions())` が成り立ちます。
+* `Profile.With(options)` は Option を加え、連鎖できます。フラグはどちらかで on なら on になり、集合（`AllowedCredentialFormats`、`AllowedClientIDPrefixes`）は両方が許す要素だけを残します。そのため `With` が Option を弱めることはなく、`profile.Final().With(a).With(b)` は `a` と `b` の両方を適用します。組み合わせるとどの入力も通らない Option（共通の要素がない 2 つの集合や、redirect 経由の要求に署名できない Client Identifier Prefix と `RequireSignedRequestByReference` の組など）は、それらを名指す `*profile.ConflictError`（`profile.ErrOptionsConflict`）で拒否します。
+* `Options.ForbidDraftProfiles`（HAIP 1.0 §1: 基盤のプロトコルは OpenID4VCI 1.0 と OpenID4VP 1.0）は、1.0 プロファイルと並ぶ Draft のプロファイルを拒否します。`Options.ForbidExperimental` は、パッケージ `experimental` のすべての設定を拒否します。どちらも `HAIPOptions()` に含まれ、ほかの Option と同じく単独でも適用できます。
+* **Draft 13**（`profile.Draft13()`）と **Draft 24**（`profile.Draft24()`）は Draft のビューを有効にします。option は持ちません（`profile.ErrDraftProfile`）。
+* プロファイルには Option を失わないテキスト形式があります。`String()`、`MarshalText` / `UnmarshalText`（そのため `encoding/json` は `{}` ではなく `"haip"` を書きます）、`profile.ParseProfile` です。形式は、版の名前か `haip` に、それを超える Option を `;` でつないだものです。各 Option は `Options` のフィールド名で書きます（入れ子の規則は `IssuerX5C.Require`、集合は `AllowedCredentialFormats=dc+sd-jwt,mso_mdoc`）。例: `final`、`haip`、`draft13`、`draft24`、`final;RequirePAR;RequireDPoP`、`haip;AllowedCredentialFormats=mso_mdoc`。`ParseProfile(p.String()) == p` が成り立ちます。`Options.String()` は on の Option を同じ綴りで列挙します。
+* Option ごとの設定を自前で持つアプリケーションは、設定 1 つを `Options` のフィールド 1 つに対応させ、`With` でプロファイルを構築します（`profile.Final().With(profile.Options{RequirePAR: par, RequireDPoP: dpop})`）。プロセスの境界を越えるときはテキスト形式を渡し、`ParseProfile` で読みます。
+* Option が原因のエラーは、その Option を名指す `*profile.OptionError` を持ちます（`errors.As(err, &optionErr)` で取り出し、`optionErr.Option` はたとえば `"RequireDPoP"`）。拒否を分類するエラーとそのコードは変わりません。Option は単独でも適用できるので、メッセージは "HAIP" ではなく Option を名指します。
 * receiver と presenter の plugin は wallet の 1.0 プロファイルで構築します（`oid4vci.Oid4vciReceiver.Profile`、`oid4vp.Oid4vpPresenter.Profile`）。wallet が自ら構築する plugin にはそれが設定されます。
 * wallet は渡された plugin を変更しません。`NewWalletWithConfig` が確認する内容は[プロファイルの規則](#profile-rules)を参照してください。
 
@@ -994,7 +998,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 * **Issuer の鍵:** 方式はポリシーではなく Credential で決まります（SD-JWT VC -19 §2.5、§7.3）。
   ポリシーは方式を許すだけです。
   許していない方式にあたる Credential は拒否し、代わりに別の方式を試すことはしません。
-  * `x5c` ヘッダがあれば、そのチェーンだけで `IssuerX509` に対して認証します（アンカー、CRL による失効確認、任意の EKU）。信頼できないチェーンは拒否します。`iss` の有無にかかわらず、Issuer は leaf 証明書の subject です（SD-JWT VC -19 §2.5）。`x5c` と並ぶ `iss` は `https` の URL でなければならず、その host を leaf が `dNSName`（完全一致、ワイルドカードは不可）か、同じ scheme の `uniformResourceIdentifier` で名指ししていなければなりません。そうでなければ `ErrIssuerDNSBindingFailed` で拒否します。DID の `iss` と `x5c` の組み合わせは拒否します。DID の Issuer は DID document で認証するので、その Credential は `x5c` を持ちません。その他の `iss` も拒否します。例外は `IssuerX509.Experimental.AllowHTTP` の下の `http` の `iss` で、同じ規則で束縛します（ローカルのテスト用 Issuer のためのもので、`ForbidInsecureTransports` を持つプロファイルは拒否します）。
+  * `x5c` ヘッダがあれば、そのチェーンだけで `IssuerX509` に対して認証します（アンカー、CRL による失効確認、任意の EKU）。信頼できないチェーンは拒否します。`iss` の有無にかかわらず、Issuer は leaf 証明書の subject です（SD-JWT VC -19 §2.5）。`x5c` と並ぶ `iss` は `https` の URL でなければならず、その host を leaf が `dNSName`（完全一致、ワイルドカードは不可）か、同じ scheme の `uniformResourceIdentifier` で名指ししていなければなりません。そうでなければ `ErrIssuerDNSBindingFailed` で拒否します。DID の `iss` と `x5c` の組み合わせは拒否します。DID の Issuer は DID document で認証するので、その Credential は `x5c` を持ちません。その他の `iss` も拒否します。例外は `IssuerX509.Experimental.AllowHTTP` の下の `http` の `iss` で、同じ規則で束縛します（ローカルのテスト用 Issuer のためのもので、`ForbidExperimental` を持つプロファイルは拒否します）。
   * `x5c` がなく `iss` が `https` なら、`IssuerKeys` による JWT VC Issuer Metadata（SD-JWT VC -19 §4、SD-JWT VC だけ）か、`Federation`（Entity Identifier が `iss` である OpenID Federation の Trust Chain から導いた `openid_credential_issuer` metadata の鍵。`acceptance.NewFederationIssuerKeys`）で認証します。
   * `x5c` がなく `iss` が DID なら、`IssuerKeys` で解決し、Credential Issuer の origin が DIF Well Known DID Configuration でその DID を結び付けている場合だけ受け入れます（OpenID4VCI 1.0 §14.4）。
   * それ以外の `iss`、または `iss` がなければ拒否します。
@@ -1005,7 +1009,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 `IssuerKeys` は `*issuerkeys.Resolver` です。
 その `Mechanisms` で JWT VC Issuer Metadata（と `jwks_uri`）、DID の各 method、DID Configuration による束縛を有効にします。
 `issuerkeys.Request` は acceptor が自分で埋めます。
-平文 HTTP で取得できるのは `Resolver.Experimental`（`experimental.Transport`）を設定したときだけです。SD-JWT VC -19 §3 はすべての取得に HTTPS を求めており、`ForbidInsecureTransports` を持つプロファイル（HAIP）は、これを設定した resolver を持つポリシーを拒否します。
+平文 HTTP で取得できるのは `Resolver.Experimental`（`experimental.Transport`）を設定したときだけです。SD-JWT VC -19 §3 はすべての取得に HTTPS を求めており、`ForbidExperimental` を持つプロファイル（HAIP）は、これを設定した resolver を持つポリシーを拒否します。
 
 `acceptance.Verification`（`SavedCredential.Verification` も同じ）は、Issuer をどう認証したかを記録します。
 `Issuer`（認証した主体。`x5c` では leaf 証明書の subject、その他の方式では `iss`）、`ClaimedIssuer`（Credential が持つ `iss`。`x5c` では leaf を束縛した相手であり、認証した主体そのものではありません）、`Mechanism`（`issuerkeys.MechanismX5CTrustedChain`、`MechanismJWTVCIssuerMetadata`、`MechanismDIDConfigurationBinding`、`MechanismOpenIDFederation`）、Issuer の鍵、証明書のフィンガープリントと `IssuerCertificateSubject`、`IssuerDNSBound`、`DID`、`FederationTrustAnchor`、失効確認の件数、holder binding の結果です。
@@ -1017,7 +1021,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 
 * ポリシーがなければ、Credential を要求も保存もしません（`ErrCredentialAcceptancePolicyRequired`）。`ReceiveCredential` も同じです。
 * Issuer を認証せずに Credential を受け入れるポリシーはありません。
-* HAIP では SD-JWT VC に `IssuerX509` が必要です（HAIP §6.1.1）。`x5c` を持たなければならず（`ErrHAIPX5CRequired`）、トラストアンカーを含んではならず（`ErrHAIPTrustAnchorInX5C`）、署名証明書は自己署名であってはなりません（`ErrIssuerCertificateSelfSigned`）。
+* HAIP では SD-JWT VC に `IssuerX509` が必要です（HAIP §6.1.1）。`x5c` を持たなければならず（`ErrIssuerX5CRequired`）、トラストアンカーを含んではならず（`ErrIssuerX5CTrustAnchor`）、署名証明書は自己署名であってはなりません（`ErrIssuerCertificateSelfSigned`）。
 * `AllowUnadvertisedRevocation` は、CRL 配布点を持たない証明書を信頼経路に残し、別に数えて報告します。OCSP は参照しません。
 
 ## OpenID4VP 1.0 の提示 {#openid4vp-10-presentation}
@@ -1031,7 +1035,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 | メソッド | 目的 |
 | --- | --- |
 | `ParsePresentationRequest(ctx, uri)` | Authorization Request URI を解析して受け付けます。`request_uri` はライブラリ自身が取得します。 |
-| `ParsePresentationRequestObject(ctx, requestObject, src)` | 呼出し側が既に持つ Request Object を、値で渡されたものとして認証します。HAIP は拒否します（`ErrHAIPRequestURIRequired`）。 |
+| `ParsePresentationRequestObject(ctx, requestObject, src)` | 呼出し側が既に持つ Request Object を、値で渡されたものとして認証します。HAIP は拒否します（`ErrRequestURIRequired`）。 |
 | `ReadmitPresentationRequest(ctx, sealed, key)` | `h.Seal(key)` が返した封をした受理から、要求を再び受理します（[解析と提示を分けるとき](#parsing-now-and-presenting-later)を参照）。 |
 | `ParseDCAPIRequest(ctx, invocation)` | Digital Credentials API の要求を受け付けます。 |
 | `SelectCredentials(ctx, h)` | ライブラリ自身が選ぶ保存済み Credential です。 |
@@ -1161,7 +1165,7 @@ func presentLater(ctx context.Context, w *wallet.Wallet, requestObject, clientID
 Request Object がどう届いたかはライブラリが観測するもので、呼出し側が申告するものではありません。
 `RequestObjectVerification.Delivery` が `"reference"` になるのは、ライブラリ自身が `request_uri` を取得したとき（またはその取得の封をした受理を再受理したとき）だけで、`WalletNonce` もその POST でライブラリが送った `wallet_nonce` だけを記録します。
 値で渡された Request Object は、常に値で届いたものとして扱います。
-そのため HAIP では、`ParsePresentationRequestObject` と `request` パラメータを、通信の前に `ErrHAIPRequestURIRequired` で拒否します。
+そのため HAIP では、`ParsePresentationRequestObject` と `request` パラメータを、通信の前に `ErrRequestURIRequired` で拒否します。
 
 ### Verifier の認証 {#verifier-authentication}
 
@@ -1367,10 +1371,10 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 
 `NewWalletWithConfig` は構成を `Config.Profiles` に照らして確認します。
 
-* `Config.Profiles` は 1.0 のプロファイルをちょうど 1 つ、Draft のプロファイルをそれぞれ高々 1 つ含みます（`ErrInvalidArgument`）。Options が `profile.HAIPOptions()` を覆う（`Options.Covers`）1.0 プロファイル、つまり `profile.HAIP()` と、名前が `final` のままの `profile.Final().With(profile.HAIPOptions())` は、Draft のプロファイルとも `Experimental.Hooks` とも併用できません（`ErrProfileForbidsDraft`）。判定は名前ではなく Options で行います。
+* `Config.Profiles` は 1.0 のプロファイルをちょうど 1 つ、Draft のプロファイルをそれぞれ高々 1 つ含みます（`ErrInvalidArgument`）。`Options.ForbidDraftProfiles` を持つ 1.0 プロファイル（HAIP）は、Draft のプロファイルと併用できません（`ErrProfileForbidsDraft`）。
 * `profile.Carrier` を実装する receiver / presenter の plugin は、option を含めて wallet の 1.0 プロファイルを報告しなければなりません（`ErrProfileMismatch`）。Draft のプロファイルを報告する plugin は拒否します（`profile.ErrDraftProfile`）。1.0 プロファイルが option を持つとき（HAIP、または `With` で強めた Final）は `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、素の Final では受け入れます。
 * `Draft13()` のメソッドと `ReceiveCredential` は `profile.Draft13()` が、`Draft24()` のメソッドと Draft 24 の handle は `profile.Draft24()` が有効でなければ `ErrProfileForbidsDraft` を返します。`Experimental.Hooks` は Draft のプロファイルが 1 つも有効でなければ拒否します。
-* `Experimental.Transport` は、`ForbidInsecureTransports` を持つプロファイル（HAIP）と、wallet が再構成しない注入された `Receiver` / `Presenter` との併用で拒否します（`ErrInvalidArgument`）。
+* `Experimental.Transport` と `Experimental.Hooks` は `ForbidExperimental` を持つプロファイル（HAIP）で拒否し、`Experimental.Transport` は wallet が再構成しない注入された `Receiver` / `Presenter` との併用でも拒否します（`ErrInvalidArgument`）。
 * DPoP 鍵のない `Attestation.ClientKeyFromDPoP` と、`Attestation.ClientKey` と併用した `Attestation.ClientKeyFromDPoP` は拒否します（`ErrInvalidArgument`）。
 * `Storeless` と `CredStore` の併用、`SupportedTransactionDataTypes` と `Presenter` の併用、`*oid4vp.Oid4vpPresenter` 以外の `Presenter` plugin は拒否します（`ErrInvalidArgument`）。
 
@@ -1379,9 +1383,9 @@ plugin のフィールドは登録後に変更してはなりません。
 HAIP はさらに、それぞれ `profile.Options` のフィールドを通じて、PAR、DPoP に束縛されたアクセストークン、クライアント認証の手段、すべての Credential Configuration の `scope`、key attestation が必要なときの Nonce Endpoint、`x509_hash`、`request_uri` で配送される署名付き要求、暗号化された応答モード、SD-JWT VC の issuer `x5c`、`cnf` を持つすべての SD-JWT VC への Key Binding JWT などを要求します。
 `Experimental.Transport`（wallet、receiver、Issuer の鍵の resolver、Status List の checker）と、presenter のゼロ値でない `Experimental` は、すべての入口で拒否します。
 
-`w.StatusListChecker(base)` は `statuslist.Checker` の複製を返し、`base` の `Profile` がゼロ値なら wallet の 1.0 プロファイルを設定します。
-そのため HAIP の wallet の Status List の確認は、呼出し側がプロファイルを渡し直さなくても HAIP 1.0 §6.1（token の鍵を `x5c` に含める、トラストアンカーを含めない、自己署名の leaf を使わない）を適用します。
-別のプロファイルを名指す checker は拒否し（`ErrProfileMismatch`）、HAIP では `Experimental` を設定した checker を拒否します（`statuslist.ErrStatusListInsecureTransportForbidden`）。
+`w.StatusListChecker(base)` は、`base` の `Profile` が wallet の 1.0 プロファイルであることを確かめてから `statuslist.Checker` の複製を返します（違えば `ErrProfileMismatch`）。
+checker は自身のプロファイルの Option を適用します。HAIP 1.0 §6.1 なら、token の鍵を `x5c` に含める、トラストアンカーを含めない、自己署名の leaf を使わない、です。そのため HAIP の wallet でゼロ値（Final）のプロファイルのままの checker は、弱い規則で動かさずに拒否します。
+`ForbidExperimental` の下では、`Experimental` を設定した checker を拒否します（`statuslist.ErrStatusListInsecureTransportForbidden`）。
 ライブラリが既定で作る HTTP client（receiver、presenter、Federation の resolver、Issuer の鍵の resolver、Status List の checker、CRL の取得）は、すべて TLS 1.2 以上で接続します（HAIP 1.0 §4 が適用する FAPI 2.0 Security Profile §5.2.1、BCP 195）。
 呼出し側が注入した client は、その TLS 設定のままです。
 
@@ -1491,7 +1495,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 どの型もゼロ値が規格どおりの挙動です。
 環境変数からは何も読みません。
-規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は、どこに渡した `Transport` も、ゼロ値でない `Presenter` も拒否します。`Presenter` は presenter のすべての入口（OpenID4VP 1.0、Digital Credentials API、Draft 24、再受理）で、ネットワークに触れる前に拒否します（Status List の checker は `statuslist.ErrStatusListInsecureTransportForbidden`、ほかは不正な入力または `invalid_request` のエラーです）。`Hooks` には Draft のプロファイルが必要です。
+規格外の設定を禁じるプロファイルは、無視せずに拒否します。HAIP は、どこに渡した `Transport` も、ゼロ値でない `Presenter` も拒否します。`Presenter` は presenter のすべての入口（OpenID4VP 1.0、Digital Credentials API、Draft 24、再受理）で、ネットワークに触れる前に拒否します（Status List の checker は `statuslist.ErrStatusListInsecureTransportForbidden`、ほかは不正な入力または `invalid_request` のエラーです）。`Hooks` も拒否します。`Hooks` にはもともと Draft のプロファイルが必要です。
 
 ## 環境変数
 
@@ -1530,7 +1534,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 * receiver plugin は HTTP のリダイレクトをすべて拒否し（`ErrHTTPRedirectNotAllowed`）、応答ボディの大きさを制限し、`credential_issuer` が要求した識別子と異なる Credential Issuer Metadata と、`issuer` が要求したものと異なる認可サーバーメタデータを拒否します。
 * `Oid4vpPresenter.ParsePresentationRequest` は [Verifier の認証](#verifier-authentication)のとおりに Verifier を認証します。署名付き Request Object は prefix ごとの仕組みで検証し、`client_metadata` の鍵では検証しません。`x509_*` の prefix は署名付き Request Object を要求し、コロンのない `client_id` は登録が必要な pre-registered client として扱い、`iat` が未来のものは拒否します。`X509TrustChainRoots` は失効情報のない証明書を引き続き受け入れます。
 * `Oid4vpPresenter.AllowHTTP` と `InsecureSkipX509Verify` を削除しました。`Oid4vpPresenter.Experimental`（`experimental.Presenter`）で明示的に設定します。`NewWallet` と `presenter.WithDefaultConfig` が構築する presenter は `VCKNOTS_WALLET_HTTP_ALLOWED` を読まなくなりました。`Oid4vpPresenter.RequireClientMetadataJWKKeyIDs` を削除しました。OpenID4VP 1.0 の入口は、`Experimental.AcceptClientMetadataJWKsWithoutKeyID` を設定しない限り、重複のない `kid` を常に要求します。`requestBuilder.WithHTTPAllowed` を削除しました。
-* `issuerkeys.Resolver.AllowHTTP` と `statuslist.Checker.AllowHTTP` を `Experimental experimental.Transport` に置き換えました。プロファイルが `ForbidInsecureTransports` を持つ `statuslist.Checker` は、`Experimental` を無視せず `statuslist.ErrStatusListInsecureTransportForbidden` で拒否し、その規則を `KeyRequest.ForbidInsecureTransports` で鍵の hook に渡します。`Resolver.StatusListKeys` はそれを resolver 自身の `Experimental` に適用します。
+* `issuerkeys.Resolver.AllowHTTP` と `statuslist.Checker.AllowHTTP` を `Experimental experimental.Transport` に置き換えました。プロファイルが `ForbidExperimental` を持つ `statuslist.Checker` は、`Experimental` を無視せず `statuslist.ErrStatusListInsecureTransportForbidden` で拒否し、その規則を `KeyRequest.ForbidExperimental` で鍵の hook に渡します。`Resolver.StatusListKeys` はそれを resolver 自身の `Experimental` に適用します。
 * `presenterTypes.RequestObjectSource.DeliveredByReference`、`RequestObjectSource.WalletNonce`、`oid4vp.RequestObjectVerification.DeliveryAttested` を削除しました。ライブラリは自ら観測した配送と自ら送った `wallet_nonce` を記録し、HAIP は値で渡された Request Object を拒否します。
 * `oid4vp.FederationTrustOptions.AllowUnsignedRequests` を削除しました。署名なしの `openid_federation` の要求は常に拒否します。federation の Request Object は、Federation Entity Key ではなく `openid_credential_verifier` メタデータの鍵で検証します。
 * `oid4vp.OID4VPClientIDPrefixWebOrigin` を削除しました。署名なしの DC API の要求は `ClientID` が空のままで、platform の Origin は `CredentialPresentationRequest.Origin` が持ちます。OpenID4VP 1.0 は JWK の `alg` を常に要求するので、`profile.ResponseEncryptionRules.RequireJWKAlg` を削除しました。

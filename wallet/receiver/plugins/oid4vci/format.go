@@ -43,10 +43,10 @@ func CredentialFormatFlavor(p profile.Profile, format string) (credential.Suppor
 	case p == profile.Draft13():
 		table = draft13CredentialFormats
 	case p.Draft():
-		return "", fmt.Errorf("%w: %s is not an OpenID4VCI profile", ErrCredentialFormatUnsupported, p.Name())
+		return "", fmt.Errorf("%w: %s is not an OpenID4VCI profile", ErrCredentialFormatUnsupported, p)
 	}
 	if flavor, ok := table[format]; ok {
 		return flavor, nil
 	}
-	return "", fmt.Errorf("%w: %q under %s", ErrCredentialFormatUnsupported, format, p.Name())
+	return "", fmt.Errorf("%w: %q under %s", ErrCredentialFormatUnsupported, format, p)
 }

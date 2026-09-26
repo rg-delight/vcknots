@@ -1,6 +1,10 @@
 package oid4vp
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/trustknots/vcknots/wallet/profile"
+)
 
 // validateResponseEncryptionMetadata refuses, while the request is parsed, a
 // direct_post.jwt or dc_api.jwt request whose response this Wallet could not
@@ -28,7 +32,7 @@ func (b *requestCore) validateResponseEncryptionMetadata() error {
 	}
 	if rules.RequireVerifierGCMBoth && (!slices.Contains(metadata.EncryptedResponseEncValuesSupported, "A128GCM") ||
 		!slices.Contains(metadata.EncryptedResponseEncValuesSupported, "A256GCM")) {
-		return newAuthorizationRequestError(InvalidRequestError, "%w", ErrResponseEncryptionEncMissing)
+		return newAuthorizationRequestError(InvalidRequestError, "%w: %w", profile.Refused("ResponseEncryption.RequireVerifierGCMBoth"), ErrResponseEncryptionEncMissing)
 	}
 	return nil
 }

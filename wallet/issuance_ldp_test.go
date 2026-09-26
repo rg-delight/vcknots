@@ -206,6 +206,6 @@ func TestIssuanceRefusesAnLdpVCUnderHAIP(t *testing.T) {
 	fixture := newHAIPIssuanceFixture(t, func(f *finalIssuanceFixture) { f.credentialFormat = "ldp_vc" })
 	_, err := fixture.wallet.BeginIssuance(context.Background(), fixture.issuanceRequest())
 	require.ErrorIs(t, err, receiverTypes.ErrInvalidMetadata)
-	require.ErrorContains(t, err, "HAIP requires credential format dc+sd-jwt or mso_mdoc")
+	require.ErrorContains(t, err, "profile option AllowedCredentialFormats requires credential format dc+sd-jwt or mso_mdoc")
 	require.Zero(t, fixture.parCalls)
 }

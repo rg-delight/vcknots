@@ -22,8 +22,8 @@ type walletProfiles struct {
 }
 
 // resolveProfiles validates Config.Profiles: exactly one 1.0 profile, each
-// draft profile at most once, and no draft profile beside a 1.0 profile whose
-// Options cover HAIPOptions() (enforcesHAIP), whatever its name.
+// draft profile at most once, and no draft profile beside a 1.0 profile with
+// Options.ForbidDraftProfiles.
 func resolveProfiles(profiles []profile.Profile) (walletProfiles, error) {
 	if len(profiles) == 0 {
 		profiles = DefaultProfiles()
@@ -31,13 +31,13 @@ func resolveProfiles(profiles []profile.Profile) (walletProfiles, error) {
 	var resolved walletProfiles
 	finals := 0
 	for _, p := range profiles {
-		switch p.Name() {
-		case profile.NameDraft13:
+		switch p.Version() {
+		case profile.VersionDraft13:
 			if resolved.draft13 {
 				return walletProfiles{}, fmt.Errorf("%w: Config.Profiles names profile.Draft13 twice", ErrInvalidArgument)
 			}
 			resolved.draft13 = true
-		case profile.NameDraft24:
+		case profile.VersionDraft24:
 			if resolved.draft24 {
 				return walletProfiles{}, fmt.Errorf("%w: Config.Profiles names profile.Draft24 twice", ErrInvalidArgument)
 			}
@@ -50,17 +50,10 @@ func resolveProfiles(profiles []profile.Profile) (walletProfiles, error) {
 	if finals != 1 {
 		return walletProfiles{}, fmt.Errorf("%w: Config.Profiles must name exactly one OpenID4VCI 1.0 / OpenID4VP 1.0 profile, got %d", ErrInvalidArgument, finals)
 	}
-	if enforcesHAIP(resolved.final) && (resolved.draft13 || resolved.draft24) {
-		return walletProfiles{}, fmt.Errorf("%w: HAIP 1.0 profiles only OpenID4VCI 1.0 and OpenID4VP 1.0, so Config.Profiles cannot name a draft profile beside %s", ErrProfileForbidsDraft, resolved.final)
+	if resolved.final.Options().ForbidDraftProfiles && (resolved.draft13 || resolved.draft24) {
+		return walletProfiles{}, fmt.Errorf("%w: %w forbids a draft profile in Config.Profiles beside %s", ErrProfileForbidsDraft, profile.Refused("ForbidDraftProfiles"), resolved.final)
 	}
 	return resolved, nil
-}
-
-// enforcesHAIP reports whether p applies all of HAIP 1.0: profile.HAIP(), or
-// profile.Final().With(profile.HAIPOptions()), which keeps the name "final".
-// The decision reads the Options, never the name.
-func enforcesHAIP(p profile.Profile) bool {
-	return p.Options().Covers(profile.HAIPOptions())
 }
 
 // options returns the Options of the wallet's 1.0 profile.
@@ -84,4 +77,10 @@ func (w *Wallet) requireDraft24() error {
 		return fmt.Errorf("%w: Config.Profiles does not enable profile.Draft24", ErrProfileForbidsDraft)
 	}
 	return nil
+}
+
+// validatesCredentialConfigurations reports whether o constrains a Credential
+// Configuration, which the OpenID4VCI receiver then validates.
+func validatesCredentialConfigurations(o profile.Options) bool {
+	return o.RequireIssuerMetadataScopes || o.AllowedCredentialFormats != 0
 }

@@ -321,7 +321,7 @@ func TestIssuanceHAIPRequiresPAR(t *testing.T) {
 	})
 	_, err := fixture.wallet.BeginIssuance(context.Background(), fixture.issuanceRequest())
 	require.ErrorIs(t, err, receiverTypes.ErrInvalidMetadata)
-	require.ErrorContains(t, err, "HAIP requires a pushed authorization request endpoint")
+	require.ErrorContains(t, err, "profile option RequirePAR requires a pushed authorization request endpoint")
 	require.Equal(t, 0, fixture.authorizeCalls)
 }
 
@@ -340,7 +340,7 @@ func TestIssuanceHAIPAuthorizationRequestRejectsAuthorizationDetails(t *testing.
 	req.AuthorizationRequestType = AuthorizationRequestDetails
 	_, err := fixture.wallet.BeginIssuance(context.Background(), req)
 	require.ErrorIs(t, err, ErrInvalidArgument)
-	require.ErrorContains(t, err, "HAIP requires the scope authorization request type")
+	require.ErrorContains(t, err, "profile option RequireScopeAuthorization requires the scope authorization request type")
 	require.Equal(t, 0, fixture.parCalls)
 }
 
@@ -352,7 +352,7 @@ func TestIssuanceHAIPAuthorizationRequestRejectsScopelessConfiguration(t *testin
 	for _, requested := range []AuthorizationRequestType{"", AuthorizationRequestScope} {
 		_, _, err := authorizationRequestParameters(requested, "pid", scopeless, true)
 		require.ErrorIs(t, err, receiverTypes.ErrInvalidMetadata)
-		require.ErrorContains(t, err, `HAIP requires the credential configuration "pid" to advertise a scope`)
+		require.ErrorContains(t, err, `profile option RequireScopeAuthorization requires the credential configuration "pid" to advertise a scope`)
 	}
 
 	// Outside HAIP the default falls back to authorization_details (Section
@@ -1366,5 +1366,5 @@ func TestIssuanceHAIPCredentialStagesNeedNoClientAuthentication(t *testing.T) {
 	// The token endpoint still requires it.
 	_, err = poller.AuthorizeIssuance(ctx, authorization, location)
 	require.ErrorIs(t, err, ErrInvalidArgument)
-	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.ErrorContains(t, err, "profile option RequireClientAuthentication requires an OAuth2 client authentication mechanism")
 }

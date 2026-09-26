@@ -548,7 +548,7 @@ func TestAuthorizePreAuthorizedIssuanceRejectsAnonymousUnderHAIP(t *testing.T) {
 	fixture := newHAIPIssuanceFixture(t, func(f *finalIssuanceFixture) { f.clientAuthKey = nil })
 	_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
 	require.ErrorIs(t, err, ErrInvalidArgument)
-	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.ErrorContains(t, err, "profile option RequireClientAuthentication requires an OAuth2 client authentication mechanism")
 	require.Equal(t, 0, fixture.tokenCalls)
 
 	fixture.wallet.attestationConfig.Client = &attestation.StaticClientAttester{Key: testKeyEntry(t, fixture.attesterKey)}
@@ -764,7 +764,7 @@ func TestAuthorizeIssuanceRequiresHAIPClientAuthenticationOnResume(t *testing.T)
 
 	fixture.clientAuthKey = nil
 	_, err = fixture.newWallet(t).AuthorizeIssuance(context.Background(), authorization, location)
-	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.ErrorContains(t, err, "profile option RequireClientAuthentication requires an OAuth2 client authentication mechanism")
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 

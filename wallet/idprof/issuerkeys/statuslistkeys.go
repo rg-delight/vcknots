@@ -106,7 +106,7 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 //
 // A Resolver with Experimental set is refused, with an error wrapping
 // statuslist.ErrStatusListInsecureTransportForbidden, when
-// request.ForbidInsecureTransports says the Checker's profile forbids it.
+// request.ForbidExperimental says the Checker's profile forbids it.
 //
 // request.X5C carries the profile's rules (HAIP 1.0 Section 6.1): Require
 // refuses every source other than the x5c chain, ExcludeAnchor a chain that
@@ -123,7 +123,7 @@ func (r *Resolver) StatusListKeyFunc(template Request, trust *X5CTrust) statusli
 // are exactly the returned keys, so Resolution.CandidateFor answers for the
 // key that verified.
 func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *X5CTrust, request statuslist.KeyRequest) ([]jose.JSONWebKey, *Resolution, error) {
-	if request.ForbidInsecureTransports && r.Experimental != (experimental.Transport{}) {
+	if request.ForbidExperimental && r.Experimental != (experimental.Transport{}) {
 		// HAIP 1.0 Section 4: the profile refuses the experimental transport
 		// relaxation rather than resolving over it.
 		return nil, nil, fmt.Errorf("%w: the profile does not permit Resolver.Experimental", statuslist.ErrStatusListInsecureTransportForbidden)

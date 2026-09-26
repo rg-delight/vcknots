@@ -181,7 +181,7 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 	f.additionalEntry = f.keyEntry(f.additionalKey)
 	f.dpopEntry = f.keyEntry(f.clientKey)
 	f.issuedCredential = f.issueCredential(f.holderKey, map[string]string{"given_name": "Taro"})
-	if f.walletProfile.Options().ForbidInsecureTransports {
+	if f.walletProfile.Options().ForbidExperimental {
 		f.server = httptest.NewTLSServer(http.HandlerFunc(f.serveHTTP))
 	} else {
 		f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
@@ -197,7 +197,7 @@ func (f *finalIssuanceFixture) newWallet(t *testing.T) *Wallet {
 	t.Helper()
 	plugin := receiverTypes.Receiver(&oid4vci.Oid4vciReceiver{
 		HTTPClient:   f.server.Client(),
-		Experimental: experimental.Transport{AllowHTTP: !f.walletProfile.Options().ForbidInsecureTransports},
+		Experimental: experimental.Transport{AllowHTTP: !f.walletProfile.Options().ForbidExperimental},
 		Profile:      f.walletProfile,
 	})
 	if f.wrapReceiverPlugin != nil {

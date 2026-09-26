@@ -55,14 +55,14 @@ func TestVerifyX5CBindsTheIssToTheLeafByDefault(t *testing.T) {
 			"https subdomain":     "https://www.attacker.example",
 			"not a URL":           "attacker.example",
 		} {
-			t.Run(p.Name()+" iss "+name, func(t *testing.T) {
+			t.Run(p.String()+" iss "+name, func(t *testing.T) {
 				_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, &issuer), x509Trust(chain.anchors()), sdJWT(&holder))
 				require.ErrorIs(t, err, ErrIssuerDNSBindingFailed)
 				require.Nil(t, verification)
 			})
 		}
 
-		t.Run(p.Name()+" the leaf's own host is bound and the Issuer is the certificate subject", func(t *testing.T) {
+		t.Run(p.String()+" the leaf's own host is bound and the Issuer is the certificate subject", func(t *testing.T) {
 			_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, ptr("https://attacker.example/issuer")), x509Trust(chain.anchors()), sdJWT(&holder))
 			require.NoError(t, err)
 			require.True(t, verification.IssuerDNSBound)
@@ -110,7 +110,7 @@ func TestVerifyX5CWithoutIssIsIssuedByTheCertificateSubject(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	holder := newHolderKey(t)
 	for _, p := range []profile.Profile{profile.Final(), profile.HAIP()} {
-		t.Run(p.Name(), func(t *testing.T) {
+		t.Run(p.String(), func(t *testing.T) {
 			_, verification, err := newTestAcceptor(t, p).Verify(t.Context(), x5cClaims(t, chain, holder, nil), x509Trust(chain.anchors()), sdJWT(&holder))
 			require.NoError(t, err)
 			require.Equal(t, "CN=Acceptance Test Issuer", verification.Issuer)
@@ -250,7 +250,7 @@ func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 }
 
 // HAIP 1.0 §4 and SD-JWT VC -19 §3: key material over TLS only (CR-15).
-func TestVerifyRefusesAnExperimentalResolverUnderForbidInsecureTransports(t *testing.T) {
+func TestVerifyRefusesAnExperimentalResolverUnderForbidExperimental(t *testing.T) {
 	holder := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	policy := x509Trust(chain.anchors())

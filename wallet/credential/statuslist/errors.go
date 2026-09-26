@@ -97,7 +97,7 @@ var (
 	// ErrStatusListInsecureTransportForbidden reports that the Checker
 	// (Checker.Experimental), or the resolution behind its ResolveIssuerKeys
 	// hook, carries an experimental transport relaxation that the Checker's
-	// profile forbids (profile.Options.ForbidInsecureTransports, HAIP 1.0
+	// profile forbids (profile.Options.ForbidExperimental, HAIP 1.0
 	// Section 4). It is a configuration error: the Checker's own relaxation is
 	// refused before anything is fetched.
 	ErrStatusListInsecureTransportForbidden = common.NewCodedError("status_list_insecure_transport_forbidden", "the profile does not permit the experimental transport relaxation")

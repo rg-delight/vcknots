@@ -88,7 +88,7 @@ type Oid4vpPresenter struct {
 
 	// Experimental relaxes the presenter beyond OpenID4VP for a local test
 	// verifier (package experimental). The zero value applies none. A profile
-	// with ForbidInsecureTransports (HAIP) refuses any non-zero value on every
+	// with ForbidExperimental (HAIP) refuses any non-zero value on every
 	// entry point: the OpenID4VP 1.0, Digital Credentials API, Draft 24 and
 	// re-admission parses.
 	Experimental experimental.Presenter
@@ -140,7 +140,7 @@ func (p *Oid4vpPresenter) ParseRequest(ctx context.Context, uri string) (types.A
 // claim must equal (OID4VP 1.0 §5.10.1, ErrRequestObjectClientIDMismatch); it
 // is empty only when there is no outer client_id. A profile with
 // RequireSignedRequestByReference (HAIP 1.0 §5.1) refuses every Request Object
-// passed by value with ErrHAIPRequestURIRequired: only ParseRequest, which
+// passed by value with ErrRequestURIRequired: only ParseRequest, which
 // fetches request_uri itself, observes delivery by reference. The result is an
 // *AdmittedRequest.
 func (p *Oid4vpPresenter) ParseRequestObject(ctx context.Context, requestObject string, src types.RequestObjectSource) (types.AdmittedRequest, error) {
@@ -190,7 +190,7 @@ func (p *Oid4vpPresenter) parseRequestURI(ctx context.Context, uriString string)
 		builder.WithRequestObjectURI(requestURI, method)
 	case requestObj != "":
 		if builder.options.RequireSignedRequestByReference {
-			return nil, errHAIPRequestURIRequired()
+			return nil, errRequestURIRequired()
 		}
 		builder.WithRequestObject(requestObj)
 	default:
@@ -214,7 +214,7 @@ func (p *Oid4vpPresenter) parseRequestObject(ctx context.Context, requestObject 
 	if builder.options.RequireSignedRequestByReference {
 		// HAIP 1.0 §5.1: the Request Object must come from request_uri, which
 		// only a fetch by this library can establish.
-		return nil, errHAIPRequestURIRequired()
+		return nil, errRequestURIRequired()
 	}
 	builder.applySource(clientID)
 	builder.WithRequestObject(requestObject)
@@ -233,7 +233,7 @@ func authorizationRequestQuery(uriString string) (url.Values, error) {
 
 // profileOptions returns the Options of the presenter's profile, failing
 // closed before any network access on a draft profile, and on any
-// experimental relaxation under a profile with ForbidInsecureTransports
+// experimental relaxation under a profile with ForbidExperimental
 // (HAIP). Every entry point calls it - the OpenID4VP 1.0, Digital
 // Credentials API, Draft 24 and re-admission parses - so a HAIP presenter
 // refuses Experimental wherever it would take effect, rather than applying a
@@ -243,10 +243,10 @@ func (p *Oid4vpPresenter) profileOptions() (profile.Options, error) {
 		return profile.Options{}, fmt.Errorf("invalid OID4VP profile: %w", err)
 	}
 	options := p.Profile.Options()
-	if options.ForbidInsecureTransports && p.Experimental != (experimental.Presenter{}) {
+	if options.ForbidExperimental && p.Experimental != (experimental.Presenter{}) {
 		// HAIP 1.0 §5: TLS verifier endpoints, verified X.509 request signing
 		// and OpenID4VP 1.0 as written; no experimental escape weakens it.
-		return profile.Options{}, newAuthorizationRequestError(InvalidRequestError, "the %s profile does not permit Oid4vpPresenter.Experimental", p.Profile.Name())
+		return profile.Options{}, newAuthorizationRequestError(InvalidRequestError, "%w does not permit Oid4vpPresenter.Experimental", profile.Refused("ForbidExperimental"))
 	}
 	return options, nil
 }

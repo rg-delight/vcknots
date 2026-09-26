@@ -44,10 +44,11 @@ var (
 	// match the leaf certificate that signed the Request Object (OID4VP 1.0
 	// §5.9.3).
 	ErrX509HashMismatch = common.NewCodedError("x509_hash_mismatch", "request object x509_hash client_id does not match the signing certificate")
-	// ErrHAIPRequestURIRequired reports that the HAIP profile requires a signed
-	// Authorization Request delivered through request_uri, and this request did
-	// not arrive that way (HAIP 1.0 §5.1).
-	ErrHAIPRequestURIRequired = common.NewCodedError("haip_request_uri_required", "HAIP requires the Authorization Request delivered by request_uri")
+	// ErrRequestURIRequired reports, under
+	// Options.RequireSignedRequestByReference, a redirect-based Authorization
+	// Request that did not arrive as a signed Request Object this library
+	// fetched from request_uri (HAIP 1.0 §5.1).
+	ErrRequestURIRequired = common.NewCodedError("request_uri_required", "the Authorization Request was not delivered by request_uri")
 	// ErrResponseURIInvalid reports that a response_uri is not a usable
 	// Response Endpoint: absent, unparseable, without an authority, or not
 	// https while the presenter does not allow plain http.

@@ -178,7 +178,7 @@ func TestHAIPRequestObjectRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 		"client_id":   {f.clientID()},
 		"request_uri": {f.server.URL + "/request-object"},
 	}.Encode())
-	if err == nil || !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
+	if err == nil || !strings.Contains(err.Error(), "profile option RequestObjectX5C.ExcludeAnchor forbids including the trust anchor certificate in the x5c header") {
 		t.Fatalf("HAIP must reject the anchor in x5c with a root pool: %v", err)
 	}
 
@@ -503,7 +503,7 @@ func TestParsePresentationRequestRequestObjectSentinels(t *testing.T) {
 		},
 		{
 			name:     "haip request_uri required",
-			sentinel: ErrHAIPRequestURIRequired,
+			sentinel: ErrRequestURIRequired,
 			presenter: func(f *requestObjectFixture) *Oid4vpPresenter {
 				return f.presenterWith(requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByValue})
 			},

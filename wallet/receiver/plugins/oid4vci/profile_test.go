@@ -41,7 +41,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 
 		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 		_, err = haip.FetchAccessToken(types.Oid4vci, bearer, "code", "")
-		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
+		require.ErrorContains(t, err, "profile option RequireDPoP requires a DPoP-bound access token")
 	})
 
 	t.Run("DPoP token type is case-insensitive", func(t *testing.T) {
@@ -63,7 +63,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 
 		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
-		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
+		require.ErrorContains(t, err, "profile option RequireDPoP requires a DPoP-bound access token")
 	})
 
 	t.Run("authorization code DPoP retry exchange", func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 			return types.OAuthClientAttestationHeaders{}, nil
 		}}, DPoP: testProver(func(string) (string, error) { return "proof", nil })})
-		require.ErrorContains(t, err, "HAIP requires a DPoP-bound access token")
+		require.ErrorContains(t, err, "profile option RequireDPoP requires a DPoP-bound access token")
 	})
 
 	t.Run("a draft profile fails closed", func(t *testing.T) {
@@ -189,7 +189,7 @@ func TestOid4vciReceiver_ProfileAllowHTTP(t *testing.T) {
 
 	haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
 	_, err := haip.FetchIssuerMetadata(endpoint, types.Oid4vci)
-	require.ErrorContains(t, err, "HAIP profile does not permit Experimental.Transport")
+	require.ErrorContains(t, err, "profile option ForbidExperimental does not permit Experimental.Transport")
 	code, coded := common.CodeOf(err)
 	require.True(t, coded)
 	require.Equal(t, "invalid_argument", code)

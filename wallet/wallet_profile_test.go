@@ -29,10 +29,10 @@ import (
 )
 
 // profilesFor is Config.Profiles for a wallet built around the 1.0 profile
-// p: HAIP alone, and any other profile with both draft profiles, as
-// DefaultProfiles runs Final.
+// p: alone when it forbids draft profiles (HAIP), and otherwise with both
+// draft profiles, as DefaultProfiles runs Final.
 func profilesFor(p profile.Profile) []profile.Profile {
-	if p.Name() == profile.NameHAIP {
+	if p.Options().ForbidDraftProfiles {
 		return []profile.Profile{p}
 	}
 	return []profile.Profile{p, profile.Draft13(), profile.Draft24()}

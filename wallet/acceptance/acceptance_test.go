@@ -164,7 +164,7 @@ func TestVerifyHAIPRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 	require.Len(t, verification.CertificateSHA256, 2)
 
 	_, _, err = newTestAcceptor(t, profile.HAIP()).Verify(t.Context(), wire, policy, sdJWT(&holder))
-	require.ErrorIs(t, err, ErrHAIPTrustAnchorInX5C)
+	require.ErrorIs(t, err, ErrIssuerX5CTrustAnchor)
 }
 
 func TestVerifyRejectsUnsupportedConfirmationMethod(t *testing.T) {
@@ -355,8 +355,8 @@ func TestVerifyTypedFailures(t *testing.T) {
 		{"disclosure integrity", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, extraDisclosure: true}), ErrDisclosureIntegrity},
 		{"sd_alg", profile.Final(), resolvingPolicy, signed(testWire{disclosures: disclosed}), signed(testWire{disclosures: disclosed, sdAlg: "sha-1"}), ErrSDAlgUnsupported},
 		{"issuer DNS binding", profile.Final(), x509Trust(chain.anchors()), x5cSigned(testWire{}), x5cSigned(testWire{issuer: "https://other.example.test"}), ErrIssuerDNSBindingFailed},
-		{"HAIP x5c required", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), signed(testWire{}), ErrHAIPX5CRequired},
-		{"HAIP trust anchor in x5c", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrHAIPTrustAnchorInX5C},
+		{"HAIP x5c required", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), signed(testWire{}), ErrIssuerX5CRequired},
+		{"HAIP trust anchor in x5c", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), x5cSigned(testWire{x5c: chain.x5c()}), ErrIssuerX5CTrustAnchor},
 		{"HAIP self-signed issuer certificate", profile.HAIP(), x509Trust(chain.anchors()), x5cSigned(testWire{}), selfSigned, ErrIssuerCertificateSelfSigned},
 	}
 	for _, testCase := range cases {

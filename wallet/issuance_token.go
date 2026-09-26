@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -38,7 +39,7 @@ func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 	}
 	clientID := strings.TrimSpace(w.clientAuth.ClientID)
 	if w.options().RequireClientAuthentication && clientID == "" {
-		return nil, invalidArgument("HAIP requires a client_id on the pre-authorized_code token request")
+		return nil, invalidArgument("%w requires a client_id on the pre-authorized_code token request", profile.Refused("RequireClientAuthentication"))
 	}
 	hint := strings.TrimSpace(req.AuthorizationServer)
 	if hint == "" {
@@ -183,7 +184,7 @@ func (w *Wallet) checkGrantToken(token *receiverTypes.CredentialIssuanceAccessTo
 		return fmt.Errorf("the state carries no access token: %w", ErrIssuanceStateMismatch)
 	}
 	if w.options().RequireDPoP && !isDPoPAccessToken(token) {
-		return fmt.Errorf("HAIP requires a DPoP-bound access token, the token has token_type %q: %w", token.TokenType, ErrDPoPRequired)
+		return fmt.Errorf("%w requires a DPoP-bound access token, the token has token_type %q: %w", profile.Refused("RequireDPoP"), token.TokenType, ErrDPoPRequired)
 	}
 	return nil
 }

@@ -475,7 +475,7 @@ func (c *requestCore) applyRequestObjectX5CRules(certificates []*x509.Certificat
 		return err
 	}
 	if anchored {
-		return errors.New("HAIP forbids including the trust anchor certificate in the x5c header")
+		return fmt.Errorf("%w forbids including the trust anchor certificate in the x5c header", profile.Refused("RequestObjectX5C.ExcludeAnchor"))
 	}
 	return nil
 }

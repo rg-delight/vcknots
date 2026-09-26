@@ -173,12 +173,12 @@ type KeyRequest struct {
 	// ErrStatusListCertificateRejected. Under Require the hook must return
 	// only the leaf key of a chain it validated.
 	X5C profile.X5CRules
-	// ForbidInsecureTransports is profile.Options.ForbidInsecureTransports of
+	// ForbidExperimental is profile.Options.ForbidExperimental of
 	// the Checker's profile (HAIP 1.0 Section 4). A hook whose own
 	// resolution carries an experimental transport relaxation must refuse it
 	// then, with an error wrapping ErrStatusListInsecureTransportForbidden,
 	// rather than resolve over it.
-	ForbidInsecureTransports bool
+	ForbidExperimental bool
 }
 
 // ResolveIssuerKeysFunc returns the candidate public keys of a Status List
@@ -237,7 +237,7 @@ type Checker struct {
 	// local test (package experimental). Status List Tokens are signed, so
 	// cleartext does not let a network attacker forge a verdict, but it does
 	// let one observe which credential is being checked; the zero value
-	// requires https. A Profile whose options carry ForbidInsecureTransports
+	// requires https. A Profile whose options carry ForbidExperimental
 	// (HAIP) refuses a Checker that sets it with
 	// ErrStatusListInsecureTransportForbidden before anything is fetched.
 	Experimental experimental.Transport
@@ -320,7 +320,7 @@ func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map
 // its token had not yet earned.
 func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, reference Reference) (*Status, error) {
 	options := c.Profile.Options()
-	if options.ForbidInsecureTransports && c.Experimental != (experimental.Transport{}) {
+	if options.ForbidExperimental && c.Experimental != (experimental.Transport{}) {
 		return nil, fmt.Errorf("%w: the profile does not permit Checker.Experimental", ErrStatusListInsecureTransportForbidden)
 	}
 	endpoint, err := parseStatusListURI(reference.URI, c.allowHTTP())
@@ -379,10 +379,10 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 		return nil, err
 	}
 	keys, err := c.resolveIssuerKeys(ctx, KeyRequest{
-		Issuer:                   issuer,
-		Header:                   header,
-		X5C:                      options.StatusListTokenX5C,
-		ForbidInsecureTransports: options.ForbidInsecureTransports,
+		Issuer:             issuer,
+		Header:             header,
+		X5C:                options.StatusListTokenX5C,
+		ForbidExperimental: options.ForbidExperimental,
 	})
 	if err != nil {
 		return nil, err

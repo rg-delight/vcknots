@@ -580,7 +580,7 @@ func TestHAIPCredentialRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 		// HAIP profiles OpenID4VCI 1.0, whose acceptance applies IssuerX5C.
 		w, _ := newAcceptanceWallet(t, profile.HAIP(), poolPolicy())
 		_, _, err := w.VerifyCredentialForAcceptance(t.Context(), CredentialAcceptanceRequest{Raw: []byte(wire), Flavor: credential.SDJwtVC, HolderKey: &holder})
-		require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
+		require.ErrorContains(t, err, "profile option IssuerX5C.ExcludeAnchor")
 	})
 }
 

@@ -49,7 +49,7 @@ func TestHAIPRequestDelivery(t *testing.T) {
 	t.Run("a Request Object passed by value is refused", func(t *testing.T) {
 		f := newRequestObjectFixture(t)
 		_, err := parseRequestByValue(t, f, profile.HAIP())
-		if !errors.Is(err, ErrHAIPRequestURIRequired) {
+		if !errors.Is(err, ErrRequestURIRequired) {
 			t.Fatalf("HAIP must refuse a by-value Request Object: %v", err)
 		}
 	})
@@ -62,7 +62,7 @@ func TestHAIPRequestDelivery(t *testing.T) {
 			http.NotFound(w, nil)
 		})
 		_, err := f.parseRequest(t, f.claims(), requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByValue})
-		if !errors.Is(err, ErrHAIPRequestURIRequired) {
+		if !errors.Is(err, ErrRequestURIRequired) {
 			t.Fatalf("HAIP must refuse the request parameter: %v", err)
 		}
 		if fetched.Load() != 0 {

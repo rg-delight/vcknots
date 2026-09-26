@@ -147,8 +147,8 @@ func TestParseRequestObjectHAIPDeliveryPolicy(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	requestObject := f.sign(t, f.claims(), nil)
 
-	if _, err := parseRequestObjectForTest(f.haipPresenter(), requestObject, f.clientID()); !errors.Is(err, ErrHAIPRequestURIRequired) {
-		t.Fatalf("want ErrHAIPRequestURIRequired for a Request Object passed by value, got %v", err)
+	if _, err := parseRequestObjectForTest(f.haipPresenter(), requestObject, f.clientID()); !errors.Is(err, ErrRequestURIRequired) {
+		t.Fatalf("want ErrRequestURIRequired for a Request Object passed by value, got %v", err)
 	}
 }
 

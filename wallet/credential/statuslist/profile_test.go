@@ -175,7 +175,7 @@ func TestCheckReferenceAppliesTheHAIPStatusListTokenX5CRules(t *testing.T) {
 }
 
 // TestCheckReferenceForbidsCleartextUnderAProfileThatForbidsIt covers
-// profile.Options.ForbidInsecureTransports (HAIP 1.0 Section 4): the
+// profile.Options.ForbidExperimental (HAIP 1.0 Section 4): the
 // experimental transport is a test-only escape the profile refuses rather than
 // ignores, for an https reference too, and before anything is fetched.
 func TestCheckReferenceForbidsCleartextUnderAProfileThatForbidsIt(t *testing.T) {
@@ -212,7 +212,7 @@ func TestCheckReferencePassesTheTransportRuleToTheHook(t *testing.T) {
 	}
 	_, err := checker.CheckReference(context.Background(), testIssuer, h.reference(0))
 	assertSentinel(t, err, ErrStatusListInsecureTransportForbidden)
-	if !seen.ForbidInsecureTransports {
+	if !seen.ForbidExperimental {
 		t.Fatal("the hook was not told the profile forbids experimental transports")
 	}
 }

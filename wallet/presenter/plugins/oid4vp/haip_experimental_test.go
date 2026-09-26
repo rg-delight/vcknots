@@ -27,7 +27,7 @@ func (r *refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 // applied Experimental.Transport on the Draft 24 entry point and
 // Experimental.AcceptClientMetadataJWKsWithoutKeyID on the Digital Credentials
 // API entry point, because only the OpenID4VP 1.0 URI parse looked at
-// Experimental, and only at two of its fields. Under ForbidInsecureTransports
+// Experimental, and only at two of its fields. Under ForbidExperimental
 // every entry point refuses any non-zero Experimental before the network.
 func TestHAIPPresenterRefusesExperimentalOnEveryEntryPoint(t *testing.T) {
 	f := newRequestObjectFixture(t)

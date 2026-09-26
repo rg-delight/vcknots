@@ -29,7 +29,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 		for _, draft := range []profile.Profile{profile.Draft13(), profile.Draft24()} {
 			_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: draft, Delivery: deliverByValue})
 			if !errors.Is(err, profile.ErrDraftProfile) {
-				t.Fatalf("profile %s: want ErrDraftProfile, got %v", draft.Name(), err)
+				t.Fatalf("profile %s: want ErrDraftProfile, got %v", draft, err)
 			}
 		}
 	})
@@ -41,7 +41,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Fatalf("Final must accept AllowHTTP test policy: %v", err)
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, AllowHTTP: true})
-		if err == nil || !strings.Contains(err.Error(), "the haip profile does not permit Oid4vpPresenter.Experimental") {
+		if err == nil || !strings.Contains(err.Error(), "profile option ForbidExperimental does not permit Oid4vpPresenter.Experimental") {
 			t.Fatalf("HAIP must reject AllowHTTP: %v", err)
 		}
 	})
@@ -55,7 +55,7 @@ func TestFinalAndHAIPProfileParseCheckpoints(t *testing.T) {
 			t.Log("Final rejected insecure verify for its own reason")
 		}
 		_, err := f.parseRequest(t, claims, requestFixtureOptions{Profile: profile.HAIP(), Delivery: deliverByReference, Insecure: true})
-		if err == nil || !strings.Contains(err.Error(), "the haip profile does not permit Oid4vpPresenter.Experimental") {
+		if err == nil || !strings.Contains(err.Error(), "profile option ForbidExperimental does not permit Oid4vpPresenter.Experimental") {
 			t.Fatalf("HAIP must reject InsecureSkipX509Verify: %v", err)
 		}
 	})
@@ -458,7 +458,7 @@ func TestHAIPDCAPIRejectsUnencryptedResponseMode(t *testing.T) {
 	if err == nil {
 		t.Fatal("HAIP must reject the unencrypted dc_api response mode")
 	}
-	if !strings.Contains(err.Error(), "HAIP requires the response_mode dc_api.jwt") {
+	if !strings.Contains(err.Error(), "profile option RequireDCAPIJWT requires the response_mode dc_api.jwt") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -534,7 +534,7 @@ func TestRequestBuilderWithProfileRejectsDraftProfiles(t *testing.T) {
 	for _, draft := range []profile.Profile{profile.Draft13(), profile.Draft24()} {
 		_, err := NewRequestBuilder().WithProfile(draft).WithQueryParams(finalQueryBuilderParams("vp_token")).Build()
 		if !errors.Is(err, profile.ErrDraftProfile) {
-			t.Fatalf("WithProfile(%s): want ErrDraftProfile, got %v", draft.Name(), err)
+			t.Fatalf("WithProfile(%s): want ErrDraftProfile, got %v", draft, err)
 		}
 	}
 }

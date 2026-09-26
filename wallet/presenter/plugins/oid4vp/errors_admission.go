@@ -47,11 +47,12 @@ var (
 	// encrypted_response_enc_values_supported offers no content encryption
 	// this Wallet supports under the active profile.
 	ErrResponseEncryptionEncUnsupported = common.NewCodedError("response_encryption_enc_unsupported", "encrypted_response_enc_values_supported offers no supported content encryption")
-	// ErrResponseEncryptionEncMissing reports a HAIP encrypted-response request
-	// whose Verifier does not list both A128GCM and A256GCM in
+	// ErrResponseEncryptionEncMissing reports, under
+	// Options.ResponseEncryption.RequireVerifierGCMBoth, an encrypted-response
+	// request whose Verifier does not list both A128GCM and A256GCM in
 	// encrypted_response_enc_values_supported, which HAIP Section 5 requires
 	// of every Verifier using response encryption.
-	ErrResponseEncryptionEncMissing = common.NewCodedError("response_encryption_enc_missing", "HAIP requires encrypted_response_enc_values_supported to list A128GCM and A256GCM")
+	ErrResponseEncryptionEncMissing = common.NewCodedError("response_encryption_enc_missing", "encrypted_response_enc_values_supported does not list both A128GCM and A256GCM")
 	// ErrClientMetadataJWKKeyIDMissing reports a client_metadata.jwks member
 	// without a kid. OpenID4VP 1.0 Section 5.1: "Each JWK in the set MUST have
 	// a `kid` (Key ID) parameter". Reported on the OpenID4VP 1.0 entry

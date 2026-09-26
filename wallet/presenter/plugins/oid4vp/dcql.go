@@ -258,7 +258,7 @@ func validateCredentialQuery(index int, credentialQuery map[string]any, seenIDs 
 		// HAIP §5.3.2 / §6.1: HAIP only uses the dc+sd-jwt and mso_mdoc
 		// Credential Format Identifiers. A Final format such as jwt_vc_json is
 		// invalid rather than merely unsupported under this profile.
-		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile only permits the %s credential formats, got %q", strings.ReplaceAll(allowed.String(), ",", " and "), format)
+		return newAuthorizationRequestError(InvalidRequestError, "%w permits only the %s credential formats, got %q", profile.Refused("AllowedCredentialFormats"), strings.ReplaceAll(allowed.String(), ",", " and "), format)
 	}
 	if !supportedCredentialFormats[format] {
 		return newAuthorizationRequestError(VPFormatsNotSupportedError, "dcql_query.credentials[%d].format %q is not supported by this wallet", index, format)

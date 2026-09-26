@@ -149,6 +149,6 @@ func TestIssuanceWalletInitiatedHAIPRequiresClientAuthentication(t *testing.T) {
 
 	_, err := fixture.wallet.BeginIssuance(context.Background(), fixture.walletInitiatedRequest())
 	require.ErrorIs(t, err, ErrInvalidArgument)
-	require.ErrorContains(t, err, "HAIP requires an OAuth2 client authentication mechanism")
+	require.ErrorContains(t, err, "profile option RequireClientAuthentication requires an OAuth2 client authentication mechanism")
 	require.Equal(t, 0, fixture.issuerMetadataCalls)
 }

@@ -34,7 +34,7 @@ type Oid4vciReceiver struct {
 	// Experimental relaxes transport security for a local test issuer
 	// (experimental.Transport.AllowHTTP). Not specification-conforming; for
 	// testing only. The zero value requires HTTPS, as OpenID4VCI 1.0 Section
-	// 12.2 does, and a profile with ForbidInsecureTransports refuses any
+	// 12.2 does, and a profile with ForbidExperimental refuses any
 	// other value.
 	Experimental experimental.Transport
 	// Profile is the OpenID4VCI 1.0 profile whose Options the receiver
@@ -78,11 +78,11 @@ func (o *Oid4vciReceiver) profileOptions() (profile.Options, error) {
 }
 
 // requireSecureTransport rejects the experimental HTTP escape under
-// Options.ForbidInsecureTransports (HAIP §4 requires TLS for issuer and
+// Options.ForbidExperimental (HAIP §4 requires TLS for issuer and
 // authorization server endpoints).
 func (o *Oid4vciReceiver) requireSecureTransport(options profile.Options) error {
-	if options.ForbidInsecureTransports && o.Experimental != (experimental.Transport{}) {
-		return fmt.Errorf("%w: HAIP profile does not permit Experimental.Transport", common.ErrInvalidInput)
+	if options.ForbidExperimental && o.Experimental != (experimental.Transport{}) {
+		return fmt.Errorf("%w: %w does not permit Experimental.Transport", common.ErrInvalidInput, profile.Refused("ForbidExperimental"))
 	}
 	return nil
 }

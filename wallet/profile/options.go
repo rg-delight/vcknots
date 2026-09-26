@@ -7,16 +7,23 @@ import "strings"
 // states it, and can be applied on its own through Profile.With. The zero
 // value adds no constraint: it is OpenID4VCI 1.0 / OpenID4VP 1.0 Final.
 //
-// Options is comparable, so a Profile is comparable too.
+// Options is comparable, so a Profile is comparable too. Options.String names
+// the options that are on, in the spelling the text form of a Profile and
+// OptionError use.
 type Options struct {
-	// ForbidInsecureTransports refuses the test-only transport escapes of
-	// package experimental wherever they are carried: Config.Experimental.
-	// Transport, the Experimental field of the OpenID4VCI receiver, of the
-	// issuer key resolver (through the credential acceptor and the Status
-	// List key hook) and of the Status List checker, and the Transport and
-	// InsecureSkipX509Verify of the OpenID4VP presenter's Experimental.
-	// HAIP 1.0 §4 (FAPI 2.0 TLS) and §5 (x509_hash Verifier authentication).
-	ForbidInsecureTransports bool
+	// ForbidExperimental refuses every departure of package experimental
+	// wherever it is carried: Config.Experimental (Transport and Hooks), the
+	// Experimental field of the OpenID4VCI receiver, of the issuer key
+	// resolver (through the credential acceptor and the Status List key hook)
+	// and of the Status List checker, and every field of the OpenID4VP
+	// presenter's Experimental.
+	// HAIP 1.0 §4 (FAPI 2.0 TLS), §5 (x509_hash Verifier authentication) and
+	// OpenID4VCI 1.0 / OpenID4VP 1.0 as written.
+	ForbidExperimental bool
+	// ForbidDraftProfiles refuses a wallet whose Config.Profiles enables a
+	// draft profile (Draft13, Draft24) beside this one.
+	// HAIP 1.0 §1: OpenID4VCI 1.0 and OpenID4VP 1.0 are the base protocols.
+	ForbidDraftProfiles bool
 	// AllowedCredentialFormats restricts the Credential Format Identifiers a
 	// Credential Configuration (OpenID4VCI) or a DCQL Credential Query
 	// (OpenID4VP) may use. The zero value restricts nothing.
@@ -124,7 +131,8 @@ type Options struct {
 func HAIPOptions() Options {
 	all := X5CRules{Require: true, ExcludeAnchor: true, RejectSelfSigned: true}
 	return Options{
-		ForbidInsecureTransports: true,
+		ForbidExperimental:       true,
+		ForbidDraftProfiles:      true,
 		AllowedCredentialFormats: FormatSDJWTVC | FormatMsoMdoc,
 		IssuerX5C:                all,
 		StatusListTokenX5C:       all,
@@ -153,65 +161,6 @@ func HAIPOptions() Options {
 		},
 		AlwaysKeyBindingWhenConfirmed: true,
 	}
-}
-
-// ValidatesCredentialConfigurations reports whether o constrains a
-// Credential Configuration, which the OpenID4VCI receiver then validates.
-func (o Options) ValidatesCredentialConfigurations() bool {
-	return o.RequireIssuerMetadataScopes || o.AllowedCredentialFormats != 0
-}
-
-// Covers reports whether o keeps every option of floor at least as strict.
-// Options().Covers(HAIPOptions()) tells a profile that enforces all of HAIP
-// 1.0 - HAIP() or Final().With(HAIPOptions()) - whatever its name.
-func (o Options) Covers(floor Options) bool {
-	return len(o.weakened(floor)) == 0
-}
-
-// weakened names the options of floor that o does not keep at least as
-// strict.
-func (o Options) weakened(floor Options) []string {
-	var names []string
-	flag := func(name string, got, want bool) {
-		if want && !got {
-			names = append(names, name)
-		}
-	}
-	rules := func(name string, got, want X5CRules) {
-		flag(name+".Require", got.Require, want.Require)
-		flag(name+".ExcludeAnchor", got.ExcludeAnchor, want.ExcludeAnchor)
-		flag(name+".RejectSelfSigned", got.RejectSelfSigned, want.RejectSelfSigned)
-	}
-	flag("ForbidInsecureTransports", o.ForbidInsecureTransports, floor.ForbidInsecureTransports)
-	if !o.AllowedCredentialFormats.within(floor.AllowedCredentialFormats) {
-		names = append(names, "AllowedCredentialFormats")
-	}
-	rules("IssuerX5C", o.IssuerX5C, floor.IssuerX5C)
-	rules("StatusListTokenX5C", o.StatusListTokenX5C, floor.StatusListTokenX5C)
-	flag("RequirePAR", o.RequirePAR, floor.RequirePAR)
-	flag("RequireDPoP", o.RequireDPoP, floor.RequireDPoP)
-	flag("RequireAuthorizationResponseIss", o.RequireAuthorizationResponseIss, floor.RequireAuthorizationResponseIss)
-	flag("RequireScopeAuthorization", o.RequireScopeAuthorization, floor.RequireScopeAuthorization)
-	flag("RequireIssuerMetadataScopes", o.RequireIssuerMetadataScopes, floor.RequireIssuerMetadataScopes)
-	flag("RequireNonceEndpointForKeyBinding", o.RequireNonceEndpointForKeyBinding, floor.RequireNonceEndpointForKeyBinding)
-	flag("RequestSignedIssuerMetadata", o.RequestSignedIssuerMetadata, floor.RequestSignedIssuerMetadata)
-	rules("SignedMetadataX5C", o.SignedMetadataX5C, floor.SignedMetadataX5C)
-	flag("RequireClientAuthentication", o.RequireClientAuthentication, floor.RequireClientAuthentication)
-	rules("AttestationX5C", o.AttestationX5C, floor.AttestationX5C)
-	flag("RequireSignedRequestByReference", o.RequireSignedRequestByReference, floor.RequireSignedRequestByReference)
-	flag("RequireDirectPostJWT", o.RequireDirectPostJWT, floor.RequireDirectPostJWT)
-	flag("RequireDCAPIJWT", o.RequireDCAPIJWT, floor.RequireDCAPIJWT)
-	if !o.AllowedClientIDPrefixes.within(floor.AllowedClientIDPrefixes) {
-		names = append(names, "AllowedClientIDPrefixes")
-	}
-	rules("RequestObjectX5C", o.RequestObjectX5C, floor.RequestObjectX5C)
-	enc, floorEnc := o.ResponseEncryption, floor.ResponseEncryption
-	flag("ResponseEncryption.ECDHESOnly", enc.ECDHESOnly, floorEnc.ECDHESOnly)
-	flag("ResponseEncryption.P256Only", enc.P256Only, floorEnc.P256Only)
-	flag("ResponseEncryption.GCMOnly", enc.GCMOnly, floorEnc.GCMOnly)
-	flag("ResponseEncryption.RequireVerifierGCMBoth", enc.RequireVerifierGCMBoth, floorEnc.RequireVerifierGCMBoth)
-	flag("AlwaysKeyBindingWhenConfirmed", o.AlwaysKeyBindingWhenConfirmed, floor.AlwaysKeyBindingWhenConfirmed)
-	return names
 }
 
 // X5CRules are the certificate rules HAIP 1.0 states for every x5c-signed
@@ -298,11 +247,6 @@ func (s CredentialFormats) String() string {
 
 var credentialFormatNames = []string{"dc+sd-jwt", "mso_mdoc", "jwt_vc_json", "ldp_vc", "jwt_vc_json-ld"}
 
-// within reports whether s allows no more than floor.
-func (s CredentialFormats) within(floor CredentialFormats) bool {
-	return floor == 0 || (s != 0 && s&^floor == 0)
-}
-
 // ClientIDPrefixes is a set of OpenID4VP 1.0 §5.9.3 Client Identifier
 // Prefixes. The zero value is no restriction.
 type ClientIDPrefixes uint16
@@ -344,11 +288,6 @@ func (s ClientIDPrefixes) Allows(prefix string) bool {
 // String lists the prefixes in s, or "any" for the empty set.
 func (s ClientIDPrefixes) String() string {
 	return setString(uint16(s), clientIDPrefixNames)
-}
-
-// within reports whether s allows no more than floor.
-func (s ClientIDPrefixes) within(floor ClientIDPrefixes) bool {
-	return floor == 0 || (s != 0 && s&^floor == 0)
 }
 
 func setString(bits uint16, names []string) string {

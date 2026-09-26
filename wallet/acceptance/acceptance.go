@@ -103,7 +103,7 @@ type IssuerX509TrustOptions struct {
 	// Experimental.AllowHTTP binds an http iss to the leaf certificate by its
 	// host, as an https iss is, for a local test issuer. Without it an x5c
 	// credential whose iss is not an https URL is refused. A profile with
-	// ForbidInsecureTransports (HAIP) refuses it. Not
+	// ForbidExperimental (HAIP) refuses it. Not
 	// specification-conforming; for testing only.
 	Experimental experimental.Transport
 }
@@ -196,7 +196,7 @@ type Acceptor struct {
 	// draft13 admits the SD-JWT VC typ of OpenID4VCI Draft 13, vc+sd-jwt.
 	draft13 bool
 	// forbidInsecure refuses an IssuerKeys resolver with Experimental set
-	// (profile.Options.ForbidInsecureTransports).
+	// (profile.Options.ForbidExperimental).
 	forbidInsecure bool
 	serializer     *serializer.SerializationDispatcher
 	verifier       *verifier.VerificationDispatcher
@@ -219,7 +219,7 @@ func NewAcceptor(p profile.Profile, s *serializer.SerializationDispatcher, v *ve
 	return &Acceptor{
 		x5c:            options.IssuerX5C,
 		draft13:        p == profile.Draft13(),
-		forbidInsecure: options.ForbidInsecureTransports,
+		forbidInsecure: options.ForbidExperimental,
 		serializer:     s,
 		verifier:       v,
 	}, nil
@@ -289,7 +289,7 @@ func (a *Acceptor) run(ctx context.Context, raw []byte, opts Options, policy *Po
 	requireX5C := a.x5c.Require && flavor == credential.SDJwtVC
 	if requireX5C {
 		if _, present := header["x5c"]; !present {
-			return nil, nil, ErrHAIPX5CRequired
+			return nil, nil, fmt.Errorf("%w: %w", profile.Refused("IssuerX5C.Require"), ErrIssuerX5CRequired)
 		}
 	}
 

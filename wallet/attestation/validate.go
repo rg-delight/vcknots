@@ -373,7 +373,7 @@ func verifyChain(ctx context.Context, chain []*x509.Certificate, policy TrustPol
 			return fmt.Errorf("%s x5c header is invalid: %w", label, err)
 		}
 		if containsAnchor {
-			return fmt.Errorf("HAIP forbids including the trust anchor certificate in the x5c header of the %s", label)
+			return fmt.Errorf("X5CRules.ExcludeAnchor forbids including the trust anchor certificate in the x5c header of the %s", label)
 		}
 	}
 	if policy.CRL.HTTPClient == nil {

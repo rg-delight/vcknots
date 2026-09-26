@@ -92,7 +92,7 @@ func TestSealedAdmissionReadmitsUnderHAIP(t *testing.T) {
 
 	// Without a seal, the Request Object passed by value is refused.
 	_, err = later.ParseRequestObject(context.Background(), first.RequestObject(), types.RequestObjectSource{ClientID: f.clientID()})
-	require.ErrorIs(t, err, ErrHAIPRequestURIRequired)
+	require.ErrorIs(t, err, ErrRequestURIRequired)
 }
 
 // TestSealedAdmissionUsesTheClockOfTheFirstAdmission: the Request Object is
@@ -166,7 +166,7 @@ func TestSealedAdmissionRefusesAlteredSeals(t *testing.T) {
 		"a changed Request Object": {withRecord(func(r *sealedAdmissionRecord) { r.RequestObject = other }), sealKey},
 		"a changed wallet_nonce":   {withRecord(func(r *sealedAdmissionRecord) { r.WalletNonce = "chosen" }), sealKey},
 		"a changed admission time": {withRecord(func(r *sealedAdmissionRecord) { r.AdmittedAt = time.Now().UTC().Format(time.RFC3339Nano) }), sealKey},
-		"a changed profile":        {withRecord(func(r *sealedAdmissionRecord) { r.Profile = profile.NameFinal }), sealKey},
+		"a changed profile":        {withRecord(func(r *sealedAdmissionRecord) { r.Profile = profile.VersionDraft24.String() }), sealKey},
 		"a changed tag":            {types.SealedAdmission(parts[0] + "." + parts[1] + "." + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))), sealKey},
 		"another version":          {types.SealedAdmission("v1." + parts[1] + "." + parts[2]), sealKey},
 		"no version":               {types.SealedAdmission(parts[1] + "." + parts[2]), sealKey},

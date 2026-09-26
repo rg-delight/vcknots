@@ -113,16 +113,14 @@ type Config struct {
 	ClientAuth ClientAuthConfig
 
 	// Profiles selects the protocol profiles the wallet runs: exactly one
-	// OpenID4VCI 1.0 / OpenID4VP 1.0 profile (profile.Final or profile.HAIP,
-	// or one of them strengthened with Profile.With), and any of the draft
+	// OpenID4VCI 1.0 / OpenID4VP 1.0 profile (profile.Final, profile.HAIP,
+	// or either strengthened with Profile.With), and any of the draft
 	// profiles profile.Draft13 and profile.Draft24, which enable
 	// Wallet.Draft13 and Wallet.Draft24. Without a draft profile, its entry
-	// points return ErrProfileForbidsDraft. HAIP 1.0 profiles only the 1.0
-	// specifications, so a 1.0 profile whose Options cover
-	// profile.HAIPOptions() - profile.HAIP() or
-	// profile.Final().With(profile.HAIPOptions()) - with a draft profile or
-	// with Experimental.Hooks is refused (ErrProfileForbidsDraft); a second
-	// 1.0 profile, a repeated draft
+	// points return ErrProfileForbidsDraft. A 1.0 profile with
+	// Options.ForbidDraftProfiles (HAIP 1.0 profiles only the 1.0
+	// specifications) refuses a draft profile beside it
+	// (ErrProfileForbidsDraft); a second 1.0 profile, a repeated draft
 	// profile or no 1.0 profile is ErrInvalidArgument.
 	//
 	// Every plugin of Receiver and Presenter that implements profile.Carrier
@@ -454,22 +452,24 @@ func newDefaultReceiver(walletProfile profile.Profile, transport experimental.Tr
 }
 
 // checkExperimental refuses Config.Experimental settings the wallet could not
-// apply or its profiles forbid: hooks without a draft profile (they rewrite
-// draft messages only), a transport escape under
-// Options.ForbidInsecureTransports (HAIP Section 4), and a transport escape
-// with an injected plugin, which the wallet does not reconfigure.
+// apply or its profiles forbid: any of them under Options.ForbidExperimental,
+// hooks without a draft profile (they rewrite draft messages only), and a
+// transport escape with an injected plugin, which the wallet does not
+// reconfigure.
 func checkExperimental(config Config, profiles walletProfiles) error {
-	if config.Experimental.Hooks.Set() && enforcesHAIP(profiles.final) {
-		return fmt.Errorf("%w: %s does not permit Experimental.Hooks", ErrProfileForbidsDraft, profiles.final)
-	}
-	if config.Experimental.Hooks.Set() && !profiles.draft13 && !profiles.draft24 {
-		return fmt.Errorf("%w: Experimental.Hooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
-	}
-	if config.Experimental.Transport == (experimental.Transport{}) {
+	hooks := config.Experimental.Hooks.Set()
+	transport := config.Experimental.Transport != (experimental.Transport{})
+	if !hooks && !transport {
 		return nil
 	}
-	if profiles.final.Options().ForbidInsecureTransports {
-		return fmt.Errorf("%w: %s does not permit Experimental.Transport", ErrInvalidArgument, profiles.final)
+	if profiles.final.Options().ForbidExperimental {
+		return fmt.Errorf("%w: %w does not permit Config.Experimental", ErrInvalidArgument, profile.Refused("ForbidExperimental"))
+	}
+	if hooks && !profiles.draft13 && !profiles.draft24 {
+		return fmt.Errorf("%w: Experimental.Hooks rewrite draft messages and no draft profile is enabled", ErrProfileForbidsDraft)
+	}
+	if !transport {
+		return nil
 	}
 	if config.Receiver != nil || config.Presenter != nil {
 		return fmt.Errorf("%w: Experimental.Transport configures only the plugins the wallet builds; set it on the injected plugin", ErrInvalidArgument)

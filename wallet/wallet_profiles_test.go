@@ -6,7 +6,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/profile"
+	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/mock"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -41,15 +43,18 @@ func TestConfigProfilesRefusesInvalidSets(t *testing.T) {
 }
 
 // Review of 2026-09-25 (finding 8): the draft refusal read the profile's name,
-// so profile.Final().With(profile.HAIPOptions()) - all of HAIP under the name
-// "final" - ran beside Draft 13, Draft 24 and Experimental.Hooks. The refusal
-// now reads the Options.
-func TestConfigProfilesRefuseDraftsAndHooksBesideHAIPOptions(t *testing.T) {
+// so profile.Final().With(profile.HAIPOptions()) ran beside Draft 13, Draft 24
+// and Experimental.Hooks. Review of 2026-09-26 (report 7, L-2): the fix
+// inferred the refusal from "covers all of HAIPOptions", so dropping any one
+// HAIP option re-enabled the drafts. The refusal is now the explicit option
+// ForbidDraftProfiles (HAIP 1.0 §1: the base protocols are OpenID4VCI 1.0 and
+// OpenID4VP 1.0), and Experimental.Hooks falls under ForbidExperimental.
+func TestConfigProfilesRefuseDraftsUnderForbidDraftProfiles(t *testing.T) {
 	strict, err := profile.Final().With(profile.HAIPOptions())
 	require.NoError(t, err)
-	require.Equal(t, profile.NameFinal, strict.Name())
-	hooks := experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}
-	for _, p := range []profile.Profile{profile.HAIP(), strict} {
+	onlyFinal, err := profile.Final().With(profile.Options{ForbidDraftProfiles: true})
+	require.NoError(t, err)
+	for _, p := range []profile.Profile{profile.HAIP(), strict, onlyFinal} {
 		for name, profiles := range map[string][]profile.Profile{
 			"Draft 13": {p, profile.Draft13()},
 			"Draft 24": {profile.Draft24(), p},
@@ -58,14 +63,64 @@ func TestConfigProfilesRefuseDraftsAndHooksBesideHAIPOptions(t *testing.T) {
 			t.Run(p.String()+" with "+name, func(t *testing.T) {
 				_, err := NewWalletWithConfig(Config{Profiles: profiles, Storeless: true})
 				requireCoded(t, err, ErrProfileForbidsDraft)
+				requireRefusedBy(t, err, "ForbidDraftProfiles")
 			})
 		}
-		t.Run(p.String()+" with Hooks", func(t *testing.T) {
-			_, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{p}, Storeless: true, Experimental: hooks})
-			requireCoded(t, err, ErrProfileForbidsDraft)
-			require.ErrorContains(t, err, "does not permit Experimental.Hooks")
-		})
 	}
+
+	// Every other HAIP option leaves the drafts to the caller.
+	withoutForbid := profile.HAIPOptions()
+	withoutForbid.ForbidDraftProfiles = false
+	rest, err := profile.Final().With(withoutForbid)
+	require.NoError(t, err)
+	_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{rest, profile.Draft13(), profile.Draft24()}, Storeless: true})
+	require.NoError(t, err)
+}
+
+func TestConfigExperimentalRefusedUnderForbidExperimental(t *testing.T) {
+	hooks := experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}}
+	transport := experimental.Options{Transport: experimental.Transport{AllowHTTP: true}}
+	forbid, err := profile.Final().With(profile.Options{ForbidExperimental: true})
+	require.NoError(t, err)
+	for _, p := range []profile.Profile{profile.HAIP(), forbid} {
+		for name, settings := range map[string]experimental.Options{"Hooks": hooks, "Transport": transport} {
+			t.Run(p.String()+" with "+name, func(t *testing.T) {
+				profiles := []profile.Profile{p}
+				if !p.Options().ForbidDraftProfiles {
+					profiles = append(profiles, profile.Draft13())
+				}
+				_, err := NewWalletWithConfig(Config{Profiles: profiles, Storeless: true, Experimental: settings})
+				requireCoded(t, err, ErrInvalidArgument)
+				requireRefusedBy(t, err, "ForbidExperimental")
+			})
+		}
+	}
+}
+
+// requireRefusedBy asserts that err names option as the profile option that
+// refused.
+func requireRefusedBy(t *testing.T, err error, option string) {
+	t.Helper()
+	var refused *profile.OptionError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, option, refused.Option)
+}
+
+// Review of 2026-09-26 (report 7, section 1.2): a HAIP() plugin was refused
+// in a wallet built with Final().With(HAIPOptions()) (ErrProfileMismatch),
+// since the kind label took part in the comparison.
+func TestPluginProfilesCompareVersionAndOptions(t *testing.T) {
+	strict, err := profile.Final().With(profile.HAIPOptions())
+	require.NoError(t, err)
+	receiver, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()}))
+	require.NoError(t, err)
+	_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{strict}, Receiver: receiver, Storeless: true})
+	require.NoError(t, err)
+
+	partial, err := profile.Final().With(profile.Options{RequireDPoP: true})
+	require.NoError(t, err)
+	_, err = NewWalletWithConfig(Config{Profiles: []profile.Profile{partial}, Receiver: receiver, Storeless: true})
+	requireCoded(t, err, ErrProfileMismatch)
 }
 
 func TestConfigProfilesAcceptsStrengthenedFinalWithDrafts(t *testing.T) {

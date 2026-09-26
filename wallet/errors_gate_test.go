@@ -223,7 +223,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		"Wallet.StatusListChecker: experimental under HAIP": func(t *testing.T) error {
 			w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
 			require.NoError(t, err)
-			_, err = w.StatusListChecker(statuslist.Checker{Experimental: experimental.Transport{AllowHTTP: true}})
+			_, err = w.StatusListChecker(statuslist.Checker{Profile: profile.HAIP(), Experimental: experimental.Transport{AllowHTTP: true}})
 			return err
 		},
 		"Wallet.GenerateDID: not a DID type": func(t *testing.T) error {

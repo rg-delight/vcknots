@@ -505,7 +505,7 @@ func TestFetchIssuerMetadataRejectsAnchorInSignedMetadataX5C(t *testing.T) {
 	if err == nil {
 		t.Fatalf("FetchIssuerMetadata() = %#v, want an error", metadata)
 	}
-	if !strings.Contains(err.Error(), "HAIP forbids including the trust anchor certificate in the x5c header") {
+	if !strings.Contains(err.Error(), "profile option SignedMetadataX5C.ExcludeAnchor forbids including the trust anchor certificate in the x5c header") {
 		t.Fatalf("error = %v", err)
 	}
 

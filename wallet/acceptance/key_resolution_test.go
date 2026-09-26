@@ -312,7 +312,7 @@ func TestHAIPAuthenticatesSDJWTVCIssuerThroughX5COnly(t *testing.T) {
 		_, _, err := haip.Verify(t.Context(), wire, metadata, Options{})
 		require.ErrorIs(t, err, ErrIssuerKeyUnresolved)
 		_, _, err = haip.Verify(t.Context(), unsigned, metadata, Options{})
-		require.ErrorIs(t, err, ErrHAIPX5CRequired)
+		require.ErrorIs(t, err, ErrIssuerX5CRequired)
 	})
 
 	t.Run("an unanchored chain never falls back to key resolution", func(t *testing.T) {

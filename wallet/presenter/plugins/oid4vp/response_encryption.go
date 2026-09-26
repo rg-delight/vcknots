@@ -127,7 +127,7 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 	// chosen jwk."
 	algName := key.Algorithm
 	if rules.ECDHESOnly && algName != "ECDH-ES" {
-		return nil, fmt.Errorf("HAIP profile requires ECDH-ES for response encryption, got %q: %w", algName, ErrResponseEncryptionKeyUnusable)
+		return nil, fmt.Errorf("%w requires ECDH-ES for response encryption, got %q: %w", profile.Refused("ResponseEncryption.ECDHESOnly"), algName, ErrResponseEncryptionKeyUnusable)
 	}
 	alg, err := parseJWEKeyAlgorithm(algName)
 	if err != nil {

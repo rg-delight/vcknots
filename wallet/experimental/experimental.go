@@ -28,11 +28,10 @@
 //   - Nothing here is read from the environment or from global state; a
 //     setting takes effect only where a caller sets it.
 //   - A profile that forbids a departure refuses it rather than ignoring it:
-//     profile.Options.ForbidInsecureTransports (HAIP) refuses Transport
-//     wherever it is carried and any non-zero Presenter on every presenter
-//     entry point, and
-//     Hooks, which rewrite draft protocol messages, are refused unless a
-//     draft profile is enabled.
+//     profile.Options.ForbidExperimental (HAIP) refuses Transport wherever
+//     it is carried, any non-zero Presenter on every presenter entry point,
+//     and Hooks. Hooks, which rewrite draft protocol messages, are also
+//     refused unless a draft profile is enabled.
 //   - A new departure is added as a field of one of these types (or a new
 //     type in this package), never as a field of a stable configuration type.
 package experimental
@@ -60,7 +59,7 @@ type Transport struct {
 	// issuer or verifier. OpenID4VCI 1.0 Section 12.2.1 requires the https
 	// scheme for a Credential Issuer Identifier and Section 12.2.2 TLS for
 	// metadata; OpenID4VP 1.0 and HAIP 1.0 require TLS throughout. A profile
-	// with ForbidInsecureTransports (HAIP) refuses it. A client assertion is
+	// with ForbidExperimental (HAIP) refuses it. A client assertion is
 	// still sent over plain http only to a loopback host.
 	AllowHTTP bool
 }
@@ -73,7 +72,7 @@ type Presenter struct {
 	// Transport.AllowHTTP accepts http for request_uri and for the Response
 	// URI or Redirect URI of a local test verifier. OpenID4VP 1.0 Section 5.10
 	// and Draft 24 Section 5.11 require https for a request_uri POST, and HAIP
-	// 1.0 Section 5 requires TLS; a profile with ForbidInsecureTransports
+	// 1.0 Section 5 requires TLS; a profile with ForbidExperimental
 	// refuses it.
 	Transport Transport
 	// InsecureSkipX509Verify authenticates a Draft 24 x509_san_dns Request
@@ -82,7 +81,7 @@ type Presenter struct {
 	// RequestObjectVerification. Draft 24 Section 5.10.4 has the Wallet
 	// "validate the signature and the trust chain of the X.509 certificate".
 	// The OpenID4VP 1.0 entry points refuse every signed Request Object while
-	// it is set, and a profile with ForbidInsecureTransports refuses it.
+	// it is set, and a profile with ForbidExperimental refuses it.
 	InsecureSkipX509Verify bool
 	// AcceptClientMetadataJWKsWithoutKeyID accepts a client_metadata.jwks
 	// member without a kid, or with a kid another member repeats, on the
@@ -97,8 +96,9 @@ type Presenter struct {
 // how an issuer or verifier handles a malformed one. A nil hook leaves its
 // message unchanged. They rewrite draft protocol messages only, so a wallet
 // refuses them (wallet.ErrProfileForbidsDraft) unless Config.Profiles enables
-// a draft profile, which never happens under HAIP. Not
-// specification-conforming; for testing only.
+// a draft profile, and a profile with ForbidExperimental (HAIP) refuses them
+// (wallet.ErrInvalidArgument). Not specification-conforming; for testing
+// only.
 type Hooks struct {
 	// KeyProof rewrites Draft 13 key proofs.
 	KeyProof ProofTransform

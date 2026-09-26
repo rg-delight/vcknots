@@ -260,7 +260,7 @@ type Resolver struct {
 	// origin (package experimental). The zero value conforms: SD-JWT VC -19
 	// §3 says "All URLs dereferenced according to this specification MUST use
 	// the HTTPS scheme". A profile with
-	// profile.Options.ForbidInsecureTransports (HAIP) refuses a Resolver that
+	// profile.Options.ForbidExperimental (HAIP) refuses a Resolver that
 	// sets it: the credential acceptor (acceptance.NewAcceptor) and
 	// StatusListKeys under a Status List checker of such a profile fail
 	// instead of resolving.

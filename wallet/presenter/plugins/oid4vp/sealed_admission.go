@@ -405,12 +405,13 @@ func (p *Oid4vpPresenter) admissionOptions(wire wireContract) profile.Options {
 	return p.Profile.Options()
 }
 
-// admissionProfile is the name of the profile p admits a request of wire
-// under: Draft 24 for the Draft 24 contract, which the presenter's profile
-// does not apply to, and the presenter's profile otherwise.
+// admissionProfile is the protocol version of the profile p admits a request
+// of wire under: Draft 24 for the Draft 24 contract, which the presenter's
+// profile does not apply to, and the presenter's profile otherwise. The
+// profile Options are sealed beside it (admissionOptions).
 func (p *Oid4vpPresenter) admissionProfile(wire wireContract) string {
 	if wire == wireDraft24 {
-		return profile.Draft24().Name()
+		return profile.VersionDraft24.String()
 	}
-	return p.Profile.Name()
+	return p.Profile.Version().String()
 }

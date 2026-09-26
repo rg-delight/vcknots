@@ -56,7 +56,7 @@ func TestVerifySDJWTVCTypFollowsTheProfile(t *testing.T) {
 		{profile.Draft13(), "dc+sd-jwt", true},
 		{profile.Draft13(), "JWT", false},
 	} {
-		t.Run(test.profile.Name()+" "+test.typ, func(t *testing.T) {
+		t.Run(test.profile.String()+" "+test.typ, func(t *testing.T) {
 			raw := signedClaims(t, issuerKey, test.typ, nil, baseClaims(holder))
 			_, _, err := newTestAcceptor(t, test.profile).Parse([]byte(raw), sdJWT(&holder))
 			if test.accepted {

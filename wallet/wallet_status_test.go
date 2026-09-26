@@ -12,30 +12,35 @@ import (
 
 // Review of 2026-09-25 (HAIP 1.0 §6.1): a Status List checker built for a
 // HAIP wallet ran under Final unless the caller repeated the profile, so its
-// token x5c rules did not apply. StatusListChecker wires the wallet's profile.
-func TestStatusListCheckerCarriesTheWalletProfile(t *testing.T) {
+// token x5c rules did not apply. Review of 2026-09-26 (report 7, L-4): the fix
+// read a zero Profile as "the wallet's" here and as Final everywhere else.
+// The zero Profile is Final everywhere now, so a checker that does not name
+// the wallet's profile is refused rather than run under weaker rules.
+func TestStatusListCheckerRequiresTheWalletProfile(t *testing.T) {
 	strict, err := profile.Final().With(profile.HAIPOptions())
 	require.NoError(t, err)
 	for _, p := range []profile.Profile{profile.Final(), profile.HAIP(), strict} {
 		t.Run(p.String(), func(t *testing.T) {
 			w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{p}, Storeless: true})
 			require.NoError(t, err)
-			checker, err := w.StatusListChecker(statuslist.Checker{})
+			checker, err := w.StatusListChecker(statuslist.Checker{Profile: p})
 			require.NoError(t, err)
 			require.Equal(t, p, checker.Profile)
-			require.Equal(t, p.Options().StatusListTokenX5C, checker.Profile.Options().StatusListTokenX5C)
-
-			same, err := w.StatusListChecker(statuslist.Checker{Profile: p})
-			require.NoError(t, err)
-			require.Equal(t, p, same.Profile)
 		})
 	}
 
 	haip, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
 	require.NoError(t, err)
+	// Final().With(HAIPOptions()) is HAIP(), whichever way it was built.
 	_, err = haip.StatusListChecker(statuslist.Checker{Profile: strict})
+	require.NoError(t, err)
+	_, err = haip.StatusListChecker(statuslist.Checker{})
 	requireCoded(t, err, ErrProfileMismatch)
-	_, err = haip.StatusListChecker(statuslist.Checker{Experimental: experimental.Transport{AllowHTTP: true}})
+	partial, err := profile.Final().With(profile.Options{RequireDPoP: true})
+	require.NoError(t, err)
+	_, err = haip.StatusListChecker(statuslist.Checker{Profile: partial})
+	requireCoded(t, err, ErrProfileMismatch)
+	_, err = haip.StatusListChecker(statuslist.Checker{Profile: profile.HAIP(), Experimental: experimental.Transport{AllowHTTP: true}})
 	require.ErrorIs(t, err, statuslist.ErrStatusListInsecureTransportForbidden)
 
 	final, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final()}, Storeless: true})

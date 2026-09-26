@@ -3,6 +3,8 @@ package oid4vp
 import (
 	"fmt"
 	"strings"
+
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // enforceProfileOptions applies the profile Options that can only be checked
@@ -22,7 +24,7 @@ func (b *requestBuilder) enforceProfileOptions() error {
 		// HAIP §5.2: "The Verifier MUST use the Response Mode dc_api.jwt."
 		// The unencrypted dc_api mode stays available without the option.
 		if options.RequireDCAPIJWT && b.req.ResponseMode != OAuthAuthzReqResponseModeDCAPIJWT {
-			return newAuthorizationRequestError(InvalidRequestError, "HAIP requires the response_mode dc_api.jwt for Digital Credentials API requests")
+			return newAuthorizationRequestError(InvalidRequestError, "%w requires the response_mode dc_api.jwt for Digital Credentials API requests", profile.Refused("RequireDCAPIJWT"))
 		}
 		if b.requestSource == sourceDCAPIUnsigned {
 			// An unsigned request has no Verifier client_id to authenticate.
@@ -33,23 +35,23 @@ func (b *requestBuilder) enforceProfileOptions() error {
 	if options.RequireSignedRequestByReference && b.requestSource != sourceReference {
 		// HAIP §5.1: "Signed Authorization Requests MUST be used by utilizing
 		// JAR with the request_uri parameter".
-		return errHAIPRequestURIRequired()
+		return errRequestURIRequired()
 	}
 	if options.RequireDirectPostJWT && b.req.ResponseMode != OAuthAuthzReqResponseModeDirectPostJWT {
 		// HAIP §5.1: "Response encryption MUST be used by utilizing response
 		// mode direct_post.jwt".
-		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires response_mode direct_post.jwt")
+		return newAuthorizationRequestError(InvalidRequestError, "%w requires response_mode direct_post.jwt", profile.Refused("RequireDirectPostJWT"))
 	}
 	return b.requireAllowedClientIDPrefix()
 }
 
-// errHAIPRequestURIRequired is the refusal of a redirect-based request that
+// errRequestURIRequired is the refusal of a redirect-based request that
 // this library did not fetch from request_uri itself, under
 // Options.RequireSignedRequestByReference (HAIP 1.0 §5.1).
-func errHAIPRequestURIRequired() error {
+func errRequestURIRequired() error {
 	return fmt.Errorf("%w: %w",
-		newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires a signed Authorization Request delivered by request_uri"),
-		ErrHAIPRequestURIRequired)
+		newAuthorizationRequestError(InvalidRequestError, "%w requires a signed Authorization Request delivered by request_uri", profile.Refused("RequireSignedRequestByReference")),
+		ErrRequestURIRequired)
 }
 
 // requireAllowedClientIDPrefix applies Options.AllowedClientIDPrefixes and
@@ -68,12 +70,12 @@ func (b *requestBuilder) requireAllowedClientIDPrefix() error {
 	if !allowed.Allows(string(clientID.prefix)) {
 		// HAIP §5: "For signed requests, the Verifier MUST use, and the Wallet
 		// MUST accept the Client Identifier Prefix x509_hash".
-		return newAuthorizationRequestError(InvalidRequestError, "HAIP profile requires the %s Client Identifier Prefix", strings.ReplaceAll(allowed.String(), ",", " or "))
+		return newAuthorizationRequestError(InvalidRequestError, "%w requires the %s Client Identifier Prefix", profile.Refused("AllowedClientIDPrefixes"), strings.ReplaceAll(allowed.String(), ",", " or "))
 	}
 	if requireX5C && clientID.prefix != OID4VPClientIDPrefixX509Hash && clientID.prefix != OID4VPClientIDPrefixX509SanDNS {
 		// HAIP §5: a signed request is authenticated through the x5c chain of
 		// an X.509 Client Identifier.
-		return newAuthorizationRequestError(InvalidRequestError, "the profile requires a signed request authenticated with x5c, got the %s Client Identifier Prefix", clientID.prefix)
+		return newAuthorizationRequestError(InvalidRequestError, "%w requires a signed request authenticated with x5c, got the %s Client Identifier Prefix", profile.Refused("RequestObjectX5C.Require"), clientID.prefix)
 	}
 	return nil
 }

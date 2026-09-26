@@ -77,11 +77,14 @@ type configuration struct {
 	// exists to exercise batch issuance in official controls.
 	AdditionalHolderKeys int `json:"additionalHolderKeys"`
 
-	Profile                             string   `json:"profile"`
-	VerifierAllowUnadvertisedRevocation bool     `json:"verifierAllowUnadvertisedRevocation"`
-	WalletAudience                      []string `json:"walletAudience"`
-	IssuerCAFiles                       []string `json:"issuerCAFiles"`
-	IssuerAllowUnadvertisedRevocation   bool     `json:"issuerAllowUnadvertisedRevocation"`
+	// Profile is the text form of a profile.Profile (profile.ParseProfile):
+	// "final" (the default when absent), "haip", or either followed by
+	// options, such as "final;RequireDPoP;RequirePAR".
+	Profile                             profile.Profile `json:"profile"`
+	VerifierAllowUnadvertisedRevocation bool            `json:"verifierAllowUnadvertisedRevocation"`
+	WalletAudience                      []string        `json:"walletAudience"`
+	IssuerCAFiles                       []string        `json:"issuerCAFiles"`
+	IssuerAllowUnadvertisedRevocation   bool            `json:"issuerAllowUnadvertisedRevocation"`
 	// IssuerKeyResolution turns on JWT VC Issuer Metadata (SD-JWT VC -19 §4)
 	// for an https iss and DID resolution bound by a DID Configuration
 	// (OpenID4VCI 1.0 §14.4) for a DID iss.
@@ -281,14 +284,9 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 	if (operationName == "receive-code" || operationName == "receive-code-wallet-initiated") && config.RedirectURI == "" {
 		return nil, fmt.Errorf("%s requires redirectUri", operationName)
 	}
-	var selectedProfile profile.Profile
-	switch config.Profile {
-	case "", profile.NameFinal:
-		selectedProfile = profile.Final()
-	case profile.NameHAIP:
-		selectedProfile = profile.HAIP()
-	default:
-		return nil, fmt.Errorf("invalid profile %q: want %q or %q", config.Profile, profile.NameFinal, profile.NameHAIP)
+	selectedProfile := config.Profile
+	if selectedProfile.Draft() {
+		return nil, fmt.Errorf("invalid profile %s: want an OpenID4VCI 1.0 / OpenID4VP 1.0 profile", selectedProfile)
 	}
 	if config.VerifierAllowUnadvertisedRevocation && len(config.VerifierCAFiles) == 0 {
 		return nil, fmt.Errorf("verifierAllowUnadvertisedRevocation requires verifierCAFiles")

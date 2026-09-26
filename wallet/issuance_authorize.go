@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/common"
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -91,7 +92,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	// inline.
 	usePAR := as.PushedAuthorizationRequestEndpoint != nil
 	if !usePAR && w.options().RequirePAR {
-		return nil, invalidMetadata("HAIP requires a pushed authorization request endpoint on the authorization server")
+		return nil, invalidMetadata("%w requires a pushed authorization request endpoint on the authorization server", profile.Refused("RequirePAR"))
 	}
 	scope, details, err := authorizationRequestParameters(req.AuthorizationRequestType, configurationID, config, w.options().RequireScopeAuthorization)
 	if err != nil {
@@ -266,7 +267,7 @@ func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 		return err
 	}
 	if w.options().RequireDPoP && w.dpop.Key == nil {
-		return fmt.Errorf("HAIP requires Config.DPoP.Key: %w", ErrDPoPKeyRequired)
+		return fmt.Errorf("%w requires Config.DPoP.Key: %w", profile.Refused("RequireDPoP"), ErrDPoPKeyRequired)
 	}
 	return nil
 }
@@ -279,7 +280,7 @@ func (w *Wallet) requireFinalAuthorizationStage(ctx context.Context) error {
 		return err
 	}
 	if w.options().RequireClientAuthentication && w.attestationSettings().Client == nil && !clientAuthenticationConfigured(w.clientAuth) {
-		return invalidArgument("HAIP requires an OAuth2 client authentication mechanism")
+		return invalidArgument("%w requires an OAuth2 client authentication mechanism", profile.Refused("RequireClientAuthentication"))
 	}
 	return nil
 }
@@ -326,8 +327,8 @@ func (w *Wallet) finalCredentialConfiguration(transport receiverTypes.OID4VCITra
 		return config, fmt.Errorf("credential configuration %q: %w", id, err)
 	}
 	validator, _ := transport.(oid4vciProfileValidator)
-	if w.options().ValidatesCredentialConfigurations() && validator == nil {
-		return config, invalidArgument("the %s profile requires a receiver plugin that validates issuer metadata against the profile", w.profile.Name())
+	if validatesCredentialConfigurations(w.options()) && validator == nil {
+		return config, invalidArgument("the %s profile requires a receiver plugin that validates issuer metadata against the profile", w.profile)
 	}
 	if validator != nil {
 		if err := validator.ValidateCredentialConfigurationForProfile(config); err != nil {
@@ -414,20 +415,20 @@ func authorizationRequestParameters(requested AuthorizationRequestType, configur
 			return config.Scope, nil, nil
 		}
 		if scopeOnly {
-			return "", nil, invalidMetadata("HAIP requires the credential configuration %q to advertise a scope", configurationID)
+			return "", nil, invalidMetadata("%w requires the credential configuration %q to advertise a scope", profile.Refused("RequireScopeAuthorization"), configurationID)
 		}
 		return "", details, nil
 	case AuthorizationRequestScope:
 		if scope == "" {
 			if scopeOnly {
-				return "", nil, invalidMetadata("HAIP requires the credential configuration %q to advertise a scope", configurationID)
+				return "", nil, invalidMetadata("%w requires the credential configuration %q to advertise a scope", profile.Refused("RequireScopeAuthorization"), configurationID)
 			}
 			return "", nil, invalidMetadata("authorization request type %q requires the credential configuration %q to advertise a scope", AuthorizationRequestScope, configurationID)
 		}
 		return config.Scope, nil, nil
 	case AuthorizationRequestDetails:
 		if scopeOnly {
-			return "", nil, invalidArgument("HAIP requires the scope authorization request type")
+			return "", nil, invalidArgument("%w requires the scope authorization request type", profile.Refused("RequireScopeAuthorization"))
 		}
 		return "", details, nil
 	default:

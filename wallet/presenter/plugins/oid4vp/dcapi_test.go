@@ -329,7 +329,7 @@ func TestHAIPDCAPIRejectsAnchorInX5CWithRootCAs(t *testing.T) {
 
 	haip := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options, Profile: profile.HAIP()}
 	_, err := parseDCAPIForTest(haip, invocation)
-	require.ErrorContains(t, err, "HAIP forbids including the trust anchor certificate in the x5c header")
+	require.ErrorContains(t, err, "profile option RequestObjectX5C.ExcludeAnchor forbids including the trust anchor certificate in the x5c header")
 
 	final := &Oid4vpPresenter{HTTPClient: f.server.Client(), RequestObjectValidation: &options}
 	_, err = parseDCAPIForTest(final, invocation)

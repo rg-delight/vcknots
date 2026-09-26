@@ -16,6 +16,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/internal/httpfetch"
+	"github.com/trustknots/vcknots/wallet/profile"
 )
 
 // issuerSubject is what a run knows about the issuer it authenticates.
@@ -44,7 +45,7 @@ type candidateKey struct {
 // VC, HAIP 1.0 §6.1.1) makes a validated x5c chain the only way.
 func (a *Acceptor) authenticateIssuer(ctx context.Context, parsed *credential.Credential, policy *Policy, header map[string]any, subject issuerSubject, now time.Time, requireX5C bool, verification *Verification) error {
 	if requireX5C && policy.IssuerX509 == nil {
-		return fmt.Errorf("%w: HAIP requires x5c issuer authentication (IssuerX509)", ErrIssuerKeyUnresolved)
+		return fmt.Errorf("%w: %w requires x5c issuer authentication (IssuerX509)", ErrIssuerKeyUnresolved, profile.Refused("IssuerX5C.Require"))
 	}
 	if x5cRaw, present := header["x5c"]; present {
 		return a.authenticateX5CIssuer(ctx, parsed, policy, x5cRaw, subject.issuer, now, verification)
@@ -85,7 +86,7 @@ func (a *Acceptor) authenticateX5CIssuer(ctx context.Context, parsed *credential
 			return err
 		}
 		if containsAnchor {
-			return ErrHAIPTrustAnchorInX5C
+			return fmt.Errorf("%w: %w", profile.Refused("IssuerX5C.ExcludeAnchor"), ErrIssuerX5CTrustAnchor)
 		}
 	}
 	leaf := certificates[0]

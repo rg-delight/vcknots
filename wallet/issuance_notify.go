@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
@@ -29,7 +30,7 @@ func (w *Wallet) notifyIssuer(ctx context.Context, n *IssuanceNotification, even
 		return fmt.Errorf("access token has token_type %q: %w", n.AccessToken.TokenType, ErrTokenTypeUnsupported)
 	}
 	if w.options().RequireDPoP && !isDPoPAccessToken(n.AccessToken) {
-		return fmt.Errorf("HAIP requires a DPoP-bound access token, the token has token_type %q: %w", n.AccessToken.TokenType, ErrDPoPRequired)
+		return fmt.Errorf("%w requires a DPoP-bound access token, the token has token_type %q: %w", profile.Refused("RequireDPoP"), n.AccessToken.TokenType, ErrDPoPRequired)
 	}
 	dpopKey, err := w.requireDPoPKey(n.DPoPKeyThumbprint, n.AccessToken, ErrNotificationDPoPKeyMissing)
 	if err != nil {

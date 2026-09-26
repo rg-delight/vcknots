@@ -604,14 +604,16 @@ func TestDraft13KeyProofHookFailureSendsNothing(t *testing.T) {
 	require.Empty(t, fixture.credentials())
 }
 
-// Experimental.Hooks are refused when a HAIP wallet is constructed.
+// Experimental.Hooks are refused when a HAIP wallet is constructed
+// (Options.ForbidExperimental).
 func TestDraft13KeyProofHookIsRefusedUnderHAIP(t *testing.T) {
 	_, err := NewWalletWithConfig(Config{
 		Profiles:     []profile.Profile{profile.HAIP()},
 		CredStore:    newProfileCredStore(t),
 		Experimental: experimental.Options{Hooks: experimental.Hooks{KeyProof: experimental.ProofTransform{Serialized: identityProof}}},
 	})
-	draft13RequireCoded(t, err, ErrProfileForbidsDraft)
+	draft13RequireCoded(t, err, ErrInvalidArgument)
+	requireRefusedBy(t, err, "ForbidExperimental")
 }
 
 func TestDraft13RequiresOneHolderKey(t *testing.T) {

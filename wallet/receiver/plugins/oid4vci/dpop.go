@@ -159,8 +159,8 @@ func (c *recentValues[K]) put(key K, value string) {
 func requireDPoPTokenType(options profile.Options, tokenType string) error {
 	if options.RequireDPoP && !strings.EqualFold(strings.TrimSpace(tokenType), dpopAuthorizationScheme) {
 		return fmt.Errorf(
-			"%w: HAIP requires a DPoP-bound access token, the token endpoint issued token_type %q",
-			ErrDPoPRequired, tokenType)
+			"%w: %w requires a DPoP-bound access token, the token endpoint issued token_type %q",
+			ErrDPoPRequired, profile.Refused("RequireDPoP"), tokenType)
 	}
 	return nil
 }
