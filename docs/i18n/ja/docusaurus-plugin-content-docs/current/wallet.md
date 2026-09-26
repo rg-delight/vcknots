@@ -24,7 +24,7 @@ wallet は **OpenID4VCI 1.0** と **OpenID4VP 1.0** を実装しています。
 | プロトコル / 機能 | 公開 API | 備考 |
 | --- | --- | --- |
 | OpenID4VCI 1.0 Pre-Authorized Code Flow | `AuthorizePreAuthorizedIssuance` + `RequestCredential` | `tx_code` は Offer が宣言しているときに限り必須です。 |
-| OpenID4VCI 1.0 Authorization Code Flow（PKCE、PAR、RFC 9207 `iss`） | `BeginIssuance` + `AuthorizeIssuance` + `RequestCredential` | ライブラリはブラウザを開きません。PKCE は常に `S256` です。PAR は認可サーバーが広告する場合に使い、HAIP では必須です。Offer なしの wallet 起点の発行にも対応します。 |
+| OpenID4VCI 1.0 Authorization Code Flow（PKCE、PAR、RFC 9207 `iss`） | `BeginIssuance` + `AuthorizeIssuance` + `RequestCredential` | ライブラリはブラウザを開かず、`https` の認可 URL だけを返します。PKCE は常に `S256` です。PAR は認可サーバーが広告する場合に使い、HAIP のとき、またはサーバーが `require_pushed_authorization_requests` を示すときは必須です。Offer なしの wallet 起点の発行と、`grants` の無い Offer にも対応します。 |
 | Credential Offer の値渡しと参照渡し | `ResolveCredentialOffer`、`ParseCredentialOfferURL` | `ParseCredentialOfferURL` は I/O を行いません。 |
 | クライアント認証、DPoP | `Config.ClientAuth`、`Config.DPoP`、`Config.Attestation.Client` | `private_key_jwt` または OAuth 2.0 Attestation-Based Client Authentication（フローごとの一時的な Client Instance Key、サーバーが与える Challenge）です。`Config.DPoP.Key` があれば常に DPoP proof を送ります。 |
 | Batch 発行 | `CredentialRequest.HolderKeys` | holder 鍵ごとに key proof を 1 つ送り、`batch_credential_issuance.batch_size` を上限とします。 |
@@ -32,7 +32,7 @@ wallet は **OpenID4VCI 1.0** と **OpenID4VP 1.0** を実装しています。
 | Credential Request / Response の暗号化 | `Config.Issuance.CredentialEncryption` | 応答用の鍵は一時鍵です。 |
 | Deferred 発行 | `RequestDeferredCredential` | 1 回の呼出しで 1 リクエストを送ります。ライブラリはポーリングしません。 |
 | Notification | `NotifyIssuer` | ライブラリが自ら通知することはありません。 |
-| 署名付き Credential Issuer Metadata | `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` | OpenID4VCI 1.0 §12.2.3 です。 |
+| 署名付き Credential Issuer Metadata | `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` | OpenID4VCI 1.0 §12.2.3（`application/jwt`）と Draft 13 §11.2.3（`signed_metadata`）です。 |
 | 保存前の Credential 受理判定 | `Config.CredentialAcceptance` または `CredentialRequest.Acceptance`（`acceptance.Policy`）、`VerifyCredentialForAcceptance` | Credential を要求する前に必須です。Issuer の鍵は、`iss` と `x5c` が選ぶ方式で確立します（SD-JWT VC -19 §2.5）。 |
 | `direct_post` / `direct_post.jwt` 上の OpenID4VP 1.0 | `ParsePresentationRequest`、`ParsePresentationRequestObject`、`SelectCredentials`、`SubmitPresentation`、`DeclinePresentation`、`PresentCredential` | 要求には `*oid4vp.AdmittedRequest` ハンドルを通じて応答します。 |
 | Verifier の認証 | `oid4vp.Oid4vpPresenter`（`RequestObjectValidation`、`PreRegisteredClients`） | `x509_san_dns`、`x509_hash`、`redirect_uri`、pre-registered client、`verifier_attestation`、`openid_federation` に対応します。[Verifier の認証](#verifier-authentication)を参照してください。 |
@@ -261,8 +261,8 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 ## 3. Wallet機能のサンプル実装
 
 このセクションでは、`wallet/examples/server_integration_sdjwt/server_integration_sdjwt.go` と `wallet/examples/common/common.go` をもとに、最小の受領と提示のサンプルを示します。
-ここで使う `ReceiveCredential` と `PresentCredential` は、フロー全体を 1 回の呼出しで実行します。
-ユーザーのいる wallet に必要な段階的 API は、[OpenID4VCI 1.0 の発行](#openid4vci-10-issuance)と [OpenID4VP 1.0 の提示](#openid4vp-10-presentation)で説明します。
+受領のサンプルは OpenID4VCI 1.0 の段階的メソッドを使い、提示のサンプルはフロー全体を 1 回の呼出しで実行する `PresentCredential` を使います。
+ユーザーのいる wallet に必要なその他の段階的 API は、[OpenID4VCI 1.0 の発行](#openid4vci-10-issuance)と [OpenID4VP 1.0 の提示](#openid4vp-10-presentation)で説明します。
 
 ### 3-1. テスト用の鍵の準備 (IKeyEntryインターフェース)
 
@@ -341,46 +341,57 @@ func (m *MockKeyEntry) Sign(payload []byte) ([]byte, error) {
 
 ### 3-2. Credentialの受領 (OID4VCI)
 
-`ReceiveCredential` は Pre-Authorized Code の発行を 1 回の呼出しで実行します。
+OpenID4VCI 1.0 の Pre-Authorized Code の発行は 3 回の呼出しで行います。
+Offer を解析し、pre-authorized code をアクセストークンと交換し、Credential を要求します。
 実際の運用では Offer URI は QR コードやディープリンクから得ます。
 ローカルのサンプルサーバーでは `POST /configurations/:configurationId/offer` で作成できます。
 
 ```go
 import (
+	"context"
+	"fmt"
+
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/credential"
-	"github.com/trustknots/vcknots/wallet/receiver"
 )
 
-func receiveSDJwtCredential(w *wallet.Wallet, key wallet.IKeyEntry, offerURI string) (*wallet.SavedCredential, error) {
+func receiveSDJwtCredential(ctx context.Context, w *wallet.Wallet, key wallet.IKeyEntry, offerURI, txCode string) (*wallet.SavedCredential, error) {
 	// openid-credential-offer://?credential_offer=...
 	offer, err := wallet.ParseCredentialOfferURL(offerURI)
 	if err != nil {
 		return nil, err
 	}
 
-	return w.ReceiveCredential(wallet.ReceiveCredentialRequest{
+	grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{
 		CredentialOffer: offer,
-		Type:            receiver.Oid4vci,
-		Key:             key,                // signs the key proof
-		RequestedFormat: credential.SDJwtVC, // "application/dc+sd-jwt"
+		TxCode:          txCode, // required exactly when the offer carries tx_code
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{
+		HolderKeys: []wallet.IKeyEntry{key}, // each key signs one key proof
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result.Deferred != nil {
+		return nil, fmt.Errorf("the issuer deferred the credential")
+	}
+	return result.Credentials[0], nil
 }
 ```
 
-`ReceiveCredentialRequest` の補足です。
-
-* **RequestedFormat:** `credential.SDJwtVC` または `credential.JwtVc` を指定します。空の場合は、最初に提示された configuration の形式を使います。
-* **TxCode:** Offer が要求する場合に、token エンドポイントへ `tx_code` として送ります。
-* **CachedIssuerMetadata:** 設定すると Issuer メタデータを取得しません（セクション 4 を参照）。
-* **Acceptance:** この呼び出しの受理ポリシーです。`Config.CredentialAcceptance` より優先します。
-
-`ReceiveCredential` は Draft 13 §11.2.2 の位置（識別子の後ろに well-known のパスを付けた URL）から Issuer のメタデータを、また認可サーバーのメタデータを取得し、pre-authorized code でアクセストークンを取得し、`Key` で key proof に署名して Credential を要求し、検査してから保存します。
-検査には `Acceptance`、なければ `Config.CredentialAcceptance` を使います。
+`AuthorizePreAuthorizedIssuance` は Issuer と認可サーバーのメタデータを取得し、pre-authorized code でアクセストークンを取得します。
+`PreAuthorizedIssuanceRequest.CredentialConfigurationID` は提示された configuration を選び、空の場合は最初のものを使います。
+`RequestCredential` は、Issuer が Nonce Endpoint を公開していればそこから `c_nonce` を得て（§7）、holder 鍵ごとに key proof に署名し、Credential を要求し、検査してから保存します。
+検査には `CredentialRequest.Acceptance`、なければ `Config.CredentialAcceptance` を使います。
 どちらもなければ何も要求せず、`ErrCredentialAcceptancePolicyRequired` で失敗します。
 Issuer を認証していない Credential は保存しません（SD-JWT VC -19 §2.4）。
-`ReceiveCredential` は OpenID4VCI Draft 13 であり、`Config.Profiles` に `profile.Draft13()` が必要です。
-新しいコードでは `AuthorizePreAuthorizedIssuance` と `RequestCredential` を使います。
+Deferred 発行、通知、Authorization Code Flow は [OpenID4VCI 1.0 の発行](#openid4vci-10-issuance)で説明します。
+
+`ReceiveCredential` は、OpenID4VCI **Draft 13** の Issuer に対して同じ Pre-Authorized Code Flow を 1 回の呼出しで実行します。
+[ReceiveCredential](#receivecredential) で説明します。
 
 ### 3-3. Credentialの提示 (OpenID4VP)
 
@@ -455,9 +466,9 @@ func listSavedCredentials(w *wallet.Wallet) ([]*wallet.SavedCredential, error) {
 
 ## 4. Issuerメタデータの取得
 
-`FetchCredentialIssuerMetadata` は Issuer の `.well-known/openid-credential-issuer` 文書を取得します。
-`ReceiveCredential` は `ReceiveCredentialRequest.CachedIssuerMetadata` が設定されていなければ自分で取得します。
-OpenID4VCI 1.0 のメソッドは常にメタデータを再取得し、キャッシュしたメタデータを受け取りません。
+`FetchCredentialIssuerMetadata` は Issuer の OpenID4VCI 1.0 の `.well-known/openid-credential-issuer` 文書（§12.2.2）を取得します。
+たとえば、holder が Offer を受け入れる前にその内容を示すために使います。
+発行のメソッドは `ReceiveCredential` も含めて常にメタデータを再取得し、キャッシュしたメタデータを受け取りません。
 
 ```go
 import (
@@ -519,7 +530,7 @@ receiver は、`credential_issuer` が要求した識別子と異なるメタデ
 ### ReceiveCredentialRequest {#ReceiveCredentialRequest}
 
 `ReceiveCredential` の入力です。
-[CredentialOffer](#CredentialOffer)、受領プロトコル（`Type`）、key proof の鍵（`Key`）、要求する形式（`RequestedFormat`）、任意の `CachedIssuerMetadata`、`TxCode`、`Acceptance` を持ちます。
+`pre-authorized_code` grant を持つ [CredentialOffer](#CredentialOffer)、任意の `CredentialConfigurationID`（空の場合は最初に提示された configuration）、任意の `TxCode`、1 つの key proof に署名する holder 鍵 `Key`、`Config.CredentialAcceptance` より優先する任意の `Acceptance` を持ちます。
 
 ### CredentialOffer {#CredentialOffer}
 
@@ -583,17 +594,27 @@ token エンドポイントでのクライアント認証です。
 
 ### ReceiveCredential
 
-Pre-Authorized Code Flow で Credential を受領し、保存します。
+OpenID4VCI Draft 13 の Issuer から Pre-Authorized Code Flow で Credential を受領し、保存します。
 
 ```go
-func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error)
+func (w *Wallet) ReceiveCredential(ctx context.Context, req ReceiveCredentialRequest) (*SavedCredential, error)
 ```
 
 **パラメータ**:
+- `ctx`: フローを取り消します
 - `req`: 受領リクエスト（[ReceiveCredentialRequest](#ReceiveCredentialRequest)）
 
 **戻り値**:
-- 受領し保存した Credential（[SavedCredential](#SavedCredential)）
+- 受領し保存した Credential（[SavedCredential](#SavedCredential)）。storeless の wallet は保存せずに返します
+
+`ReceiveCredential` は、`Draft13().AuthorizePreAuthorizedIssuance` の後に `Key` を唯一の holder 鍵として `Draft13().RequestCredential` を呼ぶので、通信は Draft 13 のものです（[Draft 13](#draft-13) を参照）。
+メタデータは Draft 13 §11.2.2 の位置から取得し、key proof には Token Response の `c_nonce` を入れ（§6.2）、Credential Request は `format` と 1 つの `proof` を持ちます（§7.2）。
+Draft 13 には Nonce Endpoint がないので、メタデータに `nonce_endpoint` があっても呼びません。
+`Config.Profiles` に `profile.Draft13()` が必要です（`ErrProfileForbidsDraft`）。
+token request の前に受理ポリシー（`ErrCredentialAcceptancePolicyRequired`）と `Key`（`ErrDraft13HolderKeyMissing`）を要求するので、wallet が拒否する Credential のために pre-authorized code を消費しません。
+Deferred の応答は `ErrDraft13CredentialDeferred` で失敗します。
+ポーリングと通知には `Draft13()` のメソッドを使います。
+OpenID4VCI 1.0 の Issuer には `AuthorizePreAuthorizedIssuance` と `RequestCredential` を使います。
 
 ### PresentCredential
 
@@ -667,7 +688,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 発行時に保存前に行う検査を、`req.Acceptance`、なければ `Config.CredentialAcceptance` で生の Credential に適用します。何も保存しません。
 storeless の wallet で受け取って後で保存する呼び出し側や、保持している Credential を検査し直す呼び出し側のための 2 段目です。
 `CredentialIssuer` は発行の Credential Issuer Identifier です（DID の Issuer はこの origin と束縛します）。
-`IssuanceVersion` はプロファイルを選びます（`IssuanceVersionDraft13` は SD-JWT VC の `typ` `vc+sd-jwt` を受け付けます）。
+`Version` はプロファイルを選びます。ゼロ値の `profile.VersionFinal` は wallet の 1.0 プロファイルを、`profile.VersionDraft13` は `profile.Draft13()` を適用します（SD-JWT VC の `typ` `vc+sd-jwt` を受け付けます）。
 `CredentialConfiguration` を設定すると、それは Credential を発行した Configuration です。`cryptographic_binding_methods_supported` を列挙していれば、`RequestCredential` と同じく、Credential は `HolderKey` と一致する `cnf.jwk` を持たなければなりません（OpenID4VCI 1.0 §12.2.4、HAIP 1.0 §6.1）。
 
 ```go
@@ -676,7 +697,7 @@ type CredentialAcceptanceRequest struct {
 	Flavor           credential.SupportedSerializationFlavor
 	HolderKey        *jose.JSONWebKey
 	CredentialIssuer string
-	IssuanceVersion  IssuanceVersion
+	Version          profile.Version
 	Acceptance       *acceptance.Policy
 	// CredentialConfiguration, when it lists cryptographic_binding_methods_supported,
 	// requires a cnf.jwk that HolderKey matches.
@@ -714,11 +735,12 @@ OpenID4VCI 1.0 の発行は段階ごとに進み、各段階は次の段階が�
 | Deferred トランザクションの 1 回の問合せ | `RequestDeferredCredential(ctx, deferred)` | `*IssuanceResult` |
 | Issuer への通知 | `NotifyIssuer(ctx, notification, event, description)` | `error` |
 
-状態の型（`IssuanceAuthorization`、`IssuanceGrant`、`DeferredIssuance`、`IssuanceNotification`）は JSON にシリアライズでき、`Version` を持つので、段階を別プロセスで実行できます。
+状態の型（`IssuanceAuthorization`、`IssuanceGrant`、`DeferredIssuance`、`IssuanceNotification`）は JSON にシリアライズできるので、段階を別プロセスで実行できます。
 状態が持つのは識別子と秘密だけです。
 各段階は Issuer と認可サーバーのメタデータを再取得し、状態がまだ wallet に合っているか（同じ `ClientAuth.ClientID`、`Issuance.RedirectURI`、DPoP 鍵であり、Issuer がまだその認可サーバーに委任しているか）を確認して、合わなければ `ErrIssuanceStateMismatch` で拒否します。
-別の OpenID4VCI バージョンの状態は `ErrIssuanceVersionMismatch` で拒否します。
-各状態はフローのプロファイルを `Profile`（JSON の `"profile"`、`profile.Profile` のテキスト形式）に記録します。wallet が別のプロファイルで動く段階は、何も送る前にその状態を拒否します（`ErrIssuanceProfileMismatch`）。そのため、フローが開始時と異なる Option で続くことはありません。
+各状態はフローのプロファイルを `Profile`（JSON の `"profile"`、`profile.Profile` のテキスト形式）に記録します。
+`Profile` の版（`Profile.Version()`）が別の OpenID4VCI バージョンである状態は `ErrIssuanceVersionMismatch` で拒否します。
+同じ版で wallet が別のプロファイルで動く段階は、何も送る前にその状態を拒否します（`ErrIssuanceProfileMismatch`）。そのため、フローが開始時と異なる Option で続くことはありません。
 段階を別プロセスで実行する呼出し側は、各段階の wallet を状態の `Profile` で構築します。
 
 **状態の JSON は bearer secret です。**
@@ -742,7 +764,10 @@ HAIP では、各段階が `Config.DPoP.Key` を要求し、PAR または token 
 
 ### Authorization Code Flow
 
-`BeginIssuance` はメタデータを解決し、Credential Configuration を profile と `Config.Issuance.CredentialEncryption` に照らして確認し、サーバーが RFC 9126 PAR に対応していれば認可リクエストを push して（HAIP では必須）、holder のブラウザで開く URL を返します。
+`BeginIssuance` はメタデータを解決し、Credential Configuration を profile と `Config.Issuance.CredentialEncryption` に照らして確認し、サーバーが RFC 9126 PAR に対応していれば認可リクエストを push して（HAIP では必須。サーバーが `require_pushed_authorization_requests` を示す場合も必須）、holder のブラウザで開く URL を返します。
+PAR の応答は `request_uri` と正の `expires_in` を持たなければなりません（RFC 9126 §2.2、`receiverTypes.ErrPARResponseInvalid`）。push に失敗したとき、パラメータを URL に載せて送る方式に切り替えることはありません。
+認可エンドポイントは `https` でなければなりません（`http` は experimental の transport のときだけで、HAIP では使えません）。
+`grants` の無い Offer や空の `grants` の Offer は、認可サーバーの `grant_types_supported` が `authorization_code` を含むか、省略されているときに開始します（OpenID4VCI 1.0 §4.1.1。それ以外は `ErrAuthorizationCodeGrantUnsupported`）。
 `AuthorizeIssuance` はブラウザが届けたリダイレクト URL 全体を受け取り、検査して（RFC 6749 §4.1.2、RFC 9207 の `iss`、`state`、`redirect_uri`）認可コードを交換します。
 
 ```go
@@ -829,6 +854,8 @@ func receivePreAuthorized(ctx context.Context, w *wallet.Wallet, offerURI, txCod
 Credential は `CredentialRequest.Acceptance`、なければ `Config.CredentialAcceptance` で検査し、storeless でなければ保存します。
 ポリシーが必要とする発行の文脈（Credential Issuer Identifier と形式）はライブラリが渡すので、呼び出し側は Credential を自分で検証し直さずに、発行ごとの受理を構成できます。
 `IssuanceResult` は `Credentials` か保留中の `Deferred` トランザクションのどちらかを持ち、Issuer が通知を求めた場合は `Notification` も持ちます。
+Token Response が `credential_identifiers`（§6.2）を示した場合、`IssuanceGrant.CredentialIdentifiers` はそのすべてを保持し、`CredentialRequest.CredentialIdentifier` がリクエストで指定する Credential Dataset を選びます（既定は先頭）。holder が求める dataset ごとに `RequestCredential` を呼びます。
+`credentials` 配列の要素は、ほかのメンバーがあっても `credential` メンバーを読みます（§8.3）。
 Credential を拒否した場合は、`credential_failure` を報告するための `Notification` を持つ結果がエラーと一緒に返ります。
 
 ライブラリが自らポーリングや通知を行うことはありません。
@@ -866,7 +893,7 @@ func completeIssuance(ctx context.Context, w *wallet.Wallet, result *wallet.Issu
 }
 ```
 
-`DeferredIssuance.Interval` は Issuer が求めた間隔で、どれだけ待つかは呼出し側が決めます。
+`DeferredIssuance.Interval` は Issuer が求めた間隔で、短くすることはありません。どれだけ待つかは呼出し側が決めます。
 `NotifyIssuer` は再取得したメタデータから `notification_endpoint` を見つけ、`credential_accepted`、`credential_failure`、`credential_deleted` のいずれかを送ります。
 
 ### Key attestation
@@ -913,7 +940,7 @@ func requestWithKeyAttestation(ctx context.Context, w *wallet.Wallet, grant *wal
 `Request` と `Response` はそれぞれ次のいずれかです。
 `CredentialEncryptionFollowIssuer` は Issuer が広告するものを暗号化し、Issuer が要求すれば従います。
 `CredentialEncryptionRequired` は暗号化を提供しない Issuer を拒否します（`ErrCredentialEncryptionUnavailable`）。
-`CredentialEncryptionDisabled` は暗号化を要求する Issuer を拒否します（`ErrCredentialEncryptionDisallowed`）。
+`CredentialEncryptionDisabled` は暗号化をしません。`encryption_required: false` で暗号化を提供する Issuer にも暗号化せず、暗号化を要求する Issuer は拒否します（`ErrCredentialEncryptionDisallowed`）。どちらか一方を無効にすると、両方が無効になります。
 応答用の鍵は暗号化されたリクエストの中でしか運ばれないため、応答の暗号化を必須にするとリクエストの暗号化も必須になります。
 矛盾は `BeginIssuance` または `AuthorizePreAuthorizedIssuance` で拒否します。
 応答の復号鍵は一時鍵で、`DeferredIssuance` に含まれて運ばれます。
@@ -949,6 +976,12 @@ HAIP（`Options.RequestSignedIssuerMetadata`）では、`IssuerMetadataSigning` 
 `RequireIssuerDNSBinding` と `ExpectedLeafDNSName` は leaf 証明書の DNS 束縛を加えます。
 このポリシーは再取得のたびに適用されます。
 
+Draft 13（§11.2.3）では、同じトラスト情報で JSON 文書の `signed_metadata` メンバーを検証します。
+`iss`、`sub`（要求した識別子）、`iat` が必須で、`exp` があれば確認し、`typ` は求めません。
+検証した claim は JSON の値より優先するので、Draft 13 の各段階は署名された endpoint と `authorization_servers` を使います。
+検証できない `signed_metadata` は取得を失敗させます。トラストアンカーが無ければこのメンバーは無視し、`Require` はこれを必須にします。
+`SignedMetadata` は検証した署名があるときだけ設定します。
+
 署名付き文書の拒否はすべて `errors.Is(err, ErrIssuerMetadataSignatureInvalid)` を満たし、`ErrIssuerMetadataSubjectMismatch`、`ErrIssuerMetadataLeafDNSMismatch`、`ErrIssuerMetadataExpired` はこれをラップします。
 `ErrIssuerMetadataSignatureRequired` は `Require` の結果です。
 `CredentialIssuerMetadata.MetadataSignature` は受け入れた署名者を記録し、`RawDocument` は受け入れた文書を保持します。
@@ -956,8 +989,11 @@ HAIP（`Options.RequestSignedIssuerMetadata`）では、`IssuerMetadataSigning` 
 ### Draft 13
 
 `w.Draft13()` は、同じ段階的メソッドと状態の型で OpenID4VCI Draft 13 を実行します。
-状態は `IssuanceVersionDraft13` を持ちます。
+状態は `Profile` に `profile.Draft13()` を持ちます。
 Credential Offer が必須で、`c_nonce` は Token Response と Credential Response から得て、key proof は 1 つだけ送り、key attestation と Credential の暗号化はありません。
+`authorization_details` で要求したあとの `credential_identifiers` は任意です（無ければ形式でリクエストします）。
+key proof は、`cryptographic_binding_methods_supported` のうち wallet が作れる最初の方式（`jwk` か `did:key`）で鍵を示します（どちらも無ければ `ErrCryptographicBindingMethodUnsupported`）。
+アクセストークンは Bearer か DPoP でなければならず、`interval` の無い `issuance_pending` は 5 秒待つものとします（§9.3）。
 Credential Issuer Metadata は Draft 13 §11.2.2 の位置からだけ取得します。
 `Config.Experimental.Hooks.KeyProof` はテストのために key proof を書き換えます。
 
@@ -1412,6 +1448,7 @@ key proof のアルゴリズムは、Issuer が `proof_signing_alg_values_suppor
 * `profile.Carrier` を実装する receiver / presenter の plugin は、option を含めて wallet の 1.0 プロファイルを報告しなければなりません（`ErrProfileMismatch`）。Draft のプロファイルを報告する plugin は拒否します（`profile.ErrDraftProfile`）。1.0 プロファイルが option を持つとき（HAIP、または `With` で強めた Final）は `profile.Carrier` を実装しない plugin を拒否し（`ErrProfilePluginUnsupported`）、素の Final では受け入れます。
 * `Draft13()` のメソッドと `ReceiveCredential` は `profile.Draft13()` が、`Draft24()` のメソッドと Draft 24 の handle は `profile.Draft24()` が有効でなければ `ErrProfileForbidsDraft` を返します。`Experimental.Hooks` は Draft のプロファイルが 1 つも有効でなければ拒否します。
 * `Experimental.Transport` と `Experimental.Hooks` は `ForbidExperimental` を持つプロファイル（HAIP）で拒否し、`Experimental.Transport` は wallet が再構成しない注入された `Receiver` / `Presenter` との併用でも拒否します（`ErrInvalidArgument`）。
+  プロファイルが禁じる `Experimental` を自身に持つ注入された `oid4vci.Oid4vciReceiver` も拒否し（`Oid4vciReceiver.ValidateProfile`）、そのような receiver はどの交換でも何も送りません。
 * DPoP 鍵のない `Attestation.ClientKeyFromDPoP` と、`Attestation.ClientKey` と併用した `Attestation.ClientKeyFromDPoP` は拒否します（`ErrInvalidArgument`）。
 * `Storeless` と `CredStore` の併用、`SupportedTransactionDataTypes` と `Presenter` の併用、`*oid4vp.Oid4vpPresenter` 以外の `Presenter` plugin は拒否します（`ErrInvalidArgument`）。
 
@@ -1549,7 +1586,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 このセクションは、upstream のコミット `f0c7c53` 以降に、そこに存在した識別子に加えられた変更と、そのメソッドの挙動の変更を挙げます。
 それ以降に追加された識別子は、ここまでのセクションで説明しています。
-`f0c7c53` のエクスポートされたシグネチャは、下に挙げる削除した `env` の識別子を除いて変わっていません。
+`f0c7c53` のエクスポートされたシグネチャは、`ReceiveCredential`、`ReceiveCredentialRequest`、下に挙げる削除した `env` の識別子を除いて変わっていません。
 
 **パッケージ `wallet`**
 
@@ -1558,8 +1595,8 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 * `NewWalletWithConfig` は、不正な `Profiles`、wallet と異なる profile の plugin、プロファイルが option を持つときの `profile.Carrier` を実装しない plugin、Draft のプロファイルがないときの `Experimental.Hooks` を拒否します。`CredStore` を伴う `Storeless`、注入した `Presenter` を伴う `SupportedTransactionDataTypes`、`*oid4vp.Oid4vpPresenter` 以外の presenter plugin も拒否します。エラーにはコードがあります。
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
 * `VerifyCredential` は、proof が検証できたときだけ、かつ `acceptance.DefaultSigningAlgorithms()`（ES256）に限り true を返します。nil の Credential には false を返します。
-* `ReceiveCredential` は `Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。受理ポリシー（`ReceiveCredentialRequest.Acceptance` または `Config.CredentialAcceptance`）が必要で、なければ何も要求せずに `ErrCredentialAcceptancePolicyRequired` を返します。以前は解析しただけの Credential を保存していました。ポリシーを満たさない Credential は保存しません。storeless の wallet は検査の後に `ErrNoCredentialStore` を返します。匿名の token request（`client_id` なし）には、認可サーバーのメタデータの `pre-authorized_grant_anonymous_access_supported: true` が必要です。値がないときは以前 `true` として扱っていましたが、今は拒否します。Offer の Issuer は、receiver plugin が許す場合（`HTTPSchemePolicy`）に限り平文 HTTP を使えます。
-* `ReceiveCredentialRequest` に `Acceptance` があります。
+* `ReceiveCredential` は `context.Context` を受け取り、`Draft13()` の Draft 13 Pre-Authorized Code Flow を 1 回の呼出しで実行します。`credential_configuration_id` と `proofs` の代わりに Draft 13 の Credential Request（`format` と 1 つの `proof`）を送り、key proof の `c_nonce` は Token Response からだけ得ます。`nonce_endpoint` は呼ばず、そこから Token Response の `c_nonce` に切り替えることもありません。`Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。受理ポリシー（`ReceiveCredentialRequest.Acceptance` または `Config.CredentialAcceptance`）と `Key` が必要で、なければ何も要求せずに `ErrCredentialAcceptancePolicyRequired` か `ErrDraft13HolderKeyMissing` を返します。以前は解析しただけの Credential を保存していました。ポリシーを満たさない Credential と、`cnf` が `Key` 以外の鍵を指す Credential は保存しません。storeless の wallet は Credential を保存せずに返します。Deferred の応答は `ErrDraft13CredentialDeferred` を返します。匿名の token request（`client_id` なし）には、認可サーバーのメタデータの `pre-authorized_grant_anonymous_access_supported: true` が必要です。値がないときは以前 `true` として扱っていましたが、今は拒否します。Offer の Issuer は、receiver plugin が許す場合（`HTTPSchemePolicy`）に限り平文 HTTP を使えます。
+* `ReceiveCredentialRequest` に `Acceptance` と `CredentialConfigurationID` があります。`Type`（OpenID4VCI しかありません）、`RequestedFormat`（configuration は `CredentialConfigurationID` で選びます）、`CachedIssuerMetadata`（メタデータは常に再取得します）を削除しました。
 * `PresentCredential` と `PresentCredentialWithOptions` は `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を実行します。保存済み Credential は最新のものではなく DCQL クエリで選び、答える query ごとに提示を作り、query の要求どおりに Key Binding JWT を付けます。要求は [Verifier の認証](#verifier-authentication)の規則で受け付けます。
 * `GetCredentialEntries` と `GetCredentialEntry` は、storeless の wallet で `ErrNoCredentialStore` を返します。
 * `Wallet` のメソッドが返すエラーにはすべてコードがあります（`wallet.ErrorCode`）。
@@ -1581,6 +1618,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 * `receiver.ReceivingDispatcher` と `presenter.PresentationDispatcher` に新しいメソッド（`Plugins`、transport と解析のアクセサ）があります。`sdjwtvc.SdJwtVcPresentationOptions` に `LimitDisclosureToSelectedClaims` と `RequireRootClaimMatch` が、`presenterTypes.PresentationRequest` に `ResponseMode` があります。`receiver/types` のメタデータの型に新しいフィールドがあります。
 * `env.IsHTTPAllowed`、`env.SetHTTPAllowed`、`env.HTTP_ALLOWED` を削除し、`VCKNOTS_WALLET_HTTP_ALLOWED` は読まなくなりました。ローカルテストでの平文 HTTP には [`experimental.Transport`](#experimental) を使います。
 * コンポーネントのパッケージ（`keystore`、`credstore`、`presenter/types`、`common` など）のセンチネルエラーはコードを持ちます。`errors.Is` は引き続き一致します。
+* `receiverTypes.SignatureAlgorithm` は、JWA 名の無い COSE アルゴリズム識別子を失敗させず、10 進の文字列として保持します。未知の `credential_signing_alg_values_supported` の値で Credential Issuer Metadata 全体が読めなくなることはありません。
 
 ## 7. 注意事項
 

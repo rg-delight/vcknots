@@ -8,7 +8,6 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/attestation"
-	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
@@ -39,17 +38,6 @@ import (
 // The library never polls a deferred transaction and never sends a
 // notification on its own.
 
-// IssuanceVersion is the OpenID4VCI version a state belongs to. A state is
-// refused by the other version's methods (ErrIssuanceVersionMismatch).
-type IssuanceVersion string
-
-const (
-	// IssuanceVersionFinal is OpenID4VCI 1.0, used by the methods of Wallet.
-	IssuanceVersionFinal IssuanceVersion = "1.0"
-	// IssuanceVersionDraft13 is OpenID4VCI Draft 13, used by Wallet.Draft13.
-	IssuanceVersionDraft13 IssuanceVersion = "draft-13"
-)
-
 // AuthorizationRequestType selects how the Credential Configuration is
 // requested at the authorization endpoint (OpenID4VCI 1.0 Sections 5.1.1 and
 // 5.1.2). The zero value uses scope when the configuration advertises one and
@@ -67,8 +55,11 @@ const (
 // IssuanceRequest starts an Authorization Code Flow issuance.
 type IssuanceRequest struct {
 	// CredentialOffer is the offer the holder accepted; it must carry an
-	// authorization_code grant. Nil starts a wallet-initiated issuance
-	// (OpenID4VCI 1.0 Section 5), which only the 1.0 methods support.
+	// authorization_code grant, or no grants at all, in which case the
+	// authorization server metadata must support the authorization_code grant
+	// (OpenID4VCI 1.0 and Draft 13 Section 4.1.1). Nil starts a
+	// wallet-initiated issuance (OpenID4VCI 1.0 Section 5), which only the 1.0
+	// methods support.
 	CredentialOffer *CredentialOffer
 	// CredentialIssuer is the Credential Issuer Identifier of a
 	// wallet-initiated issuance. It must be empty when CredentialOffer is set.
@@ -98,6 +89,10 @@ type PreAuthorizedIssuanceRequest struct {
 
 // CredentialRequest holds the per-request inputs of RequestCredential.
 type CredentialRequest struct {
+	// CredentialIdentifier selects the Credential Dataset to request: one of
+	// the grant's CredentialIdentifiers. Empty selects the first. It must be
+	// empty when the grant has none.
+	CredentialIdentifier string
 	// HolderKeys are the keys the credentials are bound to, one key proof
 	// each. More than one requests a batch (OpenID4VCI 1.0 Section 8.2), up to
 	// the issuer's batch_size. Draft 13 takes at most one.
@@ -123,9 +118,10 @@ type CredentialRequest struct {
 // and is used once:
 // discard it after AuthorizeIssuance, whether that succeeded or failed.
 type IssuanceAuthorization struct {
-	Version IssuanceVersion `json:"version"`
 	// Profile is the profile the flow runs under: the wallet's 1.0 profile,
-	// or profile.Draft13 for a Draft 13 state.
+	// or profile.Draft13 for a Draft 13 state. Its Version is the
+	// OpenID4VCI version of the state, which the other version's methods
+	// refuse (ErrIssuanceVersionMismatch).
 	Profile profile.Profile `json:"profile"`
 	// AuthorizationURL is the authorization request to open in the holder's
 	// browser.
@@ -148,7 +144,7 @@ type IssuanceAuthorization struct {
 	// (OpenID4VCI 1.0 Section 6.2).
 	AuthorizationDetailsRequested bool `json:"authorization_details_requested,omitempty"`
 	// RequestURIExpiresAt is the RFC 9126 request_uri expiry; zero when the
-	// request was not pushed or the server stated no lifetime.
+	// request was not pushed.
 	RequestURIExpiresAt time.Time `json:"request_uri_expires_at,omitempty"`
 	// ClientInstanceKey is the ephemeral private key the Client Attestation
 	// of the Pushed Authorization Request bound, set when the wallet chose a
@@ -172,12 +168,14 @@ func (a *IssuanceAuthorization) RequestURIExpired(now time.Time) bool {
 }
 
 // IssuanceGrant is the state between the token exchange and
-// RequestCredential. It is a bearer secret (AccessToken) and is used once:
-// discard it after RequestCredential, keeping only the Deferred or
-// Notification of its result. A call that stopped before sending anything,
-// such as with *KeyAttestationRequiredError, may be repeated with it.
+// RequestCredential. It is a bearer secret (AccessToken) and is used once
+// per Credential Dataset: discard it after RequestCredential, keeping only the
+// Deferred or Notification of its result, unless CredentialIdentifiers lists
+// more datasets the holder wants, each requested with its own
+// RequestCredential (CredentialRequest.CredentialIdentifier). A call that
+// stopped before sending anything, such as with *KeyAttestationRequiredError,
+// may be repeated with it.
 type IssuanceGrant struct {
-	Version                   IssuanceVersion `json:"version"`
 	Profile                   profile.Profile `json:"profile"`
 	CredentialIssuer          string          `json:"credential_issuer"`
 	CredentialConfigurationID string          `json:"credential_configuration_id"`
@@ -186,8 +184,12 @@ type IssuanceGrant struct {
 	AuthorizationServer string                                       `json:"authorization_server"`
 	AccessToken         *receiverTypes.CredentialIssuanceAccessToken `json:"access_token"`
 	// CredentialIdentifiers are the Section 6.2 credential_identifiers of the
-	// requested configuration; the Credential Request names the first. Empty
-	// means it names the configuration (Section 8.2).
+	// requested configuration, each naming a Credential Dataset the access
+	// token can be used for, in the order the server listed them. A
+	// Credential Request names one of them (CredentialRequest.
+	// CredentialIdentifier, the first by default). Empty means the request
+	// names the configuration (1.0 Section 8.2) or, in Draft 13, its format
+	// (Draft 13 Section 7.2).
 	CredentialIdentifiers []string `json:"credential_identifiers,omitempty"`
 	// CNonce is the c_nonce the key proofs and a key attestation must carry;
 	// empty when the issuer has no Nonce Endpoint.
@@ -209,7 +211,6 @@ type IssuanceGrant struct {
 // Deferred, and discard it when the credentials are issued or the transaction
 // fails.
 type DeferredIssuance struct {
-	Version                   IssuanceVersion                              `json:"version"`
 	Profile                   profile.Profile                              `json:"profile"`
 	CredentialIssuer          string                                       `json:"credential_issuer"`
 	CredentialConfigurationID string                                       `json:"credential_configuration_id"`
@@ -243,7 +244,6 @@ type DeferredIssuance struct {
 // credentials (OpenID4VCI 1.0 Section 11). It is a bearer secret
 // (AccessToken) and is used once: discard it after NotifyIssuer.
 type IssuanceNotification struct {
-	Version           IssuanceVersion                              `json:"version"`
 	Profile           profile.Profile                              `json:"profile"`
 	CredentialIssuer  string                                       `json:"credential_issuer"`
 	NotificationID    string                                       `json:"notification_id"`
@@ -282,14 +282,20 @@ const (
 	NotificationCredentialDeleted NotificationEvent = "credential_deleted"
 )
 
-// ReceiveCredentialRequest holds parameters for receiving a credential.
+// ReceiveCredentialRequest is the input of ReceiveCredential, the one-call
+// OpenID4VCI Draft 13 Pre-Authorized Code Flow.
 type ReceiveCredentialRequest struct {
-	CredentialOffer      *CredentialOffer
-	Type                 receiverTypes.SupportedReceivingTypes
-	Key                  IKeyEntry
-	RequestedFormat      credential.SupportedSerializationFlavor
-	CachedIssuerMetadata *receiverTypes.CredentialIssuerMetadata
-	TxCode               string
+	// CredentialOffer must carry a pre-authorized_code grant.
+	CredentialOffer *CredentialOffer
+	// CredentialConfigurationID selects one of the offered configurations;
+	// empty selects the first.
+	CredentialConfigurationID string
+	// TxCode is the Transaction Code the holder entered, when the grant carries
+	// a tx_code object (Draft 13 Section 6.1).
+	TxCode string
+	// Key is the holder key the credential is bound to. It signs the one key
+	// proof of the Credential Request (Draft 13 Section 7.2.1).
+	Key IKeyEntry
 	// Acceptance overrides Config.CredentialAcceptance for this credential.
 	// One of the two is required.
 	Acceptance *acceptance.Policy

@@ -26,13 +26,28 @@ const (
 
 // ClientProvider obtains a Wallet Attestation for this wallet instance. The
 // library never handles the attester's private key.
+//
+// "Wallet Attestations MUST NOT be reused across different Issuers" (HAIP
+// §4.4.1) is an obligation on the wallet, and the library cannot enforce it
+// on its own: the Client Attestation JWT of
+// draft-ietf-oauth-attestation-based-client-auth §5.1, which OpenID4VCI 1.0
+// Appendix E adopts, defines no aud claim (only the Client Attestation PoP JWT
+// of §5.2 carries one), so an attestation that names no audience is valid and
+// is accepted. A provider must therefore return an attestation obtained for
+// request.AuthorizationServer, and never one it returned for another
+// server. The wallet asks the provider anew at every stage that
+// authenticates the client (the Pushed Authorization Request and each Token
+// Request), always naming the server that stage talks to; a provider that
+// caches attestations must key its cache by AuthorizationServer. When the
+// attestation does carry aud, ValidateClientAttestation refuses it unless
+// aud names request.AuthorizationServer.
 type ClientProvider interface {
 	ClientAttestation(ctx context.Context, request ClientRequest) (*ClientAttestation, error)
 }
 
-// ClientRequest is the input to a ClientProvider. AuthorizationServer lets the
-// provider scope the attestation to one server: "Wallet Attestations MUST NOT
-// be reused across different Issuers" (HAIP §4.4.1).
+// ClientRequest is the input to a ClientProvider. AuthorizationServer is the
+// one server the returned attestation may be used with (HAIP §4.4.1); see
+// ClientProvider.
 type ClientRequest struct {
 	ClientID            string
 	ClientKey           jose.JSONWebKey // wallet instance public key (cnf.jwk)

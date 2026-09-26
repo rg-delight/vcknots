@@ -23,13 +23,12 @@
 
 ## サンプルが使う Wallet API
 
-サンプルは、1 回の呼出しでフローを実行する `ReceiveCredential`（OpenID4VCI の Pre-Authorized Code Flow）と `PresentCredential`（OpenID4VP 1.0）を呼び出します。
-ユーザーのいる wallet は代わりに段階的 API を使います。
-発行では `ResolveCredentialOffer`、`BeginIssuance`、`AuthorizeIssuance` または `AuthorizePreAuthorizedIssuance`、`RequestCredential` を、提示では `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を使います。
+サンプルは、OpenID4VCI 1.0 の段階的 API（`ParseCredentialOfferURL` または `ResolveCredentialOffer`、`AuthorizePreAuthorizedIssuance`、`RequestCredential` による Pre-Authorized Code Flow）で Credential を受領し、1 回の呼出しでフローを実行する `PresentCredential`（OpenID4VP 1.0）で提示します。
+ユーザーのいる wallet は、Authorization Code Flow に `BeginIssuance` と `AuthorizeIssuance` を、提示に `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` も使います。
 [wallet ガイド](../../docs/i18n/ja/docusaurus-plugin-content-docs/current/wallet.md) がその API、対応プロトコル、HAIP プロファイル、セキュリティ上の既定値を説明し、[公開 Wallet API driver](official_driver/README.ja.md) が完全な構成を示します。
 
-サンプルは `Config.CredentialAcceptance` を設定しないため、`ReceiveCredential` は受領した Credential を解析するだけで、Issuer を認証しません。
-OpenID4VCI 1.0 のメソッドは受理ポリシーなしでは実行を拒否します。
+サンプルは `common.SampleIssuerAcceptance` で `Config.CredentialAcceptance` を設定し、`RequestCredential` はそのポリシーが Issuer を認証した Credential だけを保存します。
+OpenID4VCI のメソッドは受理ポリシーなしでは実行を拒否します。
 
 ## 前提条件
 
@@ -245,7 +244,7 @@ time=2025-11-27T14:03:25.066+09:00 level=INFO msg="Fetching credential offer fro
 time=2025-11-27T14:03:25.077+09:00 level=INFO msg="Received offer URL" url="openid-credential-offer://?credential_offer=%7B%22credential_issuer%22%3A%22http%3A%2F%2Flocalhost%3A8080%22%2C%22credential_configuration_ids%22%3A%5B%22UniversityDegreeCredential%22%5D%2C%22grants%22%3A%7B%22urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code%22%3A%7B%22pre-authorized_code%22%3A%220d6386e621c740d1a02771312039efeb%22%7D%7D%7D"
 time=2025-11-27T14:03:25.077+09:00 level=INFO msg="Decoded offer" offer="{\"credential_issuer\":\"http://localhost:8080\",\"credential_configuration_ids\":[\"UniversityDegreeCredential\"],\"grants\":{\"urn:ietf:params:oauth:grant-type:pre-authorized_code\":{\"pre-authorized_code\":\"0d6386e621c740d1a02771312039efeb\"}}}"
 time=2025-11-27T14:03:25.077+09:00 level=INFO msg="Parsed credential offer" issuer=http://localhost:8080 configs=[UniversityDegreeCredential] grants=1
-time=2025-11-27T14:03:25.152+09:00 level=INFO msg="Successfully imported demo credential via controller.ReceiveCredential" entry_id=0909df8b-cecb-4432-a047-a1a9c2dfc720 raw_length=808
+time=2025-11-27T14:03:25.152+09:00 level=INFO msg="Successfully imported demo credential via wallet.RequestCredential" entry_id=0909df8b-cecb-4432-a047-a1a9c2dfc720 raw_length=808
 time=2025-11-27T14:03:25.152+09:00 level=INFO msg="=== Received Credential Details ==="
 time=2025-11-27T14:03:25.152+09:00 level=INFO msg="Credential Entry ID" id=0909df8b-cecb-4432-a047-a1a9c2dfc720
 time=2025-11-27T14:03:25.152+09:00 level=INFO msg="Credential MimeType" mime_type=application/vc+jwt

@@ -73,7 +73,6 @@ func TestIssuanceStatesAreBoundToTheFlowProfile(t *testing.T) {
 		require.Empty(t, fixture.notificationBodies)
 
 		_, err = fixture.wallet.RequestDeferredCredential(ctx, &DeferredIssuance{
-			Version:                   IssuanceVersionFinal,
 			Profile:                   profile.HAIP(),
 			CredentialIssuer:          fixture.server.URL,
 			CredentialConfigurationID: "pid",

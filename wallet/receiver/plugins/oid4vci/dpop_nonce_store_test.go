@@ -296,3 +296,32 @@ func TestDPoPUnattributedNonceIsClaimedByOneKey(t *testing.T) {
 		t.Fatalf("the claiming key lost its nonce: %q", got)
 	}
 }
+
+// OpenID4VCI 1.0 Section 7.2: when the Nonce Response carries a DPoP-Nonce,
+// "the Wallet uses the new nonce value in the DPoP proof". A key that already
+// held an older nonce for the Credential Issuer uses the fresh one, which is
+// the case after an invalid_nonce refresh.
+func TestDPoPNonceFromANonceResponseSupersedesTheKeysOlderNonce(t *testing.T) {
+	receiver := &Oid4vciReceiver{}
+	endpoint, err := url.Parse("https://issuer.example/credential")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prover := func(thumbprint string) exchange {
+		return exchange{url: *endpoint, resourceServer: true, dpop: types.DPoPProver{KeyThumbprint: thumbprint, Proof: func(string) (string, error) { return "proof", nil }}}
+	}
+	nonceSource := exchange{url: *endpoint, resourceServer: true, dpopNonceSource: true}
+
+	receiver.rememberDPoPNonce(prover("key-1"), "stale")
+	receiver.rememberDPoPNonce(nonceSource, "fresh")
+	if got := receiver.dpopNonceFor(prover("key-1")); got != "fresh" {
+		t.Fatalf("dpopNonceFor = %q, want the fresh nonce", got)
+	}
+	if got := receiver.dpopNonceFor(prover("key-2")); got != "" {
+		t.Fatalf("another key got %q; the fresh nonce belongs to the key that claimed it", got)
+	}
+	receiver.rememberDPoPNonce(prover("key-1"), "next")
+	if got := receiver.dpopNonceFor(prover("key-1")); got != "next" {
+		t.Fatalf("dpopNonceFor = %q, want the key's latest nonce", got)
+	}
+}

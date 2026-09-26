@@ -20,7 +20,7 @@ The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. `Config.Profiles
 | Protocol / feature | Public API | Notes |
 | --- | --- | --- |
 | OpenID4VCI 1.0 Pre-Authorized Code Flow | `AuthorizePreAuthorizedIssuance` + `RequestCredential` | `tx_code` is required exactly when the offer declares one. |
-| OpenID4VCI 1.0 Authorization Code Flow (PKCE, PAR, RFC 9207 `iss`) | `BeginIssuance` + `AuthorizeIssuance` + `RequestCredential` | The library does not open the browser. PKCE is always `S256`. PAR is used when the authorization server advertises it and required under HAIP. Wallet-initiated issuance (no offer) is supported. |
+| OpenID4VCI 1.0 Authorization Code Flow (PKCE, PAR, RFC 9207 `iss`) | `BeginIssuance` + `AuthorizeIssuance` + `RequestCredential` | The library does not open the browser, and returns an `https` authorization URL only. PKCE is always `S256`. PAR is used when the authorization server advertises it, and required under HAIP or when the server sets `require_pushed_authorization_requests`. Wallet-initiated issuance (no offer) and an offer without `grants` are supported. |
 | Credential Offer by value or by reference | `ResolveCredentialOffer`, `ParseCredentialOfferURL` | `ParseCredentialOfferURL` performs no I/O. |
 | Client authentication, DPoP | `Config.ClientAuth`, `Config.DPoP`, `Config.Attestation.Client` | `private_key_jwt` or OAuth 2.0 Attestation-Based Client Authentication (an ephemeral Client Instance Key per flow, server-provided Challenges). DPoP proofs are sent whenever `Config.DPoP.Key` is set. |
 | Batch issuance | `CredentialRequest.HolderKeys` | One key proof per holder key, up to `batch_credential_issuance.batch_size`. |
@@ -28,7 +28,7 @@ The wallet implements **OpenID4VCI 1.0** and **OpenID4VP 1.0**. `Config.Profiles
 | Credential Request / Response encryption | `Config.Issuance.CredentialEncryption` | The response key is ephemeral. |
 | Deferred issuance | `RequestDeferredCredential` | One request per call; the library does not poll. |
 | Notification | `NotifyIssuer` | The library never notifies on its own. |
-| Signed Credential Issuer Metadata | `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` | OpenID4VCI 1.0 §12.2.3. |
+| Signed Credential Issuer Metadata | `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` | OpenID4VCI 1.0 §12.2.3 (`application/jwt`) and Draft 13 §11.2.3 (`signed_metadata`). |
 | Credential acceptance before storage | `Config.CredentialAcceptance` or `CredentialRequest.Acceptance` (`acceptance.Policy`), `VerifyCredentialForAcceptance` | Required before any credential is requested. The issuer key is established by the mechanism its `iss` and `x5c` select (SD-JWT VC -19 §2.5). |
 | OpenID4VP 1.0 over `direct_post` / `direct_post.jwt` | `ParsePresentationRequest`, `ParsePresentationRequestObject`, `SelectCredentials`, `SubmitPresentation`, `DeclinePresentation`; `PresentCredential` | Requests are answered through an `*oid4vp.AdmittedRequest` handle. |
 | Verifier authentication | `oid4vp.Oid4vpPresenter` (`RequestObjectValidation`, `PreRegisteredClients`) | `x509_san_dns`, `x509_hash`, `redirect_uri`, pre-registered clients, `verifier_attestation`, `openid_federation`. See [Verifier authentication](#verifier-authentication). |
@@ -245,7 +245,7 @@ func newWallet(certPath string, allowHTTP bool) (*wallet.Wallet, error) {
 
 ## 3. Sample Implementation of Wallet Features
 
-This section shows the smallest receive and present samples, based on `wallet/examples/server_integration_sdjwt/server_integration_sdjwt.go` and `wallet/examples/common/common.go`. They use `ReceiveCredential` and `PresentCredential`, which run a whole flow in one call. The staged API that a wallet with a user needs is described in [OpenID4VCI 1.0 issuance](#openid4vci-10-issuance) and [OpenID4VP 1.0 presentation](#openid4vp-10-presentation).
+This section shows the smallest receive and present samples, based on `wallet/examples/server_integration_sdjwt/server_integration_sdjwt.go` and `wallet/examples/common/common.go`. The receive sample uses the OpenID4VCI 1.0 staged methods, and the present sample uses `PresentCredential`, which runs a whole flow in one call. The rest of the staged API that a wallet with a user needs is described in [OpenID4VCI 1.0 issuance](#openid4vci-10-issuance) and [OpenID4VP 1.0 presentation](#openid4vp-10-presentation).
 
 ### 3-1. Preparing Test Keys (IKeyEntry Interface)
 
@@ -323,39 +323,47 @@ func (m *MockKeyEntry) Sign(payload []byte) ([]byte, error) {
 
 ### 3-2. Receiving a Credential (OID4VCI)
 
-`ReceiveCredential` runs a Pre-Authorized Code issuance in one call. In a real deployment the offer URI comes from a QR code or deep link; with the local sample server, create one with `POST /configurations/:configurationId/offer`.
+An OpenID4VCI 1.0 Pre-Authorized Code issuance takes three calls: parse the offer, exchange the pre-authorized code for an access token, and request the credential. In a real deployment the offer URI comes from a QR code or deep link; with the local sample server, create one with `POST /configurations/:configurationId/offer`.
 
 ```go
 import (
+	"context"
+	"fmt"
+
 	"github.com/trustknots/vcknots/wallet"
-	"github.com/trustknots/vcknots/wallet/credential"
-	"github.com/trustknots/vcknots/wallet/receiver"
 )
 
-func receiveSDJwtCredential(w *wallet.Wallet, key wallet.IKeyEntry, offerURI string) (*wallet.SavedCredential, error) {
+func receiveSDJwtCredential(ctx context.Context, w *wallet.Wallet, key wallet.IKeyEntry, offerURI, txCode string) (*wallet.SavedCredential, error) {
 	// openid-credential-offer://?credential_offer=...
 	offer, err := wallet.ParseCredentialOfferURL(offerURI)
 	if err != nil {
 		return nil, err
 	}
 
-	return w.ReceiveCredential(wallet.ReceiveCredentialRequest{
+	grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{
 		CredentialOffer: offer,
-		Type:            receiver.Oid4vci,
-		Key:             key,                // signs the key proof
-		RequestedFormat: credential.SDJwtVC, // "application/dc+sd-jwt"
+		TxCode:          txCode, // required exactly when the offer carries tx_code
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{
+		HolderKeys: []wallet.IKeyEntry{key}, // each key signs one key proof
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result.Deferred != nil {
+		return nil, fmt.Errorf("the issuer deferred the credential")
+	}
+	return result.Credentials[0], nil
 }
 ```
 
-Notes on `ReceiveCredentialRequest`:
+`AuthorizePreAuthorizedIssuance` fetches the issuer and authorization server metadata and obtains an access token with the pre-authorized code; `PreAuthorizedIssuanceRequest.CredentialConfigurationID` selects an offered configuration, and the first is used when it is empty. `RequestCredential` obtains a `c_nonce` from the issuer's Nonce Endpoint when it advertises one (§7), signs a key proof with each holder key, requests the credential, checks it and stores it. The check is `CredentialRequest.Acceptance`, or else `Config.CredentialAcceptance`. With neither, `RequestCredential` requests nothing and fails with `ErrCredentialAcceptancePolicyRequired`: no credential is stored without an authenticated issuer (SD-JWT VC -19 §2.4). A deferred issuance, notifications and the Authorization Code Flow are described in [OpenID4VCI 1.0 issuance](#openid4vci-10-issuance).
 
-* **RequestedFormat:** `credential.SDJwtVC` or `credential.JwtVc`. When empty, the format of the first offered configuration is used.
-* **TxCode:** sent to the token endpoint as `tx_code` when the offer requires one.
-* **CachedIssuerMetadata:** when set, the issuer metadata is not fetched (see section 4).
-* **Acceptance:** the acceptance policy of this call; it overrides `Config.CredentialAcceptance`.
-
-`ReceiveCredential` fetches the issuer metadata from the Draft 13 §11.2.2 location (the well-known path appended to the identifier) and the authorization server metadata, obtains an access token with the pre-authorized code, signs the key proof with `Key`, requests the credential, checks it and stores it. The check is `Acceptance`, or else `Config.CredentialAcceptance`. With neither, `ReceiveCredential` requests nothing and fails with `ErrCredentialAcceptancePolicyRequired`: no credential is stored without an authenticated issuer (SD-JWT VC -19 §2.4). `ReceiveCredential` is OpenID4VCI Draft 13 and needs `profile.Draft13()` in `Config.Profiles`; new code uses `AuthorizePreAuthorizedIssuance` and `RequestCredential`.
+`ReceiveCredential` runs the same Pre-Authorized Code Flow in one call for an OpenID4VCI **Draft 13** issuer; it is described under [ReceiveCredential](#receivecredential).
 
 ### 3-3. Presenting a Credential (OpenID4VP)
 
@@ -426,7 +434,7 @@ func listSavedCredentials(w *wallet.Wallet) ([]*wallet.SavedCredential, error) {
 
 ## 4. Fetching Issuer Metadata
 
-`FetchCredentialIssuerMetadata` fetches the issuer's `.well-known/openid-credential-issuer` document. `ReceiveCredential` fetches it itself unless `ReceiveCredentialRequest.CachedIssuerMetadata` is set. The OpenID4VCI 1.0 methods always re-discover the metadata and take no cached copy.
+`FetchCredentialIssuerMetadata` fetches the issuer's OpenID4VCI 1.0 `.well-known/openid-credential-issuer` document (§12.2.2), for example to show the holder what an offer contains before they accept it. The issuance methods, `ReceiveCredential` included, always re-discover the metadata and take no cached copy.
 
 ```go
 import (
@@ -483,7 +491,7 @@ Input for `NewWalletWithConfig`. Every field is optional.
 
 ### ReceiveCredentialRequest {#ReceiveCredentialRequest}
 
-Input for `ReceiveCredential`: the [CredentialOffer](#CredentialOffer), the receiving protocol (`Type`), the key proof key (`Key`), the requested format (`RequestedFormat`), the optional `CachedIssuerMetadata` and the optional `TxCode`.
+Input for `ReceiveCredential`: the [CredentialOffer](#CredentialOffer) with a `pre-authorized_code` grant, the optional `CredentialConfigurationID` (empty selects the first offered configuration), the optional `TxCode`, the holder key `Key` that signs the one key proof, and the optional `Acceptance` policy that overrides `Config.CredentialAcceptance`.
 
 ### CredentialOffer {#CredentialOffer}
 
@@ -535,17 +543,20 @@ The methods that take a `context.Context` stop when it is canceled. Every error 
 
 ### ReceiveCredential
 
-Receives a credential through the Pre-Authorized Code Flow and stores it.
+Receives a credential from an OpenID4VCI Draft 13 issuer through the Pre-Authorized Code Flow and stores it.
 
 ```go
-func (w *Wallet) ReceiveCredential(req ReceiveCredentialRequest) (*SavedCredential, error)
+func (w *Wallet) ReceiveCredential(ctx context.Context, req ReceiveCredentialRequest) (*SavedCredential, error)
 ```
 
 **Parameters**:
+- `ctx`: Cancels the flow
 - `req`: Receive request ([ReceiveCredentialRequest](#ReceiveCredentialRequest))
 
 **Return value**:
-- The received and stored credential ([SavedCredential](#SavedCredential))
+- The received and stored credential ([SavedCredential](#SavedCredential)); a storeless wallet returns it without storing it
+
+`ReceiveCredential` is `Draft13().AuthorizePreAuthorizedIssuance` followed by `Draft13().RequestCredential` with `Key` as the one holder key, so its wire is Draft 13's (see [Draft 13](#draft-13)): the metadata comes from the Draft 13 §11.2.2 location, the key proof carries the `c_nonce` of the Token Response (§6.2), and the Credential Request names the `format` with one `proof` (§7.2). Draft 13 has no Nonce Endpoint, so a `nonce_endpoint` in the metadata is never called. It needs `profile.Draft13()` in `Config.Profiles` (`ErrProfileForbidsDraft`). Before the token request it requires an acceptance policy (`ErrCredentialAcceptancePolicyRequired`) and `Key` (`ErrDraft13HolderKeyMissing`), so the pre-authorized code is not spent on a credential the wallet would refuse. A deferred response fails with `ErrDraft13CredentialDeferred`; polling and notifications need the `Draft13()` methods. An OpenID4VCI 1.0 issuer is served by `AuthorizePreAuthorizedIssuance` and `RequestCredential`.
 
 ### PresentCredential
 
@@ -616,7 +627,7 @@ func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose
 
 ### VerifyCredentialForAcceptance
 
-Runs the check issuance runs before storing over a raw credential, under `req.Acceptance` or else `Config.CredentialAcceptance`, and stores nothing. It is the second step for a caller that receives on a storeless wallet and persists later, or that re-checks a credential it holds. `CredentialIssuer` is the Credential Issuer Identifier of the issuance (a DID issuer is bound to its origin), and `IssuanceVersion` selects the profile (`IssuanceVersionDraft13` admits the SD-JWT VC `typ` `vc+sd-jwt`). `CredentialConfiguration`, when set, is the configuration the credential was issued under: if it lists `cryptographic_binding_methods_supported`, the credential must carry a `cnf.jwk` that `HolderKey` matches (OpenID4VCI 1.0 §12.2.4; HAIP 1.0 §6.1), as `RequestCredential` requires.
+Runs the check issuance runs before storing over a raw credential, under `req.Acceptance` or else `Config.CredentialAcceptance`, and stores nothing. It is the second step for a caller that receives on a storeless wallet and persists later, or that re-checks a credential it holds. `CredentialIssuer` is the Credential Issuer Identifier of the issuance (a DID issuer is bound to its origin), and `Version` selects the profile: the zero value `profile.VersionFinal` applies the wallet's 1.0 profile, and `profile.VersionDraft13` applies `profile.Draft13()`, which admits the SD-JWT VC `typ` `vc+sd-jwt`. `CredentialConfiguration`, when set, is the configuration the credential was issued under: if it lists `cryptographic_binding_methods_supported`, the credential must carry a `cnf.jwk` that `HolderKey` matches (OpenID4VCI 1.0 §12.2.4; HAIP 1.0 §6.1), as `RequestCredential` requires.
 
 ```go
 type CredentialAcceptanceRequest struct {
@@ -624,7 +635,7 @@ type CredentialAcceptanceRequest struct {
 	Flavor           credential.SupportedSerializationFlavor
 	HolderKey        *jose.JSONWebKey
 	CredentialIssuer string
-	IssuanceVersion  IssuanceVersion
+	Version          profile.Version
 	Acceptance       *acceptance.Policy
 	// CredentialConfiguration, when it lists cryptographic_binding_methods_supported,
 	// requires a cnf.jwk that HolderKey matches.
@@ -660,7 +671,7 @@ An OpenID4VCI 1.0 issuance runs in stages, and each stage returns the state the 
 | Poll a deferred transaction once | `RequestDeferredCredential(ctx, deferred)` | `*IssuanceResult` |
 | Notify the issuer | `NotifyIssuer(ctx, notification, event, description)` | `error` |
 
-The state types (`IssuanceAuthorization`, `IssuanceGrant`, `DeferredIssuance`, `IssuanceNotification`) are JSON-serializable and carry a `Version`, so a stage can run in another process. They hold identifiers and secrets only: each stage re-discovers the issuer and authorization server metadata, and checks that the state still fits the wallet (the same `ClientAuth.ClientID`, `Issuance.RedirectURI` and DPoP key, an authorization server the issuer still delegates to), refusing a mismatch with `ErrIssuanceStateMismatch`. A state of the other OpenID4VCI version is refused with `ErrIssuanceVersionMismatch`. Each state also records the profile of the flow in `Profile` (JSON `"profile"`, the text form of `profile.Profile`), and a stage whose wallet runs another profile refuses it before sending anything (`ErrIssuanceProfileMismatch`), so a flow never continues under other options than it began with. A caller that runs the stages in different processes builds each stage's wallet with the state's `Profile`.
+The state types (`IssuanceAuthorization`, `IssuanceGrant`, `DeferredIssuance`, `IssuanceNotification`) are JSON-serializable, so a stage can run in another process. They hold identifiers and secrets only: each stage re-discovers the issuer and authorization server metadata, and checks that the state still fits the wallet (the same `ClientAuth.ClientID`, `Issuance.RedirectURI` and DPoP key, an authorization server the issuer still delegates to), refusing a mismatch with `ErrIssuanceStateMismatch`. Each state records the profile of the flow in `Profile` (JSON `"profile"`, the text form of `profile.Profile`). A state whose `Profile` has the other OpenID4VCI version (`Profile.Version()`) is refused with `ErrIssuanceVersionMismatch`, and a stage whose wallet runs another profile of the same version refuses it before sending anything (`ErrIssuanceProfileMismatch`), so a flow never continues under other options than it began with. A caller that runs the stages in different processes builds each stage's wallet with the state's `Profile`.
 
 **The state JSON is a bearer secret.** It carries the PKCE `code_verifier`, the ephemeral Client Instance Key of the flow, the access token or the ephemeral response decryption key. Keep it server-side or encrypted, and out of logs.
 
@@ -672,7 +683,7 @@ The state types (`IssuanceAuthorization`, `IssuanceGrant`, `DeferredIssuance`, `
 
 ### Authorization Code Flow
 
-`BeginIssuance` resolves the metadata, checks the Credential Configuration against the profile and `Config.Issuance.CredentialEncryption`, pushes the authorization request when the server supports RFC 9126 PAR (HAIP requires it), and returns the URL to open in the holder's browser. `AuthorizeIssuance` takes the whole redirect URL the browser delivered, checks it (RFC 6749 §4.1.2, RFC 9207 `iss`, `state`, `redirect_uri`) and exchanges the code.
+`BeginIssuance` resolves the metadata, checks the Credential Configuration against the profile and `Config.Issuance.CredentialEncryption`, pushes the authorization request when the server supports RFC 9126 PAR (HAIP requires it, and so does a server that sets `require_pushed_authorization_requests`), and returns the URL to open in the holder's browser. The PAR response must carry a `request_uri` and a positive `expires_in` (RFC 9126 §2.2, `receiverTypes.ErrPARResponseInvalid`); a failed push is never replaced by sending the parameters inline. The authorization endpoint must use `https` (plain `http` only with the experimental transport, never under HAIP). An offer without `grants`, or with an empty object, starts the flow when the authorization server's `grant_types_supported` lists `authorization_code` or is absent (OpenID4VCI 1.0 §4.1.1; otherwise `ErrAuthorizationCodeGrantUnsupported`). `AuthorizeIssuance` takes the whole redirect URL the browser delivered, checks it (RFC 6749 §4.1.2, RFC 9207 `iss`, `state`, `redirect_uri`) and exchanges the code.
 
 ```go
 import (
@@ -750,7 +761,7 @@ The client is anonymous unless `private_key_jwt` or `Config.Attestation.Client` 
 
 ### Credential request, deferred issuance and notification
 
-`RequestCredential` sends one key proof per holder key (more than one requests a batch), a key attestation when needed, and request and response encryption per `Config.Issuance.CredentialEncryption`. The credentials are checked under `CredentialRequest.Acceptance`, or else `Config.CredentialAcceptance`, and stored unless the wallet is storeless. The library supplies the issuance context the policy needs (the Credential Issuer Identifier and the format), so a caller configures the acceptance of one issuance without verifying the credential again itself. `IssuanceResult` holds either `Credentials` or a pending `Deferred` transaction, and a `Notification` when the issuer asked to be notified. When the credentials are refused, the error comes with a result whose `Notification` lets the caller report `credential_failure`.
+`RequestCredential` sends one key proof per holder key (more than one requests a batch), a key attestation when needed, and request and response encryption per `Config.Issuance.CredentialEncryption`. The credentials are checked under `CredentialRequest.Acceptance`, or else `Config.CredentialAcceptance`, and stored unless the wallet is storeless. The library supplies the issuance context the policy needs (the Credential Issuer Identifier and the format), so a caller configures the acceptance of one issuance without verifying the credential again itself. `IssuanceResult` holds either `Credentials` or a pending `Deferred` transaction, and a `Notification` when the issuer asked to be notified. When the Token Response named `credential_identifiers` (§6.2), `IssuanceGrant.CredentialIdentifiers` keeps all of them, and `CredentialRequest.CredentialIdentifier` selects the Credential Dataset a request names (the first by default); request each dataset the holder wants with its own `RequestCredential`. An element of the `credentials` array is read by its `credential` member, whatever other members it has (§8.3). When the credentials are refused, the error comes with a result whose `Notification` lets the caller report `credential_failure`.
 
 The library neither polls nor notifies on its own:
 
@@ -787,7 +798,7 @@ func completeIssuance(ctx context.Context, w *wallet.Wallet, result *wallet.Issu
 }
 ```
 
-`DeferredIssuance.Interval` is the interval the issuer asked for; the caller decides how long to wait. `NotifyIssuer` finds the `notification_endpoint` in the re-discovered metadata and sends `credential_accepted`, `credential_failure` or `credential_deleted`.
+`DeferredIssuance.Interval` is the interval the issuer asked for, never shortened; the caller decides how long to wait. `NotifyIssuer` finds the `notification_endpoint` in the re-discovered metadata and sends `credential_accepted`, `credential_failure` or `credential_deleted`.
 
 ### Key attestation
 
@@ -827,7 +838,7 @@ func requestWithKeyAttestation(ctx context.Context, w *wallet.Wallet, grant *wal
 
 ### Credential encryption
 
-`Config.Issuance.CredentialEncryption` is the holder's policy for Credential Request (§8.1) and Credential Response (§8.2) encryption. Each of `Request` and `Response` is `CredentialEncryptionFollowIssuer` (encrypt what the issuer advertises, obey an issuer that requires it), `CredentialEncryptionRequired` (refuse an issuer that does not offer it, `ErrCredentialEncryptionUnavailable`) or `CredentialEncryptionDisabled` (refuse an issuer that requires it, `ErrCredentialEncryptionDisallowed`). The response key is carried only inside an encrypted request, so requiring response encryption requires request encryption. A conflict is refused at `BeginIssuance` or `AuthorizePreAuthorizedIssuance`. The response decryption key is ephemeral and travels in `DeferredIssuance`. A plaintext response after encryption was requested is refused.
+`Config.Issuance.CredentialEncryption` is the holder's policy for Credential Request (§8.1) and Credential Response (§8.2) encryption. Each of `Request` and `Response` is `CredentialEncryptionFollowIssuer` (encrypt what the issuer advertises, obey an issuer that requires it), `CredentialEncryptionRequired` (refuse an issuer that does not offer it, `ErrCredentialEncryptionUnavailable`) or `CredentialEncryptionDisabled` (send no encryption, also to an issuer that offers it with `encryption_required: false`, and refuse an issuer that requires it, `ErrCredentialEncryptionDisallowed`). Disabling either disables both. The response key is carried only inside an encrypted request, so requiring response encryption requires request encryption. A conflict is refused at `BeginIssuance` or `AuthorizePreAuthorizedIssuance`. The response decryption key is ephemeral and travels in `DeferredIssuance`. A plaintext response after encryption was requested is refused.
 
 ### Client authentication, DPoP and attestations
 
@@ -845,11 +856,13 @@ The library never holds an attester's private key. Before an attestation is sent
 
 `oid4vci.Oid4vciReceiver.IssuerMetadataSigning` configures OpenID4VCI 1.0 §12.2.3 signed Credential Issuer Metadata. `Request` sends the signed-metadata `Accept` header and has no effect without trust material; under HAIP (`Options.RequestSignedIssuerMetadata`) it is on whatever `IssuerMetadataSigning` says. `Require` rejects an unsigned document. The signer is authenticated from the `x5c` header against `TrustAnchors` or `RootCAs`, and `sub` and `credential_issuer` must both be the requested identifier. `RequireIssuerDNSBinding` and `ExpectedLeafDNSName` add a DNS binding of the leaf certificate. Every re-discovery applies this policy.
 
+For Draft 13 (§11.2.3) the same trust material verifies the `signed_metadata` member of the JSON document: `iss`, `sub` (the requested identifier) and `iat` are required, `exp` is honoured, and no `typ` is required. The verified claims take precedence over the plain JSON values, so every Draft 13 stage uses the signed endpoints and `authorization_servers`. A `signed_metadata` that does not verify fails the discovery; without trust anchors the member is ignored, and `Require` demands it. `SignedMetadata` is set only for a verified signature.
+
 Every rejection of a signed document satisfies `errors.Is(err, ErrIssuerMetadataSignatureInvalid)`; `ErrIssuerMetadataSubjectMismatch`, `ErrIssuerMetadataLeafDNSMismatch` and `ErrIssuerMetadataExpired` wrap it. `ErrIssuerMetadataSignatureRequired` is the `Require` outcome. `CredentialIssuerMetadata.MetadataSignature` records the accepted signer, and `RawDocument` keeps the accepted document.
 
 ### Draft 13
 
-`w.Draft13()` runs OpenID4VCI Draft 13 with the same staged methods and state types; the states carry `IssuanceVersionDraft13`. A Credential Offer is required, the `c_nonce` comes from the Token and Credential Responses, one key proof is sent, and there are no key attestations or credential encryption. Credential Issuer Metadata comes from the Draft 13 §11.2.2 location only. `Config.Experimental.Hooks.KeyProof` rewrites the key proof for testing.
+`w.Draft13()` runs OpenID4VCI Draft 13 with the same staged methods and state types; the states carry `profile.Draft13()` as their `Profile`. A Credential Offer is required, the `c_nonce` comes from the Token and Credential Responses, one key proof is sent, and there are no key attestations or credential encryption. `credential_identifiers` are optional after an `authorization_details` request (the request then names the format), the key proof binds the key by the first method of `cryptographic_binding_methods_supported` the wallet can produce (`jwk` or `did:key`, `ErrCryptographicBindingMethodUnsupported` otherwise), the access token must be Bearer or DPoP, and an `issuance_pending` without `interval` waits five seconds (§9.3). Credential Issuer Metadata comes from the Draft 13 §11.2.2 location only. `Config.Experimental.Hooks.KeyProof` rewrites the key proof for testing.
 
 ```go
 import (
@@ -1180,7 +1193,7 @@ The key proof algorithm must be one the issuer lists in `proof_signing_alg_value
 * `Config.Profiles` names exactly one 1.0 profile and each draft profile at most once (`ErrInvalidArgument`). A 1.0 profile with `Options.ForbidDraftProfiles` (HAIP) together with a draft profile is refused (`ErrProfileForbidsDraft`).
 * A receiver or presenter plugin that implements `profile.Carrier` must report the wallet's 1.0 profile, options included (`ErrProfileMismatch`); a plugin reporting a draft profile is refused (`profile.ErrDraftProfile`). When the 1.0 profile carries options (HAIP, or Final strengthened with `With`), a plugin that does not implement `profile.Carrier` is refused (`ErrProfilePluginUnsupported`); under plain Final it is accepted.
 * `Draft13()` methods and `ReceiveCredential` return `ErrProfileForbidsDraft` unless `profile.Draft13()` is enabled, and `Draft24()` methods and Draft 24 handles unless `profile.Draft24()` is. `Experimental.Hooks` is refused unless a draft profile is enabled.
-* `Experimental.Transport` and `Experimental.Hooks` are refused under a profile with `ForbidExperimental` (HAIP), and `Experimental.Transport` together with an injected `Receiver` or `Presenter`, which the wallet does not reconfigure (`ErrInvalidArgument`).
+* `Experimental.Transport` and `Experimental.Hooks` are refused under a profile with `ForbidExperimental` (HAIP), and `Experimental.Transport` together with an injected `Receiver` or `Presenter`, which the wallet does not reconfigure (`ErrInvalidArgument`). An injected `oid4vci.Oid4vciReceiver` whose own `Experimental` its profile forbids is refused too (`Oid4vciReceiver.ValidateProfile`), and such a receiver sends nothing on any exchange.
 * `Attestation.ClientKeyFromDPoP` without a DPoP key or together with `Attestation.ClientKey` is refused (`ErrInvalidArgument`).
 * `Storeless` together with `CredStore`, `SupportedTransactionDataTypes` together with `Presenter`, and a `Presenter` plugin other than `*oid4vp.Oid4vpPresenter` are refused (`ErrInvalidArgument`).
 
@@ -1286,7 +1299,7 @@ The variables are defined in `wallet/env/env.go`.
 
 ## Changes from the previous wallet API
 
-This section lists the changes since upstream commit `f0c7c53` to identifiers that existed there, and the behavior changes of their methods. Identifiers added since then are described in the sections above. Every exported signature of `f0c7c53` is unchanged, except the removed `env` identifiers listed below.
+This section lists the changes since upstream commit `f0c7c53` to identifiers that existed there, and the behavior changes of their methods. Identifiers added since then are described in the sections above. Every exported signature of `f0c7c53` is unchanged, except `ReceiveCredential`, `ReceiveCredentialRequest` and the removed `env` identifiers listed below.
 
 **Package `wallet`**
 
@@ -1295,8 +1308,8 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 * `NewWalletWithConfig` refuses an invalid `Profiles` set, a plugin whose profile differs from the wallet's, a plugin that does not implement `profile.Carrier` when the profile carries options, and `Experimental.Hooks` without a draft profile. It refuses `Storeless` with a `CredStore`, `SupportedTransactionDataTypes` with an injected `Presenter`, and a presenter plugin other than `*oid4vp.Oid4vpPresenter`. Its errors carry codes.
 * `SetReceiver` is deprecated. It checks the dispatcher's plugins as `NewWalletWithConfig` does; a refused dispatcher is not installed, and every method that needs the receiver returns the refusal.
 * `VerifyCredential` returns true only when the proof verifies, and only for `acceptance.DefaultSigningAlgorithms()` (ES256); a nil credential returns false.
-* `ReceiveCredential` returns `ErrProfileForbidsDraft` unless `Config.Profiles` enables `profile.Draft13()`, which the default does. It needs an acceptance policy, `ReceiveCredentialRequest.Acceptance` or `Config.CredentialAcceptance`, and without one requests nothing and returns `ErrCredentialAcceptancePolicyRequired`; it used to store a credential it had only parsed. A credential that fails the policy is not stored. A storeless wallet returns `ErrNoCredentialStore` after the check. An anonymous token request (no `client_id`) needs `pre-authorized_grant_anonymous_access_supported: true` in the authorization server metadata; an absent value, which was read as `true`, now refuses it. The offer's issuer may be plain HTTP only when the receiver plugin allows it (`HTTPSchemePolicy`).
-* `ReceiveCredentialRequest` has `Acceptance`.
+* `ReceiveCredential` takes a `context.Context` and is the Draft 13 Pre-Authorized Code Flow of `Draft13()` in one call. It sends the Draft 13 Credential Request (`format` and one `proof`) instead of `credential_configuration_id` and `proofs`, and takes the key proof `c_nonce` from the Token Response only: it no longer calls a `nonce_endpoint`, and never falls back from one to the Token Response. It returns `ErrProfileForbidsDraft` unless `Config.Profiles` enables `profile.Draft13()`, which the default does. It needs an acceptance policy, `ReceiveCredentialRequest.Acceptance` or `Config.CredentialAcceptance`, and a `Key`; without them it requests nothing and returns `ErrCredentialAcceptancePolicyRequired` or `ErrDraft13HolderKeyMissing`. It used to store a credential it had only parsed. A credential that fails the policy, or whose `cnf` names another key than `Key`, is not stored. A storeless wallet returns the credential without storing it. A deferred response returns `ErrDraft13CredentialDeferred`. An anonymous token request (no `client_id`) needs `pre-authorized_grant_anonymous_access_supported: true` in the authorization server metadata; an absent value, which was read as `true`, now refuses it. The offer's issuer may be plain HTTP only when the receiver plugin allows it (`HTTPSchemePolicy`).
+* `ReceiveCredentialRequest` has `Acceptance` and `CredentialConfigurationID`. `Type` (only OpenID4VCI exists), `RequestedFormat` (select the configuration with `CredentialConfigurationID`) and `CachedIssuerMetadata` (the metadata is always re-discovered) were removed.
 * `PresentCredential` and `PresentCredentialWithOptions` run `ParsePresentationRequest`, `SelectCredentials` and `SubmitPresentation`. Stored credentials are chosen by the DCQL query instead of taking the newest one, each answered query gets its own presentation, and a Key Binding JWT is attached as the query requires. The request is admitted under the rules of [Verifier authentication](#verifier-authentication).
 * `GetCredentialEntries` and `GetCredentialEntry` return `ErrNoCredentialStore` on a storeless wallet.
 * Every error returned by a method of `Wallet` carries a code (`wallet.ErrorCode`).
@@ -1318,6 +1331,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
 * `receiver.ReceivingDispatcher` and `presenter.PresentationDispatcher` have new methods (`Plugins`, the transport and parse accessors). `sdjwtvc.SdJwtVcPresentationOptions` has `LimitDisclosureToSelectedClaims` and `RequireRootClaimMatch`. `presenterTypes.PresentationRequest` has `ResponseMode`. The metadata types in `receiver/types` have new fields.
 * `env.IsHTTPAllowed`, `env.SetHTTPAllowed` and `env.HTTP_ALLOWED` are removed, and `VCKNOTS_WALLET_HTTP_ALLOWED` is no longer read. Plain HTTP for a local test is [`experimental.Transport`](#experimental).
 * The sentinel errors of the component packages (`keystore`, `credstore`, `presenter/types`, `common` and others) carry codes; `errors.Is` still matches them.
+* `receiverTypes.SignatureAlgorithm` keeps a COSE algorithm identifier without a JWA name as its decimal text instead of failing, so an unknown `credential_signing_alg_values_supported` entry no longer makes the Credential Issuer Metadata unreadable.
 
 ## 7. Notes
 

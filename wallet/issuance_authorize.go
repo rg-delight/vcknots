@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		return nil, err
 	}
 	var issuer, configurationID, issuerState, hint string
+	grantFromMetadata := false
 	if req.CredentialOffer != nil {
 		if strings.TrimSpace(req.CredentialIssuer) != "" {
 			return nil, invalidArgument("credential issuer must be empty when a credential offer is provided")
@@ -50,6 +52,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		}
 		issuer, configurationID = offered.issuer, offered.configurationID
 		issuerState, hint = offered.grant.IssuerState, strings.TrimSpace(offered.grant.AuthorizationServer)
+		grantFromMetadata = offered.grantFromMetadata
 	} else {
 		// OpenID4VCI 1.0 Section 5: a wallet-initiated issuance names the
 		// issuer and the configuration itself.
@@ -74,8 +77,14 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	if as.AuthorizationEndpoint == nil {
 		return nil, invalidMetadata("authorization endpoint is missing on authorization server")
 	}
+	if err := requireSecureAuthorizationEndpoint(transport, as.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
 	if as.TokenEndpoint == nil {
 		return nil, invalidMetadata("token endpoint is missing on authorization server")
+	}
+	if err := checkOfferedAuthorizationCodeGrant(grantFromMetadata, as); err != nil {
+		return nil, err
 	}
 	config, err := w.finalCredentialConfiguration(transport, md, configurationID)
 	if err != nil {
@@ -87,12 +96,9 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 	if err := w.checkPrivateKeyJWT(as); err != nil {
 		return nil, err
 	}
-	// HAIP Section 4 requires PAR (Options.RequirePAR); OpenID4VCI 1.0 does
-	// not, so a Final issuer without a PAR endpoint gets the parameters
-	// inline.
-	usePAR := as.PushedAuthorizationRequestEndpoint != nil
-	if !usePAR && w.options().RequirePAR {
-		return nil, invalidMetadata("%w requires a pushed authorization request endpoint on the authorization server", profile.Refused("RequirePAR"))
+	usePAR, err := pushedAuthorizationRequired(as, w.options().RequirePAR)
+	if err != nil {
+		return nil, err
 	}
 	scope, details, err := authorizationRequestParameters(req.AuthorizationRequestType, configurationID, config, w.options().RequireScopeAuthorization)
 	if err != nil {
@@ -115,7 +121,6 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		IssuerState:          issuerState,
 	}
 	authorization := &IssuanceAuthorization{
-		Version:                       IssuanceVersionFinal,
 		Profile:                       w.profile,
 		State:                         state,
 		CodeVerifier:                  verifier,
@@ -142,12 +147,8 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 			return nil, err
 		}
 		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, auth)
-		if err != nil {
-			return nil, fmt.Errorf("failed to push authorization request: %w", err)
-		}
-		requestURI = pushed.RequestURI
-		if pushed.ExpiresIn > 0 {
-			authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+		if requestURI, err = acceptPushedAuthorization(authorization, pushed, err); err != nil {
+			return nil, err
 		}
 	}
 	authorization.AuthorizationURL = authorizationRequestURL(as.AuthorizationEndpoint, clientID, request, requestURI)
@@ -167,7 +168,7 @@ func (w *Wallet) AuthorizeIssuance(ctx context.Context, authorization *IssuanceA
 }
 
 func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization, redirectURL string) (*IssuanceGrant, error) {
-	if err := w.checkAuthorizationState(a, IssuanceVersionFinal, w.profile); err != nil {
+	if err := w.checkAuthorizationState(a, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
@@ -231,15 +232,11 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	return w.newFinalGrant(ctx, transport, discovery, a.CredentialConfigurationID, config, token, mode)
 }
 
-// checkAuthorizationState checks that a is a complete state of version,
-// recorded under current, and was created with the wallet's client_id and
-// redirect_uri.
-func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, version IssuanceVersion, current profile.Profile) error {
+// checkAuthorizationState checks that a is a complete state recorded under
+// current, and was created with the wallet's client_id and redirect_uri.
+func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, current profile.Profile) error {
 	if a == nil {
 		return invalidArgument("authorization state is required")
-	}
-	if a.Version != version {
-		return fmt.Errorf("authorization state has version %q: %w", a.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("authorization state", a.Profile, current); err != nil {
 		return err
@@ -466,6 +463,62 @@ func newPKCE() (verifier, challenge, state string, err error) {
 	return verifier, base64.RawURLEncoding.EncodeToString(digest[:]), state, nil
 }
 
+// pushedAuthorizationRequired reports whether the authorization request is
+// pushed: whenever the server has a PAR endpoint. A server without one is
+// refused when the profile requires PAR (Options.RequirePAR, HAIP Section 4)
+// or the server itself does (RFC 9126 Section 5
+// require_pushed_authorization_requests); otherwise, as OpenID4VCI 1.0 and
+// Draft 13 allow, the parameters travel inline.
+func pushedAuthorizationRequired(as *receiverTypes.AuthorizationServerMetadata, profileRequiresPAR bool) (bool, error) {
+	if as.PushedAuthorizationRequestEndpoint != nil {
+		return true, nil
+	}
+	if profileRequiresPAR {
+		return false, invalidMetadata("%w requires a pushed authorization request endpoint on the authorization server", profile.Refused("RequirePAR"))
+	}
+	if as.RequirePushedAuthorizationRequests != nil && *as.RequirePushedAuthorizationRequests {
+		return false, invalidMetadata("the authorization server requires pushed authorization requests (RFC 9126 Section 5) and advertises no pushed_authorization_request_endpoint")
+	}
+	return false, nil
+}
+
+// acceptPushedAuthorization checks the RFC 9126 Section 2.2 response of a
+// pushed authorization request (request_uri and a positive expires_in, both
+// REQUIRED), records the request_uri's expiry on authorization and returns
+// the request_uri. A pushed request that failed is never replaced by the
+// parameters inline.
+func acceptPushedAuthorization(authorization *IssuanceAuthorization, pushed *receiverTypes.PushedAuthorizationResponse, err error) (string, error) {
+	if err != nil {
+		return "", fmt.Errorf("failed to push authorization request: %w", err)
+	}
+	if pushed == nil || strings.TrimSpace(pushed.RequestURI) == "" {
+		return "", fmt.Errorf("%w: the response carries no request_uri", receiverTypes.ErrPARResponseInvalid)
+	}
+	if pushed.ExpiresIn <= 0 {
+		return "", fmt.Errorf("%w: expires_in must be a positive integer, got %d", receiverTypes.ErrPARResponseInvalid, pushed.ExpiresIn)
+	}
+	authorization.RequestURIExpiresAt = time.Now().Add(time.Duration(pushed.ExpiresIn) * time.Second)
+	return pushed.RequestURI, nil
+}
+
+// requireSecureAuthorizationEndpoint refuses an authorization endpoint the
+// holder's browser would open without TLS: OpenID4VCI 1.0 Section 11 and
+// FAPI 2.0 Section 5.2.1 (HAIP Section 4) require TLS for every endpoint, and
+// the wallet never fetches this one itself, so the receiver's scheme check
+// does not reach it. Plain http is allowed only when the receiver allows it
+// (receiverTypes.HTTPSchemePolicy, experimental and never under
+// ForbidExperimental).
+func requireSecureAuthorizationEndpoint(transport any, endpoint *common.URIField) error {
+	endpointURL := url.URL(*endpoint)
+	if strings.EqualFold(endpointURL.Scheme, "https") {
+		return nil
+	}
+	if policy, ok := transport.(receiverTypes.HTTPSchemePolicy); ok && policy.HTTPAllowed() && strings.EqualFold(endpointURL.Scheme, "http") {
+		return nil
+	}
+	return invalidMetadata("the authorization endpoint %q does not use https", endpointURL.String())
+}
+
 // authorizationRequestURL builds the authorization request URL. With a PAR
 // request_uri only client_id and request_uri are sent (RFC 9126 Section 4);
 // otherwise the parameters travel inline.
@@ -562,26 +615,37 @@ func sameOriginAndPath(registered, actual *url.URL) bool {
 }
 
 // authorizationDetailsMode records whether the request used
-// authorization_details, which OpenID4VCI 1.0 Section 6.2 makes "REQUIRED
-// when the authorization_details parameter is used ... OPTIONAL when scope
-// parameter was used" in the Token Response.
+// authorization_details, which makes them REQUIRED in the Token Response
+// (OpenID4VCI 1.0 Section 6.2: "REQUIRED when the authorization_details
+// parameter ... is used ... OPTIONAL when scope parameter was used"; Draft 13
+// Section 6.2 likewise), and what the entry must then carry.
 type authorizationDetailsMode int
 
 const (
+	// authorizationDetailsOptional: the request used scope, or no parameter
+	// (Pre-Authorized Code Flow).
 	authorizationDetailsOptional authorizationDetailsMode = iota
+	// authorizationDetailsRequired (OpenID4VCI 1.0 Section 6.2): the entry
+	// for the configuration and its credential_identifiers, "REQUIRED. A
+	// non-empty array".
 	authorizationDetailsRequired
+	// authorizationDetailsEntryRequired (Draft 13 Section 6.2): the entry for
+	// the configuration; its credential_identifiers are OPTIONAL, and without
+	// them the Credential Request names the format (Draft 13 Section 7.2).
+	authorizationDetailsEntryRequired
 )
 
-// credentialIdentifiersFor selects the credential_identifiers of the Token
-// Response entry for configurationID (Section 6.2). The selected identifier is
-// the first; an entry without identifiers, or no entry, names the
-// configuration instead in optional mode. In required mode those cases, an
-// entry for another configuration only, and more than one identifier are
-// ErrAuthorizationDetailsMissing.
+// credentialIdentifiersFor returns the credential_identifiers of the Token
+// Response entry for configurationID (Section 6.2), in the order the server
+// listed them: each names a Credential Dataset the access token can be used
+// for. An entry without identifiers, or no entry, yields none, so the request
+// names the configuration instead, unless mode requires the entry (both
+// required modes) or its identifiers (authorizationDetailsRequired), which is
+// then ErrAuthorizationDetailsMissing.
 func credentialIdentifiersFor(token *receiverTypes.CredentialIssuanceAccessToken, configurationID string, mode authorizationDetailsMode) ([]string, error) {
-	required := mode == authorizationDetailsRequired
+	entryRequired := mode != authorizationDetailsOptional
 	if token == nil {
-		if required {
+		if entryRequired {
 			return nil, fmt.Errorf("token response is missing an access token with authorization_details for %q: %w", configurationID, ErrAuthorizationDetailsMissing)
 		}
 		return nil, nil
@@ -596,25 +660,40 @@ func credentialIdentifiersFor(token *receiverTypes.CredentialIssuanceAccessToken
 			continue
 		}
 		identifiers := nonEmptyCredentialIdentifiers(detail.CredentialIdentifiers)
-		switch {
-		case len(identifiers) == 0 && required:
+		if len(identifiers) == 0 && mode == authorizationDetailsRequired {
 			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries no credential_identifiers: %w", configurationID, ErrAuthorizationDetailsMissing)
-		case len(identifiers) == 0:
-			return nil, nil
-		case len(identifiers) > 1 && required:
-			return nil, fmt.Errorf("authorization_details entry for credential_configuration_id %q carries %d credential_identifiers, but this wallet requests exactly one credential: %w", configurationID, len(identifiers), ErrAuthorizationDetailsMissing)
 		}
-		return identifiers[:1], nil
+		if len(identifiers) == 0 {
+			return nil, nil
+		}
+		return identifiers, nil
 	}
 	switch {
-	case entries == 0 && required:
+	case entries == 0 && entryRequired:
 		return nil, fmt.Errorf("token response for credential_configuration_id %q carries no authorization_details: %w", configurationID, ErrAuthorizationDetailsMissing)
 	case entries == 0:
 		return nil, nil
-	case required:
+	case entryRequired:
 		return nil, fmt.Errorf("token response authorization_details carries no entry for credential_configuration_id %q: %w", configurationID, ErrAuthorizationDetailsMissing)
 	}
 	return nil, fmt.Errorf("access token authorization_details contains no entry for credential_configuration_id %q: %w", configurationID, receiverTypes.ErrInvalidTokenResponse)
+}
+
+// selectCredentialIdentifier returns the credential_identifier the Credential
+// Request names: requested, which must be one of the grant's identifiers, or
+// the first of them; "" when the grant has none and the request names the
+// configuration (OpenID4VCI 1.0 Section 8.2, Draft 13 Section 7.2).
+func selectCredentialIdentifier(grant *IssuanceGrant, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	switch {
+	case requested != "" && !slices.Contains(grant.CredentialIdentifiers, requested):
+		return "", invalidArgument("credential_identifier %q is not one of the grant's credential_identifiers %v", requested, grant.CredentialIdentifiers)
+	case requested != "":
+		return requested, nil
+	case len(grant.CredentialIdentifiers) > 0:
+		return grant.CredentialIdentifiers[0], nil
+	}
+	return "", nil
 }
 
 // nonEmptyCredentialIdentifiers drops blank identifiers.

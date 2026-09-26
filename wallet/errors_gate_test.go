@@ -103,18 +103,18 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Wallet.RequestCredential: Draft 13 grant": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
-			_, err := f.wallet.RequestCredential(ctx, &IssuanceGrant{Version: IssuanceVersionDraft13}, f.credentialRequest())
+			_, err := f.wallet.RequestCredential(ctx, &IssuanceGrant{Profile: profile.Draft13()}, f.credentialRequest())
 			return err
 		},
 		"Wallet.RequestDeferredCredential: incomplete state": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
-			_, err := f.wallet.RequestDeferredCredential(ctx, &DeferredIssuance{Version: IssuanceVersionFinal})
+			_, err := f.wallet.RequestDeferredCredential(ctx, &DeferredIssuance{Profile: profile.Final()})
 			return err
 		},
 		"Wallet.RequestDeferredCredential: no deferred endpoint": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
 			_, err := f.wallet.RequestDeferredCredential(ctx, &DeferredIssuance{
-				Version: IssuanceVersionFinal, CredentialIssuer: f.server.URL, CredentialConfigurationID: "pid",
+				Profile: profile.Final(), CredentialIssuer: f.server.URL, CredentialConfigurationID: "pid",
 				TransactionID: "tx-1", AccessToken: token,
 			})
 			return err
@@ -122,13 +122,13 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		"Wallet.NotifyIssuer: invalid event": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
 			return f.wallet.NotifyIssuer(ctx, &IssuanceNotification{
-				Version: IssuanceVersionFinal, CredentialIssuer: f.server.URL, NotificationID: "n-1", AccessToken: token,
+				Profile: profile.Final(), CredentialIssuer: f.server.URL, NotificationID: "n-1", AccessToken: token,
 			}, NotificationEvent("credential_lost"), "")
 		},
 		"Wallet.NotifyIssuer: no notification endpoint": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
 			return f.wallet.NotifyIssuer(ctx, &IssuanceNotification{
-				Version: IssuanceVersionFinal, CredentialIssuer: f.server.URL, NotificationID: "n-1", AccessToken: token,
+				Profile: profile.Final(), CredentialIssuer: f.server.URL, NotificationID: "n-1", AccessToken: token,
 			}, NotificationCredentialAccepted, "")
 		},
 		"Draft13Issuance.AuthorizePreAuthorizedIssuance: HAIP": func(t *testing.T) error {
@@ -141,7 +141,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			return err
 		},
 		"Wallet.ReceiveCredential: no offer": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.ReceiveCredential(ReceiveCredentialRequest{Type: receiverTypes.Oid4vci})
+			_, err := newFinalIssuanceFixture(t).wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
 			return err
 		},
 		"Wallet.AuthorizePreAuthorizedIssuance: canceled": func(t *testing.T) error {
@@ -158,7 +158,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			return err
 		},
 		"Draft13Issuance.AuthorizeIssuance: 1.0 state": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.Draft13().AuthorizeIssuance(ctx, &IssuanceAuthorization{Version: IssuanceVersionFinal}, "")
+			_, err := newFinalIssuanceFixture(t).wallet.Draft13().AuthorizeIssuance(ctx, &IssuanceAuthorization{Profile: profile.Final()}, "")
 			return err
 		},
 		"Draft13Issuance.AuthorizePreAuthorizedIssuance: no offer": func(t *testing.T) error {
@@ -167,7 +167,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Draft13Issuance.RequestCredential: 1.0 grant": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
-			_, err := f.wallet.Draft13().RequestCredential(ctx, &IssuanceGrant{Version: IssuanceVersionFinal}, f.credentialRequest())
+			_, err := f.wallet.Draft13().RequestCredential(ctx, &IssuanceGrant{Profile: profile.Final()}, f.credentialRequest())
 			return err
 		},
 		"Draft13Issuance.RequestCredential: nil grant": func(t *testing.T) error {
@@ -176,11 +176,11 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			return err
 		},
 		"Draft13Issuance.RequestDeferredCredential: 1.0 state": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.Draft13().RequestDeferredCredential(ctx, &DeferredIssuance{Version: IssuanceVersionFinal})
+			_, err := newFinalIssuanceFixture(t).wallet.Draft13().RequestDeferredCredential(ctx, &DeferredIssuance{Profile: profile.Final()})
 			return err
 		},
 		"Draft13Issuance.NotifyIssuer: 1.0 state": func(t *testing.T) error {
-			return newFinalIssuanceFixture(t).wallet.Draft13().NotifyIssuer(ctx, &IssuanceNotification{Version: IssuanceVersionFinal}, NotificationCredentialAccepted, "")
+			return newFinalIssuanceFixture(t).wallet.Draft13().NotifyIssuer(ctx, &IssuanceNotification{Profile: profile.Final()}, NotificationCredentialAccepted, "")
 		},
 		"Draft13Issuance.NotifyIssuer: nil state": func(t *testing.T) error {
 			return newFinalIssuanceFixture(t).wallet.Draft13().NotifyIssuer(ctx, nil, NotificationCredentialAccepted, "")
@@ -188,7 +188,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		"Wallet.ReceiveCredential: receiver refused by SetReceiver": func(t *testing.T) error {
 			w := newFinalIssuanceFixture(t).wallet
 			w.SetReceiver(nil)
-			_, err := w.ReceiveCredential(ReceiveCredentialRequest{Type: receiverTypes.Oid4vci})
+			_, err := w.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
 			return err
 		},
 		"Wallet.FetchCredentialIssuerMetadata: unreachable issuer": func(t *testing.T) error {

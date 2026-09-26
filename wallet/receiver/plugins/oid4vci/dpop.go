@@ -25,7 +25,8 @@ import (
 // An empty keyThumbprint marks an unattributed nonce: one a response carried
 // before any key asked for it, such as the DPoP-Nonce of an OpenID4VCI 1.0
 // Section 7.2 Nonce Response. The first key that asks the same server role
-// claims it, and no other key sees it afterwards.
+// claims it, in place of any older nonce that key held, and no other key sees
+// it afterwards.
 type dpopNonceKey struct {
 	server         string
 	resourceServer bool
@@ -69,10 +70,13 @@ func (o *Oid4vciReceiver) rememberDPoPNonce(ex exchange, nonce string) {
 	o.dpopNonces.put(key, nonce)
 }
 
-// dpopNonceFor returns the latest DPoP nonce held for ex's key, or "" when
-// none is held. Without a nonce of its own, the key claims the unattributed
-// nonce of the same server role, which is then no longer offered to another
-// key.
+// dpopNonceFor returns the latest DPoP nonce for ex's key, or "" when none
+// is held. An unattributed nonce of the same server role is newer than the
+// key's own: it was issued after the key's last exchange with that role (any
+// exchange of the key would have claimed it), such as the DPoP-Nonce of the
+// Nonce Response fetched after an invalid_nonce. The key claims it, in place
+// of its own, and it is then no longer offered to another key. OpenID4VCI 1.0
+// Section 7.2: "the Wallet uses the new nonce value in the DPoP proof".
 func (o *Oid4vciReceiver) dpopNonceFor(ex exchange) string {
 	key, ok := ex.dpopNonceKey()
 	if !ok || key.keyThumbprint == "" {
@@ -83,16 +87,13 @@ func (o *Oid4vciReceiver) dpopNonceFor(ex exchange) string {
 	if o.dpopNonces == nil {
 		return ""
 	}
-	if nonce, found := o.dpopNonces.get(key); found {
-		return nonce
-	}
 	unattributed := key
 	unattributed.keyThumbprint = ""
-	nonce, found := o.dpopNonces.take(unattributed)
-	if !found {
-		return ""
+	if nonce, found := o.dpopNonces.take(unattributed); found {
+		o.dpopNonces.put(key, nonce)
+		return nonce
 	}
-	o.dpopNonces.put(key, nonce)
+	nonce, _ := o.dpopNonces.get(key)
 	return nonce
 }
 

@@ -83,12 +83,18 @@ type finalIssuanceFixture struct {
 	responseAlgValues []string
 	responseEncValues []string
 	requestEncryption bool
-	omitPAREndpoint   bool
+	// requestEncryptionOptional publishes credential_request_encryption with
+	// encryption_required false.
+	requestEncryptionOptional bool
+	omitPAREndpoint           bool
 	// anonymousAccess is the pre-authorized_grant_anonymous_access_supported
 	// the authorization server metadata carries; nil omits it. The default
 	// fixture sets it to true.
 	anonymousAccess       *bool
 	issParameterSupported bool
+	// grantTypesSupported, when set, is the authorization server's
+	// grant_types_supported.
+	grantTypesSupported []string
 	// walletProfile selects the wallet and plugin profile; HAIP also serves
 	// TLS (HAIP Section 4).
 	walletProfile           profile.Profile
@@ -98,10 +104,18 @@ type finalIssuanceFixture struct {
 	// proofTypesSupported, when set, is published verbatim.
 	proofTypesSupported map[string]any
 	// credentialFormat, when set, replaces the configuration's dc+sd-jwt.
-	credentialFormat         string
-	bindingMethods           []string
-	batchSize                int
-	parExpiresIn             int
+	credentialFormat string
+	bindingMethods   []string
+	batchSize        int
+	parExpiresIn     int
+	// parResponse, when set, is the PAR endpoint's 201 body.
+	parResponse map[string]any
+	// authorizationEndpoint, when set, replaces the authorization server's
+	// authorization_endpoint.
+	authorizationEndpoint string
+	// requirePAR is the authorization server's
+	// require_pushed_authorization_requests (RFC 9126 Section 5).
+	requirePAR               bool
 	authMethodsSupported     []receiverTypes.TokenEndpointAuthMethod
 	authSigningAlgsSupported []jose.SignatureAlgorithm
 	authorizeLocation        func(f *finalIssuanceFixture, state string) string
@@ -402,7 +416,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			metadata["credential_request_encryption"] = map[string]any{
 				"jwks":                 map[string]any{"keys": []any{f.requestEncryptionKey.Public()}},
 				"enc_values_supported": []string{"A128GCM"},
-				"encryption_required":  true,
+				"encryption_required":  !f.requestEncryptionOptional,
 			}
 		}
 		mockserver.JSONResponse(w, http.StatusOK, metadata)
@@ -423,6 +437,15 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		if f.issParameterSupported {
 			metadata["authorization_response_iss_parameter_supported"] = true
 		}
+		if f.authorizationEndpoint != "" {
+			metadata["authorization_endpoint"] = f.authorizationEndpoint
+		}
+		if f.requirePAR {
+			metadata["require_pushed_authorization_requests"] = true
+		}
+		if f.grantTypesSupported != nil {
+			metadata["grant_types_supported"] = f.grantTypesSupported
+		}
 		if f.authMethodsSupported != nil {
 			metadata["token_endpoint_auth_methods_supported"] = f.authMethodsSupported
 		}
@@ -436,6 +459,10 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 		f.parForm = r.Form
 		f.parHeaders = r.Header.Clone()
 		f.pushedState = r.Form.Get("state")
+		if f.parResponse != nil {
+			mockserver.JSONResponse(w, http.StatusCreated, f.parResponse)
+			return
+		}
 		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"request_uri": "urn:request:1", "expires_in": f.parExpiresIn})
 	case "/authorize":
 		f.authorizeCalls++

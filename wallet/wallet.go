@@ -12,7 +12,15 @@
 //		log.Fatal(err)
 //	}
 //
-//	credential, err := w.ReceiveCredential(req)
+//	offer, err := w.ResolveCredentialOffer(ctx, offerURL)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{CredentialOffer: offer})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holderKey}, Acceptance: policy})
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -477,12 +485,26 @@ func checkExperimental(config Config, profiles walletProfiles) error {
 	return nil
 }
 
+// profileValidator is implemented by a plugin that can tell whether its own
+// settings satisfy its profile, such as an experimental transport a profile
+// with ForbidExperimental refuses.
+type profileValidator interface {
+	ValidateProfile() error
+}
+
 // checkPluginProfiles refuses a plugin whose profile.Carrier reports another
 // profile than the wallet's and, when the wallet's profile carries options, a
 // plugin that is not a Carrier: an option adds checks a plugin must know to
-// apply.
+// apply. A plugin whose own settings its profile refuses (profileValidator)
+// is refused too, so an injected plugin is held to the rules of one the
+// wallet builds.
 func checkPluginProfiles[P any](plugins []P, walletProfile profile.Profile) error {
 	for _, plugin := range plugins {
+		if validator, ok := any(plugin).(profileValidator); ok {
+			if err := validator.ValidateProfile(); err != nil {
+				return fmt.Errorf("%T: %w", plugin, err)
+			}
+		}
 		carrier, ok := any(plugin).(profile.Carrier)
 		if !ok {
 			if walletProfile.Options() != (profile.Options{}) {

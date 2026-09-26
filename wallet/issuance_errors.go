@@ -43,7 +43,8 @@ var (
 // Issuance conditions.
 var (
 	// ErrIssuanceVersionMismatch reports a state of the other OpenID4VCI
-	// version: a Draft 13 state given to a 1.0 method or the reverse.
+	// version (its Profile's Version): a Draft 13 state given to a 1.0 method
+	// or the reverse.
 	ErrIssuanceVersionMismatch = common.NewCodedError("issuance_version_mismatch", "issuance state belongs to another OpenID4VCI version")
 	// ErrIssuanceProfileMismatch reports a state recorded under another
 	// profile than the wallet runs: a stage never continues a flow under
@@ -70,6 +71,11 @@ var (
 	// ErrNonceEndpointRequired reports a key attestation under HAIP from an
 	// issuer without a Nonce Endpoint (HAIP Section 4.5.1).
 	ErrNonceEndpointRequired = common.NewCodedError("nonce_endpoint_required", "key attestation requires a c_nonce but the issuer advertises no nonce_endpoint")
+	// ErrAuthorizationCodeGrantUnsupported reports a Credential Offer without
+	// grants whose authorization server does not support the
+	// authorization_code grant, the only grant a wallet can use without
+	// parameters from the offer (OpenID4VCI 1.0 and Draft 13 Section 4.1.1).
+	ErrAuthorizationCodeGrantUnsupported = common.NewCodedError("authorization_code_grant_unsupported", "the credential offer names no grant and the authorization server does not support the authorization_code grant")
 	// ErrPreAuthorizedGrantMissing reports an offer without a usable
 	// pre-authorized_code grant.
 	ErrPreAuthorizedGrantMissing = common.NewCodedError("pre_authorized_grant_missing", "credential offer carries no pre-authorized_code grant")
@@ -163,6 +169,15 @@ var (
 	// ErrDraft13CredentialResponseInvalid reports a Credential Response with
 	// neither a credential nor a transaction_id.
 	ErrDraft13CredentialResponseInvalid = common.NewCodedError("draft13_credential_response_invalid", "credential response does not carry a usable credential")
+	// ErrDraft13CredentialDeferred reports that the issuer answered
+	// ReceiveCredential with a transaction_id (Draft 13 Section 7.3). The
+	// one-call flow keeps no state to poll with; Draft13().RequestCredential
+	// returns the DeferredIssuance for RequestDeferredCredential.
+	ErrDraft13CredentialDeferred = common.NewCodedError("draft13_credential_deferred", "the issuer deferred the credential; ReceiveCredential cannot poll for it, use Draft13().RequestCredential")
+	// ErrCryptographicBindingMethodUnsupported reports a Credential
+	// Configuration whose cryptographic_binding_methods_supported lists no
+	// method the wallet can bind a key proof with (jwk or did:key).
+	ErrCryptographicBindingMethodUnsupported = common.NewCodedError("cryptographic_binding_method_unsupported", "the credential configuration lists no cryptographic binding method the wallet supports")
 	// ErrDraft13ProofTransformFailed reports that
 	// Config.Experimental.Hooks.KeyProof refused the key proof.
 	ErrDraft13ProofTransformFailed = common.NewCodedError("draft13_proof_transform_failed", "proof transform failed")
@@ -219,6 +234,9 @@ func classifyKeepingMessage(err error) error {
 // checkStateProfile refuses a state recorded under another profile than
 // current, the profile of the stage that continues it.
 func checkStateProfile(state string, recorded, current profile.Profile) error {
+	if recorded.Version() != current.Version() {
+		return fmt.Errorf("the %s belongs to OpenID4VCI %s, the method to %s: %w", state, recorded.Version(), current.Version(), ErrIssuanceVersionMismatch)
+	}
 	if recorded != current {
 		return fmt.Errorf("the %s was recorded under the %s profile, the wallet runs %s: %w", state, recorded, current, ErrIssuanceProfileMismatch)
 	}

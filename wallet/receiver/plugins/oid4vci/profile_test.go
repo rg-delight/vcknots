@@ -17,16 +17,31 @@ import (
 // newTokenServer returns an endpoint whose token response carries tokenType.
 func newTokenServer(t *testing.T, tokenType string) common.URIField {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mockserver.JSONResponse(w, http.StatusOK, map[string]string{
-			"access_token": "access-token",
-			"token_type":   tokenType,
-		})
-	}))
+	server := httptest.NewServer(tokenHandler(tokenType))
 	t.Cleanup(server.Close)
 	parsed, err := url.Parse(server.URL + "/token")
 	require.NoError(t, err)
 	return common.URIField(*parsed)
+}
+
+// newTLSTokenServer is newTokenServer over TLS, for a HAIP receiver (HAIP
+// Section 4), with the client that trusts it.
+func newTLSTokenServer(t *testing.T, tokenType string) (common.URIField, *http.Client) {
+	t.Helper()
+	server := httptest.NewTLSServer(tokenHandler(tokenType))
+	t.Cleanup(server.Close)
+	parsed, err := url.Parse(server.URL + "/token")
+	require.NoError(t, err)
+	return common.URIField(*parsed), server.Client()
+}
+
+func tokenHandler(tokenType string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]string{
+			"access_token": "access-token",
+			"token_type":   tokenType,
+		})
+	})
 }
 
 // TestOid4vciReceiver_ProfileTokenType checks HAIP §4 "Sender-constrained
@@ -39,14 +54,15 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "Bearer", token.TokenType)
 
-		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
-		_, err = haip.FetchAccessToken(types.Oid4vci, bearer, "code", "")
+		tlsBearer, client := newTLSTokenServer(t, "Bearer")
+		haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP()}
+		_, err = haip.FetchAccessToken(types.Oid4vci, tlsBearer, "code", "")
 		require.ErrorContains(t, err, "profile option RequireDPoP requires a DPoP-bound access token")
 	})
 
 	t.Run("DPoP token type is case-insensitive", func(t *testing.T) {
-		dpop := newTokenServer(t, "dpop")
-		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
+		dpop, client := newTLSTokenServer(t, "dpop")
+		haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP()}
 		token, err := haip.FetchAccessToken(types.Oid4vci, dpop, "code", "")
 		require.NoError(t, err)
 		require.Equal(t, "dpop", token.TokenType)
@@ -61,17 +77,18 @@ func TestOid4vciReceiver_ProfileTokenType(t *testing.T) {
 		_, err := final.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.NoError(t, err)
 
-		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
-		_, err = haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
+		tlsBearer, client := newTLSTokenServer(t, "Bearer")
+		haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP()}
+		_, err = haip.RequestToken(t.Context(), tlsBearer, request, types.ClientAuthentication{DPoP: testProver(fixedProof("proof"))})
 		require.ErrorContains(t, err, "profile option RequireDPoP requires a DPoP-bound access token")
 	})
 
 	t.Run("authorization code DPoP retry exchange", func(t *testing.T) {
-		bearer := newTokenServer(t, "Bearer")
+		bearer, client := newTLSTokenServer(t, "Bearer")
 		request := types.TokenRequest{
 			GrantType: types.AuthorizationCode, Code: "code", RedirectURI: "https://wallet.example/cb", CodeVerifier: "verifier", ClientID: "client",
 		}
-		haip := &Oid4vciReceiver{Experimental: experimental.Transport{AllowHTTP: true}, Profile: profile.HAIP()}
+		haip := &Oid4vciReceiver{HTTPClient: client, Profile: profile.HAIP()}
 		_, err := haip.RequestToken(t.Context(), bearer, request, types.ClientAuthentication{ClientAttestation: types.ClientAttestationProver{KeyThumbprint: testClientKeyThumbprint, Headers: func(string) (types.OAuthClientAttestationHeaders, error) {
 			return types.OAuthClientAttestationHeaders{}, nil
 		}}, DPoP: testProver(func(string) (string, error) { return "proof", nil })})

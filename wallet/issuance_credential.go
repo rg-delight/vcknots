@@ -44,7 +44,7 @@ func (w *Wallet) RequestCredential(ctx context.Context, grant *IssuanceGrant, re
 }
 
 func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
-	if err := checkGrant(grant, IssuanceVersionFinal, w.profile); err != nil {
+	if err := checkGrant(grant, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
@@ -125,9 +125,9 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		}
 	}
 
-	identifier := ""
-	if len(grant.CredentialIdentifiers) > 0 {
-		identifier = grant.CredentialIdentifiers[0]
+	identifier, err := selectCredentialIdentifier(grant, req.CredentialIdentifier)
+	if err != nil {
+		return nil, err
 	}
 	// lastNonce is the c_nonce of the last body built; an invalid_nonce retry
 	// replaces it.
@@ -173,7 +173,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		if encryption != nil {
 			payload["credential_response_encryption"] = encryption
 		}
-		body, contentType, err := transport.EncodeCredentialRequest(payload, md)
+		body, contentType, err := transport.EncodeCredentialRequest(payload, w.issuance.CredentialEncryption.requestEncodingMetadata(md))
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to encode credential request: %w", err)
 		}
@@ -206,7 +206,6 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		return &IssuanceResult{
 			CredentialResponse: response,
 			Deferred: &DeferredIssuance{
-				Version:                   IssuanceVersionFinal,
 				Profile:                   w.profile,
 				CredentialIssuer:          md.CredentialIssuer,
 				CredentialConfigurationID: grant.CredentialConfigurationID,
@@ -240,7 +239,6 @@ func (w *Wallet) acceptCredentialResponse(
 	result := &IssuanceResult{CredentialResponse: response}
 	if response.NotificationID != "" {
 		result.Notification = &IssuanceNotification{
-			Version:           IssuanceVersionFinal,
 			Profile:           w.profile,
 			CredentialIssuer:  md.CredentialIssuer,
 			NotificationID:    response.NotificationID,
@@ -256,14 +254,10 @@ func (w *Wallet) acceptCredentialResponse(
 	return result, nil
 }
 
-// checkGrant checks that grant is a complete state of version, recorded
-// under current.
-func checkGrant(grant *IssuanceGrant, version IssuanceVersion, current profile.Profile) error {
+// checkGrant checks that grant is a complete state recorded under current.
+func checkGrant(grant *IssuanceGrant, current profile.Profile) error {
 	if grant == nil {
 		return invalidArgument("grant is required")
-	}
-	if grant.Version != version {
-		return fmt.Errorf("grant has version %q: %w", grant.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("grant", grant.Profile, current); err != nil {
 		return err
@@ -553,20 +547,26 @@ func subjectDIDKey(claims map[string]any) (*jose.JSONWebKey, error) {
 	return &key, nil
 }
 
-// rawCredentialBytes unwraps a credentials element (Section 8.3: an object
-// whose credential member is a string or a JSON object).
+// rawCredentialBytes returns the credential of a credentials element: the
+// value of its credential member, as a string (a JWT-based or SD-JWT
+// credential) or, for a JSON credential such as ldp_vc, its JSON encoding.
+// OpenID4VCI 1.0 Section 8.3 defines the element as an object "containing
+// ... credential: REQUIRED" and, like the whole response, lets the issuer add
+// members the wallet ignores, so only the credential member is read, and only
+// one level down: a JSON credential keeps whatever members it has.
 func rawCredentialBytes(value any) ([]byte, error) {
-	switch credentialValue := value.(type) {
-	case string:
-		return []byte(credentialValue), nil
-	case []byte:
-		return credentialValue, nil
-	case map[string]any:
-		if inner, ok := credentialValue["credential"]; ok && len(credentialValue) == 1 {
-			return rawCredentialBytes(inner)
-		}
+	element, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("credentials element is %T, not an object", value)
 	}
-	raw, err := json.Marshal(value)
+	credentialValue, ok := element["credential"]
+	if !ok {
+		return nil, fmt.Errorf("credentials element has no credential member")
+	}
+	if text, ok := credentialValue.(string); ok {
+		return []byte(text), nil
+	}
+	raw, err := json.Marshal(credentialValue)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal credential value: %w", err)
 	}

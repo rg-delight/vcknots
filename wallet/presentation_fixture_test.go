@@ -159,7 +159,7 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 		wires <- wire
 		issuer, err := url.Parse(server.URL)
 		require.NoError(t, err)
-		saved, err := controller.ReceiveCredential(ReceiveCredentialRequest{CredentialOffer: &CredentialOffer{CredentialIssuer: issuer, CredentialConfigurationIDs: []string{vct}, Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}}}, Type: receiverTypes.Oid4vci, Key: holder})
+		saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{CredentialOffer: &CredentialOffer{CredentialIssuer: issuer, CredentialConfigurationIDs: []string{vct}, Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}}}, Key: holder})
 		require.NoError(t, err)
 		require.Equal(t, wire, string(saved.Entry.Raw))
 	}

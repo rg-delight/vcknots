@@ -558,7 +558,7 @@ func TestBeginIssuanceReturnsResumableState(t *testing.T) {
 	require.Equal(t, "urn:request:1", authorizationURL.Query().Get("request_uri"))
 	require.Equal(t, fixture.pushedState, authorization.State)
 	require.NotEmpty(t, authorization.CodeVerifier)
-	require.Equal(t, IssuanceVersionFinal, authorization.Version)
+	require.Equal(t, profile.VersionFinal, authorization.Profile.Version())
 	require.Equal(t, "pid", authorization.CredentialConfigurationID)
 	require.False(t, authorization.RequestURIExpiresAt.Before(before.Add(time.Minute)))
 	require.False(t, authorization.RequestURIExpiresAt.After(time.Now().Add(time.Minute)))
@@ -739,7 +739,7 @@ func TestIssuanceHolderKeyIsOnlyNeededForTheCredentialRequest(t *testing.T) {
 }
 
 // RFC 9126 Section 2.2: the request_uri lifetime bounds opening the
-// authorization URL. No stated lifetime is not an expiry the wallet invents.
+// authorization URL.
 func TestIssuanceAuthorizationRequestURIExpiry(t *testing.T) {
 	expiry := time.Now().Add(time.Minute)
 	authorization := &IssuanceAuthorization{RequestURIExpiresAt: expiry}
@@ -748,11 +748,6 @@ func TestIssuanceAuthorizationRequestURIExpiry(t *testing.T) {
 	require.True(t, authorization.RequestURIExpired(expiry.Add(time.Second)))
 	require.False(t, (&IssuanceAuthorization{}).RequestURIExpired(time.Now()))
 	require.False(t, (*IssuanceAuthorization)(nil).RequestURIExpired(time.Now()))
-
-	withoutLifetime := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
-		f.parExpiresIn = 0
-	})
-	require.True(t, flowTestBegin(t, withoutLifetime).RequestURIExpiresAt.IsZero())
 
 	withoutPAR := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.omitPAREndpoint = true
@@ -871,10 +866,17 @@ func TestIssuanceRefusesKeyAttestationWithUnlistedAlgorithm(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // flowTestTransportOnlyPlugin implements the OpenID4VCI 1.0 transport and
-// nothing else, as a plugin written outside this module may.
+// nothing else, as a plugin written outside this module may. It reports the
+// HTTP scheme policy of the plugin it wraps, so the fixture's plain http
+// authorization endpoint stays usable (receiverTypes.HTTPSchemePolicy).
 type flowTestTransportOnlyPlugin struct {
 	receiverTypes.Receiver
 	receiverTypes.OID4VCITransport
+}
+
+func (p *flowTestTransportOnlyPlugin) HTTPAllowed() bool {
+	policy, ok := p.Receiver.(receiverTypes.HTTPSchemePolicy)
+	return ok && policy.HTTPAllowed()
 }
 
 // A receiver plugin that only speaks HTTP is enough for a whole issuance: the
@@ -996,15 +998,14 @@ func flowTestOpenIDCredentialDetail(configurationID string, identifiers ...strin
 
 // After an authorization_details request the Token Response must carry a
 // usable openid_credential entry for the configuration: a missing entry, a
-// foreign configuration, no identifiers or more than one fail closed.
+// foreign configuration or no identifiers fail closed.
 func TestCredentialIdentifiersRequiredModeRejectsUnusableResponses(t *testing.T) {
 	cases := map[string]*receiverTypes.CredentialIssuanceAccessToken{
-		"no access token":                 nil,
-		"missing authorization_details":   {Token: "access-1"},
-		"foreign configuration":           {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("other", "id-other")}},
-		"empty credential_identifiers":    {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid")}},
-		"blank credential_identifiers":    {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", " ")}},
-		"multiple credential_identifiers": {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", "id-1", "id-2")}},
+		"no access token":               nil,
+		"missing authorization_details": {Token: "access-1"},
+		"foreign configuration":         {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("other", "id-other")}},
+		"empty credential_identifiers":  {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid")}},
+		"blank credential_identifiers":  {Token: "access-1", AuthorizationDetails: []receiverTypes.CredentialIssuanceAuthorizationDetail{flowTestOpenIDCredentialDetail("pid", " ")}},
 	}
 	for name, accessToken := range cases {
 		t.Run(name, func(t *testing.T) {
