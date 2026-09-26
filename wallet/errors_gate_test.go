@@ -140,7 +140,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			return err
 		},
 		"Wallet.ReceiveCredential: no offer": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.ReceiveCredential(ReceiveCredentialRequest{Type: receiverTypes.Oid4vci})
+			_, err := newFinalIssuanceFixture(t).wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
 			return err
 		},
 		"Wallet.AuthorizePreAuthorizedIssuance: canceled": func(t *testing.T) error {
@@ -187,7 +187,7 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		"Wallet.ReceiveCredential: receiver refused by SetReceiver": func(t *testing.T) error {
 			w := newFinalIssuanceFixture(t).wallet
 			w.SetReceiver(nil)
-			_, err := w.ReceiveCredential(ReceiveCredentialRequest{Type: receiverTypes.Oid4vci})
+			_, err := w.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
 			return err
 		},
 		"Wallet.FetchCredentialIssuerMetadata: unreachable issuer": func(t *testing.T) error {

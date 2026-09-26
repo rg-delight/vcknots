@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 func TestParseCredentialOfferURL(t *testing.T) {
@@ -54,4 +55,69 @@ func TestParseCredentialOfferURL_TransactionCodeRoundTrip(t *testing.T) {
 	var roundTripped CredentialOfferGrant
 	require.NoError(t, json.Unmarshal(roundTripJSON, &roundTripped))
 	require.Equal(t, *wantGrant, roundTripped)
+}
+
+// TestValidateOfferedConfigurations: every credential_configuration_id of an
+// offer must be described by the issuer metadata (Draft 13 Section 4.1.1,
+// 1.0 Section 4.1.1).
+func TestValidateOfferedConfigurations(t *testing.T) {
+	tests := []struct {
+		name            string
+		offer           *CredentialOffer
+		issuerMetadata  *receiverTypes.CredentialIssuerMetadata
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:    "all offered configuration IDs are supported",
+			offer:   &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json", "StudentID_jwt_vc_json"}},
+			wantErr: false,
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+					"EmployeeID_jwt_vc_json": {Format: "jwt_vc_json"},
+					"StudentID_jwt_vc_json":  {Format: "jwt_vc_json"},
+				},
+			},
+		},
+		{
+			name:  "unsupported offered configuration ID is rejected",
+			offer: &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json", "UnknownID_jwt_vc_json"}},
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{
+					"EmployeeID_jwt_vc_json": {Format: "jwt_vc_json"},
+				},
+			},
+			wantErr:         true,
+			wantErrContains: `credential configuration "UnknownID_jwt_vc_json" is not supported by issuer metadata`,
+		},
+		{
+			name:            "missing issuer metadata is rejected",
+			offer:           &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json"}},
+			issuerMetadata:  nil,
+			wantErr:         true,
+			wantErrContains: "issuer metadata is required",
+		},
+		{
+			name:  "missing supported configurations in metadata is rejected",
+			offer: &CredentialOffer{CredentialConfigurationIDs: []string{"EmployeeID_jwt_vc_json"}},
+			issuerMetadata: &receiverTypes.CredentialIssuerMetadata{
+				CredentialConfigurationSupported: map[string]receiverTypes.CredentialConfiguration{},
+			},
+			wantErr:         true,
+			wantErrContains: "credential configurations supported are missing in issuer metadata",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOfferedConfigurations(tt.offer, tt.issuerMetadata)
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErrContains)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
 }

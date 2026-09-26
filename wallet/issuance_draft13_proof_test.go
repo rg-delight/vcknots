@@ -1,13 +1,16 @@
 package wallet
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	idprofTypes "github.com/trustknots/vcknots/wallet/idprof/types"
 )
 
@@ -333,4 +336,20 @@ func TestController_generateJWTProof_JWKBinding_AllowsNilDID(t *testing.T) {
 	_, hasKID := header["kid"]
 	assert.True(t, hasJWK)
 	assert.False(t, hasKID)
+}
+
+// generateJWTProof builds an untransformed key proof; a kid-bound proof is
+// bound to did.ID.
+func (w *Wallet) generateJWTProof(key IKeyEntry, did *idprofTypes.IdentityProfile, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod) (string, error) {
+	keyID := ""
+	if binding != credentialRequestProofBindingMethodJWK {
+		if did == nil {
+			return "", fmt.Errorf("did is required for kid proof binding")
+		}
+		if strings.TrimSpace(did.ID) == "" {
+			return "", fmt.Errorf("did.ID is required for kid proof binding")
+		}
+		keyID = did.ID
+	}
+	return w.generateJWTProofWithTransform(context.Background(), key, keyID, nonce, aud, clientID, binding, experimental.ProofTransform{})
 }

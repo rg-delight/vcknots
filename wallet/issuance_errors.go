@@ -168,6 +168,11 @@ var (
 	// ErrDraft13CredentialResponseInvalid reports a Credential Response with
 	// neither a credential nor a transaction_id.
 	ErrDraft13CredentialResponseInvalid = common.NewCodedError("draft13_credential_response_invalid", "credential response does not carry a usable credential")
+	// ErrDraft13CredentialDeferred reports that the issuer answered
+	// ReceiveCredential with a transaction_id (Draft 13 Section 7.3). The
+	// one-call flow keeps no state to poll with; Draft13().RequestCredential
+	// returns the DeferredIssuance for RequestDeferredCredential.
+	ErrDraft13CredentialDeferred = common.NewCodedError("draft13_credential_deferred", "the issuer deferred the credential; ReceiveCredential cannot poll for it, use Draft13().RequestCredential")
 	// ErrDraft13ProofTransformFailed reports that
 	// Config.Experimental.Hooks.KeyProof refused the key proof.
 	ErrDraft13ProofTransformFailed = common.NewCodedError("draft13_proof_transform_failed", "proof transform failed")

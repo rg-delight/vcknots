@@ -125,22 +125,6 @@ func (w *Wallet) generateJWTProofWithTransform(ctx context.Context, key IKeyEntr
 	return applyProofSerialized(transform, proof)
 }
 
-// generateJWTProof builds an untransformed key proof; a kid-bound proof is
-// bound to did.ID.
-func (w *Wallet) generateJWTProof(key IKeyEntry, did *idprofTypes.IdentityProfile, nonce *string, aud string, clientID *string, binding credentialRequestProofBindingMethod) (string, error) {
-	keyID := ""
-	if binding != credentialRequestProofBindingMethodJWK {
-		if did == nil {
-			return "", fmt.Errorf("did is required for kid proof binding")
-		}
-		if strings.TrimSpace(did.ID) == "" {
-			return "", fmt.Errorf("did.ID is required for kid proof binding")
-		}
-		keyID = did.ID
-	}
-	return w.generateJWTProofWithTransform(context.Background(), key, keyID, nonce, aud, clientID, binding, experimental.ProofTransform{})
-}
-
 // didKeyVerificationMethod returns the DID URL of a did:key's one
 // verification method (did:key Method Section 3.1.2): Draft 13 Section
 // 7.2.1.1 requires the kid to identify a key, which the bare DID does not.
@@ -156,4 +140,23 @@ func didKeyVerificationMethod(did *idprofTypes.IdentityProfile) (string, error) 
 		return did.ID, nil
 	}
 	return did.ID + "#" + identifier, nil
+}
+
+// ensureJWTProofSupported refuses a configuration whose proof_types_supported
+// is empty or lacks jwt, the only key proof the wallet builds (Draft 13
+// Section 7.2.1); one without proof_types_supported accepts any.
+func ensureJWTProofSupported(credentialConfiguration *receiverTypes.CredentialConfiguration) error {
+	if credentialConfiguration == nil || credentialConfiguration.ProofTypesSupported == nil {
+		return nil
+	}
+	proofTypes := *credentialConfiguration.ProofTypesSupported
+	if len(proofTypes) == 0 {
+		return fmt.Errorf("proof_types_supported must not be empty")
+	}
+	for proofType := range proofTypes {
+		if strings.EqualFold(strings.TrimSpace(proofType), "jwt") {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported proof type: jwt proof is required")
 }

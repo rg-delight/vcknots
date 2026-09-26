@@ -3,10 +3,28 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"github.com/trustknots/vcknots/wallet/common"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
+
+// FetchCredentialIssuerMetadata reads the OpenID4VCI 1.0 Section 12.2
+// Credential Issuer Metadata of endpoint (a Credential Issuer Identifier) from
+// the Section 12.2.2 location, under the wallet's 1.0 profile: what a wallet
+// shows the holder about an offer before AuthorizePreAuthorizedIssuance or
+// BeginIssuance. Those methods re-discover the metadata themselves.
+func (w *Wallet) FetchCredentialIssuerMetadata(endpoint *url.URL, receivingType receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
+	if endpoint == nil {
+		return nil, invalidArgument("issuer metadata endpoint is required")
+	}
+	uriField, err := common.ParseURIField(endpoint.String())
+	if err != nil {
+		return nil, keepMessage(ErrInvalidArgument, fmt.Errorf("failed to parse URI field: %w", err))
+	}
+	metadata, err := w.receiver.FetchIssuerMetadata(*uriField, receivingType)
+	return metadata, classifyKeepingMessage(err)
+}
 
 // issuanceDiscovery is the metadata one stage resolved.
 type issuanceDiscovery struct {

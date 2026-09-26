@@ -21,7 +21,6 @@ import (
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
-	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/jwtvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 )
@@ -584,14 +583,13 @@ func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry)
 	t.Helper()
 	t.Setenv(env.DEBUG.String(), "")
 	controller := createTestControllerAllowingHTTP(t)
-	issuer, _, closeServer := newReceiveCredentialTestServer(t)
-	t.Cleanup(closeServer)
 	key := newMockKeyEntry()
-	saved, err := controller.ReceiveCredential(ReceiveCredentialRequest{
+	issuer := newReceiveCredentialTestServer(t, key)
+	saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
 		CredentialOffer: &CredentialOffer{
 			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"test-config"},
 			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "test-code"}},
-		}, Type: receiverTypes.Oid4vci, Key: key, Acceptance: mockIssuerAcceptance(),
+		}, Key: key, Acceptance: mockIssuerAcceptance(),
 	})
 	require.NoError(t, err, "presentation test must receive and store a real signed credential")
 	require.NotNil(t, saved)

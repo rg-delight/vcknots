@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // requireJSONRoundTrip marshals value and unmarshals it into target, as a
@@ -129,4 +133,34 @@ func TestDeferredIssuanceKeepsTheFactOfAPerRequestPolicy(t *testing.T) {
 	result, err = fixture.wallet.RequestCredential(ctx, plain, fixture.credentialRequest())
 	require.NoError(t, err)
 	require.False(t, result.Deferred.AcceptanceOverridden)
+}
+
+// FetchCredentialIssuerMetadata reads the OpenID4VCI 1.0 Section 12.2.2
+// location, where the well-known segment precedes the identifier's path; the
+// Draft 13 Section 11.2.2 location ReceiveCredential reads appends it.
+func TestFetchCredentialIssuerMetadataReadsThe10Location(t *testing.T) {
+	server := mockserver.NewOID4VCIIssuerServer(nil)
+	t.Cleanup(server.Close)
+	issuer, err := url.Parse(server.URL())
+	require.NoError(t, err)
+	metadata, err := createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(issuer, receiverTypes.Oid4vci)
+	require.NoError(t, err)
+	require.Equal(t, server.URL(), metadata.CredentialIssuer)
+
+	var paths []string
+	var mu sync.Mutex
+	pathServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(pathServer.Close)
+	tenant, err := url.Parse(pathServer.URL + "/tenant")
+	require.NoError(t, err)
+	_, err = createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(tenant, receiverTypes.Oid4vci)
+	require.Error(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{"/.well-known/openid-credential-issuer/tenant"}, paths)
 }

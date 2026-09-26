@@ -569,9 +569,6 @@ func (d *Draft13Issuance) credentialRequest(ctx context.Context, md *receiverTyp
 			}
 		}
 	}
-	if !shouldAttachCredentialRequestProof(ReceiveCredentialRequest{}, &config) {
-		return request, nil
-	}
 	if err := ensureJWTProofSupported(&config); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrProofTypeUnsupported, err)
 	}

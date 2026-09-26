@@ -12,7 +12,15 @@
 //		log.Fatal(err)
 //	}
 //
-//	credential, err := w.ReceiveCredential(req)
+//	offer, err := w.ResolveCredentialOffer(ctx, offerURL)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	grant, err := w.AuthorizePreAuthorizedIssuance(ctx, wallet.PreAuthorizedIssuanceRequest{CredentialOffer: offer})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holderKey}, Acceptance: policy})
 //	if err != nil {
 //		log.Fatal(err)
 //	}

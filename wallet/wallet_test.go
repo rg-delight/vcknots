@@ -11,7 +11,6 @@ import (
 	"io"
 	"math/big"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -24,10 +23,8 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/experimental"
-	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/receiver"
-	receiverOid4vci "github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -150,22 +147,6 @@ func createTestControllerAllowingHTTP(t *testing.T) *Wallet {
 		t.Fatalf("Failed to create controller allowing HTTP: %v", err)
 	}
 	return controller
-}
-
-// newHTTPTestReceiver is the default receiving dispatcher with an OpenID4VCI
-// plugin that accepts plain http endpoints.
-func newHTTPTestReceiver() (*receiver.ReceivingDispatcher, error) {
-	return receiver.NewReceivingDispatcher(receiver.WithDefaultConfig(), receiver.WithPlugin(receiverTypes.Oid4vci, &receiverOid4vci.Oid4vciReceiver{
-		Experimental: experimental.Transport{AllowHTTP: true},
-	}))
-}
-
-func mustParseURL(t *testing.T, rawURL string) *url.URL {
-	t.Helper()
-
-	parsed, err := url.Parse(rawURL)
-	require.NoError(t, err)
-	return parsed
 }
 
 // serverObservations records what a test's httptest handler observed about the
@@ -581,29 +562,6 @@ func extractPayloadField(t *testing.T, compactJWT string, field string) any {
 	return value
 }
 
-// observedHeaderField reads a compact JWT header field on behalf of an httptest
-// handler, recording a malformed proof instead of asserting on the server
-// goroutine, and reports whether the field was found.
-func observedHeaderField(obs *serverObservations, compactJWT string, field string) (any, bool) {
-	parts := strings.Split(compactJWT, ".")
-	if !assert.Len(obs, parts, 3) {
-		return nil, false
-	}
-	b, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if !assert.NoError(obs, err) {
-		return nil, false
-	}
-	var header map[string]any
-	if !assert.NoError(obs, json.Unmarshal(b, &header)) {
-		return nil, false
-	}
-	value, ok := header[field]
-	if !assert.True(obs, ok, "field %q not found in header", field) {
-		return nil, false
-	}
-	return value, true
-}
-
 func TestValidateClientAuthConfig(t *testing.T) {
 	key, _ := newClientAuthKeyEntry(t, "client-key-1")
 
@@ -685,76 +643,6 @@ func TestValidateClientAuthConfig(t *testing.T) {
 func TestClientAuthConfig_SignatureAlgorithmDefaultsToES256(t *testing.T) {
 	assert.Equal(t, jose.ES256, ClientAuthConfig{}.signatureAlgorithm())
 	assert.Equal(t, jose.ES384, ClientAuthConfig{SigningAlg: jose.ES384}.signatureAlgorithm())
-}
-
-// This fixture intentionally uses a mocked ES256 signature (64 zero bytes).
-// These tests only validate SD-JWT parsing/metadata round-trip, not signature verification.
-// If SD-JWT deserialization later requires signature verification, replace this with a
-// valid ES256 signature (preferred) or change alg to "none" accordingly.
-// walletTestIssuer signs the credentials of the legacy issuance fixtures with
-// an x5c chain to mockserver.CredentialTrustAnchors, so mockIssuerAcceptance
-// authenticates them.
-var walletTestIssuer = mockserver.MustGenerateKeyPair("wallet-test-issuer")
-
-// signWalletTestCredential signs claims as walletTestIssuer with typ and x5c.
-func signWalletTestCredential(typ string, claims map[string]interface{}) string {
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: walletTestIssuer.PrivateKey},
-		(&jose.SignerOptions{}).WithType(jose.ContentType(typ)).WithHeader("x5c", walletTestIssuer.CertificateChain()))
-	if err != nil {
-		panic(err)
-	}
-	token, err := jwt.Signed(signer).Claims(claims).Serialize()
-	if err != nil {
-		panic(err)
-	}
-	return token
-}
-
-func createWalletTestSDJWT() string {
-	disclosures := []string{
-		"WyIyR0xDNDJzS1F2ZUNmR2ZyeU5STjl3IiwgImdpdmVuX25hbWUiLCAiSm9obiJd",
-		"WyI2SWo3dE0tYTVpVlBHYm9TNXRtdlZBIiwgImVtYWlsIiwgImpvaG5kb2VAZXhhbXBsZS5jb20iXQ",
-	}
-
-	sdDigests := make([]string, 0, len(disclosures))
-	for _, disclosure := range disclosures {
-		h := sha256.Sum256([]byte(disclosure))
-		sdDigests = append(sdDigests, base64.RawURLEncoding.EncodeToString(h[:]))
-	}
-
-	payload := map[string]interface{}{
-		"_sd":     sdDigests,
-		"iss":     "http://127.0.0.1/issuer",
-		"sub":     "did:key:z6Mkwallet-test-subject",
-		"iat":     1683000000,
-		"exp":     1883000000,
-		"vct":     "https://credentials.example.com/identity_credential",
-		"_sd_alg": "sha-256",
-	}
-	result := signWalletTestCredential("vc+sd-jwt", payload)
-	for _, disclosure := range disclosures {
-		result += "~" + disclosure
-	}
-	result += "~"
-
-	return result
-}
-
-func createWalletTestJwtVCCredential() string {
-	now := time.Now().Unix()
-	payload := map[string]interface{}{
-		"iat": now,
-		"exp": now + 3600,
-		"vc": map[string]interface{}{
-			"id":     "https://issuer.example.com/credentials/test-1",
-			"type":   []string{"VerifiableCredential"},
-			"issuer": "https://issuer.example.com",
-			"credentialSubject": map[string]interface{}{
-				"id": "did:key:test-subject",
-			},
-		},
-	}
-	return signWalletTestCredential("JWT", payload)
 }
 
 func TestController_GenerateDID_ErrorPaths_Integration(t *testing.T) {
