@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // RFC 6749 Section 7.1: "The client MUST NOT use an access token if it does
@@ -72,4 +73,21 @@ func TestDraft13IssuancePendingIntervalDefaultsToFiveSeconds(t *testing.T) {
 			require.Equal(t, test.want, pending.Deferred.Interval)
 		})
 	}
+}
+
+// Draft 13 Section 6.1: tx_code "MUST be present if a tx_code object was
+// present in the Credential Offer (including if the object was empty)", and
+// is only sent then. Both are refused before the pre-authorized code is spent.
+func TestDraft13PreAuthorizedCodeChecksTheTransactionCode(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	missing := fixture.preAuthorizedRequest()
+	missing.TxCode = ""
+	_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), missing)
+	require.ErrorIs(t, err, ErrTransactionCodeRequired)
+
+	unexpected := fixture.preAuthorizedRequest()
+	unexpected.CredentialOffer.Grants[string(receiverTypes.PreAuthorizedCode)].TxCode = nil
+	_, err = fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), unexpected)
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	require.Empty(t, fixture.tokens())
 }

@@ -366,6 +366,11 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	if grant == nil || strings.TrimSpace(grant.PreAuthorizedCode) == "" {
 		return nil, ErrDraft13PreAuthorizedCodeGrantMissing
 	}
+	// Section 6.1: tx_code "MUST be present if a tx_code object was present
+	// in the Credential Offer (including if the object was empty)", as in 1.0.
+	if err := checkTxCode(grant, req.TxCode); err != nil {
+		return nil, err
+	}
 	hint := strings.TrimSpace(req.AuthorizationServer)
 	if hint == "" {
 		hint = strings.TrimSpace(grant.AuthorizationServer)
