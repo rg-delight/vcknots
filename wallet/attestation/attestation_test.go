@@ -278,6 +278,10 @@ func TestClientAttestationClaimsAreChecked(t *testing.T) {
 		"foreign aud":           {clientAttestationType, with(claims, "aud", "https://other-as.example"), "does not identify the authorization server"},
 		"foreign aud array":     {clientAttestationType, with(claims, "aud", []string{"https://other-as.example"}), "does not identify the authorization server"},
 		"non-string aud member": {clientAttestationType, with(claims, "aud", 7), "does not identify the authorization server"},
+		// draft-ietf-oauth-attestation-based-client-auth Section 5.1, RFC 7800
+		// Section 3.2: cnf.jwk is the Client Instance public key.
+		"private cnf key":   {clientAttestationType, with(claims, "cnf", map[string]any{"jwk": clientKey}), "not a public asymmetric key"},
+		"symmetric cnf key": {clientAttestationType, with(claims, "cnf", map[string]any{"jwk": map[string]any{"kty": "oct", "k": "c2VjcmV0"}}), "not a public asymmetric key"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -360,6 +364,9 @@ func TestKeyAttestationClaimsAreChecked(t *testing.T) {
 		"wrong typ":          {"JWT", valid, "typ must be"},
 		"foreign aud":        {keyAttestationType, with(valid, "aud", "https://other-issuer.example"), "does not identify the credential issuer"},
 		"invalid attested":   {keyAttestationType, with(valid, "attested_keys", []any{map[string]any{"kty": "EC"}}), "malformed"},
+		// OpenID4VCI 1.0 Appendix D.1: attested_keys are public keys.
+		"private attested":   {keyAttestationType, with(valid, "attested_keys", []jose.JSONWebKey{holderKey}), "not a public asymmetric key"},
+		"symmetric attested": {keyAttestationType, with(valid, "attested_keys", []any{holderKey.Public(), map[string]any{"kty": "oct", "k": "c2VjcmV0"}}), "attested_keys[1] is not a public asymmetric key"},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {

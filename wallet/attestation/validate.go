@@ -143,6 +143,14 @@ func checkClientClaims(attestation *ClientAttestation, request ClientRequest, no
 	if claims.Cnf == nil || claims.Cnf.JWK.Key == nil {
 		return errors.New("client attestation is missing cnf.jwk")
 	}
+	// draft-ietf-oauth-attestation-based-client-auth Section 5.1: cnf holds
+	// the key the Client Instance proves possession of, which RFC 7800
+	// Section 3.2 conveys as a public key JWK. A cnf.jwk with private members
+	// or a symmetric key would be forwarded unchanged to the Authorization
+	// Server.
+	if !claims.Cnf.JWK.IsPublic() {
+		return errors.New("client attestation cnf.jwk is not a public asymmetric key")
+	}
 	if err := sameKey(request.ClientKey, claims.Cnf.JWK); err != nil {
 		return fmt.Errorf("client attestation cnf.jwk does not match the wallet client key: %w", err)
 	}
@@ -169,6 +177,13 @@ func checkKeyClaims(attestation *KeyAttestation, request KeyRequest, now time.Ti
 	}
 	attested := make(map[string]struct{}, len(claims.AttestedKeys))
 	for index := range claims.AttestedKeys {
+		// OpenID4VCI 1.0 Appendix D: attested_keys lists the cryptographic
+		// public keys whose properties the attestation asserts. An entry with
+		// private members or a symmetric key would be forwarded unchanged to
+		// the Credential Issuer.
+		if claims.AttestedKeys[index].Key != nil && !claims.AttestedKeys[index].IsPublic() {
+			return fmt.Errorf("key attestation attested_keys[%d] is not a public asymmetric key", index)
+		}
 		sum, err := thumbprint(claims.AttestedKeys[index])
 		if err != nil {
 			return fmt.Errorf("key attestation attested_keys[%d] is invalid: %w", index, err)
