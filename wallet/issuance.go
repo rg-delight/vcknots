@@ -38,17 +38,6 @@ import (
 // The library never polls a deferred transaction and never sends a
 // notification on its own.
 
-// IssuanceVersion is the OpenID4VCI version a state belongs to. A state is
-// refused by the other version's methods (ErrIssuanceVersionMismatch).
-type IssuanceVersion string
-
-const (
-	// IssuanceVersionFinal is OpenID4VCI 1.0, used by the methods of Wallet.
-	IssuanceVersionFinal IssuanceVersion = "1.0"
-	// IssuanceVersionDraft13 is OpenID4VCI Draft 13, used by Wallet.Draft13.
-	IssuanceVersionDraft13 IssuanceVersion = "draft-13"
-)
-
 // AuthorizationRequestType selects how the Credential Configuration is
 // requested at the authorization endpoint (OpenID4VCI 1.0 Sections 5.1.1 and
 // 5.1.2). The zero value uses scope when the configuration advertises one and
@@ -129,9 +118,10 @@ type CredentialRequest struct {
 // and is used once:
 // discard it after AuthorizeIssuance, whether that succeeded or failed.
 type IssuanceAuthorization struct {
-	Version IssuanceVersion `json:"version"`
 	// Profile is the profile the flow runs under: the wallet's 1.0 profile,
-	// or profile.Draft13 for a Draft 13 state.
+	// or profile.Draft13 for a Draft 13 state. Its Version is the
+	// OpenID4VCI version of the state, which the other version's methods
+	// refuse (ErrIssuanceVersionMismatch).
 	Profile profile.Profile `json:"profile"`
 	// AuthorizationURL is the authorization request to open in the holder's
 	// browser.
@@ -186,7 +176,6 @@ func (a *IssuanceAuthorization) RequestURIExpired(now time.Time) bool {
 // stopped before sending anything, such as with *KeyAttestationRequiredError,
 // may be repeated with it.
 type IssuanceGrant struct {
-	Version                   IssuanceVersion `json:"version"`
 	Profile                   profile.Profile `json:"profile"`
 	CredentialIssuer          string          `json:"credential_issuer"`
 	CredentialConfigurationID string          `json:"credential_configuration_id"`
@@ -222,7 +211,6 @@ type IssuanceGrant struct {
 // Deferred, and discard it when the credentials are issued or the transaction
 // fails.
 type DeferredIssuance struct {
-	Version                   IssuanceVersion                              `json:"version"`
 	Profile                   profile.Profile                              `json:"profile"`
 	CredentialIssuer          string                                       `json:"credential_issuer"`
 	CredentialConfigurationID string                                       `json:"credential_configuration_id"`
@@ -256,7 +244,6 @@ type DeferredIssuance struct {
 // credentials (OpenID4VCI 1.0 Section 11). It is a bearer secret
 // (AccessToken) and is used once: discard it after NotifyIssuer.
 type IssuanceNotification struct {
-	Version           IssuanceVersion                              `json:"version"`
 	Profile           profile.Profile                              `json:"profile"`
 	CredentialIssuer  string                                       `json:"credential_issuer"`
 	NotificationID    string                                       `json:"notification_id"`

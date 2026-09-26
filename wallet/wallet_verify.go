@@ -41,11 +41,11 @@ type CredentialAcceptanceRequest struct {
 	// credential came from. A DID issuer is bound to its origin
 	// (acceptance.Options.CredentialIssuer).
 	CredentialIssuer string
-	// IssuanceVersion is the OpenID4VCI version the credential was issued
-	// under. Empty means IssuanceVersionFinal and the wallet's 1.0 profile;
-	// IssuanceVersionDraft13 applies profile.Draft13, which admits the SD-JWT
+	// Version is the OpenID4VCI version the credential was issued under. The
+	// zero value, profile.VersionFinal, applies the wallet's 1.0 profile;
+	// profile.VersionDraft13 applies profile.Draft13, which admits the SD-JWT
 	// VC typ vc+sd-jwt, and needs Config.Profiles to enable it.
-	IssuanceVersion IssuanceVersion
+	Version profile.Version
 	// Acceptance overrides Config.CredentialAcceptance for this credential.
 	Acceptance *acceptance.Policy
 	// CredentialConfiguration is the Credential Configuration the credential
@@ -73,15 +73,15 @@ func (w *Wallet) VerifyCredentialForAcceptance(ctx context.Context, req Credenti
 
 func (w *Wallet) verifyCredentialForAcceptanceRequest(ctx context.Context, req CredentialAcceptanceRequest) (*credential.Credential, *acceptance.Verification, error) {
 	issuanceProfile := w.profile
-	switch req.IssuanceVersion {
-	case "", IssuanceVersionFinal:
-	case IssuanceVersionDraft13:
+	switch req.Version {
+	case profile.VersionFinal:
+	case profile.VersionDraft13:
 		if err := w.requireDraft13(); err != nil {
 			return nil, nil, err
 		}
 		issuanceProfile = profile.Draft13()
 	default:
-		return nil, nil, invalidArgument("unknown issuance version %q", req.IssuanceVersion)
+		return nil, nil, invalidArgument("%s is not an OpenID4VCI version", req.Version)
 	}
 	policy, err := w.acceptancePolicy(req.Acceptance)
 	if err != nil {

@@ -20,7 +20,7 @@ func (w *Wallet) NotifyIssuer(ctx context.Context, n *IssuanceNotification, even
 }
 
 func (w *Wallet) notifyIssuer(ctx context.Context, n *IssuanceNotification, event NotificationEvent, description string) error {
-	if err := checkNotification(n, IssuanceVersionFinal, w.profile, event, description); err != nil {
+	if err := checkNotification(n, w.profile, event, description); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -58,12 +58,9 @@ func (w *Wallet) notifyIssuer(ctx context.Context, n *IssuanceNotification, even
 // checkNotification applies the rules OpenID4VCI 1.0 Section 11.1 and Draft
 // 13 Section 10.1 share: a notification_id, one of the three events, an
 // event_description within %x20-21 / %x23-5B / %x5D-7E, and an access token.
-func checkNotification(n *IssuanceNotification, version IssuanceVersion, current profile.Profile, event NotificationEvent, description string) error {
+func checkNotification(n *IssuanceNotification, current profile.Profile, event NotificationEvent, description string) error {
 	if n == nil {
 		return invalidArgument("notification is required")
-	}
-	if n.Version != version {
-		return fmt.Errorf("notification has version %q: %w", n.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("notification", n.Profile, current); err != nil {
 		return err

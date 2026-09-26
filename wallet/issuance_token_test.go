@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"net/http"
 	"net/url"
 	"testing"
@@ -187,7 +188,7 @@ func TestIssuanceTwoStageAuthorizationSurvivesJSONRoundTrip(t *testing.T) {
 
 	var restoredGrant IssuanceGrant
 	requireJSONRoundTrip(t, grant, &restoredGrant)
-	require.Equal(t, IssuanceVersionFinal, restoredGrant.Version)
+	require.Equal(t, profile.VersionFinal, restoredGrant.Profile.Version())
 	require.NotNil(t, restoredGrant.AccessToken)
 	require.Equal(t, "pid", restoredGrant.CredentialConfigurationID)
 	require.Equal(t, fixture.server.URL, restoredGrant.CredentialIssuer)
@@ -695,7 +696,7 @@ func TestAuthorizeIssuanceRefusesAStateThatDoesNotFit(t *testing.T) {
 		},
 		"another version": {
 			tamper: func(_ *finalIssuanceFixture, _ *finalIssuanceFixture, a *IssuanceAuthorization, _ *Wallet) {
-				a.Version = IssuanceVersionDraft13
+				a.Profile = profile.Draft13()
 			},
 			want: ErrIssuanceVersionMismatch,
 		},
@@ -777,7 +778,6 @@ func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
 	bearer := &receiverTypes.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "Bearer"}
 
 	_, err := fixture.wallet.RequestCredential(context.Background(), &IssuanceGrant{
-		Version:                   IssuanceVersionFinal,
 		Profile:                   fixture.wallet.profile,
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "pid",
@@ -787,7 +787,6 @@ func TestHAIPResumedAccessTokenMustBeDPoPBound(t *testing.T) {
 	require.ErrorIs(t, err, ErrDPoPRequired)
 
 	_, err = fixture.wallet.RequestDeferredCredential(context.Background(), &DeferredIssuance{
-		Version:                   IssuanceVersionFinal,
 		Profile:                   fixture.wallet.profile,
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "pid",

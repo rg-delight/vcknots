@@ -558,7 +558,7 @@ func TestBeginIssuanceReturnsResumableState(t *testing.T) {
 	require.Equal(t, "urn:request:1", authorizationURL.Query().Get("request_uri"))
 	require.Equal(t, fixture.pushedState, authorization.State)
 	require.NotEmpty(t, authorization.CodeVerifier)
-	require.Equal(t, IssuanceVersionFinal, authorization.Version)
+	require.Equal(t, profile.VersionFinal, authorization.Profile.Version())
 	require.Equal(t, "pid", authorization.CredentialConfigurationID)
 	require.False(t, authorization.RequestURIExpiresAt.Before(before.Add(time.Minute)))
 	require.False(t, authorization.RequestURIExpiresAt.After(time.Now().Add(time.Minute)))

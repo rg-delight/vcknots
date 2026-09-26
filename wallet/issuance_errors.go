@@ -43,7 +43,8 @@ var (
 // Issuance conditions.
 var (
 	// ErrIssuanceVersionMismatch reports a state of the other OpenID4VCI
-	// version: a Draft 13 state given to a 1.0 method or the reverse.
+	// version (its Profile's Version): a Draft 13 state given to a 1.0 method
+	// or the reverse.
 	ErrIssuanceVersionMismatch = common.NewCodedError("issuance_version_mismatch", "issuance state belongs to another OpenID4VCI version")
 	// ErrIssuanceProfileMismatch reports a state recorded under another
 	// profile than the wallet runs: a stage never continues a flow under
@@ -233,6 +234,9 @@ func classifyKeepingMessage(err error) error {
 // checkStateProfile refuses a state recorded under another profile than
 // current, the profile of the stage that continues it.
 func checkStateProfile(state string, recorded, current profile.Profile) error {
+	if recorded.Version() != current.Version() {
+		return fmt.Errorf("the %s belongs to OpenID4VCI %s, the method to %s: %w", state, recorded.Version(), current.Version(), ErrIssuanceVersionMismatch)
+	}
 	if recorded != current {
 		return fmt.Errorf("the %s was recorded under the %s profile, the wallet runs %s: %w", state, recorded, current, ErrIssuanceProfileMismatch)
 	}

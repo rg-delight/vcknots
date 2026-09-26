@@ -510,7 +510,7 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 		require.ErrorIs(t, err, acceptance.ErrCredentialTypInvalid)
 
 		draft13 := final
-		draft13.IssuanceVersion = IssuanceVersionDraft13
+		draft13.Version = profile.VersionDraft13
 		w13, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.Final(), profile.Draft13()}, CredStore: newAcceptanceStore(t), CredentialAcceptance: acceptIssuerKeyPolicy(issuerKey)})
 		require.NoError(t, err)
 		_, _, err = w13.VerifyCredentialForAcceptance(context.Background(), draft13)

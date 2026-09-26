@@ -413,7 +413,7 @@ func TestDraft13PreAuthorizedCodeFlow(t *testing.T) {
 	ctx := context.Background()
 
 	grant := fixture.preAuthorize(t, fixture.wallet)
-	require.Equal(t, IssuanceVersionDraft13, grant.Version)
+	require.Equal(t, profile.VersionDraft13, grant.Profile.Version())
 	require.Equal(t, "nonce-1", grant.CNonce, "Draft 13 takes the c_nonce from the Token Response")
 	result, err := fixture.wallet.Draft13().RequestCredential(ctx, grant, fixture.holder())
 	require.NoError(t, err)
@@ -425,7 +425,7 @@ func TestDraft13PreAuthorizedCodeFlow(t *testing.T) {
 	require.NotNil(t, result.CredentialResponse.CNonce)
 	require.Equal(t, "nonce-2", *result.CredentialResponse.CNonce)
 	require.NotNil(t, result.Notification)
-	require.Equal(t, IssuanceVersionDraft13, result.Notification.Version)
+	require.Equal(t, profile.VersionDraft13, result.Notification.Profile.Version())
 	require.Equal(t, "notification-1", result.Notification.NotificationID)
 	require.Equal(t, "access-1", result.Notification.AccessToken.Token)
 	require.Equal(t, 1, draft13StoredCount(t, fixture.wallet), "the view verifies and stores")
@@ -720,7 +720,7 @@ func TestDraft13DeferredTransaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, result.Credentials)
 	require.NotNil(t, result.Deferred)
-	require.Equal(t, IssuanceVersionDraft13, result.Deferred.Version)
+	require.Equal(t, profile.VersionDraft13, result.Deferred.Profile.Version())
 	require.Equal(t, "transaction-1", result.Deferred.TransactionID)
 	require.Equal(t, 7*time.Second, result.Deferred.Interval)
 	require.Empty(t, fixture.deferreds(), "the library does not poll")
@@ -807,7 +807,6 @@ func TestDraft13DeferredReportsATerminalRefusal(t *testing.T) {
 func TestDraft13DeferredRequiresTheDPoPKeyOfTheToken(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	deferred := &DeferredIssuance{
-		Version:                   IssuanceVersionDraft13,
 		Profile:                   profile.Draft13(),
 		CredentialIssuer:          fixture.server.URL,
 		CredentialConfigurationID: "degree",
@@ -884,7 +883,6 @@ func TestDraft13NotifyIssuer(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	ctx := context.Background()
 	notification := &IssuanceNotification{
-		Version:          IssuanceVersionDraft13,
 		Profile:          profile.Draft13(),
 		CredentialIssuer: fixture.server.URL,
 		NotificationID:   "notification-1",
@@ -944,7 +942,7 @@ func TestDraft13AuthorizationCodeFlowSurvivesJSONRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	authorization := fixture.beginAuthorization(t, fixture.wallet, IssuanceRequest{})
-	require.Equal(t, IssuanceVersionDraft13, authorization.Version)
+	require.Equal(t, profile.VersionDraft13, authorization.Profile.Version())
 	require.Empty(t, fixture.tokens(), "beginning the flow sends nothing to the token endpoint")
 
 	authorizationURL, err := url.Parse(authorization.AuthorizationURL)
@@ -966,7 +964,7 @@ func TestDraft13AuthorizationCodeFlowSurvivesJSONRoundTrip(t *testing.T) {
 	resumed := fixture.newWallet(t)
 	grant, err := resumed.Draft13().AuthorizeIssuance(ctx, &restored, draft13Redirect(&restored, fixture.server.URL))
 	require.NoError(t, err)
-	require.Equal(t, IssuanceVersionDraft13, grant.Version)
+	require.Equal(t, profile.VersionDraft13, grant.Profile.Version())
 
 	var storedGrant IssuanceGrant
 	requireJSONRoundTrip(t, grant, &storedGrant)
@@ -1089,10 +1087,10 @@ func TestDraft13RequiresAnAcceptancePolicy(t *testing.T) {
 
 // draft13States returns a complete state of each stage for issuer, stamped
 // with version.
-func draft13States(issuer string, version IssuanceVersion) (*IssuanceAuthorization, *IssuanceGrant, *DeferredIssuance, *IssuanceNotification) {
+func draft13States(issuer string, version profile.Profile) (*IssuanceAuthorization, *IssuanceGrant, *DeferredIssuance, *IssuanceNotification) {
 	token := &receiverTypes.CredentialIssuanceAccessToken{Token: "access-1", TokenType: "Bearer"}
 	return &IssuanceAuthorization{
-			Version:                   version,
+			Profile:                   version,
 			AuthorizationURL:          issuer + "/authorize?state=state-1",
 			State:                     "state-1",
 			CodeVerifier:              "verifier-1",
@@ -1102,20 +1100,20 @@ func draft13States(issuer string, version IssuanceVersion) (*IssuanceAuthorizati
 			ClientID:                  draft13ClientID,
 			RedirectURI:               draft13RedirectURI,
 		}, &IssuanceGrant{
-			Version:                   version,
+			Profile:                   version,
 			CredentialIssuer:          issuer,
 			CredentialConfigurationID: "degree",
 			AuthorizationServer:       issuer,
 			AccessToken:               token,
 			CNonce:                    "nonce-1",
 		}, &DeferredIssuance{
-			Version:                   version,
+			Profile:                   version,
 			CredentialIssuer:          issuer,
 			CredentialConfigurationID: "degree",
 			TransactionID:             "transaction-1",
 			AccessToken:               token,
 		}, &IssuanceNotification{
-			Version:          version,
+			Profile:          version,
 			CredentialIssuer: issuer,
 			NotificationID:   "notification-1",
 			AccessToken:      token,
@@ -1129,7 +1127,7 @@ func TestDraft13IsForbiddenUnderHAIP(t *testing.T) {
 	haip := newProfileWallet(t, profile.HAIP(), &receiverOid4vci.Oid4vciReceiver{Profile: profile.HAIP()}, nil, acceptIssuerKeyPolicy(fixture.issuerKey))
 	draft13 := haip.Draft13()
 	ctx := context.Background()
-	authorization, grant, deferred, notification := draft13States(fixture.server.URL, IssuanceVersionDraft13)
+	authorization, grant, deferred, notification := draft13States(fixture.server.URL, profile.Draft13())
 
 	_, err := draft13.BeginIssuance(ctx, IssuanceRequest{CredentialOffer: fixture.authorizationCodeOffer()})
 	draft13RequireCoded(t, err, ErrProfileForbidsDraft)
@@ -1157,7 +1155,7 @@ func TestDraft13StatesAndFinalStatesDoNotMix(t *testing.T) {
 	w := fixture.wallet
 	draft13 := w.Draft13()
 
-	authorization, grant, deferred, notification := draft13States(fixture.server.URL, IssuanceVersionDraft13)
+	authorization, grant, deferred, notification := draft13States(fixture.server.URL, profile.Draft13())
 	_, err := w.AuthorizeIssuance(ctx, authorization, draft13Redirect(authorization, ""))
 	draft13RequireCoded(t, err, ErrIssuanceVersionMismatch)
 	_, err = w.RequestCredential(ctx, grant, fixture.holder())
@@ -1166,7 +1164,7 @@ func TestDraft13StatesAndFinalStatesDoNotMix(t *testing.T) {
 	draft13RequireCoded(t, err, ErrIssuanceVersionMismatch)
 	draft13RequireCoded(t, w.NotifyIssuer(ctx, notification, NotificationCredentialAccepted, ""), ErrIssuanceVersionMismatch)
 
-	authorization, grant, deferred, notification = draft13States(fixture.server.URL, IssuanceVersionFinal)
+	authorization, grant, deferred, notification = draft13States(fixture.server.URL, profile.Final())
 	_, err = draft13.AuthorizeIssuance(ctx, authorization, draft13Redirect(authorization, ""))
 	draft13RequireCoded(t, err, ErrIssuanceVersionMismatch)
 	_, err = draft13.RequestCredential(ctx, grant, fixture.holder())

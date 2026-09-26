@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"github.com/trustknots/vcknots/wallet/profile"
 	"net/http"
 	"testing"
 
@@ -25,7 +26,6 @@ func notifyTestEndpoint(f *finalIssuanceFixture) {
 // issuer hands back for notification-1.
 func (f *finalIssuanceFixture) notifyTestNotification() *IssuanceNotification {
 	return &IssuanceNotification{
-		Version:          IssuanceVersionFinal,
 		Profile:          f.wallet.profile,
 		CredentialIssuer: f.server.URL,
 		NotificationID:   "notification-1",
@@ -105,7 +105,7 @@ func TestNotifyIssuerRefusesAnInvalidRequestBeforeSending(t *testing.T) {
 		want   error
 	}{
 		"nil notification":        {func(_ *finalIssuanceFixture, in *input) { in.notification = nil }, ErrInvalidArgument},
-		"another version":         {func(_ *finalIssuanceFixture, in *input) { in.notification.Version = IssuanceVersionDraft13 }, ErrIssuanceVersionMismatch},
+		"another version":         {func(_ *finalIssuanceFixture, in *input) { in.notification.Profile = profile.Draft13() }, ErrIssuanceVersionMismatch},
 		"missing issuer":          {func(_ *finalIssuanceFixture, in *input) { in.notification.CredentialIssuer = "" }, ErrIssuanceStateMismatch},
 		"missing notification_id": {func(_ *finalIssuanceFixture, in *input) { in.notification.NotificationID = " " }, ErrNotificationIDMissing},
 		"unknown event":           {func(_ *finalIssuanceFixture, in *input) { in.event = "credential_lost" }, ErrNotificationEventInvalid},

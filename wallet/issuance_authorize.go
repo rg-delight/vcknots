@@ -121,7 +121,6 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		IssuerState:          issuerState,
 	}
 	authorization := &IssuanceAuthorization{
-		Version:                       IssuanceVersionFinal,
 		Profile:                       w.profile,
 		State:                         state,
 		CodeVerifier:                  verifier,
@@ -169,7 +168,7 @@ func (w *Wallet) AuthorizeIssuance(ctx context.Context, authorization *IssuanceA
 }
 
 func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization, redirectURL string) (*IssuanceGrant, error) {
-	if err := w.checkAuthorizationState(a, IssuanceVersionFinal, w.profile); err != nil {
+	if err := w.checkAuthorizationState(a, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
@@ -233,15 +232,11 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	return w.newFinalGrant(ctx, transport, discovery, a.CredentialConfigurationID, config, token, mode)
 }
 
-// checkAuthorizationState checks that a is a complete state of version,
-// recorded under current, and was created with the wallet's client_id and
-// redirect_uri.
-func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, version IssuanceVersion, current profile.Profile) error {
+// checkAuthorizationState checks that a is a complete state recorded under
+// current, and was created with the wallet's client_id and redirect_uri.
+func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, current profile.Profile) error {
 	if a == nil {
 		return invalidArgument("authorization state is required")
-	}
-	if a.Version != version {
-		return fmt.Errorf("authorization state has version %q: %w", a.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("authorization state", a.Profile, current); err != nil {
 		return err

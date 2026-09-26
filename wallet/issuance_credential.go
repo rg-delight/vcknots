@@ -44,7 +44,7 @@ func (w *Wallet) RequestCredential(ctx context.Context, grant *IssuanceGrant, re
 }
 
 func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
-	if err := checkGrant(grant, IssuanceVersionFinal, w.profile); err != nil {
+	if err := checkGrant(grant, w.profile); err != nil {
 		return nil, err
 	}
 	if err := w.requireFinalIssuance(ctx); err != nil {
@@ -206,7 +206,6 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		return &IssuanceResult{
 			CredentialResponse: response,
 			Deferred: &DeferredIssuance{
-				Version:                   IssuanceVersionFinal,
 				Profile:                   w.profile,
 				CredentialIssuer:          md.CredentialIssuer,
 				CredentialConfigurationID: grant.CredentialConfigurationID,
@@ -240,7 +239,6 @@ func (w *Wallet) acceptCredentialResponse(
 	result := &IssuanceResult{CredentialResponse: response}
 	if response.NotificationID != "" {
 		result.Notification = &IssuanceNotification{
-			Version:           IssuanceVersionFinal,
 			Profile:           w.profile,
 			CredentialIssuer:  md.CredentialIssuer,
 			NotificationID:    response.NotificationID,
@@ -256,14 +254,10 @@ func (w *Wallet) acceptCredentialResponse(
 	return result, nil
 }
 
-// checkGrant checks that grant is a complete state of version, recorded
-// under current.
-func checkGrant(grant *IssuanceGrant, version IssuanceVersion, current profile.Profile) error {
+// checkGrant checks that grant is a complete state recorded under current.
+func checkGrant(grant *IssuanceGrant, current profile.Profile) error {
 	if grant == nil {
 		return invalidArgument("grant is required")
-	}
-	if grant.Version != version {
-		return fmt.Errorf("grant has version %q: %w", grant.Version, ErrIssuanceVersionMismatch)
 	}
 	if err := checkStateProfile("grant", grant.Profile, current); err != nil {
 		return err

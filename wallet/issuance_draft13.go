@@ -22,9 +22,10 @@ import (
 
 // Draft13Issuance runs OpenID4VCI Draft 13 issuances with the same staged
 // methods and state types as the Wallet's 1.0 methods; the states carry
-// IssuanceVersionDraft13. Differences from 1.0: an offer is required, the
-// c_nonce comes from the Token Response and the Credential Response, one key
-// proof is sent, and there are no key attestations or credential encryption.
+// profile.Draft13 as their Profile. Differences from 1.0: an offer is
+// required, the c_nonce comes from the Token Response and the Credential
+// Response, one key proof is sent, and there are no key attestations or
+// credential encryption.
 // Every method returns ErrProfileForbidsDraft under HAIP.
 type Draft13Issuance struct {
 	w *Wallet
@@ -265,7 +266,6 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		IssuerState:          grant.IssuerState,
 	}
 	authorization := &IssuanceAuthorization{
-		Version:                       IssuanceVersionDraft13,
 		Profile:                       profile.Draft13(),
 		State:                         state,
 		CodeVerifier:                  verifier,
@@ -312,7 +312,7 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err != nil {
 		return nil, err
 	}
-	if err := d.w.checkAuthorizationState(a, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := d.w.checkAuthorizationState(a, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
@@ -426,7 +426,6 @@ func (d *Draft13Issuance) newGrant(discovery *issuanceDiscovery, configurationID
 		identifiers = nil
 	}
 	grant := &IssuanceGrant{
-		Version:                   IssuanceVersionDraft13,
 		Profile:                   profile.Draft13(),
 		CredentialIssuer:          discovery.issuerMetadata.CredentialIssuer,
 		CredentialConfigurationID: configurationID,
@@ -472,7 +471,7 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if err := d.w.requireDraft13(); err != nil {
 		return nil, err
 	}
-	if err := checkGrant(grant, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := checkGrant(grant, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	if len(req.HolderKeys) > 1 {
@@ -542,7 +541,6 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 		return &IssuanceResult{
 			CredentialResponse: draft13CredentialResponse(response),
 			Deferred: &DeferredIssuance{
-				Version:                   IssuanceVersionDraft13,
 				Profile:                   profile.Draft13(),
 				CredentialIssuer:          md.CredentialIssuer,
 				CredentialConfigurationID: grant.CredentialConfigurationID,
@@ -628,7 +626,6 @@ func (d *Draft13Issuance) acceptCredential(ctx context.Context, policy *acceptan
 	result := &IssuanceResult{CredentialResponse: draft13CredentialResponse(response)}
 	if response.NotificationID != "" {
 		result.Notification = &IssuanceNotification{
-			Version:           IssuanceVersionDraft13,
 			Profile:           profile.Draft13(),
 			CredentialIssuer:  md.CredentialIssuer,
 			NotificationID:    response.NotificationID,
@@ -684,7 +681,7 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err := d.w.requireDraft13(); err != nil {
 		return nil, err
 	}
-	if err := checkDeferred(deferred, IssuanceVersionDraft13, profile.Draft13()); err != nil {
+	if err := checkDeferred(deferred, profile.Draft13()); err != nil {
 		return nil, err
 	}
 	policy, err := d.w.deferredAcceptancePolicy(deferred)
@@ -731,7 +728,7 @@ func (d *Draft13Issuance) notifyIssuer(ctx context.Context, n *IssuanceNotificat
 	if err := d.w.requireDraft13(); err != nil {
 		return err
 	}
-	if err := checkNotification(n, IssuanceVersionDraft13, profile.Draft13(), event, description); err != nil {
+	if err := checkNotification(n, profile.Draft13(), event, description); err != nil {
 		return err
 	}
 	transport, discovery, dpopKey, err := d.credentialStage(ctx, nil, n.CredentialIssuer, n.AccessToken, n.DPoPKeyThumbprint, ErrNotificationDPoPKeyMissing)
