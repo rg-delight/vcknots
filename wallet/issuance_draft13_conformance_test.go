@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -43,4 +44,32 @@ func TestDraft13RefusesAnAccessTokenOfAnUnknownType(t *testing.T) {
 	fixture := newDraft13Fixture(t)
 	grant := fixture.preAuthorize(t, fixture.wallet)
 	require.Equal(t, "Bearer", grant.AccessToken.TokenType)
+}
+
+// Draft 13 Section 9.3: issuance_pending "SHOULD also contain the interval
+// member ... If interval member is not present, the Wallet MUST use 5 as the
+// default value." A long interval is kept as the issuer named it.
+func TestDraft13IssuancePendingIntervalDefaultsToFiveSeconds(t *testing.T) {
+	for name, test := range map[string]struct {
+		body map[string]any
+		want time.Duration
+	}{
+		"absent":  {map[string]any{"error": "issuance_pending"}, 5 * time.Second},
+		"one day": {map[string]any{"error": "issuance_pending", "interval": 86400}, 24 * time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newDraft13Fixture(t)
+			fixture.set(func(f *draft13Fixture) {
+				f.credentialResponse = func(int, map[string]any) (int, any) {
+					return http.StatusAccepted, map[string]any{"transaction_id": "transaction-1"}
+				}
+				f.deferredResponse = func(int) (int, any) { return http.StatusBadRequest, test.body }
+			})
+			result, err := fixture.receivePreAuthorized(t)
+			require.NoError(t, err)
+			pending, err := fixture.wallet.Draft13().RequestDeferredCredential(context.Background(), result.Deferred)
+			require.NoError(t, err)
+			require.Equal(t, test.want, pending.Deferred.Interval)
+		})
+	}
 }

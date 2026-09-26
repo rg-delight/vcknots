@@ -70,9 +70,14 @@ func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *Issuance
 	return result, classify(err)
 }
 
+// draft13DefaultPendingInterval is the wait, in seconds, of an
+// issuance_pending error that names no interval (Draft 13 Section 9.3).
+const draft13DefaultPendingInterval = 5
+
 // RequestDeferredCredential sends one Draft 13 Deferred Credential Request
 // (Section 9). While the issuer answers issuance_pending, the result's
-// Deferred carries the interval it named.
+// Deferred carries the interval it named, or the Section 9.3 default of five
+// seconds. The library never shortens the issuer's interval.
 func (d *Draft13Issuance) RequestDeferredCredential(ctx context.Context, deferred *DeferredIssuance) (*IssuanceResult, error) {
 	result, err := d.requestDeferredCredential(ctx, deferred)
 	return result, classify(err)
@@ -700,7 +705,13 @@ func (d *Draft13Issuance) requestDeferredCredential(ctx context.Context, deferre
 	if err != nil {
 		var endpointError *receiverTypes.Draft13CredentialEndpointError
 		if errors.As(err, &endpointError) && errors.Is(endpointError, receiverTypes.ErrDraft13IssuancePending) {
-			return pendingDeferred(deferred, d.w, discovery, endpointError.Interval), nil
+			interval := endpointError.Interval
+			if interval <= 0 {
+				// Section 9.3: "If interval member is not present, the Wallet
+				// MUST use 5 as the default value."
+				interval = draft13DefaultPendingInterval
+			}
+			return pendingDeferred(deferred, d.w, discovery, interval), nil
 		}
 		return nil, fmt.Errorf("deferred credential request failed: %w", err)
 	}
