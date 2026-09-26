@@ -363,7 +363,9 @@ func authenticate(ctx context.Context, token string, header jwtHeader, policy Tr
 	if len(signed.Signatures) != 1 {
 		return fmt.Errorf("%s must carry exactly one signature", label)
 	}
-	if _, err := signed.Verify(key); err != nil {
+	// RFC 7518 Sections 3.3 and 3.5: an RSA key shorter than 2048 bits is
+	// refused before the signature is checked under it.
+	if _, err := commonjose.VerifySignature(signed, key); err != nil {
 		return fmt.Errorf("%s signature could not be verified: %w", label, err)
 	}
 	return nil

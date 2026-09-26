@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
+	commonjose "github.com/trustknots/vcknots/wallet/common/jose"
 	commonX509 "github.com/trustknots/vcknots/wallet/common/x509"
 	"github.com/trustknots/vcknots/wallet/keystore"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -556,3 +558,39 @@ func TestKeyRequestIsJSON(t *testing.T) {
 
 // haipX5C is the HAIP 1.0 attestation rule set (profile.HAIPOptions).
 var haipX5C = profile.HAIPOptions().AttestationX5C
+
+// TestValidateRefusesAWeakRSAAttesterKey pins that an attestation is held to
+// the RSA floor of RFC 7518 Sections 3.3 and 3.5 like every other JWS the
+// library verifies, whether it is a Wallet Attestation or a key attestation.
+func TestValidateRefusesAWeakRSAAttesterKey(t *testing.T) {
+	clientKey := newPrivateJWK(t, "client-key-1")
+	holderKey := newPrivateJWK(t, "holder-key-1")
+	sign := func(t *testing.T, key *rsa.PrivateKey, typ string, claims map[string]any) string {
+		t.Helper()
+		signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key}, (&jose.SignerOptions{}).WithType(jose.ContentType(typ)))
+		require.NoError(t, err)
+		token, err := jwt.Signed(signer).Claims(claims).Serialize()
+		require.NoError(t, err)
+		return token
+	}
+	clientRequest := ClientRequest{ClientID: "client-1", ClientKey: clientKey}
+	keyRequest := KeyRequest{Keys: []jose.JSONWebKey{holderKey}, Nonce: "cnonce-1"}
+	for _, bits := range []int{1024, commonjose.MinimumRSAModulusBits} {
+		attester, err := rsa.GenerateKey(rand.Reader, bits)
+		require.NoError(t, err)
+		policy := resolvedBy(jose.JSONWebKey{Key: attester})
+		client := &ClientAttestation{JWT: sign(t, attester, clientAttestationType, clientClaimsFor(clientKey))}
+		key := &KeyAttestation{JWT: sign(t, attester, keyAttestationType, keyClaimsFor(holderKey, "cnonce-1", time.Now().Add(time.Minute)))}
+		clientErr := ValidateClientAttestation(t.Context(), client, clientRequest, policy)
+		keyErr := ValidateKeyAttestation(t.Context(), key, keyRequest, policy)
+		if bits < commonjose.MinimumRSAModulusBits {
+			require.ErrorIs(t, clientErr, ErrClientAttestationInvalid)
+			require.ErrorIs(t, clientErr, commonjose.ErrVerificationKeyTooWeak)
+			require.ErrorIs(t, keyErr, ErrKeyAttestationInvalid)
+			require.ErrorIs(t, keyErr, commonjose.ErrVerificationKeyTooWeak)
+			continue
+		}
+		require.NoError(t, clientErr)
+		require.NoError(t, keyErr)
+	}
+}
