@@ -173,7 +173,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 		if encryption != nil {
 			payload["credential_response_encryption"] = encryption
 		}
-		body, contentType, err := transport.EncodeCredentialRequest(payload, md)
+		body, contentType, err := transport.EncodeCredentialRequest(payload, w.issuance.CredentialEncryption.requestEncodingMetadata(md))
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to encode credential request: %w", err)
 		}

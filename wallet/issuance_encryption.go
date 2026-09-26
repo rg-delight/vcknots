@@ -24,8 +24,10 @@ const (
 	// CredentialEncryptionRequired refuses an issuer that does not offer the
 	// encryption (ErrCredentialEncryptionUnavailable).
 	CredentialEncryptionRequired
-	// CredentialEncryptionDisabled asks for no encryption and refuses an
-	// issuer that requires it (ErrCredentialEncryptionDisallowed).
+	// CredentialEncryptionDisabled asks for no encryption, also when the
+	// issuer offers it optionally (encryption_required false: "the Wallet MAY
+	// choose"), and refuses an issuer that requires it
+	// (ErrCredentialEncryptionDisallowed).
 	CredentialEncryptionDisabled
 )
 
@@ -43,6 +45,19 @@ type CredentialEncryptionPolicy struct {
 
 func (p CredentialEncryptionPolicy) disablesEncryption() bool {
 	return p.Request == CredentialEncryptionDisabled || p.Response == CredentialEncryptionDisabled
+}
+
+// requestEncodingMetadata is the metadata a (Deferred) Credential Request is
+// encoded against: md, or, when the policy disables encryption, md without
+// credential_request_encryption, so the request travels unencrypted. validate
+// has already refused an issuer that requires request encryption.
+func (p CredentialEncryptionPolicy) requestEncodingMetadata(md *receiverTypes.CredentialIssuerMetadata) *receiverTypes.CredentialIssuerMetadata {
+	if md == nil || md.CredentialRequestEncryption == nil || !p.disablesEncryption() {
+		return md
+	}
+	plain := *md
+	plain.CredentialRequestEncryption = nil
+	return &plain
 }
 
 // responseEncryptionKey returns a new ephemeral key the Credential Response is
@@ -101,17 +116,20 @@ func (p CredentialEncryptionPolicy) validate(md *receiverTypes.CredentialIssuerM
 	requestEncryption := md.CredentialRequestEncryption
 	issuerRequiresResponseEncryption := responseEncryption != nil &&
 		responseEncryption.EncryptionRequired != nil && *responseEncryption.EncryptionRequired
+	issuerRequiresRequestEncryption := requestEncryption != nil &&
+		requestEncryption.EncryptionRequired != nil && *requestEncryption.EncryptionRequired
 	switch {
 	case p.disablesEncryption() && issuerRequiresResponseEncryption:
 		return fmt.Errorf("%w: the credential issuer requires credential response encryption", ErrCredentialEncryptionDisallowed)
+	case p.disablesEncryption() && issuerRequiresRequestEncryption:
+		// Section 8.1: "The Client MAY encrypt the request when
+		// encryption_required is false and MUST do so when encryption_required
+		// is true."
+		return fmt.Errorf("%w: the credential issuer requires credential request encryption", ErrCredentialEncryptionDisallowed)
 	case issuerRequiresResponseEncryption && requestEncryption == nil:
 		// Section 8.2: the request must be encrypted when it carries the
 		// response key, so the issuer's own metadata leaves no valid request.
 		return fmt.Errorf("%w: the credential issuer requires credential response encryption but advertises no credential_request_encryption", ErrCredentialEncryptionUnavailable)
-	case p.Request == CredentialEncryptionDisabled && requestEncryption != nil:
-		// Section 8.1 leaves no way to opt out of advertised request
-		// encryption.
-		return fmt.Errorf("%w: the credential issuer advertises credential request encryption", ErrCredentialEncryptionDisallowed)
 	case p.Request == CredentialEncryptionRequired && requestEncryption == nil:
 		return fmt.Errorf("%w: the credential issuer advertises no credential_request_encryption", ErrCredentialEncryptionUnavailable)
 	case p.Response == CredentialEncryptionRequired && (responseEncryption == nil || requestEncryption == nil):

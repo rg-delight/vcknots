@@ -68,7 +68,7 @@ func (w *Wallet) requestDeferredCredential(ctx context.Context, d *DeferredIssua
 		}
 		request["credential_response_encryption"] = encryption
 	}
-	body, contentType, err := transport.EncodeCredentialRequest(request, md)
+	body, contentType, err := transport.EncodeCredentialRequest(request, w.issuance.CredentialEncryption.requestEncodingMetadata(md))
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode deferred credential request: %w", err)
 	}

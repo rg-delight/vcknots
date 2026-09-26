@@ -77,9 +77,42 @@ func TestCredentialEncryptionPolicyDisabled(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, key, "a disabled response encryption asks for no key")
 
+	// Section 8.1: "The Client MAY encrypt the request when
+	// encryption_required is false and MUST do so when encryption_required is
+	// true." Disabling request encryption refuses only the latter.
 	disabledRequest := CredentialEncryptionPolicy{Request: CredentialEncryptionDisabled}
-	_, err = disabledRequest.responseEncryptionKey(encryptionTestMetadata(true, false, false))
+	required, optional := true, false
+	requiredRequest := encryptionTestMetadata(true, false, false)
+	requiredRequest.CredentialRequestEncryption.EncryptionRequired = &required
+	_, err = disabledRequest.responseEncryptionKey(requiredRequest)
 	require.ErrorIs(t, err, ErrCredentialEncryptionDisallowed)
+	disabled.Response = CredentialEncryptionDisabled
+	_, err = disabled.responseEncryptionKey(requiredRequest)
+	require.ErrorIs(t, err, ErrCredentialEncryptionDisallowed, "disabling either encryption disables both")
+
+	optionalRequest := encryptionTestMetadata(true, false, false)
+	optionalRequest.CredentialRequestEncryption.EncryptionRequired = &optional
+	key, err = disabledRequest.responseEncryptionKey(optionalRequest)
+	require.NoError(t, err)
+	require.Nil(t, key)
+	require.Nil(t, disabledRequest.requestEncodingMetadata(optionalRequest).CredentialRequestEncryption, "the request is not encrypted")
+	require.NotNil(t, optionalRequest.CredentialRequestEncryption, "the issuer metadata itself is left alone")
+	require.NotNil(t, CredentialEncryptionPolicy{}.requestEncodingMetadata(optionalRequest).CredentialRequestEncryption, "following the issuer encrypts what it offers")
+}
+
+// End to end: a wallet that disables encryption sends a plaintext
+// Credential Request to an issuer whose request encryption is optional.
+func TestCredentialEncryptionDisabledSendsPlaintextToAnOptionalIssuer(t *testing.T) {
+	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.requestEncryption = true
+		f.requestEncryptionOptional = true
+		f.encryptionPolicy = CredentialEncryptionPolicy{Request: CredentialEncryptionDisabled, Response: CredentialEncryptionDisabled}
+	})
+	result, err := fixture.receive(fixture.issuanceRequest())
+	require.NoError(t, err)
+	require.Len(t, result.Credentials, 1)
+	require.Equal(t, "application/json", fixture.credentialHeaders.Get("Content-Type"))
+	require.NotContains(t, fixture.lastCredentialBody, "credential_response_encryption")
 }
 
 // The policy is applied at the first stage, before the authorization request

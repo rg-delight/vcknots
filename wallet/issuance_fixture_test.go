@@ -83,7 +83,10 @@ type finalIssuanceFixture struct {
 	responseAlgValues []string
 	responseEncValues []string
 	requestEncryption bool
-	omitPAREndpoint   bool
+	// requestEncryptionOptional publishes credential_request_encryption with
+	// encryption_required false.
+	requestEncryptionOptional bool
+	omitPAREndpoint           bool
 	// anonymousAccess is the pre-authorized_grant_anonymous_access_supported
 	// the authorization server metadata carries; nil omits it. The default
 	// fixture sets it to true.
@@ -413,7 +416,7 @@ func (f *finalIssuanceFixture) serveHTTP(w http.ResponseWriter, r *http.Request)
 			metadata["credential_request_encryption"] = map[string]any{
 				"jwks":                 map[string]any{"keys": []any{f.requestEncryptionKey.Public()}},
 				"enc_values_supported": []string{"A128GCM"},
-				"encryption_required":  true,
+				"encryption_required":  !f.requestEncryptionOptional,
 			}
 		}
 		mockserver.JSONResponse(w, http.StatusOK, metadata)
