@@ -167,15 +167,6 @@ func isDCAPIMode(mode OAuthAuthzReqResponseMode) bool {
 	return mode == OAuthAuthzReqResponseModeDCAPI || mode == OAuthAuthzReqResponseModeDCAPIJWT
 }
 
-// validateRedirectAndResponseURIExclusivity refuses a direct_post request that
-// carries both redirect_uri and response_uri (OID4VP 1.0 §5.1, §8.2).
-func validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam string) error {
-	if redirectURIFromParam != "" && responseURIFromParam != "" {
-		return newAuthorizationRequestError(InvalidRequestError, "redirect_uri and response_uri must not both be present in the same request")
-	}
-	return nil
-}
-
 // withoutIssuerClaim drops iss, which a Wallet must ignore in a Request Object
 // (OID4VP 1.0 §5).
 func withoutIssuerClaim(params map[string]any) map[string]any {

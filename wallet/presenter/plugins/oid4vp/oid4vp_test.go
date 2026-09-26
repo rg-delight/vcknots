@@ -624,12 +624,12 @@ func TestOid4vpPresenter_ParsePresentationRequest_QueryParamValidations(t *testi
 		},
 		// redirect_uri matches the client_id-derived value on purpose so the
 		// mismatch check (redirectURIFromParam vs redirectURIFromClientID) does
-		// not fire first and the new exclusivity check is exercised.
+		// not fire first and the direct_post rule is exercised.
 		{
 			name:    "redirect_uri and response_uri must not coexist",
 			uri:     "openid4vp://present?client_id=redirect_uri:http://example.com/cb&response_type=vp_token&nonce=n&dcql_query=" + testDcqlQueryParam + "&response_mode=direct_post&redirect_uri=http://example.com/cb&response_uri=https://example.com/response",
 			wantErr: true,
-			errSub:  "redirect_uri and response_uri must not both be present",
+			errSub:  "redirect_uri must not be present with response_mode direct_post",
 		},
 	}
 

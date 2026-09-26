@@ -94,16 +94,19 @@ func (b *requestBuilder) setParamsWithAnyMap(params map[string]any) {
 	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
 	responseURIFromParam := getParam("response_uri", responseURIRequired)
 
-	// OID4VP 1.0 §8.2: redirect_uri and response_uri are mutually exclusive
-	// when response_mode is direct_post (or direct_post.jwt).
-	if isDirectPostMode(b.req.ResponseMode) {
-		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
-			b.errValidation = err
-			return
-		}
-	}
-
 	b.req.ResponseURI = responseURIFromParam
+
+	// OID4VP 1.0 §8.2: "If the redirect_uri Authorization Request parameter
+	// is present when the Response Mode is direct_post, the Wallet MUST
+	// return an invalid_request Authorization Response error", and §8.3.1
+	// applies §8.2 to direct_post.jwt.
+	if isDirectPostMode(b.req.ResponseMode) && redirectURIFromParam != "" {
+		// The error response may only go where the Client Identifier binds
+		// the Response URI (§5.9.3), never to a URI the request chose.
+		b.req.ResponseURI = redirectURIFromClientID
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+		return
+	}
 
 	// OID4VP 1.0 §5.9.3 binds the Response URI to the redirect_uri Client
 	// Identifier the same way it binds the Redirect URI, so a foreign

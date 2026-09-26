@@ -299,13 +299,17 @@ func (b *draft24RequestBuilder) setParams(params map[string]any) {
 	// Response Mode direct_post is used)."
 	responseURIRequired := isDirectPostMode(b.req.ResponseMode) && redirectURIFromClientID == ""
 	responseURIFromParam := getParam("response_uri", responseURIRequired)
-	if isDirectPostMode(b.req.ResponseMode) {
-		if err := validateRedirectAndResponseURIExclusivity(redirectURIFromParam, responseURIFromParam); err != nil {
-			b.errValidation = err
-			return
-		}
-	}
 	b.req.ResponseURI = responseURIFromParam
+	// Draft 24 §8.2: "If the redirect_uri Authorization Request parameter is
+	// present when the Response Mode is direct_post, the Wallet MUST return
+	// an invalid_request Authorization Response error"; direct_post.jwt is
+	// direct_post with JARM (§8.3.1).
+	if isDirectPostMode(b.req.ResponseMode) && redirectURIFromParam != "" {
+		b.req.RedirectURI = ""
+		b.req.ResponseURI = redirectURIFromClientID
+		b.errValidation = newAuthorizationRequestError(InvalidRequestError, "%w", ErrRedirectURIWithDirectPost)
+		return
+	}
 	if redirectURIFromClientID != "" && isDirectPostMode(b.req.ResponseMode) {
 		b.req.RedirectURI = ""
 		if responseURIFromParam == "" {
