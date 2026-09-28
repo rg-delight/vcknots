@@ -846,6 +846,7 @@ func receivePreAuthorized(ctx context.Context, w *wallet.Wallet, offerURI, txCod
 HAIP では `Config.ClientAuth.ClientID` の設定が必須です。
 Client Attestation を使わないとき、設定した `Config.ClientAuth.Method`（既定は `none`）が認可サーバーの `token_endpoint_auth_methods_supported` に含まれている必要があります。
 この一覧がなければ RFC 8414 §2 により `client_secret_basic` とみなされ、wallet はこの方式を実装していないので、送信前に `client_authentication_unavailable` で拒否します。
+ただし、サーバーが `pre-authorized_grant_anonymous_access_supported: true` を宣言していれば、匿名の要求（クライアント認証なし、`client_id` なし）を送ります。§6.1 はこの grant でのクライアント認証を OPTIONAL とし、§12.3 はこのパラメータで `client_id` のない要求を受け付けると宣言させるからです。
 `none` のとき、`pre-authorized_grant_anonymous_access_supported` は `client_id` を送るかどうかだけを決めます。
 `true` なら、`client_id` を設定していても token request に含めません。
 それ以外のとき（既定値は `false`、§12.3）は `Config.ClientAuth.ClientID` を送り、設定がなければ `client_authentication_unavailable` で拒否します。
@@ -1606,6 +1607,7 @@ upstream の `main` のエクスポートされたシグネチャは、`ReceiveC
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
 * `VerifyCredential` は、proof が検証できたときだけ、かつ `acceptance.DefaultSigningAlgorithms()`（ES256）に限り true を返します。nil の Credential には false を返します。
 * `ReceiveCredential` は `context.Context` を受け取り、`Draft13()` の Draft 13 Pre-Authorized Code Flow を 1 回の呼出しで実行します。`credential_configuration_id` と `proofs` の代わりに Draft 13 の Credential Request（`format` と 1 つの `proof`）を送り、key proof の `c_nonce` は Token Response からだけ得ます。`nonce_endpoint` は呼ばず、そこから Token Response の `c_nonce` に切り替えることもありません。`Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。受理ポリシー（`ReceiveCredentialRequest.Acceptance` または `Config.CredentialAcceptance`）と `Key` が必要で、なければ何も要求せずに `ErrCredentialAcceptancePolicyRequired` か `ErrDraft13HolderKeyMissing` を返します。以前は解析しただけの Credential を保存していました。ポリシーを満たさない Credential と、`cnf` が `Key` 以外の鍵を指す Credential は保存しません。storeless の wallet は Credential を保存せずに返します。Deferred の応答は `ErrDraft13CredentialDeferred` を返します。token request は、OpenID4VCI 1.0 の `token_endpoint_auth_methods_supported` による交渉ではなく、Draft 13 §6.1 に従います。`Config.ClientAuth.ClientID` があれば常に送り、匿名の token request（`client_id` なし）には `pre-authorized_grant_anonymous_access_supported: true` が必要です（値がなければ `false` です）。メタデータの `token_endpoint_auth_methods_supported` は、設定した `private_key_jwt` の assertion を付けるかどうかだけを決めます。Offer の Issuer は、receiver plugin が許す場合（`HTTPSchemePolicy`）に限り平文 HTTP を使えます。
+* `pre-authorized_grant_anonymous_access_supported: true` を宣言し、`token_endpoint_auth_methods_supported` を省略した認可サーバーへの pre-authorized_code の token request は、`client_authentication_unavailable` で拒否せず、匿名（クライアント認証なし、`client_id` なし）で送ります（OpenID4VCI 1.0 §6.1、§12.3）。方式の一覧を公開しているサーバーでは、従来どおりその一覧で決めます。
 * `ReceiveCredentialRequest` に `Acceptance` と `CredentialConfigurationID` があります。`Type`（OpenID4VCI しかありません）、`RequestedFormat`（configuration は `CredentialConfigurationID` で選びます）、`CachedIssuerMetadata`（メタデータは常に再取得します）を削除しました。
 * `PresentCredential` と `PresentCredentialWithOptions` は `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を実行します。保存済み Credential は最新のものではなく DCQL クエリで選び、答える query ごとに提示を作り、query の要求どおりに Key Binding JWT を付けます。要求は [Verifier の認証](#verifier-authentication)の規則で受け付けます。
 * `GetCredentialEntries` と `GetCredentialEntry` は、storeless の wallet で `ErrNoCredentialStore` を返します。
@@ -1668,7 +1670,7 @@ upstream の `main` のエクスポートされたシグネチャは、`ReceiveC
   * **A:** `curl http://localhost:8080/.well-known/openid-credential-issuer` を実行して JSON メタデータが返ること、その `credential_issuer` が Offer の識別子と一致することを確認してください。識別子がパスを持つとき、1.0 の発行は `/.well-known/openid-credential-issuer/<パス>` を、Draft 13 の発行は `<パス>/.well-known/openid-credential-issuer` を読み、ほかの位置は試しません。
 
 * **Q: Pre-Authorized Code の発行が `client_authentication_unavailable` で失敗する。**
-  * **A:** token request に使えるクライアント認証が見つかりません。理由はエラーメッセージに出ます。認可サーバーのメタデータが `token_endpoint_auth_methods_supported` を省略しているか、設定した方式（既定は `none`）を含んでいないか、`none` を含んでいても `pre-authorized_grant_anonymous_access_supported` を `true` にしておらず（既定値は `false`）、wallet に `client_id` がありません。サーバーが示す方式を `Config.ClientAuth` に設定するか、`Config.ClientAuth.ClientID` を設定するか、サーバー側で匿名アクセスを宣言してください。
+  * **A:** token request に使えるクライアント認証が見つかりません。理由はエラーメッセージに出ます。認可サーバーのメタデータが匿名アクセスを宣言せずに `token_endpoint_auth_methods_supported` を省略しているか、設定した方式（既定は `none`）を含んでいないか、`none` を含んでいても `pre-authorized_grant_anonymous_access_supported` を `true` にしておらず（既定値は `false`）、wallet に `client_id` がありません。サーバーが示す方式を `Config.ClientAuth` に設定するか、`Config.ClientAuth.ClientID` を設定するか、サーバー側で匿名アクセスを宣言してください。
 
 * **Q: Credential の要求が `credential_acceptance_policy_required` で失敗する。**
   * **A:** `Config.CredentialAcceptance` か `CredentialRequest.Acceptance` を設定してください。ポリシーは Issuer を認証できる方式を許していなければなりません。`x5c` を持つ Credential には `IssuerX509`、JWT VC Issuer Metadata や DID Configuration で束縛された DID には `IssuerKeys`、OpenID Federation の Entity には `Federation` です。テスト用の Issuer も同じ方法で認証します（たとえばテスト用 CA を `IssuerX509` に入れます）。

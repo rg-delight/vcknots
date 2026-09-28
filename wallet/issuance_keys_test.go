@@ -254,7 +254,7 @@ func TestResolveClientAuthMethod(t *testing.T) {
 
 	t.Run("rejects when token_endpoint_auth_methods_supported is omitted", func(t *testing.T) {
 		authMetadata := &receiverTypes.AuthorizationServerMetadata{
-			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(true),
+			PreAuthorizedGrantAnonymousAccessSupported: boolPtr(false),
 		}
 		_, err := resolveClientAuthMethod(ClientAuthConfig{}, authMetadata)
 		require.ErrorIs(t, err, errNoUsableClientAuthMethod)
@@ -363,12 +363,16 @@ func TestResolveClientAuthMethod_Matrix(t *testing.T) {
 		wantSendClientID bool
 		wantErrContains  string
 	}{
-		// Absent list: RFC 8414 section 2 default, nothing else is consulted.
+		// Absent list: RFC 8414 section 2 default.
 		{name: "methods=absent/anon=absent/config=C1", methods: nil, anon: nil, clientAuth: configNoClientID, wantErrContains: errListAbsent},
 		{name: "methods=absent/anon=absent/config=C2", methods: nil, anon: nil, clientAuth: configClientID, wantErrContains: errListAbsent},
 		{name: "methods=absent/anon=absent/config=C3", methods: nil, anon: nil, clientAuth: configPrivateKey, wantErrContains: errListAbsent},
-		{name: "methods=absent/anon=true/config=C1", methods: nil, anon: boolPtr(true), clientAuth: configNoClientID, wantErrContains: errListAbsent},
-		{name: "methods=absent/anon=true/config=C2", methods: nil, anon: boolPtr(true), clientAuth: configClientID, wantErrContains: errListAbsent},
+		// Except for an anonymous request: OpenID4VCI 1.0 Sections 6.1 and 12.3
+		// let a server that declares anonymous access take a request without
+		// client authentication and without client_id, and the RFC 8414
+		// default names only how a confidential client authenticates.
+		{name: "methods=absent/anon=true/config=C1", methods: nil, anon: boolPtr(true), clientAuth: configNoClientID, wantMethod: receiverTypes.None},
+		{name: "methods=absent/anon=true/config=C2", methods: nil, anon: boolPtr(true), clientAuth: configClientID, wantMethod: receiverTypes.None},
 		{name: "methods=absent/anon=true/config=C3", methods: nil, anon: boolPtr(true), clientAuth: configPrivateKey, wantErrContains: errListAbsent},
 		{name: "methods=absent/anon=false/config=C1", methods: nil, anon: boolPtr(false), clientAuth: configNoClientID, wantErrContains: errListAbsent},
 		{name: "methods=absent/anon=false/config=C2", methods: nil, anon: boolPtr(false), clientAuth: configClientID, wantErrContains: errListAbsent},
