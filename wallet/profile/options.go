@@ -4,8 +4,10 @@ import "strings"
 
 // Options are the constraints a profile adds to OpenID4VCI 1.0 and OpenID4VP
 // 1.0. Each field is one requirement of HAIP 1.0, named by the section that
-// states it, and can be applied on its own through Profile.With. The zero
-// value adds no constraint: it is OpenID4VCI 1.0 / OpenID4VP 1.0 Final.
+// states it, or a check the specifications leave to the Wallet, which no
+// profile turns on by default; each can be applied on its own through
+// Profile.With. The zero value adds no constraint: it is OpenID4VCI 1.0 /
+// OpenID4VP 1.0 Final.
 //
 // Options is comparable, so a Profile is comparable too. Options.String names
 // the options that are on, in the spelling the text form of a Profile and
@@ -42,6 +44,16 @@ type Options struct {
 	// anchors) a chain carrying a trust anchor.
 	// HAIP 1.0 §6.1 (IETF SD-JWT VC Profile).
 	StatusListTokenX5C X5CRules
+	// RequireStatusListSignerBinding binds the x5c leaf of a Status List
+	// Token to the Referenced Token's issuer, beyond the chain reaching a
+	// configured trust anchor: the leaf has the key or the non-empty subject
+	// of the credential's issuer certificate, shares its issuing certificate
+	// authority (issuer name and authority key identifier), or names the host
+	// of the credential's https iss. draft-ietf-oauth-status-list-21 §11.3
+	// "does not mandate specific methods for key resolution and trust
+	// management" and only recommends these links, and HAIP 1.0 §6.1 adds
+	// none, so no profile turns it on; HAIPOptions leaves it off.
+	RequireStatusListSignerBinding bool
 
 	// RequirePAR refuses an authorization server without a Pushed
 	// Authorization Request endpoint.
@@ -125,9 +137,10 @@ type Options struct {
 }
 
 // HAIPOptions returns every constraint HAIP 1.0 adds to OpenID4VCI 1.0 and
-// OpenID4VP 1.0: all options on, credential formats restricted to dc+sd-jwt
-// and mso_mdoc, and signed requests to the x509_hash Client Identifier
-// Prefix.
+// OpenID4VP 1.0: all options HAIP states on, credential formats restricted to
+// dc+sd-jwt and mso_mdoc, and signed requests to the x509_hash Client
+// Identifier Prefix. The checks HAIP leaves to the Wallet
+// (RequireStatusListSignerBinding) stay off.
 func HAIPOptions() Options {
 	all := X5CRules{Require: true, ExcludeAnchor: true, RejectSelfSigned: true}
 	return Options{

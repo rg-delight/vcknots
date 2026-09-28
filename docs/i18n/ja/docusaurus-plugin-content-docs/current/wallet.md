@@ -1466,6 +1466,9 @@ HAIP はさらに、それぞれ `profile.Options` のフィールドを通じ�
 
 `w.StatusListChecker(base)` は、`base` の `Profile` が wallet の 1.0 プロファイルであることを確かめてから `statuslist.Checker` の複製を返します（違えば `ErrProfileMismatch`）。
 checker は自身のプロファイルの Option を適用します。HAIP 1.0 §6.1 なら、token の鍵を `x5c` に含める、トラストアンカーを含めない、自己署名の leaf を使わない、です。そのため HAIP の wallet でゼロ値（Final）のプロファイルのままの checker は、弱い規則で動かさずに拒否します。
+鍵の hook `issuerkeys.Resolver.StatusListKeyFunc` は、設定したアンカーに届く token の `x5c` チェーンの leaf を受け入れます。draft-ietf-oauth-status-list-21 §11.3 は、Status List Token の署名者と Credential の Issuer との束縛を義務づけていないからです。
+`profile.Options.RequireStatusListSignerBinding` はどのプロファイルでも既定で無効で、有効にすると、leaf が Credential の Issuer 証明書（`X5CTrust.IssuerCertificate`）と同じ鍵か subject を持つこと、同じ CA が発行したこと、または `iss` のホストを名指すことも求めます。
+Extended Key Usage は `X5CTrust.KeyUsages` を設定したときだけ要求します。
 `ForbidExperimental` の下では、`Experimental` を設定した checker を拒否します（`statuslist.ErrStatusListInsecureTransportForbidden`）。
 ライブラリが既定で作る HTTP client（receiver、presenter、Federation の resolver、Issuer の鍵の resolver、Status List の checker、CRL の取得）は、すべて TLS 1.2 以上で接続します（HAIP 1.0 §4 が適用する FAPI 2.0 Security Profile §5.2.1、BCP 195）。
 呼出し側が注入した client は、その TLS 設定のままです。

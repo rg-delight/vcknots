@@ -86,6 +86,14 @@ func keyRequest(issuer string, header map[string]any) statuslist.KeyRequest {
 	return statuslist.KeyRequest{Issuer: issuer, Header: header}
 }
 
+// boundKeyRequest is keyRequest under
+// profile.Options.RequireStatusListSignerBinding.
+func boundKeyRequest(issuer string, header map[string]any) statuslist.KeyRequest {
+	request := keyRequest(issuer, header)
+	request.RequireSignerBinding = true
+	return request
+}
+
 // TestStatusListKeysX5C covers an https issuer whose token carries x5c: the
 // chain is the only key source (SD-JWT VC -19 Section 2.5 and 7.3),
 // and a chain that is not trusted is refused rather than replaced by another
@@ -143,13 +151,6 @@ func TestStatusListKeysX5C(t *testing.T) {
 				return nil, statusListHeader(f.leaf)
 			},
 			failure: failureChainUntrusted,
-		},
-		{
-			name: "a leaf that does not name the issuer host",
-			arrange: func(t *testing.T, f *statusListFixture) (*X5CTrust, map[string]any) {
-				return f.trust(f.ca.certificate), statusListHeader(newTestLeaf(t, f.ca, "other.example.test"))
-			},
-			failure: "certificate does not name the issuer host",
 		},
 		{
 			name: "a malformed chain",
@@ -220,7 +221,7 @@ func TestStatusListKeysBindsTheTokenToTheCredentialLeaf(t *testing.T) {
 
 	resolve := func(t *testing.T, f *statusListFixture, trust *X5CTrust, leaf testCertificate) error {
 		t.Helper()
-		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest(f.issuer, statusListHeader(leaf)))
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, boundKeyRequest(f.issuer, statusListHeader(leaf)))
 		return err
 	}
 	failureOf := func(t *testing.T, err error) string {
@@ -303,7 +304,7 @@ func TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost(t *testing.T) {
 		t.Helper()
 		trust := f.trust(f.ca.certificate)
 		trust.IssuerCertificate = issuerCertificate.certificate
-		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest(issuer, statusListHeader(leaf)))
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, boundKeyRequest(issuer, statusListHeader(leaf)))
 		return err
 	}
 	const emptyFailure = "certificate subject is empty and does not identify the credential issuer"
@@ -577,13 +578,68 @@ func TestStatusListKeysDID(t *testing.T) {
 	})
 }
 
+// TestStatusListKeysAcceptsAnAnchoredSignerByDefault covers the default
+// trust of a Status List Token signer. draft-ietf-oauth-status-list-21
+// Section 11.3 "does not mandate specific methods for key resolution and
+// trust management", and HAIP 1.0 Section 6.1 asks only that the key be in
+// x5c, the anchor not be included and the leaf not be self-signed. The leaf
+// of a chain that reaches a configured anchor is therefore accepted though it
+// shares nothing with the credential's issuer certificate, and
+// RequireStatusListSignerBinding refuses the same token.
+func TestStatusListKeysAcceptsAnAnchoredSignerByDefault(t *testing.T) {
+	t.Parallel()
+	arrange := func(t *testing.T) (*statusListFixture, *X5CTrust, testCertificate) {
+		t.Helper()
+		f := newStatusListFixture(t)
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = newTestLeafWithSubject(t, newTestCA(t, "credential root"), "credential issuer", nil, "issuer.example.test").certificate
+		signer := newTestLeafWithSubject(t, f.ca, "status service", nil, "status.example.test")
+		return f, trust, signer
+	}
+
+	for name, issuer := range map[string]string{"with iss": "https://issuer.example.test", "without iss": ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f, trust, signer := arrange(t)
+			request := keyRequest(issuer, statusListHeader(signer))
+			request.X5C = profile.HAIPOptions().StatusListTokenX5C
+			keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mechanismsOf(resolution.Candidates); !slices.Equal(got, []Mechanism{MechanismX5CTrustedChain}) || len(keys) != 1 {
+				t.Fatalf("mechanisms = %v, keys = %d", got, len(keys))
+			}
+
+			request.RequireSignerBinding = true
+			_, _, err = f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, request)
+			var unresolved *UnresolvedError
+			if !errors.As(err, &unresolved) {
+				t.Fatalf("under RequireStatusListSignerBinding: err = %v, want *UnresolvedError", err)
+			}
+		})
+	}
+
+	t.Run("the chain must still reach a configured anchor", func(t *testing.T) {
+		t.Parallel()
+		f, trust, signer := arrange(t)
+		trust.TrustAnchors = []*x509.Certificate{newTestCA(t, "another root").certificate}
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest(f.issuer, statusListHeader(signer)))
+		var unresolved *UnresolvedError
+		if !errors.As(err, &unresolved) || diagnosticFor(t, unresolved.Diagnostics, RungX5C).Failure != failureChainUntrusted {
+			t.Fatalf("err = %v, want an untrusted chain", err)
+		}
+	})
+}
+
 // statusListUnlinkedFailure is the x5c diagnostic of a Status List Token leaf
 // that no draft-ietf-oauth-status-list-21 Section 11.3 link binds to the
 // credential's issuer certificate.
 const statusListUnlinkedFailure = "certificate is neither the credential issuer's nor issued by the credential issuer's certificate authority"
 
-// TestStatusListKeysAcceptsAStatusIssuerOfTheSameCA covers
-// draft-ietf-oauth-status-list-21 Section 11.3: when the Status Issuer is
+// TestStatusListKeysAcceptsAStatusIssuerOfTheSameCA covers the same-CA link
+// RequireStatusListSignerBinding accepts, after draft-ietf-oauth-status-list-21
+// Section 11.3: when the Status Issuer is
 // another entity than the credential's issuer, "the keys used for the Status
 // List Token may be cryptographically linked, e.g. by a Certificate Authority
 // through an x.509 PKI", and the two certificates "should be issued by the
@@ -593,7 +649,7 @@ const statusListUnlinkedFailure = "certificate is neither the credential issuer'
 func TestStatusListKeysAcceptsAStatusIssuerOfTheSameCA(t *testing.T) {
 	t.Parallel()
 	resolve := func(f *statusListFixture, trust *X5CTrust) error {
-		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest("", statusListHeader(f.leaf)))
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, boundKeyRequest("", statusListHeader(f.leaf)))
 		return err
 	}
 	failureOf := func(t *testing.T, err error) string {
@@ -648,7 +704,7 @@ func TestStatusListKeysWithoutIssuer(t *testing.T) {
 		f := newStatusListFixture(t)
 		trust := f.trust(f.ca.certificate)
 		trust.IssuerCertificate = newTestLeaf(t, f.ca, "credential.example.test").certificate
-		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest("", statusListHeader(f.leaf)))
+		keys, resolution, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, boundKeyRequest("", statusListHeader(f.leaf)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -673,7 +729,7 @@ func TestStatusListKeysWithoutIssuer(t *testing.T) {
 			f := newStatusListFixture(t)
 			trust := f.trust(f.ca.certificate)
 			trust.IssuerCertificate = test.issuer(t, f)
-			_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest("", statusListHeader(f.leaf)))
+			_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, boundKeyRequest("", statusListHeader(f.leaf)))
 			var unresolved *UnresolvedError
 			if !errors.As(err, &unresolved) {
 				t.Fatalf("err = %v", err)
@@ -687,7 +743,7 @@ func TestStatusListKeysWithoutIssuer(t *testing.T) {
 	t.Run("a token without x5c is not resolved", func(t *testing.T) {
 		t.Parallel()
 		f := newStatusListFixture(t)
-		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), f.trust(f.ca.certificate), keyRequest("", statusListHeader()))
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), f.trust(f.ca.certificate), boundKeyRequest("", statusListHeader()))
 		if !errors.Is(err, ErrNoIssuerKeyResolved) {
 			t.Fatalf("err = %v", err)
 		}

@@ -44,10 +44,25 @@ func leafFields(t *testing.T, visit func(path string, field reflect.Value)) {
 	walk("", reflect.ValueOf(&options).Elem())
 }
 
+// walletChoices are the options that state a check the specifications leave
+// to the Wallet rather than a requirement of HAIP 1.0, so HAIPOptions leaves
+// them off.
+var walletChoices = map[string]bool{
+	// draft-ietf-oauth-status-list-21 §11.3 mandates no signer binding, and
+	// HAIP 1.0 §6.1 adds none.
+	"RequireStatusListSignerBinding": true,
+}
+
 func TestHAIPOptionsTurnsOnEveryRequirement(t *testing.T) {
 	haip := reflect.ValueOf(HAIPOptions())
 	leafFields(t, func(path string, _ reflect.Value) {
 		field := haip.FieldByIndex(fieldIndex(t, path))
+		if walletChoices[path] {
+			if !field.IsZero() {
+				t.Errorf("HAIPOptions turns on %s, which HAIP does not require", path)
+			}
+			return
+		}
 		if field.IsZero() {
 			t.Errorf("HAIPOptions leaves %s off", path)
 		}
