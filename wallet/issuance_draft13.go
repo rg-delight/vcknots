@@ -194,18 +194,36 @@ func (d *Draft13Issuance) dpopEnabled(as *receiverTypes.AuthorizationServerMetad
 	return as != nil && as.DPoPSigningAlgValuesSupported != nil && len(*as.DPoPSigningAlgValuesSupported) > 0
 }
 
-// tokenAuthentication is the DPoP and private_key_jwt of a Draft 13 token or
-// PAR request.
-func (d *Draft13Issuance) tokenAuthentication(ctx context.Context, as *receiverTypes.AuthorizationServerMetadata, dpop bool) receiverTypes.ClientAuthentication {
+// tokenAuthentication is the DPoP and client authentication of a Draft 13
+// token or PAR request. The configured method is used as configured, never
+// downgraded: private_key_jwt needs the server to advertise it, and none
+// needs a server that lists none, publishes no
+// token_endpoint_auth_methods_supported (Draft 13 predates the negotiation),
+// or declares pre-authorized_grant_anonymous_access_supported. Anything else
+// is refused with errNoUsableClientAuthMethod before the request is sent, as
+// the OpenID4VCI 1.0 negotiation refuses it.
+func (d *Draft13Issuance) tokenAuthentication(ctx context.Context, as *receiverTypes.AuthorizationServerMetadata, dpop bool) (receiverTypes.ClientAuthentication, error) {
 	w := d.w
 	var auth receiverTypes.ClientAuthentication
+	switch method := w.clientAuth.Method; method {
+	case receiverTypes.PrivateKeyJwt:
+		if err := clientAuthMethodUsable(method, w.clientAuth, as); err != nil {
+			return auth, err
+		}
+		auth.ClientAssertion = w.privateKeyJWTFactory(ctx, as)
+	case "", receiverTypes.None:
+		if as.TokenEndpointAuthMethodsSupported != nil && !anonymousPreAuthorizedAccessSupported(as) {
+			if err := clientAuthMethodUsable(receiverTypes.None, w.clientAuth, as); err != nil {
+				return auth, err
+			}
+		}
+	default:
+		return auth, unimplementedAuthMethodError(method)
+	}
 	if dpop && d.dpopEnabled(as) {
 		auth.DPoP = dpopProofFactory(ctx, w.dpop.Key, http.MethodPost, as.TokenEndpoint.String(), "")
 	}
-	if w.clientAuth.Method == receiverTypes.PrivateKeyJwt && clientAuthMethodUsable(receiverTypes.PrivateKeyJwt, w.clientAuth, as) == nil {
-		auth.ClientAssertion = w.privateKeyJWTFactory(ctx, as)
-	}
-	return auth
+	return auth, nil
 }
 
 func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
@@ -285,7 +303,11 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, d.tokenAuthentication(ctx, as, false))
+		auth, err := d.tokenAuthentication(ctx, as, false)
+		if err != nil {
+			return nil, err
+		}
+		pushed, err := transport.PushAuthorizationRequest(ctx, *as.PushedAuthorizationRequestEndpoint, request, auth)
 		if requestURI, err = acceptPushedAuthorization(authorization, pushed, err); err != nil {
 			return nil, err
 		}
@@ -337,13 +359,17 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	auth, err := d.tokenAuthentication(ctx, as, true)
+	if err != nil {
+		return nil, err
+	}
 	token, err := transport.RequestToken(ctx, *as.TokenEndpoint, receiverTypes.TokenRequest{
 		GrantType:    receiverTypes.AuthorizationCode,
 		Code:         code,
 		RedirectURI:  a.RedirectURI,
 		CodeVerifier: a.CodeVerifier,
 		ClientID:     a.ClientID,
-	}, d.tokenAuthentication(ctx, as, true))
+	}, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange authorization code: %w", err)
 	}
@@ -395,12 +421,16 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	if clientID == "" && !anonymousPreAuthorizedAccessSupported(as) {
 		return nil, errNoUsableClientAuthMethod
 	}
+	auth, err := d.tokenAuthentication(ctx, as, true)
+	if err != nil {
+		return nil, err
+	}
 	token, err := transport.RequestToken(ctx, *as.TokenEndpoint, receiverTypes.TokenRequest{
 		GrantType:         receiverTypes.PreAuthorizedCode,
 		PreAuthorizedCode: grant.PreAuthorizedCode,
 		TxCode:            req.TxCode,
 		ClientID:          clientID,
-	}, d.tokenAuthentication(ctx, as, true))
+	}, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch access token: %w", err)
 	}
