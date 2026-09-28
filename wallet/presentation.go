@@ -33,7 +33,10 @@ type CredentialSelection struct {
 	// every claim the request asks for. On a DCQL request the first claim
 	// set, in the Verifier's order, whose claims were all kept is disclosed
 	// (OID4VP 1.0 Section 6.4.1); on a Draft 24 SD-JWT VC request exactly
-	// these disclosures are.
+	// these disclosures are, except under an input descriptor's
+	// limit_disclosure "required", where a listed field is disclosed only
+	// when every disclosure its path needs was kept, and a kept name no
+	// listed field needs is refused.
 	DisclosedClaims []string
 	// Key is the holder key for this credential. Nil uses Presentation.Key.
 	Key IKeyEntry

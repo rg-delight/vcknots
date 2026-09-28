@@ -1,14 +1,15 @@
 package wallet
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/trustknots/vcknots/wallet/common"
 	"github.com/trustknots/vcknots/wallet/credential"
+	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 )
 
 // ErrLimitDisclosureUnsatisfiable reports a Draft 24 presentation that cannot
@@ -36,11 +37,20 @@ type draft24InputDescriptor struct {
 }
 
 // draft24DisclosureLimits applies limit_disclosure "required" to the
-// selections of a Draft 24 presentation: for each selection answering such a
-// descriptor it returns the disclosure names the presentation may carry, nil
-// for a selection no required descriptor constrains. A caller's
-// DisclosedClaims must stay within them; without DisclosedClaims the
-// presentation discloses exactly the listed fields the credential holds.
+// selections of a Draft 24 presentation. For each selection answering such a
+// descriptor it returns the claims the presentation discloses, as JSON-encoded
+// claims path pointers for sdjwtvc's RequireRootClaimMatch, and nil for a
+// selection no required descriptor constrains.
+//
+// A field is matched by its full path, never by a claim name, so a same-named
+// claim elsewhere in the credential stays undisclosed. Its path array is
+// evaluated in order and the first path the credential resolves is the field
+// (Presentation Exchange 2.0, Input Descriptor Object, fields). Without
+// DisclosedClaims every resolved field is disclosed; with them a field is
+// disclosed only when the Holder kept every disclosure it needs, and a kept
+// name no field needs is refused. A selection whose disclosures would reveal a
+// plaintext member of a parent disclosure that no field lists is refused too:
+// a disclosure cannot be revealed in part.
 func draft24DisclosureLimits(rawDefinition json.RawMessage, selections []CredentialSelection, credentials []resolvedCredential) ([][]string, error) {
 	var definition struct {
 		InputDescriptors []draft24InputDescriptor `json:"input_descriptors"`
@@ -53,27 +63,23 @@ func draft24DisclosureLimits(rawDefinition json.RawMessage, selections []Credent
 	}
 	limits := make([][]string, len(selections))
 	for index, selection := range selections {
-		required, allowed := false, []string{}
+		var fields [][]string
+		required := false
 		for _, descriptor := range definition.InputDescriptors {
 			if !slices.Contains(selection.QueryIDs, descriptor.ID) || descriptor.Constraints.LimitDisclosure != "required" {
 				continue
 			}
 			required = true
 			for _, field := range descriptor.Constraints.Fields {
+				pointers := make([]string, 0, len(field.Path))
 				for _, path := range field.Path {
-					// The listed claim and the claims enclosing it: a nested
-					// selectively disclosable claim is reachable only through
-					// the disclosure of its parent (RFC 9901, recursive disclosures).
-					names, ok := jsonPathMemberNames(path)
+					pointer, ok := jsonPathClaimsPointer(path)
 					if !ok {
 						return nil, fmt.Errorf("%w: input descriptor %q lists the path %q, which names no claim this library can disclose alone", ErrLimitDisclosureUnsatisfiable, descriptor.ID, path)
 					}
-					for _, name := range names {
-						if !slices.Contains(allowed, name) {
-							allowed = append(allowed, name)
-						}
-					}
+					pointers = append(pointers, pointer)
 				}
+				fields = append(fields, pointers)
 			}
 		}
 		if !required {
@@ -84,117 +90,123 @@ func draft24DisclosureLimits(rawDefinition json.RawMessage, selections []Credent
 		if err != nil || flavor != credential.SDJwtVC {
 			return nil, fmt.Errorf("%w: credential %q is a %s credential, which is presented whole", ErrLimitDisclosureUnsatisfiable, presented.id, flavor)
 		}
-		if selection.DisclosedClaims != nil {
-			for _, name := range selection.DisclosedClaims {
-				if !slices.Contains(allowed, name) {
-					return nil, fmt.Errorf("%w: credential %q would disclose %q, which no field of its input descriptors lists", ErrLimitDisclosureUnsatisfiable, presented.id, name)
-				}
-			}
-			limits[index] = slices.Clone(selection.DisclosedClaims)
-			continue
-		}
-		held := sdJWTDisclosureNames(presented.saved.Entry.Raw)
-		limited := []string{}
-		for _, name := range allowed {
-			if slices.Contains(held, name) {
-				limited = append(limited, name)
-			}
+		limited, err := limitSDJWTDisclosure(string(presented.saved.Entry.Raw), fields, selection.DisclosedClaims)
+		if err != nil {
+			return nil, fmt.Errorf("%w: credential %q: %w", ErrLimitDisclosureUnsatisfiable, presented.id, err)
 		}
 		limits[index] = limited
 	}
 	return limits, nil
 }
 
-// jsonPathLeafName returns the last member name of a JSONPath expression of
-// the forms Presentation Exchange fields use - $.a.b, $['a'], $["a"], with
-// array indexes or wildcards - which is the name of the disclosure that
-// carries the claim. A filter or script expression names no claim.
-func jsonPathLeafName(path string) (string, bool) {
-	names, ok := jsonPathMemberNames(path)
-	if !ok {
-		return "", false
-	}
-	return names[len(names)-1], true
-}
-
-// jsonPathMemberNames returns the member names of such a JSONPath expression
-// in order, the claim itself last. Array element disclosures (RFC 9901) carry
-// no name and are not selected by one.
-func jsonPathMemberNames(path string) ([]string, bool) {
-	rest, found := strings.CutPrefix(strings.TrimSpace(path), "$")
-	if !found {
-		return nil, false
-	}
-	var names []string
-	name := ""
-	for rest != "" {
-		switch {
-		case strings.HasPrefix(rest, "["):
-			end := strings.Index(rest, "]")
-			if end < 0 {
-				return nil, false
+// limitSDJWTDisclosure resolves each field to the first of its claims path
+// pointers the credential holds and returns the pointers to disclose.
+func limitSDJWTDisclosure(raw string, fields [][]string, kept []string) ([]string, error) {
+	disclosed, needed := []string{}, []string{}
+	for _, pointers := range fields {
+		for _, pointer := range pointers {
+			names, found, err := sdjwtvc.ClaimPathDisclosureNames(raw, pointer)
+			if err != nil {
+				return nil, err
 			}
-			inner := strings.TrimSpace(rest[1:end])
-			rest = rest[end+1:]
-			switch {
-			case len(inner) >= 2 && (inner[0] == '\'' || inner[0] == '"') && inner[len(inner)-1] == inner[0]:
-				name = inner[1 : len(inner)-1]
-				names = append(names, name)
-			case inner == "*" || isJSONPathIndex(inner):
-			default:
-				return nil, false
+			if !found {
+				continue
 			}
-		case strings.HasPrefix(rest, "."):
-			rest = strings.TrimLeft(rest, ".")
-			end := strings.IndexAny(rest, ".[")
-			if end < 0 {
-				end = len(rest)
+			for _, name := range names {
+				if !slices.Contains(needed, name) {
+					needed = append(needed, name)
+				}
 			}
-			segment := rest[:end]
-			rest = rest[end:]
-			if segment == "" || strings.ContainsAny(segment, "?()@") {
-				return nil, false
+			if kept == nil || isSubset(names, kept) {
+				if !slices.Contains(disclosed, pointer) {
+					disclosed = append(disclosed, pointer)
+				}
 			}
-			if segment != "*" {
-				name = segment
-				names = append(names, name)
-			}
-		default:
-			return nil, false
+			break
 		}
 	}
-	return names, name != ""
+	for _, name := range kept {
+		if !slices.Contains(needed, name) {
+			return nil, fmt.Errorf("it would disclose %q, which no field of its input descriptors needs", name)
+		}
+	}
+	if err := sdjwtvc.ConfineDisclosureToClaims(raw, disclosed); err != nil {
+		return nil, err
+	}
+	return disclosed, nil
 }
 
-func isJSONPathIndex(text string) bool {
-	if text == "" {
-		return false
-	}
-	for _, character := range strings.TrimPrefix(text, "-") {
-		if character < '0' || character > '9' {
+func isSubset(names, of []string) bool {
+	for _, name := range names {
+		if !slices.Contains(of, name) {
 			return false
 		}
 	}
 	return true
 }
 
-// sdJWTDisclosureNames returns the claim names of the object property
-// disclosures of an SD-JWT (RFC 9901: [salt, name, value]).
-func sdJWTDisclosureNames(raw []byte) []string {
-	parts := strings.Split(string(raw), "~")
-	names := []string{}
-	for _, part := range parts[1:] {
-		decoded, err := base64.RawURLEncoding.DecodeString(part)
-		if err != nil {
-			continue
-		}
-		var disclosure []any
-		if json.Unmarshal(decoded, &disclosure) != nil || len(disclosure) != 3 {
-			continue
-		}
-		if name, ok := disclosure[1].(string); ok && !slices.Contains(names, name) {
-			names = append(names, name)
+// jsonPathClaimsPointer converts a JSONPath expression of the forms
+// Presentation Exchange fields use - $.a.b, $['a'], $["a"], [0] and [*] - to a
+// JSON-encoded OID4VP claims path pointer: a member name per step, a
+// non-negative index, or null for every array element. The path starts with a
+// member name. Recursive descent, filters, scripts and negative indexes select
+// no single position and are refused.
+func jsonPathClaimsPointer(path string) (string, bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(path), "$")
+	if !found {
+		return "", false
+	}
+	pointer := []any{}
+	for rest != "" {
+		switch {
+		case strings.HasPrefix(rest, "["):
+			end := strings.Index(rest, "]")
+			if end < 0 {
+				return "", false
+			}
+			inner := strings.TrimSpace(rest[1:end])
+			rest = rest[end+1:]
+			switch {
+			case len(inner) >= 2 && (inner[0] == '\'' || inner[0] == '"') && inner[len(inner)-1] == inner[0]:
+				pointer = append(pointer, inner[1:len(inner)-1])
+			case inner == "*":
+				pointer = append(pointer, nil)
+			default:
+				index, err := strconv.ParseInt(inner, 10, 64)
+				if err != nil || index < 0 {
+					return "", false
+				}
+				pointer = append(pointer, index)
+			}
+		case strings.HasPrefix(rest, "."):
+			rest = rest[1:]
+			end := strings.IndexAny(rest, ".[")
+			if end < 0 {
+				end = len(rest)
+			}
+			segment := rest[:end]
+			rest = rest[end:]
+			switch {
+			case segment == "" || strings.ContainsAny(segment, "?()@"):
+				return "", false
+			case segment == "*":
+				pointer = append(pointer, nil)
+			default:
+				pointer = append(pointer, segment)
+			}
+		default:
+			return "", false
 		}
 	}
-	return names
+	if len(pointer) == 0 {
+		return "", false
+	}
+	if _, member := pointer[0].(string); !member {
+		return "", false
+	}
+	encoded, err := json.Marshal(pointer)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
