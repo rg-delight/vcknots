@@ -504,9 +504,9 @@ func TestValidateChecksTheChain(t *testing.T) {
 		require.ErrorContains(t, ValidateClientAttestation(t.Context(), client, clientRequest, anchoredPolicy(t, unrelated)), "chain is not trusted")
 	})
 
-	// Review of 2026-09-25 (finding 8): without anchors the chain was not
-	// validated at all, so under HAIP any non-self-signed certificate
-	// authenticated an attestation. HAIP's rules now need an anchor.
+	// Without anchors the chain could not be validated at all, and any
+	// non-self-signed certificate would authenticate an attestation, so
+	// HAIP's rules need an anchor.
 	t.Run("HAIP refuses a chain when no anchor is configured", func(t *testing.T) {
 		for _, rules := range []profile.X5CRules{haipX5C, {Require: true}, {ExcludeAnchor: true}} {
 			policy := TrustPolicy{X5C: rules}

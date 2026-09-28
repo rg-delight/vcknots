@@ -583,10 +583,10 @@ func TestFetchIssuerMetadataHAIPAcceptsUnsignedByDefault(t *testing.T) {
 	}
 }
 
-// Review of 2026-09-25 (finding 8): an explicit IssuerMetadataSigning replaced
-// the profile's default wholesale, so Request: false on a HAIP receiver
-// switched off HAIP's RequestSignedIssuerMetadata. The profile option now
-// holds whatever the caller's options say.
+// An explicit IssuerMetadataSigning does not replace the profile's default
+// wholesale: Request: false on a HAIP receiver cannot switch off HAIP's
+// RequestSignedIssuerMetadata. The profile option holds whatever the
+// caller's options say.
 func TestFetchIssuerMetadataHAIPRequestCannotBeSwitchedOff(t *testing.T) {
 	fixture := newSignedMetadataFixture(t)
 	serverURL, client, acceptHeader := serveIssuerMetadata(t, true, func(identifier string) (string, string) {

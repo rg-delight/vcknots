@@ -16,8 +16,8 @@ import (
 // Request parameter is present when the Response Mode is direct_post, the
 // Wallet MUST return an invalid_request Authorization Response error." The
 // redirect_uri Client Identifier Prefix lets the request omit response_uri
-// (§5.9.3), so a request carrying only redirect_uri was admitted before
-// (CX-VP A16). §8.3.1 applies the rule to direct_post.jwt.
+// (§5.9.3), so a request carrying only redirect_uri must still be refused.
+// §8.3.1 applies the rule to direct_post.jwt.
 func TestDirectPostWithRedirectURIIsInvalidRequest(t *testing.T) {
 	posted := make(chan url.Values, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

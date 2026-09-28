@@ -34,13 +34,11 @@ func x5cClaims(t *testing.T, chain testIssuerChain, holder jose.JSONWebKey, issu
 	return []byte(signedClaims(t, chain.leafKey, "dc+sd-jwt", map[string]any{"x5c": chain.leafOnlyX5C()}, claims))
 }
 
-// Promoted from the 2026-09-25 final review probe F (and the 2026-09-24 audit
-// probe CR-1): a chain trusted for attacker.example must not make the
-// credential speak for another issuer. SD-JWT VC -19 §2.5 makes the subject of
-// the end-entity certificate the Issuer of an x5c credential, and ADR-0093
-// decision 1 binds an https iss beside it to the leaf by default. Before the
-// fix the binding was an opt-in, so under Final and HAIP alike the credential
-// was accepted with Verification.Issuer set to the victim.
+// A chain trusted for attacker.example must not make the credential speak for
+// another issuer. SD-JWT VC -19 §2.5 makes the subject of the end-entity
+// certificate the Issuer of an x5c credential, so an https iss beside it is
+// bound to the leaf by default, under Final and HAIP alike, and a mismatch is
+// refused rather than reported as Verification.Issuer.
 func TestVerifyX5CBindsTheIssToTheLeafByDefault(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"attacker.example"})
 	holder := newHolderKey(t)
@@ -105,7 +103,7 @@ func TestVerifyX5CBindsTheIssToTheLeafByDefault(t *testing.T) {
 }
 
 // SD-JWT VC -19 §2.2.2.3 makes iss OPTIONAL and §2.5 makes the subject of the
-// x5c end-entity certificate the Issuer when it is absent (CR-9).
+// x5c end-entity certificate the Issuer when it is absent.
 func TestVerifyX5CWithoutIssIsIssuedByTheCertificateSubject(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	holder := newHolderKey(t)
@@ -132,9 +130,9 @@ func TestVerifyX5CWithoutIssIsIssuedByTheCertificateSubject(t *testing.T) {
 	})
 }
 
-// Promoted from the audit probe (CR-2): an iss that is only in a Disclosure is
-// not the issuer-signed iss. SD-JWT VC -19 §2.2.2.3 forbids disclosing it,
-// so the credential is refused before any issuer check could read it.
+// An iss that is only in a Disclosure is not the issuer-signed iss. SD-JWT VC
+// -19 §2.2.2.3 forbids disclosing it, so the credential is refused before any
+// issuer check could read it.
 func TestVerifyRefusesADisclosedIss(t *testing.T) {
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})
 	holder := newHolderKey(t)
@@ -152,7 +150,7 @@ func TestVerifyRefusesADisclosedIss(t *testing.T) {
 }
 
 // SD-JWT VC -19 §7.3: the verification process follows from iss and the
-// policy only narrows it (CR-8).
+// policy only narrows it.
 func TestVerifyMechanismFollowsTheIssuerIdentifier(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final())
 	holder := newHolderKey(t)
@@ -217,7 +215,7 @@ func TestVerifyMechanismFollowsTheIssuerIdentifier(t *testing.T) {
 // A DID iss is bound to the Credential Issuer by a DID Configuration only
 // (OpenID4VCI 1.0 §14.4, mechanism 1). A DID that resolves is not enough, and
 // the credential's own statements (the vc.issuer.credential_issuer member of
-// mechanism 2, which the signer writes itself) are not consulted (CR-6).
+// mechanism 2, which the signer writes itself) are not consulted.
 func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 	acceptor := newTestAcceptor(t, profile.Final())
 	signer := testutil.NewP256Key(t)
@@ -249,7 +247,7 @@ func TestVerifyJWTVCDIDIssuerNeedsADIDConfiguration(t *testing.T) {
 	})
 }
 
-// HAIP 1.0 §4 and SD-JWT VC -19 §3: key material over TLS only (CR-15).
+// HAIP 1.0 §4 and SD-JWT VC -19 §3: key material over TLS only.
 func TestVerifyRefusesAnExperimentalResolverUnderForbidExperimental(t *testing.T) {
 	holder := newHolderKey(t)
 	chain := newTestIssuerChain(t, []string{"issuer.example.test"})

@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// Review of 2026-09-25 (FAPI 2.0 Security Profile §5.2.1 through HAIP 1.0
-// §4): every client the library creates by default has a TLS 1.2 floor set
-// explicitly, and refuses a server that offers only TLS 1.1.
+// FAPI 2.0 Security Profile §5.2.1, through HAIP 1.0 §4: every client the
+// library creates by default has a TLS 1.2 floor set explicitly, and refuses a
+// server that offers only TLS 1.1.
 func TestDefaultClientsRequireTLS12(t *testing.T) {
 	for name, client := range map[string]*http.Client{
 		"NewClient":        NewClient(),

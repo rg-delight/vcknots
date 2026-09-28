@@ -72,7 +72,7 @@ func parseClientMetadataParam(cm any, requireKeyIDs bool, contract metadataContr
 // the contract uses must decode; any other member is kept only when it has
 // the type VerifierMetadata models, and dropped otherwise, because the Wallet
 // ignores it (OpenID4VP 1.0 §5.1: "Other metadata parameters MUST be
-// ignored") and must not refuse a request over it (CX-VP A14). The other
+// ignored") and must not refuse a request over it. The other
 // version's members are dropped unread.
 func decodeVerifierMetadata(raw []byte, contract metadataContract) (*VerifierMetadata, error) {
 	var members map[string]json.RawMessage

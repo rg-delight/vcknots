@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// SB17: the association of a request_uri with its Client Identifier (OpenID4VP
+// The association of a request_uri with its Client Identifier (OpenID4VP
 // 1.0 "Establishing Trust in the Request URI") needs a policy the production
 // wallet can set; RequestURISameHost links the hosts the Client Identifier
 // names and accepts the prefixes that name none.

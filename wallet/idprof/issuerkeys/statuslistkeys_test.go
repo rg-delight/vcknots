@@ -87,7 +87,7 @@ func keyRequest(issuer string, header map[string]any) statuslist.KeyRequest {
 }
 
 // TestStatusListKeysX5C covers an https issuer whose token carries x5c: the
-// chain is the only key source (SD-JWT VC -19 Section 2.5 and 7.3, ADR-0093),
+// chain is the only key source (SD-JWT VC -19 Section 2.5 and 7.3),
 // and a chain that is not trusted is refused rather than replaced by another
 // mechanism.
 func TestStatusListKeysX5C(t *testing.T) {
@@ -210,8 +210,8 @@ func TestStatusListKeysX5C(t *testing.T) {
 	})
 }
 
-// TestStatusListKeysBindsTheTokenToTheCredentialLeaf covers the review of
-// 2026-09-25 (finding 6): the token of a credential with iss is bound to the
+// TestStatusListKeysBindsTheTokenToTheCredentialLeaf covers the token of a
+// credential with iss is bound to the
 // credential's own x5c leaf when it is known (draft-ietf-oauth-status-list-21
 // Section 11.3, X5CTrust.IssuerCertificate), and the host binding is the one
 // the credential acceptor applies (a dNSName or URI subject alternative name).
@@ -501,8 +501,7 @@ func TestStatusListKeysWebResolution(t *testing.T) {
 
 // TestStatusListKeysDID covers a DID issuer: its keys count only once a DIF
 // Well Known DID Configuration served by the Credential Issuer's origin binds
-// the DID, whatever the credential's format - an ldp_vc included, whose Status
-// List Token used to be refused as DID-only (audit item M3).
+// the DID, whatever the credential's format - an ldp_vc included.
 func TestStatusListKeysDID(t *testing.T) {
 	t.Parallel()
 

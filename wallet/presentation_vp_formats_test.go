@@ -8,7 +8,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 )
 
-// CX-VP A12: the Verifier's vp_formats_supported limits the algorithms of the
+// The Verifier's vp_formats_supported limits the algorithms of the
 // SD-JWT VC it accepts (OpenID4VP 1.0 Appendix B.3.4); the fixture issuer
 // signs with ES256, so a Verifier listing only ES384 gets nothing rather than
 // a presentation it said it cannot verify.
@@ -39,7 +39,7 @@ func TestWallet_PresentationHonoursTheVerifiersAlgorithms(t *testing.T) {
 
 // Draft 24 §5.4: the format member of an input descriptor restricts the
 // SD-JWT VC algorithms like vp_formats does, unless vp_formats omits that
-// format, in which case the Wallet ignores it (CX-VP A08).
+// format, in which case the Wallet ignores it.
 func TestWallet_Draft24DescriptorFormatAlgorithms(t *testing.T) {
 	fixture := newSDJWTPresentationFixture(t)
 	holder := fixture.key.PublicKey()

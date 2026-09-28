@@ -51,7 +51,7 @@ func TestCheckBindsTheTokenToTheCredentialIssuerByKey(t *testing.T) {
 	}
 
 	t.Run("a token without iss is verified under the credential issuer's keys", func(t *testing.T) {
-		// Regression of audit probe PROBE-3: a Section 5.1 token carries no iss.
+		// A Section 5.1 token carries no iss.
 		h, checker, resolved := setup(t, func(claims map[string]any) { delete(claims, "iss") })
 		result, err := checker.Check(context.Background(), issuerB, status(h))
 		if err != nil {

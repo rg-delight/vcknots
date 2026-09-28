@@ -9,11 +9,11 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// Review of 2026-09-26 (report 7, L-5): the OpenID4VCI states bound only the
-// protocol version, so a flow authorized under HAIP could be continued by a
-// wallet built with a weaker profile - no DPoP, no iss check - at the token
-// or credential stage. Each state now records the flow's profile, which
-// survives JSON, and a stage under another profile refuses it before sending
+// A flow authorized under HAIP must not be continued by a wallet built with a
+// weaker profile - no DPoP, no iss check - at the token or credential stage.
+// Binding the states to the protocol version alone would allow that, so each
+// state records the flow's profile, which survives JSON, and a stage under
+// another profile refuses it before sending
 // anything.
 func TestIssuanceStatesAreBoundToTheFlowProfile(t *testing.T) {
 	ctx := context.Background()

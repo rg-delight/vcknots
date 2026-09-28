@@ -34,7 +34,7 @@ func (f *requestObjectFixture) countingDraft24Handler(t *testing.T, claims map[s
 	return fetches
 }
 
-// CX-VP A03: the outer request says response_mode=direct_post.jwt, which a
+// The outer request says response_mode=direct_post.jwt, which a
 // router reads as OpenID4VP 1.0, but the signed Request Object behind
 // request_uri carries a Presentation Exchange definition: a Draft 24 request
 // with an encrypted response (Draft 24 §8.3.1). The OpenID4VP 1.0 entry point
