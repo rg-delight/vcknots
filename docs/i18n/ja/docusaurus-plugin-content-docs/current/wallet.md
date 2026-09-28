@@ -1360,7 +1360,11 @@ func answerDCAPI(ctx context.Context, w *wallet.Wallet, protocol string, data js
 `SelectCredentials` は input descriptor ごとに最も新しい Credential を選び、`QueryIDs` は input descriptor の id を指定します。
 SD-JWT VC では key binding が常に必須で、nil でない `DisclosedClaims` が開示を制限します。
 `limit_disclosure` が `required` の input descriptor は、提示をその `fields` が名指すクレームに限ります。
-選択的に開示できない Credential や、それを超える開示は、何かを送る前に `ErrLimitDisclosureUnsatisfiable` で失敗します。
+各 field は、その `path` のうち Credential で最初に解決できたものです。
+クレーム名ではなく JSONPath 全体（`$.a.b`、`['a']`、`[0]`、`[*]`）で照合します。
+このとき `DisclosedClaims` は、field が必要とする disclosure をすべて含む場合に限り、その field を残します。
+選択的に開示できない Credential、どの field も必要としない disclosure、1 つの位置を指さない path（再帰下降やフィルタ）、どの field も覆わない平文のメンバーを持つ親の disclosure は、何かを送る前に `ErrLimitDisclosureUnsatisfiable` で失敗します。
+disclosure は一部だけを開示できないためです。
 input descriptor の `format` のアルゴリズムの列挙は `vp_formats` と同じく適用します。
 ただし `vp_formats` にない形式は無視します（§5.4）。
 `Config.Experimental.Hooks.PresentationExchangeResponse` はテストのために応答を書き換えます。
