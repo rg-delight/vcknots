@@ -1300,3 +1300,58 @@ func TestDraft13RefusesFormatsOutsideTheDraft13Table(t *testing.T) {
 		})
 	}
 }
+
+// A configured client authentication method is used as configured, never
+// dropped: private_key_jwt goes out only to a server that advertises it, and
+// a server that advertises neither it nor none, without anonymous access, gets
+// no Token Request, as the OpenID4VCI 1.0 negotiation refuses it
+// (errNoUsableClientAuthMethod).
+func TestDraft13TokenRequestNeverDowngradesTheConfiguredMethod(t *testing.T) {
+	clientKey, _ := newClientAuthKeyEntry(t, "draft13-client-key")
+	privateKeyJWT := func(c *Config) {
+		c.ClientAuth = ClientAuthConfig{Method: receiverTypes.PrivateKeyJwt, ClientID: "wallet-client", Key: clientKey}
+	}
+	for name, test := range map[string]struct {
+		configure func(*Config)
+		metadata  map[string]any
+		assertion bool
+	}{
+		"private_key_jwt not advertised": {
+			configure: privateKeyJWT,
+			metadata: map[string]any{
+				"token_endpoint_auth_methods_supported":           []string{"none"},
+				"pre-authorized_grant_anonymous_access_supported": true,
+			},
+		},
+		"private_key_jwt advertised": {
+			configure: privateKeyJWT,
+			metadata: map[string]any{
+				"token_endpoint_auth_methods_supported":            []string{"private_key_jwt"},
+				"token_endpoint_auth_signing_alg_values_supported": []string{"ES256"},
+			},
+			assertion: true,
+		},
+		"none neither advertised nor anonymous": {
+			configure: func(c *Config) { c.ClientAuth.ClientID = "wallet-client" },
+			metadata: map[string]any{
+				"token_endpoint_auth_methods_supported":           []string{"private_key_jwt"},
+				"pre-authorized_grant_anonymous_access_supported": false,
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newDraft13Fixture(t, test.configure)
+			fixture.set(func(f *draft13Fixture) { f.asMetadataExtra = test.metadata })
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), fixture.preAuthorizedRequest())
+			if !test.assertion {
+				draft13RequireCoded(t, err, errNoUsableClientAuthMethod)
+				require.Empty(t, fixture.tokens())
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, fixture.tokens(), 1)
+			require.NotEmpty(t, fixture.tokens()[0].Get("client_assertion"))
+			require.Equal(t, "wallet-client", fixture.tokens()[0].Get("client_id"))
+		})
+	}
+}
