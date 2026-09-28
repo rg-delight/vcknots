@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/profile"
@@ -120,7 +121,7 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 
 	key := selectUsableVerifierEncryptionKey(&metadata.Jwks, rules)
 	if key == nil {
-		return nil, fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
+		return nil, unusableEncryptionKeysError(&metadata.Jwks, rules)
 	}
 
 	// §8.3: "The JWE alg algorithm used MUST be equal to the alg value of the
@@ -154,6 +155,12 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 		if enc == "" {
 			// §8.3 default does not rescue an explicit list with no usable
 			// value; the verifier offered only unsupported algorithms.
+			if rules.GCMOnly && slices.ContainsFunc(metadata.EncryptedResponseEncValuesSupported, func(value string) bool {
+				_, supported := jweContentEncryptions[value]
+				return supported
+			}) {
+				return nil, fmt.Errorf("%w requires A128GCM or A256GCM, and encrypted_response_enc_values_supported offers neither: %w", profile.Refused("ResponseEncryption.GCMOnly"), ErrResponseEncryptionEncUnsupported)
+			}
 			return nil, fmt.Errorf("encrypted_response_enc_values_supported has no supported content encryption: %w", ErrResponseEncryptionEncUnsupported)
 		}
 	} else {
@@ -162,6 +169,26 @@ func selectResponseEncryptionForProfile(metadata *VerifierMetadata, rules profil
 	}
 
 	return &responseEncryption{key: key, alg: alg, enc: enc}, nil
+}
+
+// unusableEncryptionKeysError reports that no key of set is usable under
+// rules, naming the profile option that excluded the keys when the set holds
+// a key usable without it.
+func unusableEncryptionKeysError(set *jose.JSONWebKeySet, rules profile.ResponseEncryptionRules) error {
+	without := func(relax func(*profile.ResponseEncryptionRules)) bool {
+		loose := rules
+		relax(&loose)
+		return selectUsableVerifierEncryptionKey(set, loose) != nil
+	}
+	switch {
+	case rules.P256Only && without(func(r *profile.ResponseEncryptionRules) { r.P256Only = false }):
+		return fmt.Errorf("%w excludes every verifier encryption key in client_metadata.jwks: %w", profile.Refused("ResponseEncryption.P256Only"), ErrResponseEncryptionKeyUnusable)
+	case rules.ECDHESOnly && without(func(r *profile.ResponseEncryptionRules) { r.ECDHESOnly = false }):
+		return fmt.Errorf("%w excludes every verifier encryption key in client_metadata.jwks: %w", profile.Refused("ResponseEncryption.ECDHESOnly"), ErrResponseEncryptionKeyUnusable)
+	case (rules.P256Only || rules.ECDHESOnly) && without(func(r *profile.ResponseEncryptionRules) { r.P256Only, r.ECDHESOnly = false, false }):
+		return fmt.Errorf("%w and %w exclude every verifier encryption key in client_metadata.jwks: %w", profile.Refused("ResponseEncryption.P256Only"), profile.Refused("ResponseEncryption.ECDHESOnly"), ErrResponseEncryptionKeyUnusable)
+	}
+	return fmt.Errorf("no usable verifier encryption key in client_metadata.jwks: %w", ErrResponseEncryptionKeyUnusable)
 }
 
 // selectUsableVerifierEncryptionKey iterates client_metadata.jwks.keys in order

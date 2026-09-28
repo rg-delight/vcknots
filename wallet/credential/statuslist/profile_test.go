@@ -189,6 +189,10 @@ func TestCheckReferenceForbidsCleartextUnderAProfileThatForbidsIt(t *testing.T) 
 			checker.Experimental = experimental.Transport{AllowHTTP: true}
 			_, err := checker.CheckReference(context.Background(), testIssuer, Reference{URI: uri(h)})
 			assertSentinel(t, err, ErrStatusListInsecureTransportForbidden)
+			var refused *profile.OptionError
+			if !errors.As(err, &refused) || refused.Option != "ForbidExperimental" {
+				t.Fatalf("the refusal does not name ForbidExperimental: %v", err)
+			}
 			if h.requests.Load() != 0 {
 				t.Fatal("the endpoint was requested")
 			}
