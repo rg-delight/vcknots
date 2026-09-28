@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
-	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
 
 // requireJSONRoundTrip marshals value and unmarshals it into target, as a
@@ -142,7 +141,7 @@ func TestFetchCredentialIssuerMetadataReadsThe10Location(t *testing.T) {
 	t.Cleanup(server.Close)
 	issuer, err := url.Parse(server.URL())
 	require.NoError(t, err)
-	metadata, err := createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(issuer, receiverTypes.Oid4vci)
+	metadata, err := createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(t.Context(), issuer)
 	require.NoError(t, err)
 	require.Equal(t, server.URL(), metadata.CredentialIssuer)
 
@@ -157,7 +156,7 @@ func TestFetchCredentialIssuerMetadataReadsThe10Location(t *testing.T) {
 	t.Cleanup(pathServer.Close)
 	tenant, err := url.Parse(pathServer.URL + "/tenant")
 	require.NoError(t, err)
-	_, err = createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(tenant, receiverTypes.Oid4vci)
+	_, err = createTestControllerAllowingHTTP(t).FetchCredentialIssuerMetadata(t.Context(), tenant)
 	require.Error(t, err)
 	mu.Lock()
 	defer mu.Unlock()

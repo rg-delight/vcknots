@@ -186,15 +186,22 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			f.server.Close()
 			endpoint, err := url.Parse(f.server.URL)
 			require.NoError(t, err)
-			_, err = f.wallet.FetchCredentialIssuerMetadata(endpoint, receiverTypes.Oid4vci)
+			_, err = f.wallet.FetchCredentialIssuerMetadata(ctx, endpoint)
 			return err
 		},
-		"Wallet.FetchCredentialIssuerMetadata: nil endpoint": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.FetchCredentialIssuerMetadata(nil, receiverTypes.Oid4vci)
+		"Wallet.FetchCredentialIssuerMetadata: canceled": func(t *testing.T) error {
+			f := newFinalIssuanceFixture(t)
+			endpoint, err := url.Parse(f.server.URL)
+			require.NoError(t, err)
+			_, err = f.wallet.FetchCredentialIssuerMetadata(canceled, endpoint)
 			return err
 		},
-		"Wallet.FetchCredentialIssuerMetadata: relative endpoint": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.FetchCredentialIssuerMetadata(&url.URL{Path: "issuer"}, receiverTypes.Oid4vci)
+		"Wallet.FetchCredentialIssuerMetadata: nil issuer": func(t *testing.T) error {
+			_, err := newFinalIssuanceFixture(t).wallet.FetchCredentialIssuerMetadata(ctx, nil)
+			return err
+		},
+		"Wallet.FetchCredentialIssuerMetadata: relative issuer": func(t *testing.T) error {
+			_, err := newFinalIssuanceFixture(t).wallet.FetchCredentialIssuerMetadata(ctx, &url.URL{Path: "issuer"})
 			return err
 		},
 		"Wallet.VerifyCredentialForAcceptance: no policy": func(t *testing.T) error {

@@ -216,16 +216,6 @@ func keepMessage(sentinel, err error) error {
 	return &messageError{msg: err.Error(), err: fmt.Errorf("%w: %w", sentinel, err)}
 }
 
-// classifyKeepingMessage is classify for an upstream method: the returned
-// error has a code and err's text.
-func classifyKeepingMessage(err error) error {
-	classified := classify(err)
-	if classified == nil || classified == err {
-		return classified
-	}
-	return &messageError{msg: err.Error(), err: classified}
-}
-
 // checkStateProfile refuses a state recorded under another profile than
 // current, the profile of the stage that continues it.
 func checkStateProfile(state string, recorded, current profile.Profile) error {
