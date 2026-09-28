@@ -188,7 +188,9 @@ type DPoPConfig struct {
 // is never promoted. For an OpenID4VCI 1.0 pre-authorized_code token request
 // without a client attestation, it must appear in the server's
 // token_endpoint_auth_methods_supported, which RFC 8414 section 2 makes
-// client_secret_basic when absent, so such a server cannot be used.
+// client_secret_basic when absent. A server that omits the list but declares
+// pre-authorized_grant_anonymous_access_supported true takes an anonymous None
+// request instead (OID4VCI 1.0 6.1 and 12.3).
 //
 // ClientID is optional for None on that request, and is sent unless
 // pre-authorized_grant_anonymous_access_supported is true (OID4VCI 1.0 12.3).

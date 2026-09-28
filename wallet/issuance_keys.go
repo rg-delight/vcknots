@@ -79,8 +79,9 @@ type tokenEndpointAuth struct {
 // resolveClientAuthMethod negotiates how a pre-authorized_code token request
 // authenticates. token_endpoint_auth_methods_supported filters the configured
 // method and never picks or downgrades one;
-// pre-authorized_grant_anonymous_access_supported only decides whether
-// client_id may be omitted. Do not rearrange the steps below.
+// pre-authorized_grant_anonymous_access_supported decides whether client_id
+// may be omitted, and, when the server publishes no method list, stands on
+// its own for an anonymous request. Do not rearrange the steps below.
 func resolveClientAuthMethod(clientAuth ClientAuthConfig, authMetadata *receiverTypes.AuthorizationServerMetadata) (tokenEndpointAuth, error) {
 	if authMetadata == nil {
 		return tokenEndpointAuth{}, fmt.Errorf(
@@ -93,6 +94,22 @@ func resolveClientAuthMethod(clientAuth ClientAuthConfig, authMetadata *receiver
 	}
 	if configured != receiverTypes.None && configured != receiverTypes.PrivateKeyJwt {
 		return tokenEndpointAuth{}, unimplementedAuthMethodError(configured)
+	}
+
+	// OpenID4VCI 1.0 Section 6.1: "For the Pre-Authorized Code Grant Type,
+	// authentication of the Client is OPTIONAL ... and, consequently, the
+	// client_id parameter is only needed when a form of Client Authentication
+	// that relies on this parameter is used". Section 12.3 defines
+	// pre-authorized_grant_anonymous_access_supported as "whether the
+	// Credential Issuer accepts a Token Request with a Pre-Authorized Code but
+	// without a client_id". A server that declares it and publishes no
+	// token_endpoint_auth_methods_supported takes the anonymous request:
+	// RFC 8414 Section 2's default for the absent list, client_secret_basic,
+	// names how a confidential client authenticates, and an anonymous request
+	// authenticates no client. A published list still decides (below).
+	if configured == receiverTypes.None && authMetadata.TokenEndpointAuthMethodsSupported == nil &&
+		anonymousPreAuthorizedAccessSupported(authMetadata) {
+		return tokenEndpointAuth{Method: receiverTypes.None}, nil
 	}
 
 	switch methods := authMetadata.TokenEndpointAuthMethodsSupported; {
@@ -136,8 +153,8 @@ func resolveClientAuthMethod(clientAuth ClientAuthConfig, authMetadata *receiver
 
 // clientAuthMethodUsable reports whether method can be used against
 // authMetadata. It must never read
-// pre-authorized_grant_anonymous_access_supported, which only decides whether
-// client_id may be omitted.
+// pre-authorized_grant_anonymous_access_supported, which resolveClientAuthMethod
+// applies itself.
 func clientAuthMethodUsable(method receiverTypes.TokenEndpointAuthMethod, clientAuth ClientAuthConfig, authMetadata *receiverTypes.AuthorizationServerMetadata) error {
 	switch method {
 	case receiverTypes.None:
@@ -188,9 +205,9 @@ func methodNotAdvertisedError(method receiverTypes.TokenEndpointAuthMethod, auth
 	// anonymous access needs telling here why it was not enough.
 	anonNote := ""
 	if method == receiverTypes.None && anonymousPreAuthorizedAccessSupported(authMetadata) {
-		anonNote = " (pre-authorized_grant_anonymous_access_supported is true, but OID4VCI 1.0 section 12.3" +
-			" lets it decide only whether client_id may be omitted, not whether the token endpoint" +
-			" serves an unauthenticated client)"
+		anonNote = " (pre-authorized_grant_anonymous_access_supported is true, but a published" +
+			" token_endpoint_auth_methods_supported without none decides only whether client_id may be" +
+			" omitted, not whether the token endpoint serves an unauthenticated client)"
 	}
 	return fmt.Errorf(
 		"%w: the wallet is configured for %q, but token_endpoint_auth_methods_supported is %v%s",

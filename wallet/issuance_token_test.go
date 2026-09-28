@@ -455,22 +455,56 @@ func TestAuthorizePreAuthorizedIssuanceAnonymousAccessDecidesWhetherClientIDIsSe
 
 // token_endpoint_auth_methods_supported filters the configured method: an
 // authorization server that omits the list (RFC 8414 Section 2 default
-// client_secret_basic) or does not list none gets no Token Request from a
-// wallet configured for none, whatever the anonymous access flag says.
+// client_secret_basic) without declaring anonymous access, or publishes a list
+// without none, gets no Token Request from a wallet configured for none.
 func TestAuthorizePreAuthorizedIssuanceRequiresNoneAdvertised(t *testing.T) {
-	for name, methods := range map[string][]receiverTypes.TokenEndpointAuthMethod{
-		"list absent":       nil,
-		"none not listed":   {receiverTypes.PrivateKeyJwt},
-		"empty method list": {},
+	for name, test := range map[string]struct {
+		methods         []receiverTypes.TokenEndpointAuthMethod
+		anonymousAccess *bool
+	}{
+		"list absent":                      {methods: nil, anonymousAccess: boolPtr(false)},
+		"none not listed":                  {methods: []receiverTypes.TokenEndpointAuthMethod{receiverTypes.PrivateKeyJwt}, anonymousAccess: boolPtr(true)},
+		"empty method list":                {methods: []receiverTypes.TokenEndpointAuthMethod{}, anonymousAccess: boolPtr(true)},
+		"list and anonymous access absent": {methods: nil, anonymousAccess: nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
-				f.authMethodsSupported = methods
+				f.authMethodsSupported = test.methods
+				f.anonymousAccess = test.anonymousAccess
 			})
 			fixture.wallet.clientAuth = ClientAuthConfig{ClientID: "wallet-client"}
 			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
 			requireCoded(t, err, errNoUsableClientAuthMethod)
 			require.Zero(t, fixture.tokenCalls)
+		})
+	}
+}
+
+// OpenID4VCI 1.0 Section 6.1 makes client authentication OPTIONAL for the
+// Pre-Authorized Code grant and needs client_id "only ... when a form of
+// Client Authentication that relies on this parameter is used", and Section
+// 12.3 lets pre-authorized_grant_anonymous_access_supported declare a Token
+// Request "without a client_id" acceptable. A server that declares it and
+// omits token_endpoint_auth_methods_supported gets that anonymous request:
+// RFC 8414 Section 2's client_secret_basic default describes how a
+// confidential client authenticates, not whether an anonymous one may ask.
+func TestAuthorizePreAuthorizedIssuanceAnonymousAccessWithoutAMethodList(t *testing.T) {
+	for name, clientAuth := range map[string]ClientAuthConfig{
+		"no client_id":           {},
+		"a configured client_id": {Method: receiverTypes.None, ClientID: "wallet-client"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
+				f.authMethodsSupported = nil
+				f.anonymousAccess = boolPtr(true)
+			})
+			fixture.wallet.clientAuth = clientAuth
+			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+			require.NoError(t, err)
+			require.Len(t, fixture.tokenForms, 1)
+			require.Empty(t, fixture.tokenForms[0].Get("client_id"))
+			require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
+			require.Empty(t, fixture.tokenHeaders.Get("Authorization"))
 		})
 	}
 }
