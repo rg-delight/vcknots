@@ -202,7 +202,7 @@ func (d *Draft13Issuance) tokenAuthentication(ctx context.Context, as *receiverT
 	if dpop && d.dpopEnabled(as) {
 		auth.DPoP = dpopProofFactory(ctx, w.dpop.Key, http.MethodPost, as.TokenEndpoint.String(), "")
 	}
-	if method, ok := resolveClientAuthMethod(w.clientAuth, as); ok && method == receiverTypes.PrivateKeyJwt {
+	if w.clientAuth.Method == receiverTypes.PrivateKeyJwt && clientAuthMethodUsable(receiverTypes.PrivateKeyJwt, w.clientAuth, as) == nil {
 		auth.ClientAssertion = w.privateKeyJWTFactory(ctx, as)
 	}
 	return auth

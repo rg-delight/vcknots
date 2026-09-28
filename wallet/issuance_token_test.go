@@ -427,6 +427,54 @@ func TestAuthorizePreAuthorizedIssuanceWithClientIDIgnoresAnonymousAccess(t *tes
 	require.Equal(t, "wallet-client", fixture.tokenForms[0].Get("client_id"))
 }
 
+// OpenID4VCI 1.0 Section 12.3: with none advertised,
+// pre-authorized_grant_anonymous_access_supported decides only whether a
+// configured client_id is sent; it defaults to false.
+func TestAuthorizePreAuthorizedIssuanceAnonymousAccessDecidesWhetherClientIDIsSent(t *testing.T) {
+	for name, test := range map[string]struct {
+		anonymousAccess *bool
+		wantClientID    string
+	}{
+		"explicit true sends no client_id": {anonymousAccess: boolPtr(true), wantClientID: ""},
+		"omitted names the client":         {anonymousAccess: nil, wantClientID: "wallet-client"},
+		"explicit false names the client":  {anonymousAccess: boolPtr(false), wantClientID: "wallet-client"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
+				f.anonymousAccess = test.anonymousAccess
+			})
+			fixture.wallet.clientAuth = ClientAuthConfig{Method: receiverTypes.None, ClientID: "wallet-client"}
+			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+			require.NoError(t, err)
+			require.Len(t, fixture.tokenForms, 1)
+			require.Equal(t, test.wantClientID, fixture.tokenForms[0].Get("client_id"))
+			require.Empty(t, fixture.tokenForms[0].Get("client_assertion"))
+		})
+	}
+}
+
+// token_endpoint_auth_methods_supported filters the configured method: an
+// authorization server that omits the list (RFC 8414 Section 2 default
+// client_secret_basic) or does not list none gets no Token Request from a
+// wallet configured for none, whatever the anonymous access flag says.
+func TestAuthorizePreAuthorizedIssuanceRequiresNoneAdvertised(t *testing.T) {
+	for name, methods := range map[string][]receiverTypes.TokenEndpointAuthMethod{
+		"list absent":       nil,
+		"none not listed":   {receiverTypes.PrivateKeyJwt},
+		"empty method list": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newFinalIssuanceFixture(t, tokenTestBearer, tokenTestAnonymous, func(f *finalIssuanceFixture) {
+				f.authMethodsSupported = methods
+			})
+			fixture.wallet.clientAuth = ClientAuthConfig{ClientID: "wallet-client"}
+			_, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
+			requireCoded(t, err, errNoUsableClientAuthMethod)
+			require.Zero(t, fixture.tokenCalls)
+		})
+	}
+}
+
 // With a DPoP key the token is bound to it and presented with the RFC 9449
 // Section 7.1 scheme.
 func TestAuthorizePreAuthorizedIssuanceAcceptsDPoP(t *testing.T) {
@@ -434,7 +482,6 @@ func TestAuthorizePreAuthorizedIssuanceAcceptsDPoP(t *testing.T) {
 	grant, err := fixture.tokenTestPreAuthorize(fixture.tokenTestPreAuthorizedRequest(nil))
 	require.NoError(t, err)
 	require.NotEmpty(t, grant.DPoPKeyThumbprint)
-	require.Equal(t, "client-1", fixture.tokenForms[0].Get("client_id"))
 	require.NotEmpty(t, fixture.tokenHeaders.Get("DPoP"))
 
 	result, err := fixture.wallet.RequestCredential(context.Background(), grant, fixture.credentialRequest())

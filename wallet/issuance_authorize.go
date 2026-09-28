@@ -142,7 +142,7 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		if err != nil {
 			return nil, err
 		}
-		auth, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
+		auth, _, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +210,7 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	if err != nil {
 		return nil, err
 	}
-	auth, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
+	auth, _, err := w.clientAuthentication(ctx, transport, discovery, false, instanceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -368,35 +368,41 @@ func (w *Wallet) checkPrivateKeyJWT(as *receiverTypes.AuthorizationServerMetadat
 	if !asMetadataSupportsAuthMethod(as, receiverTypes.PrivateKeyJwt) {
 		return invalidMetadata("authorization server metadata does not advertise the configured private_key_jwt client authentication method")
 	}
-	if _, ok := resolveClientAuthMethod(w.clientAuth, as); !ok {
-		return errNoUsableClientAuthMethod
-	}
-	return nil
+	return clientAuthMethodUsable(receiverTypes.PrivateKeyJwt, w.clientAuth, as)
 }
 
 // clientAuthentication returns how the client authenticates at the PAR and
 // token endpoints: a Client Attestation for instanceKey when
-// Config.Attestation.Client is set, else private_key_jwt when configured. Attestation and private_key_jwt are
-// alternatives. preAuthorized also requires anonymous access to be allowed
-// when neither is used. DPoP is left to the caller.
-func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTypes.AuthorizationTransport, discovery *issuanceDiscovery, preAuthorized bool, instanceKey IKeyEntry) (receiverTypes.ClientAuthentication, error) {
+// Config.Attestation.Client is set, else private_key_jwt when configured.
+// Attestation and private_key_jwt are alternatives. For a pre-authorized_code
+// token request without an attestation, resolveClientAuthMethod negotiates the
+// method against the authorization server metadata, and the second result
+// reports whether the request carries client_id (OpenID4VCI 1.0 Section 12.3).
+// DPoP is left to the caller.
+func (w *Wallet) clientAuthentication(ctx context.Context, transport receiverTypes.AuthorizationTransport, discovery *issuanceDiscovery, preAuthorized bool, instanceKey IKeyEntry) (receiverTypes.ClientAuthentication, bool, error) {
 	var auth receiverTypes.ClientAuthentication
 	attestationProver, err := w.clientAttestationFactory(ctx, transport, discovery.asMetadata, discovery.authorizationServer, instanceKey)
 	if err != nil {
-		return auth, err
+		return auth, false, err
 	}
 	if attestationProver.Headers != nil {
 		auth.ClientAttestation = attestationProver
-		return auth, nil
+		return auth, true, nil
 	}
-	method, ok := resolveClientAuthMethod(w.clientAuth, discovery.asMetadata)
-	if preAuthorized && !ok {
-		return auth, errNoUsableClientAuthMethod
+	if !preAuthorized {
+		if w.clientAuth.Method == receiverTypes.PrivateKeyJwt {
+			auth.ClientAssertion = w.privateKeyJWTFactory(ctx, discovery.asMetadata)
+		}
+		return auth, true, nil
 	}
-	if method == receiverTypes.PrivateKeyJwt {
+	resolved, err := resolveClientAuthMethod(w.clientAuth, discovery.asMetadata)
+	if err != nil {
+		return auth, false, err
+	}
+	if resolved.Method == receiverTypes.PrivateKeyJwt {
 		auth.ClientAssertion = w.privateKeyJWTFactory(ctx, discovery.asMetadata)
 	}
-	return auth, nil
+	return auth, resolved.SendClientID, nil
 }
 
 // authorizationRequestParameters resolves the scope or authorization_details

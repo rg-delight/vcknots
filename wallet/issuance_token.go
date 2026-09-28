@@ -72,9 +72,12 @@ func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 	if err != nil {
 		return nil, err
 	}
-	auth, err := w.clientAuthentication(ctx, transport, discovery, true, instanceKey)
+	auth, sendClientID, err := w.clientAuthentication(ctx, transport, discovery, true, instanceKey)
 	if err != nil {
 		return nil, err
+	}
+	if !sendClientID {
+		clientID = ""
 	}
 	// RFC 9449 Section 5: a server that does not implement DPoP ignores the
 	// header, and HAIP requires the sender-constrained token it enables.

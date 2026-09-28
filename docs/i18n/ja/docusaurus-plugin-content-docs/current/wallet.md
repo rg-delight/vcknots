@@ -843,10 +843,13 @@ func receivePreAuthorized(ctx context.Context, w *wallet.Wallet, offerURI, txCod
 ```
 
 `private_key_jwt` または `Config.Attestation.Client` で認証しない限り、クライアントは匿名です。
-`Config.ClientAuth.ClientID` は設定されていれば送信し、HAIP ではその設定が必須です。
-`client_id` を含まない token request は、認可サーバーのメタデータが `pre-authorized_grant_anonymous_access_supported` を `true` にしているときだけ送ります。
-このパラメータの既定値は `false` なので（§12.3）、値がなければ `client_authentication_unavailable` で拒否します。
-`client_id` を含む要求は匿名ではないので、このパラメータを参照しません。
+HAIP では `Config.ClientAuth.ClientID` の設定が必須です。
+Client Attestation を使わないとき、設定した `Config.ClientAuth.Method`（既定は `none`）が認可サーバーの `token_endpoint_auth_methods_supported` に含まれている必要があります。
+この一覧がなければ RFC 8414 §2 により `client_secret_basic` とみなされ、wallet はこの方式を実装していないので、送信前に `client_authentication_unavailable` で拒否します。
+`none` のとき、`pre-authorized_grant_anonymous_access_supported` は `client_id` を送るかどうかだけを決めます。
+`true` なら、`client_id` を設定していても token request に含めません。
+それ以外のとき（既定値は `false`、§12.3）は `Config.ClientAuth.ClientID` を送り、設定がなければ `client_authentication_unavailable` で拒否します。
+`private_key_jwt` と Client Attestation の要求は常に `client_id` を含みます。
 
 ### Credential の要求、Deferred 発行、通知
 
@@ -1658,7 +1661,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
   * **A:** `curl http://localhost:8080/.well-known/openid-credential-issuer` を実行して JSON メタデータが返ること、その `credential_issuer` が Offer の識別子と一致することを確認してください。識別子がパスを持つとき、1.0 の発行は `/.well-known/openid-credential-issuer/<パス>` を、Draft 13 の発行は `<パス>/.well-known/openid-credential-issuer` を読み、ほかの位置は試しません。
 
 * **Q: Pre-Authorized Code の発行が `client_authentication_unavailable` で失敗する。**
-  * **A:** 認可サーバーが `pre-authorized_grant_anonymous_access_supported` を `true` にしておらず（既定値は `false`）、wallet に `client_id` もクライアント認証もありません。`Config.ClientAuth.ClientID`（またはクライアント認証）を設定するか、サーバー側で匿名アクセスを宣言してください。
+  * **A:** token request に使えるクライアント認証が見つかりません。理由はエラーメッセージに出ます。認可サーバーのメタデータが `token_endpoint_auth_methods_supported` を省略しているか、設定した方式（既定は `none`）を含んでいないか、`none` を含んでいても `pre-authorized_grant_anonymous_access_supported` を `true` にしておらず（既定値は `false`）、wallet に `client_id` がありません。サーバーが示す方式を `Config.ClientAuth` に設定するか、`Config.ClientAuth.ClientID` を設定するか、サーバー側で匿名アクセスを宣言してください。
 
 * **Q: Credential の要求が `credential_acceptance_policy_required` で失敗する。**
   * **A:** `Config.CredentialAcceptance` か `CredentialRequest.Acceptance` を設定してください。ポリシーは Issuer を認証できる方式を許していなければなりません。`x5c` を持つ Credential には `IssuerX509`、JWT VC Issuer Metadata や DID Configuration で束縛された DID には `IssuerKeys`、OpenID Federation の Entity には `Federation` です。テスト用の Issuer も同じ方法で認証します（たとえばテスト用 CA を `IssuerX509` に入れます）。

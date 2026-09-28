@@ -757,7 +757,7 @@ func receivePreAuthorized(ctx context.Context, w *wallet.Wallet, offerURI, txCod
 }
 ```
 
-The client is anonymous unless `private_key_jwt` or `Config.Attestation.Client` authenticates it; `Config.ClientAuth.ClientID` is sent when set, and HAIP requires it. A token request without a `client_id` is sent only to an authorization server whose metadata sets `pre-authorized_grant_anonymous_access_supported` to `true`: the parameter defaults to `false` (§12.3), so an absent value refuses the request with `client_authentication_unavailable`. A request that carries a `client_id` is not anonymous and does not consult the parameter.
+The client is anonymous unless `private_key_jwt` or `Config.Attestation.Client` authenticates it; HAIP requires `Config.ClientAuth.ClientID`. Without a client attestation, the configured `Config.ClientAuth.Method` (`none` by default) must appear in the authorization server's `token_endpoint_auth_methods_supported`: an absent list means `client_secret_basic` (RFC 8414 §2), which the wallet does not implement, so the request is refused with `client_authentication_unavailable` before it is sent. With `none`, `pre-authorized_grant_anonymous_access_supported` decides only whether `client_id` is sent. When it is `true`, the token request omits `client_id` even if one is configured; otherwise (the parameter defaults to `false`, §12.3) `Config.ClientAuth.ClientID` is sent, and a wallet without one is refused with `client_authentication_unavailable`. A `private_key_jwt` or attested request always carries `client_id`.
 
 ### Credential request, deferred issuance and notification
 
@@ -1371,7 +1371,7 @@ This section lists the changes since upstream commit `f0c7c53` to identifiers th
   * **A:** Run `curl http://localhost:8080/.well-known/openid-credential-issuer` and confirm that JSON metadata is returned, and that its `credential_issuer` equals the identifier in the offer. For an identifier with a path, a 1.0 issuance reads `/.well-known/openid-credential-issuer/<path>` and a Draft 13 issuance `<path>/.well-known/openid-credential-issuer`; no other location is tried.
 
 * **Q: A pre-authorized issuance fails with `client_authentication_unavailable`.**
-  * **A:** The authorization server does not set `pre-authorized_grant_anonymous_access_supported` to `true`, whose default is `false`, and the wallet has no `client_id` or client authentication. Configure `Config.ClientAuth.ClientID` (or a client authentication), or have the server declare anonymous access.
+  * **A:** The wallet found no usable client authentication for the token request, and the error message says why: the authorization server metadata omits `token_endpoint_auth_methods_supported` or does not list the configured method (`none` by default), or it lists `none` but does not set `pre-authorized_grant_anonymous_access_supported` to `true` (its default is `false`) and the wallet has no `client_id`. Configure `Config.ClientAuth` with a method the server advertises, set `Config.ClientAuth.ClientID`, or have the server declare anonymous access.
 
 * **Q: A credential request fails with `credential_acceptance_policy_required`.**
   * **A:** Set `Config.CredentialAcceptance` or `CredentialRequest.Acceptance`. The policy must permit a mechanism that authenticates the issuer: `IssuerX509` for a credential with `x5c`, `IssuerKeys` for JWT VC Issuer Metadata or a DID bound by a DID Configuration, `Federation` for an OpenID Federation Entity. A test issuer is authenticated the same way, for example with its test CA in `IssuerX509`.

@@ -180,6 +180,9 @@ func newFinalIssuanceFixture(t *testing.T, opts ...func(*finalIssuanceFixture)) 
 		includeNonceEndpoint: true,
 		parExpiresIn:         60,
 		anonymousAccess:      boolPtr(true),
+		// RFC 8414 Section 2 reads an absent list as client_secret_basic, so
+		// the pre-authorized_code token request needs none advertised.
+		authMethodsSupported: []receiverTypes.TokenEndpointAuthMethod{receiverTypes.None},
 	}
 	f.encryptionKey = newPrivateJWKForFinalVCITest(t, "credential-response-enc-key-1")
 	f.encryptionKey.Algorithm = "ECDH-ES"

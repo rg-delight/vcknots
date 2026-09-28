@@ -184,8 +184,14 @@ type DPoPConfig struct {
 // ClientAuthConfig holds configuration for client authentication at the
 // authorization server's token endpoint.
 //
-// Method selects the authentication method. An empty value defaults to None,
-// so private_key_jwt is only used when explicitly configured.
+// Method selects the authentication method. An empty value defaults to None and
+// is never promoted. For an OpenID4VCI 1.0 pre-authorized_code token request
+// without a client attestation, it must appear in the server's
+// token_endpoint_auth_methods_supported, which RFC 8414 section 2 makes
+// client_secret_basic when absent, so such a server cannot be used.
+//
+// ClientID is optional for None on that request, and is sent unless
+// pre-authorized_grant_anonymous_access_supported is true (OID4VCI 1.0 12.3).
 //
 // ClientID and Key are required to use PrivateKeyJwt. Key must be the private
 // key whose corresponding public key is registered with the authorization
