@@ -1,9 +1,13 @@
 # Public Wallet API driver
 
 This independent Go module drives the public Wallet API. It reads one JSON
-operation on stdin and writes one JSON result on stdout. A protocol error exits
-with code 1 and writes `{"operation": ..., "error": ...}`; invalid command or
-configuration input exits with code 2.
+operation on stdin and writes one JSON result on stdout, exiting with code 0.
+It exits with code 2, writing the reason to stderr, when the command line is
+wrong or when the configuration file or the operation cannot be read as one
+JSON document with known members. Every other failure - an unsupported
+operation, an unreadable key file, a configuration the wallet refuses, or a
+protocol error - exits with code 1 and writes
+`{"operation": ..., "error": ...}` to stdout.
 
 The driver receives credentials with the OpenID4VCI 1.0 Pre-Authorized Code
 Flow and Authorization Code Flow, lists the stored credentials, presents them
