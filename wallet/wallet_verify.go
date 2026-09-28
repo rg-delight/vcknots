@@ -3,7 +3,6 @@ package wallet
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet/acceptance"
@@ -11,21 +10,6 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 )
-
-// VerifyCredential reports whether the credential's proof verifies under
-// pubKey. Only acceptance.DefaultSigningAlgorithms() are accepted, whatever
-// plugins the verification dispatcher has registered.
-func (w *Wallet) VerifyCredential(credential *credential.Credential, pubKey jose.JSONWebKey) bool {
-	if credential == nil || credential.Proof == nil {
-		return false
-	}
-	if !slices.Contains(acceptance.DefaultSigningAlgorithms(), credential.Proof.Algorithm) {
-		return false
-	}
-
-	result, err := w.verifier.Verify(credential.Proof, &pubKey)
-	return err == nil && result
-}
 
 // CredentialAcceptanceRequest is one credential for
 // VerifyCredentialForAcceptance and the issuance context its check needs.

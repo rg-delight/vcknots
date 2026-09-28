@@ -41,7 +41,7 @@ func TestWallet_DCQLJWTVCClaimsPathsStartAtTheCredential(t *testing.T) {
 				"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
 			}.Encode()
 
-			_, err := controller.PresentCredential(uri, key, nil)
+			_, err := presentWithWalletChoice(t, controller, uri, key, nil)
 			if tc.wantPresented {
 				require.NoError(t, err)
 				require.True(t, posted)

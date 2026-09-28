@@ -282,25 +282,6 @@ const (
 	NotificationCredentialDeleted NotificationEvent = "credential_deleted"
 )
 
-// ReceiveCredentialRequest is the input of ReceiveCredential, the one-call
-// OpenID4VCI Draft 13 Pre-Authorized Code Flow.
-type ReceiveCredentialRequest struct {
-	// CredentialOffer must carry a pre-authorized_code grant.
-	CredentialOffer *CredentialOffer
-	// CredentialConfigurationID selects one of the offered configurations;
-	// empty selects the first.
-	CredentialConfigurationID string
-	// TxCode is the Transaction Code the holder entered, when the grant carries
-	// a tx_code object (Draft 13 Section 6.1).
-	TxCode string
-	// Key is the holder key the credential is bound to. It signs the one key
-	// proof of the Credential Request (Draft 13 Section 7.2.1).
-	Key IKeyEntry
-	// Acceptance overrides Config.CredentialAcceptance for this credential.
-	// One of the two is required.
-	Acceptance *acceptance.Policy
-}
-
 // CredentialOffer represents a credential offer from an issuer.
 type CredentialOffer struct {
 	CredentialIssuer           *url.URL                         `json:"credential_issuer"`

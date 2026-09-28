@@ -31,6 +31,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/receiver"
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
+	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 )
 
 func sameKeyThumbprint(t *testing.T, a, b jose.JSONWebKey) bool {
@@ -53,7 +54,8 @@ type sdjwtPresentationFixture struct {
 	receiveValues func(vct string, holder *jose.JSONWebKey, mandatory, selective map[string]any)
 }
 
-// Credentials enter through the real public receive API and TLS issuer. The
+// Credentials enter through the staged Draft 13 issuance methods and a TLS
+// issuer. The
 // fixture signs issuer JWTs and commits disclosures with independent SHA-256.
 func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 	t.Helper()
@@ -159,7 +161,7 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 		wires <- wire
 		issuer, err := url.Parse(server.URL)
 		require.NoError(t, err)
-		saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{CredentialOffer: &CredentialOffer{CredentialIssuer: issuer, CredentialConfigurationIDs: []string{vct}, Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}}}, Key: holder})
+		saved, err := receiveDraft13(t.Context(), controller, PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, vct, "code")}, CredentialRequest{HolderKeys: []IKeyEntry{holder}})
 		require.NoError(t, err)
 		require.Equal(t, wire, string(saved.Entry.Raw))
 	}
@@ -172,4 +174,25 @@ func newSDJWTPresentationFixture(t *testing.T) sdjwtPresentationFixture {
 			issue(vct, boundKey, mandatory, values)
 		},
 	}
+}
+
+// presentWithWalletChoice answers the OpenID4VP request at uri with the
+// credentials SelectCredentials chooses: ParsePresentationRequest,
+// SelectCredentials and SubmitPresentation with options. It returns the
+// redirect_uri of the verifier's response.
+func presentWithWalletChoice(t *testing.T, w *Wallet, uri string, key IKeyEntry, options serializerTypes.SerializePresentationOptions) (string, error) {
+	t.Helper()
+	request, err := w.ParsePresentationRequest(t.Context(), uri)
+	if err != nil {
+		return "", err
+	}
+	selections, err := w.SelectCredentials(t.Context(), request)
+	if err != nil {
+		return "", err
+	}
+	result, err := w.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections, SerializeOptions: options})
+	if err != nil {
+		return "", err
+	}
+	return result.RedirectURI, nil
 }

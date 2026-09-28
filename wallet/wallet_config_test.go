@@ -153,54 +153,17 @@ func TestNewWalletWithConfigProfileChecks(t *testing.T) {
 	})
 }
 
-// TestSetReceiverChecksProfile: a Final-profile receiver set on a HAIP wallet
-// is not installed, and the receiver-using methods report the refusal instead
-// of running without the HAIP checks.
-func TestSetReceiverChecksProfile(t *testing.T) {
-	finalPlugin := &oid4vci.Oid4vciReceiver{Profile: profile.Final()}
-	w, err := NewWalletWithConfig(Config{Profiles: []profile.Profile{profile.HAIP()}, Storeless: true})
+// TestDraft13NeedsADraft13Transport: an injected receiver whose OpenID4VCI
+// plugin has no Draft 13 transport is reported by the Draft 13 stages, which
+// send nothing.
+func TestDraft13NeedsADraft13Transport(t *testing.T) {
+	w, err := NewWalletWithConfig(Config{Storeless: true, Receiver: receiverWith(t, mock.NewMockReceiver(t.TempDir())), CredentialAcceptance: mockIssuerAcceptance()})
 	require.NoError(t, err)
-
-	w.SetReceiver(receiverWith(t, finalPlugin))
 
 	issuer, err := url.Parse("https://issuer.example")
 	require.NoError(t, err)
-	_, err = w.FetchCredentialIssuerMetadata(issuer, receiverTypes.Oid4vci)
-	requireCoded(t, err, ErrProfileMismatch)
-	_, err = w.receiver.OID4VCITransport(receiverTypes.Oid4vci)
-	require.ErrorIs(t, err, ErrProfileMismatch)
-	_, err = w.receiver.Draft13Transport(receiverTypes.Oid4vci)
-	require.ErrorIs(t, err, ErrProfileMismatch)
-	require.Equal(t, profile.Final(), finalPlugin.Profile, "the wallet must not change a plugin it was given")
-
-	w.SetReceiver(nil)
-	_, err = w.receiver.OID4VCITransport(receiverTypes.Oid4vci)
-	requireCoded(t, err, ErrInvalidArgument)
-
-	haipReceiver := receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()})
-	w.SetReceiver(haipReceiver)
-	require.Same(t, haipReceiver, w.receiver)
-}
-
-func TestSetReceiverRefusalReachesReceiveCredential(t *testing.T) {
-	w, err := NewWalletWithConfig(Config{Storeless: true})
-	require.NoError(t, err)
-	w.SetReceiver(receiverWith(t, &oid4vci.Oid4vciReceiver{Profile: profile.HAIP()}))
-
-	issuer, err := url.Parse("https://issuer.example")
-	require.NoError(t, err)
-	_, err = w.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           issuer,
-			CredentialConfigurationIDs: []string{"pid"},
-			Grants: map[string]*CredentialOfferGrant{
-				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
-			},
-		},
-		Key:        newMockKeyEntry(),
-		Acceptance: mockIssuerAcceptance(),
-	})
-	require.ErrorIs(t, err, ErrProfileMismatch)
+	_, err = w.Draft13().AuthorizePreAuthorizedIssuance(t.Context(), PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "pid", "code")})
+	requireCoded(t, err, receiverTypes.ErrUnsupportedProtocol)
 }
 
 func TestGenerateDIDRejectsATypeIDThatIsNotADID(t *testing.T) {

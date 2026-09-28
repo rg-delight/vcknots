@@ -78,7 +78,7 @@ func TestWallet_PublicDCQLPresentation(t *testing.T) {
 				fixture.receive("urn:test:address", &holder, nil, map[string]string{"street_address": "1 Example St", "postal_code": "100-0000"})
 				uri := presentationURI(fixture.baseURL, tc.query)
 				var tokens map[string][]string
-				redirect, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
+				redirect, err := presentWithWalletChoice(t, fixture.wallet, uri, fixture.key, nil)
 				if err == nil {
 					require.Equal(t, fixture.baseURL+"/done", redirect)
 					select {
@@ -141,7 +141,7 @@ func TestWallet_DCQLRespectsCallerDisclosureChoice(t *testing.T) {
 			if tc.options != nil {
 				before = *tc.options
 			}
-			_, err := fixture.wallet.PresentCredential(uri, fixture.key, options)
+			_, err := presentWithWalletChoice(t, fixture.wallet, uri, fixture.key, options)
 			if tc.options != nil {
 				require.Equal(t, before, *tc.options)
 			}
@@ -169,7 +169,7 @@ func TestWallet_DCQLDoesNotSubmitWhenLaterCredentialCannotBind(t *testing.T) {
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	fixture.receive("urn:test:address", &otherHolder, nil, map[string]string{"street_address": "1 Example St"})
 	uri := presentationURI(fixture.baseURL, `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]},{"id":"address","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:address"]},"claims":[{"path":["street_address"]}]}]}`)
-	_, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
+	_, err := presentWithWalletChoice(t, fixture.wallet, uri, fixture.key, nil)
 	require.ErrorContains(t, err, "signing key does not match")
 	select {
 	case <-fixture.posted:
@@ -191,7 +191,7 @@ func TestWallet_DCQLIntegerValuesSurviveReceiveAndPresentation(t *testing.T) {
 					fixture.receiveValues("urn:test:identity", &holder, claims, nil)
 				}
 				query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["account_number"],"values":[` + requested + `]}]}]}`
-				_, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+				_, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 				if requested != "9007199254740993" {
 					require.Error(t, err)
 					select {
@@ -218,14 +218,14 @@ func TestWallet_DCQLUnboundCredentialIsSkipped(t *testing.T) {
 	fixture.receive("urn:test:identity", nil, nil, map[string]string{"given_name": "Unbound"})
 
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["given_name"]}]}]}`
-	_, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+	_, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 	var authzErr *oid4vp.AuthorizationRequestError
 	require.ErrorAs(t, err, &authzErr)
 	require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
 
 	// A bound credential for the same query must be selected instead.
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Bound"})
-	redirect, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+	redirect, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 	select {
@@ -245,7 +245,7 @@ func TestWallet_DCQLMultiplePresentsEveryMatch(t *testing.T) {
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Hanako"})
 
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"multiple":true}]}`
-	redirect, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+	redirect, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 	select {
@@ -290,7 +290,7 @@ func TestWallet_DCQLNestedClaimDisclosureMinimality(t *testing.T) {
 	}, credstoreTypes.SupportedCredStoreTypes(0)))
 
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":[{"path":["address","postal_code"]}]}]}`
-	redirect, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+	redirect, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 	require.NoError(t, err)
 	require.Equal(t, fixture.baseURL+"/done", redirect)
 	select {
@@ -309,7 +309,7 @@ func TestWallet_DCQLUnsatisfiableIsAccessDenied(t *testing.T) {
 	holder := fixture.key.PublicKey()
 	fixture.receive("urn:test:identity", &holder, nil, map[string]string{"given_name": "Taro"})
 	query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:missing"]}}]}`
-	_, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+	_, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 	var authzErr *oid4vp.AuthorizationRequestError
 	require.ErrorAs(t, err, &authzErr)
 	require.Equal(t, oid4vp.AccessDeniedError, authzErr.Code)
@@ -342,7 +342,7 @@ func TestWallet_DCQLMatchesJWTVCTypeValues(t *testing.T) {
 				"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
 			}.Encode()
 
-			_, err := controller.PresentCredential(uri, key, nil)
+			_, err := presentWithWalletChoice(t, controller, uri, key, nil)
 			if tc.wantPresented {
 				require.NoError(t, err)
 				require.True(t, posted)
@@ -495,7 +495,7 @@ func transactionDataFixture(t *testing.T) sdjwtPresentationFixture {
 func presentWithTransactionData(t *testing.T, fixture sdjwtPresentationFixture, query string, entries []string) (map[string][]string, error) {
 	t.Helper()
 	uri := presentationURIWithTransactionData(t, fixture.baseURL, query, entries)
-	redirect, err := fixture.wallet.PresentCredential(uri, fixture.key, nil)
+	redirect, err := presentWithWalletChoice(t, fixture.wallet, uri, fixture.key, nil)
 	if err != nil {
 		select {
 		case <-fixture.posted:
@@ -834,7 +834,7 @@ func TestWallet_DCQLDisclosesExactlyTheSelectedClaims(t *testing.T) {
 			}, jp, de, fr, address, postal, city)
 
 			query := `{"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:test:identity"]},"claims":` + tc.claims + `}]}`
-			_, err := fixture.wallet.PresentCredential(presentationURI(fixture.baseURL, query), fixture.key, nil)
+			_, err := presentWithWalletChoice(t, fixture.wallet, presentationURI(fixture.baseURL, query), fixture.key, nil)
 			require.NoError(t, err)
 			select {
 			case form := <-fixture.posted:

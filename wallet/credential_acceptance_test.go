@@ -2,10 +2,8 @@ package wallet
 
 import (
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -135,40 +133,22 @@ func (f *acceptanceFixture) send(wire string) {
 
 func (f *acceptanceFixture) receive(t *testing.T) (*SavedCredential, error) {
 	t.Helper()
-	issuer, err := url.Parse(f.server.URL)
-	require.NoError(t, err)
-	return f.wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           issuer,
-			CredentialConfigurationIDs: []string{"acceptance-config"},
-			Grants: map[string]*CredentialOfferGrant{
-				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
-			},
-		},
-		Key: f.holder,
-	})
+	return f.receiveUnder(t, nil)
 }
 
-// storeCredential runs the Draft 13 store path over wire under the wallet's
-// Config.CredentialAcceptance.
-// receiveUnder is receive with a per-request acceptance policy.
+// receiveUnder runs the Draft 13 Pre-Authorized Code Flow with a
+// per-request acceptance policy; nil applies Config.CredentialAcceptance.
 func (f *acceptanceFixture) receiveUnder(t *testing.T, policy *acceptance.Policy) (*SavedCredential, error) {
 	t.Helper()
 	issuer, err := url.Parse(f.server.URL)
 	require.NoError(t, err)
-	return f.wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer:           issuer,
-			CredentialConfigurationIDs: []string{"acceptance-config"},
-			Grants: map[string]*CredentialOfferGrant{
-				"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"},
-			},
-		},
-		Key:        f.holder,
-		Acceptance: policy,
-	})
+	return receiveDraft13(t.Context(), f.wallet,
+		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "acceptance-config", "code")},
+		CredentialRequest{HolderKeys: []IKeyEntry{f.holder}, Acceptance: policy})
 }
 
+// storeCredential runs the Draft 13 store path over wire under the wallet's
+// Config.CredentialAcceptance.
 func (f *acceptanceFixture) storeCredential(t *testing.T, wire string, holder *jose.JSONWebKey) (*SavedCredential, error) {
 	t.Helper()
 	policy, err := f.wallet.acceptancePolicy(nil)
@@ -358,11 +338,10 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	return testIssuerChain{caCert: caCert, caKey: caKey, leafCert: leafCert, leafKey: leafKey}
 }
 
-// TestReceiveCredentialRequiresAPolicy: ReceiveCredential used to store a
-// credential whose issuer it had not authenticated when no policy was
-// configured. SD-JWT VC -19 §2.4 requires the issuer-signed JWT's key to be
-// validated, so without a policy nothing is requested or stored.
-func TestReceiveCredentialRequiresAPolicy(t *testing.T) {
+// TestIssuanceRequiresAPolicy: SD-JWT VC -19 §2.4 requires the issuer-signed
+// JWT's key to be validated, so without a policy no credential is requested
+// or stored.
+func TestIssuanceRequiresAPolicy(t *testing.T) {
 	issuerKey := testutil.NewP256Key(t)
 
 	t.Run("without a policy nothing is requested", func(t *testing.T) {
@@ -437,36 +416,6 @@ func TestCredentialAcceptance_FinalResponseAllOrNothing(t *testing.T) {
 	_, err := fixture.wallet.storeCredentialResponse(t.Context(), policy, response, metadata, "acceptance-config", []jose.JSONWebKey{holder})
 	require.Error(t, err)
 	require.Equal(t, 0, fixture.entryCount(t))
-}
-
-func TestVerifyCredential_ValidAndWrongKey(t *testing.T) {
-	issuerKey := testutil.NewP256Key(t)
-	fixture := newAcceptanceFixture(t, acceptIssuerKeyPolicy(issuerKey))
-	holder := jose.JSONWebKey{Key: &issuerKey.PublicKey, Algorithm: "ES256"}
-	wire := buildAcceptanceWire(t, acceptanceWire{cnf: &holder, signingKey: issuerKey})
-	saved, err := fixture.storeCredential(t, wire, &holder)
-	require.NoError(t, err)
-	require.True(t, fixture.wallet.VerifyCredential(saved.Credential, holder))
-
-	wrongKey := testutil.NewP256Key(t)
-	require.False(t, fixture.wallet.VerifyCredential(saved.Credential, jose.JSONWebKey{Key: &wrongKey.PublicKey, Algorithm: "ES256"}))
-}
-
-// TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy pins that a valid
-// signature under an algorithm the dispatcher implements but the default
-// policy does not accept is not reported as verified.
-func TestVerifyCredential_AppliesTheDefaultAlgorithmPolicy(t *testing.T) {
-	w, _ := newAcceptanceWallet(t, profile.Final(), nil)
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	payload := []byte("header.payload")
-	digest := sha256.Sum256(payload)
-	signature, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, digest[:])
-	require.NoError(t, err)
-	signed := &credential.Credential{Proof: &credential.CredentialProof{Algorithm: jose.RS256, Signature: signature, Payload: payload}}
-
-	require.False(t, w.VerifyCredential(signed, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
-	require.False(t, w.VerifyCredential(nil, jose.JSONWebKey{Key: &rsaKey.PublicKey}))
 }
 
 func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {

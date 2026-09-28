@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,93 +19,36 @@ import (
 	"github.com/trustknots/vcknots/wallet/credential"
 	credstoreTypes "github.com/trustknots/vcknots/wallet/credstore/types"
 	"github.com/trustknots/vcknots/wallet/env"
+	"github.com/trustknots/vcknots/wallet/internal/testutil/mockserver"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/jwtvc"
 	"github.com/trustknots/vcknots/wallet/serializer/plugins/sdjwtvc"
 )
 
-func TestController_PresentCredential_InvalidID_Integration(t *testing.T) {
+// TestController_ParsePresentationRequest_RefusesMalformedRequests: a URI
+// that is not an OpenID4VP Authorization Request, or one that lacks what the
+// wallet needs to answer it (client_id, response_uri, dcql_query), is refused
+// while parsing, before any credential is read.
+func TestController_ParsePresentationRequest_RefusesMalformedRequests(t *testing.T) {
 	controller := createTestControllerWithDefaults(t)
 
-	// Test with invalid URI that should fail during parsing
-	mockURI := "invalid://uri/with/malformed/parameters"
-
-	// Create a mock key entry for the test
-	mockKey := newMockKeyEntry()
-
-	// This should fail when trying to parse the invalid URI
-	_, err := controller.PresentCredential(mockURI, mockKey, nil)
-	if err == nil {
-		t.Error("Expected PresentCredential to fail with invalid URI")
-		return
-	}
-
-	// Verify the error is related to URI parsing
-	if !strings.Contains(err.Error(), "failed to parse request URI") {
-		t.Errorf("Expected URI parsing error, got: %v", err)
-	}
-}
-
-func TestController_PresentCredential_ErrorPaths_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	tests := []struct {
-		name    string
-		uri     string
-		wantErr bool
-		errMsg  string
-	}{
-		{
-			name:    "empty URI",
-			uri:     "",
-			wantErr: true,
-			errMsg:  "failed to parse request URI",
-		},
-		{
-			name:    "invalid URI format",
-			uri:     "invalid-uri-format",
-			wantErr: true,
-			errMsg:  "failed to parse request URI",
-		},
-		{
-			name:    "malformed URI with invalid characters",
-			uri:     "openid4vp://present?invalid[query",
-			wantErr: true,
-			errMsg:  "failed to parse request URI",
-		},
-		{
-			name:    "URI with unsupported scheme",
-			uri:     "http://example.com/present",
-			wantErr: true,
-			errMsg:  "failed to parse request URI",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockKey := newMockKeyEntry()
-			_, err := controller.PresentCredential(tt.uri, mockKey, nil)
-			if tt.wantErr && err == nil {
-				t.Errorf("PresentCredential() expected error but got none")
-			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("PresentCredential() unexpected error: %v", err)
-			}
-			if tt.wantErr && err != nil {
-				errStr := err.Error()
-				if len(tt.errMsg) > 0 && len(errStr) >= len(tt.errMsg) {
-					found := false
-					for i := 0; i <= len(errStr)-len(tt.errMsg); i++ {
-						if errStr[i:i+len(tt.errMsg)] == tt.errMsg {
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("PresentCredential() error = %v, expected to contain %v", err, tt.errMsg)
-					}
-				}
-			}
+	for name, uri := range map[string]string{
+		"empty URI":                          "",
+		"invalid URI format":                 "invalid-uri-format",
+		"unsupported scheme":                 "invalid://uri/with/malformed/parameters",
+		"malformed query":                    "openid4vp://present?invalid[query",
+		"http scheme":                        "http://example.com/present",
+		"no client_id":                       "openid4vp://present?credential_id=test-cred&presentation_definition_id=test-def",
+		"no dcql_query":                      "openid4vp://present?credential_id=test-cred&client_id=test-client",
+		"no response endpoint":               "openid4vp://present?presentation_definition_id=test-def&client_id=test-client",
+		"pre-standard credential_id":         "openid4vp://present?credential_id=non-existent-credential&presentation_definition_id=test&endpoint=https://example.com",
+		"pre-standard credential_id list":    "openid4vp://present?credential_id=cred1&credential_id=cred2&presentation_definition_id=test&endpoint=https://example.com",
+		"pre-standard escaped credential_id": "openid4vp://present?credential_id=cred%20with%20spaces&presentation_definition_id=test&endpoint=https://example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			request, err := controller.ParsePresentationRequest(t.Context(), uri)
+			require.Nil(t, request)
+			require.ErrorContains(t, err, "failed to parse request URI")
 		})
 	}
 }
@@ -242,7 +184,7 @@ func TestWallet_SelectCredentialsForConsent(t *testing.T) {
 	}}, selections)
 }
 
-func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
+func TestWallet_PresentDirectPostJWT(t *testing.T) {
 	controller := createTestControllerAllowingHTTP(t)
 	holderPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -323,7 +265,7 @@ func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
 		url.QueryEscape(string(clientMetadataBytes)),
 	)
 
-	redirect, err := controller.PresentCredential(uri, holderKey, nil)
+	redirect, err := presentWithWalletChoice(t, controller, uri, holderKey, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/done", redirect)
 	decryptedPayload, _ := obs.get("decrypted_payload").(map[string]any)
@@ -331,181 +273,6 @@ func TestWallet_PresentCredentialDirectPostJWT(t *testing.T) {
 	vpToken, ok := decryptedPayload["vp_token"].(map[string]any)
 	require.True(t, ok)
 	require.NotEmpty(t, vpToken["pid"])
-}
-
-func TestController_PresentCredential_MissingRequiredFields_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	// Test cases for missing required fields in PresentCredential function
-	// These should trigger various error paths in the function logic
-	tests := []struct {
-		name           string
-		setupMockURI   func() string
-		expectedErrors []string
-	}{
-		{
-			name: "URI with missing credential IDs",
-			setupMockURI: func() string {
-				return "openid4vp://present?presentation_definition_id=test-def&client_id=test-client"
-			},
-			expectedErrors: []string{"no credential IDs specified", "failed to parse request URI"},
-		},
-		{
-			name: "URI with missing endpoint",
-			setupMockURI: func() string {
-				return "openid4vp://present?credential_id=test-cred&presentation_definition_id=test-def"
-			},
-			expectedErrors: []string{"endpoint is not specified", "failed to parse request URI"},
-		},
-		{
-			name: "URI with missing presentation definition",
-			setupMockURI: func() string {
-				return "openid4vp://present?credential_id=test-cred&client_id=test-client"
-			},
-			expectedErrors: []string{"dcql_query is not specified", "failed to parse request URI"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockURI := tt.setupMockURI()
-			mockKey := newMockKeyEntry()
-			_, err := controller.PresentCredential(mockURI, mockKey, nil)
-
-			if err == nil {
-				t.Errorf("PresentCredential() expected error but got none")
-				return
-			}
-
-			errStr := err.Error()
-			foundExpectedError := false
-			for _, expectedErr := range tt.expectedErrors {
-				if len(errStr) >= len(expectedErr) {
-					for i := 0; i <= len(errStr)-len(expectedErr); i++ {
-						if errStr[i:i+len(expectedErr)] == expectedErr {
-							foundExpectedError = true
-							break
-						}
-					}
-					if foundExpectedError {
-						break
-					}
-				}
-			}
-
-			if !foundExpectedError {
-				t.Errorf("PresentCredential() error = %v, expected one of %v", err, tt.expectedErrors)
-			}
-		})
-	}
-}
-
-func TestController_PresentCredential_CallsRedirectHandler(t *testing.T) {
-	controller, mockKey := receiveCredentialForPresentationTest(t)
-	redirectTarget := "https://example.com/redirect"
-	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"redirect_uri":"%s"}`, redirectTarget)
-	}))
-	defer responseServer.Close()
-
-	// Step 2: Present the credential and verify redirect handler execution
-	dcqlQuery := `{"credentials":[{"id":"cred1","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`
-	clientID := "redirect_uri:" + responseServer.URL
-	presentationURI := fmt.Sprintf(
-		"openid4vp://present?dcql_query=%s&client_id=%s&response_type=vp_token&response_mode=direct_post&response_uri=%s&nonce=test-nonce-123&state=test-state-456",
-		url.QueryEscape(dcqlQuery),
-		url.QueryEscape(clientID),
-		url.QueryEscape(responseServer.URL),
-	)
-
-	called := false
-	var captured string
-	options := &PresentCredentialOptions{
-		OnRedirect: func(uri string) error {
-			called = true
-			captured = uri
-			return nil
-		},
-	}
-
-	redirectURI, err := controller.PresentCredentialWithOptions(presentationURI, mockKey, options)
-	require.NoError(t, err)
-	require.Equal(t, redirectTarget, redirectURI)
-	require.True(t, called, "expected redirect handler to be called")
-	require.Equal(t, redirectTarget, captured)
-}
-
-func TestController_PresentCredential_DetailedErrorPaths_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	// Test scenarios that exercise different parts of PresentCredential logic
-	tests := []struct {
-		name             string
-		mockURIString    string
-		expectParseError bool
-		expectCredError  bool
-		description      string
-	}{
-		{
-			name:             "valid URI format but credential not found",
-			mockURIString:    "openid4vp://present?credential_id=non-existent-credential&presentation_definition_id=test&endpoint=https://example.com",
-			expectParseError: false,
-			expectCredError:  true,
-			description:      "Should fail when getting credential entry",
-		},
-		{
-			name:             "multiple credential IDs scenario",
-			mockURIString:    "openid4vp://present?credential_id=cred1&credential_id=cred2&presentation_definition_id=test&endpoint=https://example.com",
-			expectParseError: false,
-			expectCredError:  true,
-			description:      "Should attempt to process multiple credentials",
-		},
-		{
-			name:             "credential with special characters in ID",
-			mockURIString:    "openid4vp://present?credential_id=cred%20with%20spaces&presentation_definition_id=test&endpoint=https://example.com",
-			expectParseError: false,
-			expectCredError:  true,
-			description:      "Should handle URL-encoded credential IDs",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mockKey := newMockKeyEntry()
-			_, err := controller.PresentCredential(tt.mockURIString, mockKey, nil)
-
-			if !tt.expectParseError && !tt.expectCredError && err != nil {
-				t.Errorf("PresentCredential() unexpected error: %v", err)
-			} else if (tt.expectParseError || tt.expectCredError) && err == nil {
-				t.Errorf("PresentCredential() expected error but got none for %s", tt.description)
-			}
-		})
-	}
-
-	// Test with scenarios that exercise validation logic
-	t.Run("presenter parsing success but missing fields", func(t *testing.T) {
-		testCases := []struct {
-			name string
-			uri  string
-		}{
-			{"missing credential IDs", "openid4vp://present?presentation_definition_id=test&endpoint=https://example.com"},
-			{"missing endpoint", "openid4vp://present?credential_id=test&presentation_definition_id=test"},
-			{"missing presentation definition", "openid4vp://present?credential_id=test&endpoint=https://example.com"},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.name, func(t *testing.T) {
-				mockKey := newMockKeyEntry()
-				_, err := controller.PresentCredential(tc.uri, mockKey, nil)
-				if err == nil {
-					t.Errorf("Expected error for %s but got none", tc.name)
-				}
-				// Expected error occurred - test passes
-			})
-		}
-	})
 }
 
 func TestApplyOID4VPRequestOptions(t *testing.T) {
@@ -585,12 +352,9 @@ func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry)
 	controller := createTestControllerAllowingHTTP(t)
 	key := newMockKeyEntry()
 	issuer := newReceiveCredentialTestServer(t, key)
-	saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{
-			CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"test-config"},
-			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "test-code"}},
-		}, Key: key, Acceptance: mockIssuerAcceptance(),
-	})
+	saved, err := receiveDraft13(t.Context(), controller,
+		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "test-config", "test-code")},
+		CredentialRequest{HolderKeys: []IKeyEntry{key}, Acceptance: mockIssuerAcceptance()})
 	require.NoError(t, err, "presentation test must receive and store a real signed credential")
 	require.NotNil(t, saved)
 	require.NotEmpty(t, saved.Entry.Raw)
@@ -630,19 +394,17 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 				params.Set("dcql_query", `{"credentials":[{"id":"identity","format":"jwt_vc_json","meta":{"type_values":[["VerifiableCredential"]]}}]}`)
 			}
 			uri := "openid4vp://present?" + params.Encode()
+			parse := controller.ParsePresentationRequest
 			if draft {
-				request, err := controller.Draft24().ParsePresentationRequest(t.Context(), uri)
-				require.NoError(t, err)
-				selections, err := controller.SelectCredentials(t.Context(), request)
-				require.NoError(t, err)
-				result, err := controller.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
-				require.NoError(t, err)
-				require.Equal(t, "https://verifier.example/done", result.RedirectURI)
-			} else {
-				redirect, err := controller.PresentCredential(uri, key, nil)
-				require.NoError(t, err)
-				require.Equal(t, "https://verifier.example/done", redirect)
+				parse = controller.Draft24().ParsePresentationRequest
 			}
+			request, err := parse(t.Context(), uri)
+			require.NoError(t, err)
+			selections, err := controller.SelectCredentials(t.Context(), request)
+			require.NoError(t, err)
+			result, err := controller.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
+			require.NoError(t, err)
+			require.Equal(t, "https://verifier.example/done", result.RedirectURI)
 			var form url.Values
 			select {
 			case form = <-captured:
@@ -675,4 +437,68 @@ func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
 			require.Len(t, vp["verifiableCredential"], 1)
 		})
 	}
+}
+
+// newReceiveCredentialTestServer is a plain-http Draft 13 issuer of one
+// jwt_vc_json credential whose subject is holder's did:key, signed by the
+// mockserver issuer key, for tests that need a stored credential.
+func newReceiveCredentialTestServer(t *testing.T, holder IKeyEntry) *url.URL {
+	t.Helper()
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	jwtBuilder := mockserver.MustNewJWTBuilder(mockserver.MustGenerateKeyPair("issuer-key-id"))
+	credentialJWT, err := jwtBuilder.CreateSignedCredentialJWT(server.URL, map[string]any{
+		"sub": didKeyOf(t, holder.PublicKey()),
+		"vc": map[string]any{
+			"@context":     []string{"https://www.w3.org/2018/credentials/v1"},
+			"id":           "http://example.com/credential/1",
+			"type":         []string{"VerifiableCredential"},
+			"issuer":       server.URL,
+			"issuanceDate": "2023-01-01T00:00:00Z",
+			"credentialSubject": map[string]any{
+				"id":   "http://example.com/subject",
+				"name": "John Doe",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	mux.HandleFunc("/.well-known/openid-credential-issuer", func(w http.ResponseWriter, _ *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+			"credential_issuer":     server.URL,
+			"credential_endpoint":   server.URL + "/credential",
+			"authorization_servers": []string{server.URL},
+			"credential_configurations_supported": map[string]any{
+				"test-config": map[string]any{
+					"format":                "jwt_vc_json",
+					"credential_definition": map[string]any{"type": []string{"VerifiableCredential"}},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+			"issuer":         server.URL,
+			"token_endpoint": server.URL + "/token",
+			"pre-authorized_grant_anonymous_access_supported": true,
+			"response_types_supported":                        []string{"code"},
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{
+			"access_token": "test-access-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+			"c_nonce":      "test-nonce",
+		})
+	})
+	mux.HandleFunc("/credential", func(w http.ResponseWriter, _ *http.Request) {
+		mockserver.JSONResponse(w, http.StatusOK, map[string]any{"credential": credentialJWT})
+	})
+
+	issuer, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	return issuer
 }

@@ -157,7 +157,7 @@ func TestDraftEntryPointsNeedTheirDraftProfile(t *testing.T) {
 	requireCoded(t, err, ErrProfileForbidsDraft)
 	err = finalOnly.Draft13().NotifyIssuer(t.Context(), &IssuanceNotification{}, NotificationEvent("credential_accepted"), "")
 	requireCoded(t, err, ErrProfileForbidsDraft)
-	_, err = finalOnly.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
+	_, err = finalOnly.Draft13().AuthorizePreAuthorizedIssuance(t.Context(), PreAuthorizedIssuanceRequest{})
 	requireCoded(t, err, ErrProfileForbidsDraft)
 	_, err = finalOnly.Draft24().ParsePresentationRequest(t.Context(), "openid4vp://?client_id=x")
 	requireCoded(t, err, ErrProfileForbidsDraft)

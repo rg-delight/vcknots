@@ -69,7 +69,7 @@ import (
 type Wallet struct {
 	credStore  *credstore.CredStoreDispatcher
 	idProf     *idprof.IdentityProfileDispatcher
-	receiver   receivingDispatcher
+	receiver   *receiver.ReceivingDispatcher
 	serializer *serializer.SerializationDispatcher
 	verifier   *verifier.VerificationDispatcher
 	presenter  *presenter.PresentationDispatcher
@@ -587,74 +587,6 @@ func checkBundledPresenter(d *presenter.PresentationDispatcher) error {
 		}
 	}
 	return nil
-}
-
-// SetReceiver replaces the receiver dispatcher after checking its plugins as
-// NewWalletWithConfig does. A refused dispatcher is not installed: every
-// method that needs the receiver then returns the refusal, until a later
-// SetReceiver succeeds.
-//
-// Deprecated: set Config.Receiver, which reports the refusal from
-// NewWalletWithConfig.
-func (w *Wallet) SetReceiver(r *receiver.ReceivingDispatcher) {
-	if r == nil {
-		w.receiver = refusedReceiver{err: fmt.Errorf("%w: SetReceiver got a nil dispatcher", ErrInvalidArgument)}
-		return
-	}
-	if err := checkPluginProfiles(r.Plugins(), w.profile); err != nil {
-		w.receiver = refusedReceiver{err: fmt.Errorf("SetReceiver: %w", err)}
-		return
-	}
-	w.receiver = r
-}
-
-// receivingDispatcher is the part of *receiver.ReceivingDispatcher the wallet
-// uses, so a dispatcher SetReceiver refused can stand in as refusedReceiver.
-type receivingDispatcher interface {
-	Plugins() []receiverTypes.Receiver
-	OID4VCITransport(receiverTypes.SupportedReceivingTypes) (receiverTypes.OID4VCITransport, error)
-	Draft13Transport(receiverTypes.SupportedReceivingTypes) (receiverTypes.Draft13Transport, error)
-	FetchIssuerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error)
-	FetchAuthorizationServerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error)
-	FetchAccessToken(receiverTypes.SupportedReceivingTypes, common.URIField, string, string, ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error)
-	FetchNonce(receiverTypes.SupportedReceivingTypes, common.URIField) (*string, error)
-	ReceiveCredential(receiverTypes.SupportedReceivingTypes, common.URIField, string, *string, receiverTypes.CredentialIssuanceAccessToken, *receiverTypes.CredentialDefinition, *string, ...*receiverTypes.CredentialRequestOptions) (*string, error)
-}
-
-var _ receivingDispatcher = (*receiver.ReceivingDispatcher)(nil)
-
-// refusedReceiver answers every call with the error SetReceiver refused a
-// dispatcher with.
-type refusedReceiver struct{ err error }
-
-func (r refusedReceiver) Plugins() []receiverTypes.Receiver { return nil }
-
-func (r refusedReceiver) OID4VCITransport(receiverTypes.SupportedReceivingTypes) (receiverTypes.OID4VCITransport, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) Draft13Transport(receiverTypes.SupportedReceivingTypes) (receiverTypes.Draft13Transport, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) FetchIssuerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.CredentialIssuerMetadata, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) FetchAuthorizationServerMetadata(common.URIField, receiverTypes.SupportedReceivingTypes) (*receiverTypes.AuthorizationServerMetadata, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) FetchAccessToken(receiverTypes.SupportedReceivingTypes, common.URIField, string, string, ...receiverTypes.TokenRequestOption) (*receiverTypes.CredentialIssuanceAccessToken, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) FetchNonce(receiverTypes.SupportedReceivingTypes, common.URIField) (*string, error) {
-	return nil, r.err
-}
-
-func (r refusedReceiver) ReceiveCredential(receiverTypes.SupportedReceivingTypes, common.URIField, string, *string, receiverTypes.CredentialIssuanceAccessToken, *receiverTypes.CredentialDefinition, *string, ...*receiverTypes.CredentialRequestOptions) (*string, error) {
-	return nil, r.err
 }
 
 // GenerateDID generates a DID from given options.

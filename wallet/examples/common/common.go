@@ -1,6 +1,7 @@
 package common
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -25,6 +26,7 @@ import (
 	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
 	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
+	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
 
@@ -248,4 +250,25 @@ func NewOID4VPRuntime(certPath string, allowHTTP bool) (*Runtime, error) {
 		Serializer: serializerDispatcher,
 		Wallet:     w,
 	}, nil
+}
+
+// PresentAll answers the OpenID4VP request at uri with the credentials the
+// wallet selects for it, through ParsePresentationRequest, SelectCredentials
+// and SubmitPresentation. It skips the holder's consent that a real wallet
+// asks for between selecting and submitting, which the examples do not need.
+// It returns the redirect_uri of the verifier's response, if any.
+func PresentAll(ctx context.Context, w *wallet.Wallet, uri string, key wallet.IKeyEntry, options serializerTypes.SerializePresentationOptions) (string, error) {
+	request, err := w.ParsePresentationRequest(ctx, uri)
+	if err != nil {
+		return "", err
+	}
+	selections, err := w.SelectCredentials(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	result, err := w.SubmitPresentation(ctx, request, wallet.Presentation{Key: key, Credentials: selections, SerializeOptions: options})
+	if err != nil {
+		return "", err
+	}
+	return result.RedirectURI, nil
 }

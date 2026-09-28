@@ -7,12 +7,14 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,6 +353,35 @@ func draft13StoredCount(t *testing.T, w *Wallet) int {
 	return total
 }
 
+// preAuthorizedCodeOffer is a Credential Offer of configurationID from issuer
+// with a pre-authorized_code grant and no tx_code.
+func preAuthorizedCodeOffer(issuer *url.URL, configurationID, code string) *CredentialOffer {
+	return &CredentialOffer{
+		CredentialIssuer:           issuer,
+		CredentialConfigurationIDs: []string{configurationID},
+		Grants: map[string]*CredentialOfferGrant{
+			string(receiverTypes.PreAuthorizedCode): {PreAuthorizedCode: code},
+		},
+	}
+}
+
+// receiveDraft13 runs the Draft 13 Pre-Authorized Code Flow in w through the
+// staged methods and returns the one credential it verified and stored.
+func receiveDraft13(ctx context.Context, w *Wallet, request PreAuthorizedIssuanceRequest, credentialRequest CredentialRequest) (*SavedCredential, error) {
+	grant, err := w.Draft13().AuthorizePreAuthorizedIssuance(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	result, err := w.Draft13().RequestCredential(ctx, grant, credentialRequest)
+	if err != nil {
+		return nil, err
+	}
+	if result.Deferred != nil || len(result.Credentials) != 1 {
+		return nil, fmt.Errorf("want one credential, got %d (deferred: %t)", len(result.Credentials), result.Deferred != nil)
+	}
+	return result.Credentials[0], nil
+}
+
 // draft13RequireCoded asserts errors.Is(err, target) and that err carries a
 // code other than unclassified.
 func draft13RequireCoded(t *testing.T, err error, target error) {
@@ -622,6 +653,83 @@ func TestDraft13KeyProofHookIsRefusedUnderHAIP(t *testing.T) {
 	})
 	draft13RequireCoded(t, err, ErrInvalidArgument)
 	requireRefusedBy(t, err, "ForbidExperimental")
+}
+
+// Draft 13 Section 6.2 and 7.2: the c_nonce of the key proof comes from the
+// Token Response (or a Credential Error Response); Draft 13 has no Nonce
+// Endpoint, so an advertised nonce_endpoint is never called.
+func TestDraft13NeverCallsANonceEndpoint(t *testing.T) {
+	var nonceCalls atomic.Int32
+	nonceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nonceCalls.Add(1)
+		draft13WriteJSON(w, http.StatusOK, map[string]any{"c_nonce": "nonce-from-endpoint"})
+	}))
+	t.Cleanup(nonceServer.Close)
+	fixture := newDraft13Fixture(t)
+	fixture.set(func(f *draft13Fixture) {
+		f.issuerMetadataExtra = func(string) map[string]any { return map[string]any{"nonce_endpoint": nonceServer.URL + "/nonce"} }
+	})
+
+	result, err := fixture.receivePreAuthorized(t)
+	require.NoError(t, err)
+	require.Len(t, result.Credentials, 1)
+	require.Zero(t, nonceCalls.Load(), "Draft 13 has no nonce endpoint to call")
+	requests := fixture.credentials()
+	require.Len(t, requests, 1)
+	require.NotContains(t, requests[0], "credential_configuration_id")
+	_, _, claims := draft13ProofParts(t, requests[0])
+	require.Equal(t, "nonce-1", claims["nonce"], "the key proof carries the Token Response c_nonce")
+}
+
+// Draft 13 Section 6.1: tx_code is sent only when the holder entered one.
+func TestDraft13OmitsAnEmptyTxCode(t *testing.T) {
+	fixture := newDraft13Fixture(t)
+	_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), PreAuthorizedIssuanceRequest{
+		CredentialOffer: fixture.offer(map[string]*CredentialOfferGrant{
+			string(receiverTypes.PreAuthorizedCode): {PreAuthorizedCode: "pre-code-1"},
+		}),
+	})
+	require.NoError(t, err)
+	tokens := fixture.tokens()
+	require.Len(t, tokens, 1)
+	require.False(t, tokens[0].Has("tx_code"))
+}
+
+// The pre-authorized code is used once (Draft 13 Section 4.1.1), so an offer
+// the wallet cannot redeem for the configuration it asks for is refused
+// before the Token Request.
+func TestDraft13PreAuthorizedIssuanceRefusesBeforeTheTokenRequest(t *testing.T) {
+	for name, test := range map[string]struct {
+		configure func(*Config)
+		change    func(*PreAuthorizedIssuanceRequest)
+		want      error
+	}{
+		"a configuration the offer does not list": {
+			change: func(r *PreAuthorizedIssuanceRequest) { r.CredentialConfigurationID = "other" },
+			want:   ErrDraft13CredentialConfigurationUnknown,
+		},
+		"no pre-authorized_code grant": {
+			change: func(r *PreAuthorizedIssuanceRequest) { r.CredentialOffer.Grants = map[string]*CredentialOfferGrant{} },
+			want:   ErrDraft13PreAuthorizedCodeGrantMissing,
+		},
+		"no offer": {
+			change: func(r *PreAuthorizedIssuanceRequest) { r.CredentialOffer = nil },
+			want:   ErrDraft13OfferMissing,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var configure []func(*Config)
+			if test.configure != nil {
+				configure = append(configure, test.configure)
+			}
+			fixture := newDraft13Fixture(t, configure...)
+			request := fixture.preAuthorizedRequest()
+			test.change(&request)
+			_, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(context.Background(), request)
+			draft13RequireCoded(t, err, test.want)
+			require.Empty(t, fixture.tokens(), "no token request was sent")
+		})
+	}
 }
 
 func TestDraft13RequiresOneHolderKey(t *testing.T) {

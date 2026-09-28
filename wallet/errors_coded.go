@@ -20,9 +20,7 @@ import (
 //  2. Every non-nil error returned by an exported function or method of this
 //     package has at least one code in its chain. Failures with no more
 //     specific code are reported as ErrInvalidArgument, ErrCanceled,
-//     ErrDeadlineExceeded, ErrNetwork or ErrUnclassified. The one exception is
-//     an error returned by PresentCredentialOptions.OnRedirect, which is
-//     passed back unchanged.
+//     ErrDeadlineExceeded, ErrNetwork or ErrUnclassified.
 //  3. Exported sentinels and error types of the sub-packages are coded, but a
 //     plugin method called directly may return an uncoded error from a
 //     dependency; promise 2 applies once it crosses a method of this package.
@@ -46,7 +44,8 @@ var (
 	ErrUnclassified = common.NewCodedError("unclassified", "unclassified error")
 )
 
-// Profile conditions, reported when the wallet is built or its receiver set.
+// Profile conditions, reported when the wallet is built or a draft entry
+// point its profiles do not enable is called.
 var (
 	// ErrProfileMismatch reports a plugin whose profile.Carrier reports a
 	// profile other than the 1.0 profile of Config.Profiles.

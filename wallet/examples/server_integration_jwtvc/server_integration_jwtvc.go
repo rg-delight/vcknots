@@ -325,7 +325,7 @@ func presentation(w *wallet.Wallet, key *common.MockKeyEntry, receivedCredential
 	logger.Info("Request URI is valid", "scheme", urlParsed.Scheme)
 
 	// Present demo credential to the verifier
-	redirectURI, err := w.PresentCredential(string(body), key, nil)
+	redirectURI, err := common.PresentAll(context.Background(), w, string(body), key, nil)
 	if err != nil {
 		logger.Error("Failed to present credential", "error", err)
 		panic(err)

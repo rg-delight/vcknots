@@ -25,7 +25,7 @@ func TestWallet_PresentationHonoursTheVerifiersAlgorithms(t *testing.T) {
 		}.Encode()
 	}
 
-	err := submitSelectedForTest(t, fixture.wallet, uri(`["ES384"]`), fixture.key)
+	_, err := presentWithWalletChoice(t, fixture.wallet, uri(`["ES384"]`), fixture.key, nil)
 	require.ErrorIs(t, err, oid4vp.ErrVPFormatAlgUnsupported)
 	select {
 	case <-fixture.posted:
@@ -33,7 +33,8 @@ func TestWallet_PresentationHonoursTheVerifiersAlgorithms(t *testing.T) {
 	default:
 	}
 
-	require.NoError(t, submitSelectedForTest(t, fixture.wallet, uri(`["ES256","ES384"]`), fixture.key))
+	_, err = presentWithWalletChoice(t, fixture.wallet, uri(`["ES256","ES384"]`), fixture.key, nil)
+	require.NoError(t, err)
 	<-fixture.posted
 }
 

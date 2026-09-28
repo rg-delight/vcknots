@@ -30,7 +30,8 @@ import (
 	serializerTypes "github.com/trustknots/vcknots/wallet/serializer/types"
 )
 
-// Issue a signed credential through ReceiveCredential and a real TLS server.
+// Issue a signed credential through the staged Draft 13 issuance methods and a
+// real TLS server.
 // Presentation tests do not insert credentials through private storage.
 func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry, string, <-chan string) {
 	t.Helper()
@@ -92,110 +93,94 @@ func receiveSDJWTForHolderBinding(t *testing.T, bound bool) (*Wallet, IKeyEntry,
 	require.NoError(t, err)
 	issuer, err := url.Parse(server.URL)
 	require.NoError(t, err)
-	saved, err := controller.ReceiveCredential(t.Context(), ReceiveCredentialRequest{
-		CredentialOffer: &CredentialOffer{CredentialIssuer: issuer, CredentialConfigurationIDs: []string{"identity"},
-			Grants: map[string]*CredentialOfferGrant{"urn:ietf:params:oauth:grant-type:pre-authorized_code": {PreAuthorizedCode: "code"}}},
-		Key: holder,
-	})
+	saved, err := receiveDraft13(t.Context(), controller,
+		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "identity", "code")},
+		CredentialRequest{HolderKeys: []IKeyEntry{holder}})
 	require.NoError(t, err)
 	require.Equal(t, wire, string(saved.Entry.Raw))
 	return controller, holder, server.URL, posted
 }
 
 func TestWallet_SDHolderBindingFromDCQL(t *testing.T) {
-	for _, api := range []string{"present", "submit"} {
-		for _, tc := range []struct {
-			name                                                                             string
-			requestValue                                                                     any
-			bound, wrongKey, explicitOptions, typedNil, forceBinding, wantBinding, wantError bool
-		}{
-			{name: "default requires binding", bound: true, wantBinding: true},
-			{name: "explicit true", requestValue: true, bound: true, wantBinding: true},
-			{name: "caller cannot disable requested binding", bound: true, explicitOptions: true, wantBinding: true},
-			{name: "typed nil still requires binding", bound: true, typedNil: true, wantBinding: true},
-			{name: "default rejects unbound credential", wantError: true},
-			{name: "wrong signing key", bound: true, wrongKey: true, wantError: true},
-			{name: "false permits unbound credential", requestValue: false},
-			{name: "caller can request optional binding", requestValue: false, bound: true, forceBinding: true, wantBinding: true},
-		} {
-			if api == "submit" && (tc.forceBinding || tc.explicitOptions || tc.typedNil) {
-				continue // The submit case passes no serialization options.
+	for _, tc := range []struct {
+		name                                                                             string
+		requestValue                                                                     any
+		bound, wrongKey, explicitOptions, typedNil, forceBinding, wantBinding, wantError bool
+	}{
+		{name: "default requires binding", bound: true, wantBinding: true},
+		{name: "explicit true", requestValue: true, bound: true, wantBinding: true},
+		{name: "caller cannot disable requested binding", bound: true, explicitOptions: true, wantBinding: true},
+		{name: "typed nil still requires binding", bound: true, typedNil: true, wantBinding: true},
+		{name: "default rejects unbound credential", wantError: true},
+		{name: "wrong signing key", bound: true, wrongKey: true, wantError: true},
+		{name: "false permits unbound credential", requestValue: false},
+		{name: "caller can request optional binding", requestValue: false, bound: true, forceBinding: true, wantBinding: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, key, baseURL, posted := receiveSDJWTForHolderBinding(t, tc.bound)
+			if tc.wrongKey {
+				key = newMockKeyEntry()
 			}
-			t.Run(api+"/"+tc.name, func(t *testing.T) {
-				controller, key, baseURL, posted := receiveSDJWTForHolderBinding(t, tc.bound)
-				if tc.wrongKey {
-					key = newMockKeyEntry()
+			query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:test:identity"}}}
+			if tc.requestValue != nil {
+				query["require_cryptographic_holder_binding"] = tc.requestValue
+			}
+			queryJSON, err := json.Marshal(map[string]any{"credentials": []any{query}})
+			require.NoError(t, err)
+			clientID := "redirect_uri:" + baseURL + "/response"
+			uri := "openid4vp://present?" + url.Values{
+				"client_id": {clientID}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
+				"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {string(queryJSON)},
+			}.Encode()
+			var options serializerTypes.SerializePresentationOptions
+			if tc.explicitOptions {
+				options = &sdjwtvc.SdJwtVcPresentationOptions{RequireKeyBinding: false}
+			}
+			if tc.typedNil {
+				options = (*sdjwtvc.SdJwtVcPresentationOptions)(nil)
+			}
+			if tc.forceBinding {
+				options = &sdjwtvc.SdJwtVcPresentationOptions{RequireKeyBinding: true}
+			}
+			_, err = presentWithWalletChoice(t, controller, uri, key, options)
+			if tc.explicitOptions {
+				require.False(t, options.(*sdjwtvc.SdJwtVcPresentationOptions).RequireKeyBinding, "request must not mutate caller options")
+			}
+			if tc.wantError {
+				require.Error(t, err)
+				select {
+				case <-posted:
+					t.Fatal("rejected presentation reached the verifier")
+				default:
 				}
-				query := map[string]any{"id": "identity", "format": "dc+sd-jwt", "meta": map[string]any{"vct_values": []string{"urn:test:identity"}}}
-				if tc.requestValue != nil {
-					query["require_cryptographic_holder_binding"] = tc.requestValue
-				}
-				queryJSON, err := json.Marshal(map[string]any{"credentials": []any{query}})
-				require.NoError(t, err)
-				clientID := "redirect_uri:" + baseURL + "/response"
-				uri := "openid4vp://present?" + url.Values{
-					"client_id": {clientID}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
-					"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {string(queryJSON)},
-				}.Encode()
-				var tokens map[string][]string
-				if api == "present" {
-					var options serializerTypes.SerializePresentationOptions
-					if tc.explicitOptions {
-						options = &sdjwtvc.SdJwtVcPresentationOptions{RequireKeyBinding: false}
-					}
-					if tc.typedNil {
-						options = (*sdjwtvc.SdJwtVcPresentationOptions)(nil)
-					}
-					if tc.forceBinding {
-						options = &sdjwtvc.SdJwtVcPresentationOptions{RequireKeyBinding: true}
-					}
-					_, err = controller.PresentCredential(uri, key, options)
-					if tc.explicitOptions {
-						require.False(t, options.(*sdjwtvc.SdJwtVcPresentationOptions).RequireKeyBinding, "request must not mutate caller options")
-					}
-					if err == nil {
-						select {
-						case body := <-posted:
-							require.NoError(t, json.Unmarshal([]byte(body), &tokens))
-						default:
-							t.Fatal("verifier received no response")
-						}
-					}
-				} else {
-					err = submitSelectedForTest(t, controller, uri, key)
-					if err == nil {
-						require.NoError(t, json.Unmarshal([]byte(<-posted), &tokens))
-					}
-				}
-				if tc.wantError {
-					require.Error(t, err)
-					select {
-					case <-posted:
-						t.Fatal("rejected presentation reached the verifier")
-					default:
-					}
-					return
-				}
-				require.NoError(t, err)
-				require.Len(t, tokens["identity"], 1)
-				wire := tokens["identity"][0]
-				lastSeparator := strings.LastIndex(wire, "~")
-				require.GreaterOrEqual(t, lastSeparator, 0)
-				if !tc.wantBinding {
-					require.True(t, strings.HasSuffix(wire, "~"))
-					return
-				}
-				signed, err := jwt.ParseSigned(wire[lastSeparator+1:], []jose.SignatureAlgorithm{jose.ES256})
-				require.NoError(t, err)
-				var claims map[string]any
-				require.NoError(t, signed.Claims(key.PublicKey().Key, &claims))
-				require.Equal(t, "kb+jwt", signed.Headers[0].ExtraHeaders[jose.HeaderType])
-				require.Equal(t, clientID, claims["aud"])
-				require.Equal(t, "presentation-nonce", claims["nonce"])
-				hash := sha256.Sum256([]byte(wire[:lastSeparator+1]))
-				require.Equal(t, base64.RawURLEncoding.EncodeToString(hash[:]), claims["sd_hash"])
-			})
-		}
+				return
+			}
+			require.NoError(t, err)
+			var tokens map[string][]string
+			select {
+			case body := <-posted:
+				require.NoError(t, json.Unmarshal([]byte(body), &tokens))
+			default:
+				t.Fatal("verifier received no response")
+			}
+			require.Len(t, tokens["identity"], 1)
+			wire := tokens["identity"][0]
+			lastSeparator := strings.LastIndex(wire, "~")
+			require.GreaterOrEqual(t, lastSeparator, 0)
+			if !tc.wantBinding {
+				require.True(t, strings.HasSuffix(wire, "~"))
+				return
+			}
+			signed, err := jwt.ParseSigned(wire[lastSeparator+1:], []jose.SignatureAlgorithm{jose.ES256})
+			require.NoError(t, err)
+			var claims map[string]any
+			require.NoError(t, signed.Claims(key.PublicKey().Key, &claims))
+			require.Equal(t, "kb+jwt", signed.Headers[0].ExtraHeaders[jose.HeaderType])
+			require.Equal(t, clientID, claims["aud"])
+			require.Equal(t, "presentation-nonce", claims["nonce"])
+			hash := sha256.Sum256([]byte(wire[:lastSeparator+1]))
+			require.Equal(t, base64.RawURLEncoding.EncodeToString(hash[:]), claims["sd_hash"])
+		})
 	}
 }
 
@@ -206,7 +191,8 @@ func TestWallet_FinalBindingRequirementsArePerQuery(t *testing.T) {
 		"client_id": {"redirect_uri:" + baseURL + "/response"}, "response_uri": {baseURL + "/response"}, "response_type": {"vp_token"},
 		"response_mode": {"direct_post"}, "nonce": {"presentation-nonce"}, "dcql_query": {query},
 	}.Encode()
-	require.NoError(t, submitSelectedForTest(t, controller, uri, key))
+	_, err := presentWithWalletChoice(t, controller, uri, key, nil)
+	require.NoError(t, err)
 	var tokens map[string][]string
 	require.NoError(t, json.Unmarshal([]byte(<-posted), &tokens))
 	require.Len(t, tokens["unbound"], 1)
@@ -412,20 +398,4 @@ func TestWallet_TransactionDataOwnedByANonSDJWTCredentialFails(t *testing.T) {
 		{CredentialID: entries[0].Entry.Id, QueryIDs: []string{"vc"}},
 	}})
 	require.ErrorContains(t, err, "invalid_transaction_data")
-}
-
-// submitSelectedForTest presents the library's own choice for uri through
-// ParsePresentationRequest, SelectCredentials and SubmitPresentation.
-func submitSelectedForTest(t *testing.T, w *Wallet, uri string, key IKeyEntry) error {
-	t.Helper()
-	request, err := w.ParsePresentationRequest(t.Context(), uri)
-	if err != nil {
-		return err
-	}
-	selections, err := w.SelectCredentials(t.Context(), request)
-	if err != nil {
-		return err
-	}
-	_, err = w.SubmitPresentation(t.Context(), request, Presentation{Key: key, Credentials: selections})
-	return err
 }

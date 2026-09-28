@@ -633,10 +633,20 @@ func run(config configuration, request operation) (any, error) {
 		}
 		return finishIssuance(ctx, w, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holder}, IncludeKeyAttestation: config.IncludeKeyAttestation}, config.deferredPollAttempts())
 	case "present":
-		redirectURI, err := w.PresentCredential(request.URI, holder, nil)
+		ctx := context.Background()
+		admitted, err := w.ParsePresentationRequest(ctx, request.URI)
 		if err != nil {
 			return nil, err
 		}
+		selections, err := w.SelectCredentials(ctx, admitted)
+		if err != nil {
+			return nil, err
+		}
+		submitted, err := w.SubmitPresentation(ctx, admitted, wallet.Presentation{Key: holder, Credentials: selections})
+		if err != nil {
+			return nil, err
+		}
+		redirectURI := submitted.RedirectURI
 		result := map[string]any{"redirectUri": redirectURI, "redirectFollowed": false, "redirectStatus": 0}
 		if redirectURI != "" && config.followsRedirect() {
 			status, err := followRedirect(httpClient, redirectURI)

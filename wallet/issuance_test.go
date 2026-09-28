@@ -136,7 +136,7 @@ func TestDeferredIssuanceKeepsTheFactOfAPerRequestPolicy(t *testing.T) {
 
 // FetchCredentialIssuerMetadata reads the OpenID4VCI 1.0 Section 12.2.2
 // location, where the well-known segment precedes the identifier's path; the
-// Draft 13 Section 11.2.2 location ReceiveCredential reads appends it.
+// Draft 13 Section 11.2.2 location a Draft 13 issuance reads appends it.
 func TestFetchCredentialIssuerMetadataReadsThe10Location(t *testing.T) {
 	server := mockserver.NewOID4VCIIssuerServer(nil)
 	t.Cleanup(server.Close)

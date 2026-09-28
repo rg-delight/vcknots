@@ -510,12 +510,12 @@ func main() {
 
 		options = &sdjwtvc.SdJwtVcPresentationOptions{
 			SelectedClaims: []string{"given_name"},
-			// PresentCredential derives the minimum key-binding requirement from DCQL.
+			// SubmitPresentation derives the minimum key-binding requirement from DCQL.
 		}
 	}
 
 	logger.Info("Presenting credential...")
-	redirectURI, err := w.PresentCredential(oid4vpURI, mockKey, options)
+	redirectURI, err := common.PresentAll(context.Background(), w, oid4vpURI, mockKey, options)
 	if err != nil {
 		logger.Error("Failed to present credential", "error", err)
 		os.Exit(1)

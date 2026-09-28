@@ -20,7 +20,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/trustknots/vcknots/wallet/credential"
 	"github.com/trustknots/vcknots/wallet/credstore"
 	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/presenter"
@@ -499,54 +498,6 @@ func buildTestSDJWTVCWithIssuerKey(t *testing.T, issuerKey *ecdsa.PrivateKey, ho
 	signed, err := jwt.Signed(signer).Claims(payload).Serialize()
 	require.NoError(t, err)
 	return strings.Join(append([]string{signed}, disclosures...), "~") + "~"
-}
-
-func TestController_VerifyCredential_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	cred := &credential.Credential{
-		ID:    "hoge://test-credential",
-		Types: []string{"VerifiableCredential"},
-		Proof: nil, // No proof
-	}
-
-	pubKey := jose.JSONWebKey{
-		Algorithm: "ES256",
-		KeyID:     "test-key",
-	}
-
-	// Test with no proof - should return false
-	result := controller.VerifyCredential(cred, pubKey)
-	if result {
-		t.Error("expected false for credential without proof")
-	}
-}
-
-func TestController_VerifyCredential_WithProof_Integration(t *testing.T) {
-	controller := createTestControllerWithDefaults(t)
-
-	// Create credential with proof
-	cred := &credential.Credential{
-		ID:    "https://example.com/credentials/123",
-		Types: []string{"VerifiableCredential", "TestCredential"},
-		Proof: &credential.CredentialProof{
-			Algorithm: "ES256",
-			Signature: []byte("invalid-signature"),
-			Payload:   []byte("test-payload"),
-		},
-	}
-
-	pubKey := jose.JSONWebKey{
-		Algorithm: "ES256",
-		KeyID:     "test-key",
-		Use:       "sig",
-	}
-
-	// Test with proof - should attempt verification (may fail due to mock)
-	result := controller.VerifyCredential(cred, pubKey)
-	// In mock environment, this might return false due to invalid signature
-	// but we're testing that the code path is exercised
-	t.Logf("VerifyCredential result with proof: %v", result)
 }
 
 func extractPayloadField(t *testing.T, compactJWT string, field string) any {

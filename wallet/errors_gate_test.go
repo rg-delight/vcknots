@@ -140,10 +140,6 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			_, err := newFinalIssuanceFixture(t).wallet.Draft13().BeginIssuance(ctx, IssuanceRequest{})
 			return err
 		},
-		"Wallet.ReceiveCredential: no offer": func(t *testing.T) error {
-			_, err := newFinalIssuanceFixture(t).wallet.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
-			return err
-		},
 		"Wallet.AuthorizePreAuthorizedIssuance: canceled": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
 			_, err := f.wallet.AuthorizePreAuthorizedIssuance(canceled, PreAuthorizedIssuanceRequest{CredentialOffer: f.offer()})
@@ -184,12 +180,6 @@ func errorGateCases() map[string]func(t *testing.T) error {
 		},
 		"Draft13Issuance.NotifyIssuer: nil state": func(t *testing.T) error {
 			return newFinalIssuanceFixture(t).wallet.Draft13().NotifyIssuer(ctx, nil, NotificationCredentialAccepted, "")
-		},
-		"Wallet.ReceiveCredential: receiver refused by SetReceiver": func(t *testing.T) error {
-			w := newFinalIssuanceFixture(t).wallet
-			w.SetReceiver(nil)
-			_, err := w.ReceiveCredential(t.Context(), ReceiveCredentialRequest{})
-			return err
 		},
 		"Wallet.FetchCredentialIssuerMetadata: unreachable issuer": func(t *testing.T) error {
 			f := newFinalIssuanceFixture(t)
@@ -321,16 +311,6 @@ func errorGateCases() map[string]func(t *testing.T) error {
 			closed.Close()
 			request := parsedPresentationRequest(t, f, presentationURI(closed.URL, identityDCQLQuery))
 			_, err := f.wallet.DeclinePresentation(ctx, request, "access_denied", "")
-			return err
-		},
-		"Wallet.PresentCredential: not a request": func(t *testing.T) error {
-			f := newSDJWTPresentationFixture(t)
-			_, err := f.wallet.PresentCredential("not a request", f.key, nil)
-			return err
-		},
-		"Wallet.PresentCredentialWithOptions: nothing stored": func(t *testing.T) error {
-			f := newSDJWTPresentationFixture(t)
-			_, err := f.wallet.PresentCredentialWithOptions(presentationURI(f.baseURL, identityDCQLQuery), f.key, nil)
 			return err
 		},
 		"Draft24Presentation.ParsePresentationRequest: HAIP": func(t *testing.T) error {
