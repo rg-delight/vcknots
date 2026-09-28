@@ -194,12 +194,16 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 		return nil, err
 	}
 	advertised := as.AuthorizationResponseIssParameterSupported
-	code, err := validateAuthorizationRedirect(redirectURL, a.AuthorizationURL, a.State, a.RedirectURI, authorizationResponseIssuerPolicy{
+	issuerPolicy := authorizationResponseIssuerPolicy{
 		expected: discovery.authorizationServer,
-		// FAPI 2.0 Section 5.3.2.2, which HAIP builds on, requires the check
-		// (Options.RequireAuthorizationResponseIss).
-		required: w.options().RequireAuthorizationResponseIss || (advertised != nil && *advertised),
-	})
+		required: advertised != nil && *advertised,
+	}
+	// FAPI 2.0 Section 5.3.2.2, which HAIP builds on, requires the check
+	// even when the server does not advertise it.
+	if !issuerPolicy.required && w.options().RequireAuthorizationResponseIss {
+		issuerPolicy.required, issuerPolicy.option = true, "RequireAuthorizationResponseIss"
+	}
+	code, err := validateAuthorizationRedirect(redirectURL, a.AuthorizationURL, a.State, a.RedirectURI, issuerPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -559,10 +563,12 @@ func authorizationRequestURL(endpoint *common.URIField, clientID string, request
 
 // authorizationResponseIssuerPolicy is the RFC 9207 expectation: expected is
 // the authorization server's issuer identifier, and required makes iss
-// mandatory.
+// mandatory. option names the profile option that made it mandatory, empty
+// when the server's own metadata did.
 type authorizationResponseIssuerPolicy struct {
 	expected string
 	required bool
+	option   string
 }
 
 // validateAuthorizationRedirect applies RFC 6749 Section 4.1.2 and RFC 9207
@@ -598,6 +604,9 @@ func validateAuthorizationRedirect(location, authorizationURL, expectedState, re
 			return "", ErrAuthorizationIssMismatch
 		}
 	} else if issuer.required {
+		if issuer.option != "" {
+			return "", fmt.Errorf("%w requires the iss authorization response parameter: %w", profile.Refused(issuer.option), ErrAuthorizationIssMissing)
+		}
 		return "", ErrAuthorizationIssMissing
 	}
 	if errorCode := query.Get("error"); errorCode != "" {

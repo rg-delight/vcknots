@@ -631,6 +631,22 @@ func TestAuthorizeIssuanceRejectsMissingIssuerParameter(t *testing.T) {
 	require.Equal(t, 0, fixture.tokenCalls)
 }
 
+// FAPI 2.0 Section 5.3.2.2, which HAIP builds on, requires iss even from a
+// server that does not advertise it, and the refusal names the option.
+func TestAuthorizeIssuanceRequiresIssuerParameterUnderTheProfileOption(t *testing.T) {
+	fixture := newHAIPIssuanceFixture(t, func(f *finalIssuanceFixture) {
+		f.issParameterSupported = false
+	})
+	authorization := flowTestBegin(t, fixture)
+
+	_, err := fixture.wallet.AuthorizeIssuance(context.Background(), authorization, flowTestCallback("code=code-1&state="+url.QueryEscape(authorization.State)))
+	require.ErrorIs(t, err, ErrAuthorizationIssMissing)
+	var refused *profile.OptionError
+	require.ErrorAs(t, err, &refused)
+	require.Equal(t, "RequireAuthorizationResponseIss", refused.Option)
+	require.Equal(t, 0, fixture.tokenCalls)
+}
+
 func TestAuthorizeIssuanceReturnsAuthorizationError(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t)
 	authorization := flowTestBegin(t, fixture)

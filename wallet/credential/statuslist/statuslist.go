@@ -321,7 +321,7 @@ func (c *Checker) Check(ctx context.Context, credentialIssuer string, status map
 func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, reference Reference) (*Status, error) {
 	options := c.Profile.Options()
 	if options.ForbidExperimental && c.Experimental != (experimental.Transport{}) {
-		return nil, fmt.Errorf("%w: the profile does not permit Checker.Experimental", ErrStatusListInsecureTransportForbidden)
+		return nil, fmt.Errorf("%w: %w does not permit Checker.Experimental", ErrStatusListInsecureTransportForbidden, profile.Refused("ForbidExperimental"))
 	}
 	endpoint, err := parseStatusListURI(reference.URI, c.allowHTTP())
 	if err != nil {
