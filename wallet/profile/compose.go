@@ -116,6 +116,7 @@ var options = func() []option {
 	}
 	list = append(list, x5cOptions("IssuerX5C", func(o *Options) *X5CRules { return &o.IssuerX5C })...)
 	list = append(list, x5cOptions("StatusListTokenX5C", func(o *Options) *X5CRules { return &o.StatusListTokenX5C })...)
+	list = append(list, flagOption("RequireStatusListSignerBinding", func(o *Options) *bool { return &o.RequireStatusListSignerBinding }))
 	list = append(list,
 		flagOption("RequirePAR", func(o *Options) *bool { return &o.RequirePAR }),
 		flagOption("RequireDPoP", func(o *Options) *bool { return &o.RequireDPoP }),

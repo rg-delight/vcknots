@@ -57,7 +57,11 @@ type X5CTrust struct {
 	Now func() time.Time
 	// IssuerCertificate is the validated x5c leaf certificate of the
 	// credential whose status is checked (the credential acceptor's leaf).
-	// When it is set, a Status List Token with x5c must carry a leaf with the
+	// It is read only under profile.Options.RequireStatusListSignerBinding
+	// (statuslist.KeyRequest.RequireSignerBinding); without that option the
+	// leaf of a chain that reaches TrustAnchors is accepted, since
+	// draft-ietf-oauth-status-list-21 Section 11.3 mandates no binding.
+	// Under the option, a Status List Token with x5c must carry a leaf with the
 	// same public key, the same non-empty subject, or the same issuing
 	// certificate authority (the same issuer name and authority key
 	// identifier), whether or not the credential carries `iss`: the token is
@@ -69,7 +73,7 @@ type X5CTrust struct {
 	// for the leaf, and a credential without `iss` has none. It is required
 	// for a credential without `iss`, which names no other identity to bind
 	// the token to; set it for every credential that was accepted through its
-	// x5c.
+	// x5c when the option is on.
 	IssuerCertificate *x509.Certificate
 }
 
@@ -137,7 +141,7 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 	if request.ForbidExperimental && r.Experimental != (experimental.Transport{}) {
 		// HAIP 1.0 Section 4: the profile refuses the experimental transport
 		// relaxation rather than resolving over it.
-		return nil, nil, fmt.Errorf("%w: the profile does not permit Resolver.Experimental", statuslist.ErrStatusListInsecureTransportForbidden)
+		return nil, nil, fmt.Errorf("%w: %w does not permit Resolver.Experimental", statuslist.ErrStatusListInsecureTransportForbidden, profile.Refused("ForbidExperimental"))
 	}
 	lookup := requestFromHeader(template, request.Issuer, request.Header)
 	chain := x5cChain(lookup.X5C)
@@ -147,7 +151,7 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 
 	switch {
 	case request.Issuer == "":
-		candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuerCertificate: trustIssuerCertificate(trust)})
+		candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuerCertificate: trustIssuerCertificate(trust), required: request.RequireSignerBinding})
 	case didReference(request.Issuer) == request.Issuer:
 		if request.X5C.Require {
 			return nil, nil, fmt.Errorf("%w: the profile requires an x5c signing key, which a DID issuer does not use", statuslist.ErrStatusListCertificateRejected)
@@ -160,7 +164,7 @@ func (r *Resolver) StatusListKeys(ctx context.Context, template Request, trust *
 			resolution.Diagnostics = []MechanismDiagnostic{{Mechanism: RungX5C, Failure: "issuer identifier is neither an https URL nor a DID"}}
 		case len(chain) > 0:
 			resolution.IssuerDNSName = issuerURL.Hostname()
-			candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuer: request.Issuer, issuerURL: issuerURL, issuerCertificate: trustIssuerCertificate(trust)})
+			candidates, err = r.statusListX5CRoute(ctx, resolution, trust, request.X5C, chain, x5cBinding{issuer: request.Issuer, issuerURL: issuerURL, issuerCertificate: trustIssuerCertificate(trust), required: request.RequireSignerBinding})
 		case request.X5C.Require:
 			return nil, nil, fmt.Errorf("%w: the profile requires the signing key in an x5c header", statuslist.ErrStatusListCertificateRejected)
 		default:
@@ -194,6 +198,29 @@ type x5cBinding struct {
 	issuerURL *url.URL
 	// issuerCertificate is X5CTrust.IssuerCertificate.
 	issuerCertificate *x509.Certificate
+	// required is KeyRequest.RequireSignerBinding: without it the leaf of a
+	// chain that reaches a trust anchor is accepted unbound.
+	required bool
+}
+
+// failure says why leaf, the Status List Token's x5c leaf, is not bound to
+// the Referenced Token's issuer, or returns "" when it is: it names the host
+// of the issuer's https iss, and it is linked to the credential's issuer
+// certificate when that is known (issuerCertificateFailure). A credential
+// without iss needs the issuer certificate.
+func (b x5cBinding) failure(leaf *x509.Certificate) string {
+	if b.issuerURL != nil {
+		if err := commonX509.RequireLeafNamesIssuer(leaf, b.issuerURL); err != nil {
+			return "certificate does not name the issuer host"
+		}
+	}
+	switch {
+	case b.issuerCertificate != nil:
+		return b.issuerCertificateFailure(leaf)
+	case b.issuerURL == nil:
+		return "credential issuer certificate is not configured"
+	}
+	return ""
 }
 
 // issuerCertificateFailure says why leaf, the Status List Token's x5c leaf,
@@ -326,22 +353,16 @@ func (r *Resolver) statusListX5CRoute(ctx context.Context, resolution *Resolutio
 			return nil, fmt.Errorf("%w: the x5c header includes a trust anchor certificate", statuslist.ErrStatusListCertificateRejected)
 		}
 	}
+	// draft-ietf-oauth-status-list-21 Section 11.3 "does not mandate
+	// specific methods for key resolution and trust management", so the leaf
+	// of a chain that reaches a trust anchor is accepted unless the profile
+	// asks for the binding it recommends (RequireStatusListSignerBinding).
 	// The binding is checked before the path is walked: it needs no network,
 	// and a chain for another issuer must not cost a CRL retrieval.
-	if binding.issuerURL != nil {
-		if err := commonX509.RequireLeafNamesIssuer(certificates[0], binding.issuerURL); err != nil {
-			return untrusted("certificate does not name the issuer host", nil)
-		}
-	}
-	switch {
-	case binding.issuerCertificate != nil:
-		// draft-ietf-oauth-status-list-21 Section 11.3: the token is bound to
-		// the Referenced Token by its signer.
-		if failure := binding.issuerCertificateFailure(certificates[0]); failure != "" {
+	if binding.required {
+		if failure := binding.failure(certificates[0]); failure != "" {
 			return untrusted(failure, nil)
 		}
-	case binding.issuerURL == nil:
-		return untrusted("credential issuer certificate is not configured", nil)
 	}
 
 	now := r.now

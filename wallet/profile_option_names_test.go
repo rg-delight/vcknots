@@ -17,8 +17,11 @@ import (
 // against the names Options.String spells.
 func TestRefusedNamesAnOption(t *testing.T) {
 	known := map[string]bool{}
-	// HAIPOptions turns every option on, so its String names each of them.
-	for _, element := range strings.Split(profile.HAIPOptions().String(), ";") {
+	// HAIPOptions turns every HAIP option on, so its String names each of
+	// them; the checks HAIP leaves to the Wallet are added.
+	every := profile.HAIPOptions()
+	every.RequireStatusListSignerBinding = true
+	for _, element := range strings.Split(every.String(), ";") {
 		name, _, _ := strings.Cut(element, "=")
 		known[name] = true
 	}

@@ -179,6 +179,14 @@ type KeyRequest struct {
 	// then, with an error wrapping ErrStatusListInsecureTransportForbidden,
 	// rather than resolve over it.
 	ForbidExperimental bool
+	// RequireSignerBinding is
+	// profile.Options.RequireStatusListSignerBinding of the Checker's
+	// profile. When it is false, a hook that validates an x5c chain accepts
+	// the leaf of any chain that reaches its trust anchors
+	// (draft-ietf-oauth-status-list-21 Section 11.3 mandates no binding);
+	// when it is true, the leaf must also be linked to the Referenced
+	// Token's issuer.
+	RequireSignerBinding bool
 }
 
 // ResolveIssuerKeysFunc returns the candidate public keys of a Status List
@@ -379,10 +387,11 @@ func (c *Checker) CheckReference(ctx context.Context, credentialIssuer string, r
 		return nil, err
 	}
 	keys, err := c.resolveIssuerKeys(ctx, KeyRequest{
-		Issuer:             issuer,
-		Header:             header,
-		X5C:                options.StatusListTokenX5C,
-		ForbidExperimental: options.ForbidExperimental,
+		Issuer:               issuer,
+		Header:               header,
+		X5C:                  options.StatusListTokenX5C,
+		ForbidExperimental:   options.ForbidExperimental,
+		RequireSignerBinding: options.RequireStatusListSignerBinding,
 	})
 	if err != nil {
 		return nil, err
