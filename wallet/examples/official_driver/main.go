@@ -62,6 +62,14 @@ type configuration struct {
 	// KeyAttesterKeyFile/KeyAttesterIssuer likewise configure a StaticKeyAttester.
 	KeyAttesterKeyFile string `json:"keyAttesterKeyFile"`
 	KeyAttesterIssuer  string `json:"keyAttesterIssuer"`
+	// AttesterCAFiles are the PEM Wallet Provider trust anchors the wallet
+	// validates its own client and key attestations' x5c chains against
+	// (Config.Attestation.Trust). HAIP (Options.AttestationX5C) refuses an
+	// attestation x5c chain when no anchor is configured.
+	AttesterCAFiles []string `json:"attesterCAFiles"`
+	// AttesterAllowUnadvertisedRevocation accepts attester certificates
+	// without a CRL distribution point. It requires AttesterCAFiles.
+	AttesterAllowUnadvertisedRevocation bool `json:"attesterAllowUnadvertisedRevocation"`
 	// IncludeKeyAttestation requests a key attestation even when the issuer does
 	// not require one.
 	IncludeKeyAttestation bool `json:"includeKeyAttestation"`
@@ -392,6 +400,11 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		keyAttestation = &attestation.StaticKeyAttester{Key: entry, Chain: key.Certificates, Issuer: config.KeyAttesterIssuer}
 	}
 
+	attestationTrust, err := attesterTrust(config, httpClient)
+	if err != nil {
+		return nil, err
+	}
+
 	var encryption wallet.CredentialEncryptionPolicy
 	if config.CredentialResponseEncryption {
 		encryption.Response = wallet.CredentialEncryptionRequired
@@ -407,8 +420,29 @@ func compose(config configuration, operationName string, dpop, client keystore.K
 		Issuance:             wallet.IssuanceConfig{RedirectURI: config.RedirectURI, CredentialEncryption: encryption},
 		// The client attestation binds the client key, as the DPoP key signs
 		// the proofs.
-		Attestation: wallet.AttestationConfig{Client: clientAttestation, ClientKey: client, Key: keyAttestation},
+		Attestation: wallet.AttestationConfig{Client: clientAttestation, ClientKey: client, Key: keyAttestation, Trust: attestationTrust},
 	})
+}
+
+// attesterTrust is the policy the wallet validates its own attestations'
+// x5c chains under: the attesterCAFiles anchors, with CRLs fetched over the
+// TLS-configured client.
+func attesterTrust(config configuration, httpClient *http.Client) (attestation.TrustPolicy, error) {
+	var trust attestation.TrustPolicy
+	if len(config.AttesterCAFiles) == 0 {
+		if config.AttesterAllowUnadvertisedRevocation {
+			return trust, fmt.Errorf("attesterAllowUnadvertisedRevocation requires attesterCAFiles")
+		}
+		return trust, nil
+	}
+	anchors, err := readTrustAnchors(config.AttesterCAFiles)
+	if err != nil {
+		return trust, err
+	}
+	trust.TrustAnchors = anchors
+	trust.AllowUnadvertisedRevocation = config.AttesterAllowUnadvertisedRevocation
+	trust.CRL.HTTPClient = httpClient
+	return trust, nil
 }
 
 // receiveOutput renders an issuance result. A deferred transaction the
