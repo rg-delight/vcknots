@@ -52,8 +52,8 @@ type TrustPolicy struct {
 	RootCAs      *x509.CertPool
 	// KeyUsages constrains the attester certificate's extended key usage.
 	KeyUsages []x509.ExtKeyUsage
-	// AllowUnadvertisedRevocation accepts certificates without a CRL
-	// distribution point.
+	// AllowUnadvertisedRevocation accepts certificates that advertise no
+	// revocation mechanism; one that advertises only OCSP is still refused.
 	AllowUnadvertisedRevocation bool
 	// CRL tunes revocation retrieval. CRL.HTTPClient is required when anchors
 	// are configured; CRL.RequireStatus is derived from

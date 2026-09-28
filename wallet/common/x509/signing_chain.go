@@ -144,8 +144,8 @@ func VerifySigningCertificateChain(ctx context.Context, certificates []*x509.Cer
 // the CRL retrieval tuning, and the HTTP client the revocation fetches use.
 //
 // Revocation strictness is expressed once, through AllowUnadvertisedRevocation.
-// A certificate that advertises no CRL distribution point stays on the trust
-// path only when it is true; CRL.RequireStatus is derived from it and must not
+// A certificate that advertises no revocation mechanism stays on the trust
+// path only when it is true, and one that advertises only OCSP never does; CRL.RequireStatus is derived from it and must not
 // be set as well, which VerifySigningChainWithPolicy rejects as a conflict.
 type SigningChainPolicy struct {
 	// TrustAnchors and Roots name the trust anchors. Supply exactly one of
@@ -160,11 +160,12 @@ type SigningChainPolicy struct {
 	// HTTPClient below.
 	CRL CRLCheckerOptions
 	// AllowUnadvertisedRevocation keeps on the trust path a certificate that
-	// publishes no CRL distribution point, counted in
-	// CRLCheckResult.NoMechanismCertificates instead of checked. That includes
-	// a certificate that advertises only OCSP: OCSP is not consulted, so its
-	// status is not established either. False requires a current CRL for
-	// every certificate below the anchor.
+	// advertises no revocation mechanism at all (neither a CRL distribution
+	// point nor OCSP), counted in CRLCheckResult.NoMechanismCertificates
+	// instead of checked. It never keeps a certificate that advertises only
+	// OCSP: OCSP is not consulted, and accepting it would skip the mechanism
+	// its CA publishes, so it is refused with CRLErrorUnsupported. False
+	// requires a current CRL for every certificate below the anchor.
 	AllowUnadvertisedRevocation bool
 	// CurrentTime is the single verification clock.
 	CurrentTime time.Time

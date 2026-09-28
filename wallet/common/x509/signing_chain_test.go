@@ -401,3 +401,67 @@ func TestVerifySigningChainWithPolicyDerivesRevocationStrictness(t *testing.T) {
 		}
 	})
 }
+
+// signingTestCRLRequests records each CRL request and answers 404, so a
+// check that consulted the distribution point fails with CRLErrorFetch.
+type signingTestCRLRequests struct{ urls *[]string }
+
+func (transport signingTestCRLRequests) RoundTrip(request *http.Request) (*http.Response, error) {
+	*transport.urls = append(*transport.urls, request.URL.String())
+	return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Request: request}, nil
+}
+
+// AllowUnadvertisedRevocation keeps only a certificate that advertises no
+// revocation mechanism at all. The library does not consult OCSP, so a
+// certificate whose Authority Information Access names an OCSP responder and
+// that has no CRL distribution point is refused even when unadvertised
+// revocation is allowed: accepting it would silently skip the mechanism its CA
+// publishes. A CRL distribution point is always checked.
+func TestVerifySigningChainWithPolicyRefusesOCSPOnlyCertificates(t *testing.T) {
+	root := newSigningTestCertificate(t, "Root", nil, true, nil)
+	verify := func(t *testing.T, leaf signingTestIdentity, transport http.RoundTripper) (*SigningChainResult, error) {
+		t.Helper()
+		return VerifySigningChainWithPolicy(context.Background(), []*x509.Certificate{leaf.certificate}, SigningChainPolicy{
+			TrustAnchors:                []*x509.Certificate{root.certificate},
+			CurrentTime:                 signingTestTime,
+			AllowUnadvertisedRevocation: true,
+			HTTPClient:                  &http.Client{Transport: transport},
+		})
+	}
+
+	t.Run("OCSP only is refused", func(t *testing.T) {
+		leaf := newSigningTestCertificate(t, "Signer", &root, false, func(cert *x509.Certificate) {
+			cert.OCSPServer = []string{"http://ocsp.example.test"}
+		})
+		result, err := verify(t, leaf, signingTestNoNetwork{t})
+		var crlErr *CRLCheckError
+		if result != nil || !errors.As(err, &crlErr) || crlErr.Kind != CRLErrorUnsupported {
+			t.Fatalf("OCSP-only certificate: %#v, %v; want CRLErrorUnsupported", result, err)
+		}
+	})
+
+	t.Run("no revocation mechanism is kept", func(t *testing.T) {
+		leaf := newSigningTestCertificate(t, "Signer", &root, false, nil)
+		result, err := verify(t, leaf, signingTestNoNetwork{t})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSigningTestPath(t, result, leaf.certificate, root.certificate)
+	})
+
+	t.Run("a CRL distribution point is checked", func(t *testing.T) {
+		leaf := newSigningTestCertificate(t, "Signer", &root, false, func(cert *x509.Certificate) {
+			cert.CRLDistributionPoints = []string{"http://crl.example.test/root.crl"}
+			cert.OCSPServer = []string{"http://ocsp.example.test"}
+		})
+		var requested []string
+		_, err := verify(t, leaf, signingTestCRLRequests{urls: &requested})
+		var crlErr *CRLCheckError
+		if !errors.As(err, &crlErr) || crlErr.Kind != CRLErrorFetch {
+			t.Fatalf("err = %v, want the CRL fetch failure", err)
+		}
+		if len(requested) != 1 || requested[0] != "http://crl.example.test/root.crl" {
+			t.Fatalf("CRL requests = %v", requested)
+		}
+	})
+}

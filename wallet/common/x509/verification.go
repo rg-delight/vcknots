@@ -18,18 +18,6 @@ import (
 // Deprecated: Use VerifySigningChainWithPolicy, which verifies the path and its
 // revocation under one policy and takes a context and an HTTP client.
 func CheckIfCertsRevoked(certChain []*x509.Certificate) error {
-	for index, cert := range certChain {
-		if index == len(certChain)-1 || cert == nil || cert.SerialNumber == nil {
-			break
-		}
-		urls, advertised, err := certificateCRLURLs(cert)
-		if err != nil || advertised || len(urls) > 0 {
-			continue // Check reports these
-		}
-		if ocsp, _ := certificateAdvertisesOCSP(cert); ocsp {
-			return crlError(CRLErrorUnsupported, cert, "", "certificate advertises only OCSP, which is not consulted", nil)
-		}
-	}
 	checker, err := NewCRLChecker(CRLCheckerOptions{HTTPClient: httpfetch.NewClient()})
 	if err != nil {
 		return err
