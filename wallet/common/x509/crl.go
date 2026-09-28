@@ -18,7 +18,8 @@ type CRLCheckErrorKind string
 // CRL check error kinds.
 const (
 	// CRLErrorUnsupported reports an invalid input path, a certificate without a
-	// usable CRL distribution point, or a CRL feature this package does not handle.
+	// usable CRL distribution point, a certificate that advertises only OCSP, or
+	// a CRL feature this package does not handle.
 	CRLErrorUnsupported CRLCheckErrorKind = "unsupported"
 	// CRLErrorBudget reports that the checker's CRL fetch budget was exhausted.
 	CRLErrorBudget CRLCheckErrorKind = "budget"
@@ -80,9 +81,9 @@ func (e *CRLCheckError) ErrorCode() string {
 type CRLCheckResult struct {
 	// CheckedCertificates had their serial looked up in a current CRL.
 	CheckedCertificates int
-	// NoMechanismCertificates publish no CRL distribution point, so no status
-	// was established for them: they advertise no revocation mechanism at
-	// all, or only OCSP, which this package does not consult.
+	// NoMechanismCertificates advertise no revocation mechanism at all, so no
+	// status was established for them. A certificate that advertises only
+	// OCSP is never counted here: it is refused.
 	NoMechanismCertificates int
 }
 
@@ -94,8 +95,11 @@ type CRLCheckerOptions struct {
 	MaxFetches   int
 	FetchTimeout time.Duration
 	// RequireStatus refuses a certificate that publishes no CRL distribution
-	// point, including one that advertises only OCSP. Without it such a
-	// certificate is counted in CRLCheckResult.NoMechanismCertificates.
+	// point. Without it a certificate that advertises no revocation mechanism
+	// at all is counted in CRLCheckResult.NoMechanismCertificates. A
+	// certificate that advertises only OCSP is refused either way: this
+	// package does not consult OCSP, and passing it would skip the revocation
+	// mechanism its CA publishes.
 	RequireStatus bool
 	// ClockSkew is how far a CRL's thisUpdate may lie ahead of the
 	// verification time. Zero means defaultCRLClockSkew (five minutes).
@@ -147,7 +151,8 @@ func NewCRLChecker(options CRLCheckerOptions) (*CRLChecker, error) {
 // Check verifies revocation below the anchor in a leaf-first, anchor-last path.
 // It never consults OCSP and never treats a missing CRL distribution point as
 // a CRL verdict. A distribution point extension that names no usable http(s)
-// CRL is always refused.
+// CRL, and a certificate without one that advertises OCSP in its Authority
+// Information Access, are always refused with CRLErrorUnsupported.
 func (c *CRLChecker) Check(ctx context.Context, path []*x509.Certificate, now time.Time) (CRLCheckResult, error) {
 	result := CRLCheckResult{}
 	if len(path) == 0 || now.IsZero() {
@@ -167,6 +172,13 @@ func (c *CRLChecker) Check(ctx context.Context, path []*x509.Certificate, now ti
 			return result, crlError(CRLErrorUnsupported, cert, "", err.Error(), err)
 		}
 		if len(urls) == 0 {
+			ocsp, err := certificateAdvertisesOCSP(cert)
+			if err != nil {
+				return result, crlError(CRLErrorUnsupported, cert, "", err.Error(), err)
+			}
+			if ocsp {
+				return result, crlError(CRLErrorUnsupported, cert, "", "certificate advertises only OCSP, which is not consulted", nil)
+			}
 			if advertised || c.requireStatus {
 				return result, crlError(CRLErrorUnsupported, cert, "", "no usable CRL distribution point; OCSP is not consulted", nil)
 			}

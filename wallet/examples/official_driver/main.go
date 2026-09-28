@@ -68,7 +68,7 @@ type configuration struct {
 	// attestation x5c chain when no anchor is configured.
 	AttesterCAFiles []string `json:"attesterCAFiles"`
 	// AttesterAllowUnadvertisedRevocation accepts attester certificates
-	// without a CRL distribution point. It requires AttesterCAFiles.
+	// that advertise no revocation mechanism. It requires AttesterCAFiles.
 	AttesterAllowUnadvertisedRevocation bool `json:"attesterAllowUnadvertisedRevocation"`
 	// IncludeKeyAttestation requests a key attestation even when the issuer does
 	// not require one.

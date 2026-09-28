@@ -1064,7 +1064,7 @@ wallet は Credential を返す、または保存する前に、要求のポリ�
 * ポリシーがなければ、Credential を要求も保存もしません（`ErrCredentialAcceptancePolicyRequired`）。`ReceiveCredential` も同じです。
 * Issuer を認証せずに Credential を受け入れるポリシーはありません。
 * HAIP では SD-JWT VC に `IssuerX509` が必要です（HAIP §6.1.1）。`x5c` を持たなければならず（`ErrIssuerX5CRequired`）、トラストアンカーを含んではならず（`ErrIssuerX5CTrustAnchor`）、署名証明書は自己署名であってはなりません（`ErrIssuerCertificateSelfSigned`）。
-* `AllowUnadvertisedRevocation` は、CRL 配布点を持たない証明書を信頼経路に残し、別に数えて報告します。OCSP は参照しません。
+* `AllowUnadvertisedRevocation` は、失効確認の手段を何も示さない（CRL 配布点も OCSP もない）証明書を信頼経路に残し、別に数えて報告します。OCSP は参照しないので、OCSP だけを示す証明書は、この設定にかかわらず拒否します（`x509.CRLErrorUnsupported`）。受け入れると、CA が公開している失効確認を黙って飛ばすことになるためです。
 
 ## OpenID4VP 1.0 の提示 {#openid4vp-10-presentation}
 
@@ -1244,7 +1244,7 @@ Issuer 署名の JWT または KB-JWT のアルゴリズムが、Verifier の `s
 
 `RequestObjectValidationOptions` は Relying Party 側のポリシーで、`TrustAnchors` または `RootCAs`、`CRL`、`AllowUnadvertisedRevocation`、`CertificateKeyUsages`、`WalletAudience`、`SigningAlgorithms`（既定は ES256 と RS256）、`RequireExpiry`、`MaxAge`（ゼロはどのプロファイルでも無制限です）、`Now`、`ClockSkew` を持ちます。
 `iat` が未来の Request Object は拒否するので、受け入れる Verifier の時計のずれに合わせて `ClockSkew` を設定してください。
-`X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。
+`X509TrustChainRoots` だけを使う場合は、失効情報を公開していない証明書も受け入れます。ただし、OCSP だけを示す証明書は拒否します。
 `RequestObjectValidation` のアンカーと併用はできません。
 
 `Oid4vpPresenter.Experimental`（`experimental.Presenter`）は、どの仕様も認めない緩和を持ちます。

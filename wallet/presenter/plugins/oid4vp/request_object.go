@@ -28,6 +28,8 @@ type RequestObjectValidationOptions struct {
 	// AllowUnadvertisedRevocation explicitly retains ecosystems which accept
 	// certificates without any published CRL/OCSP information. Such certificates
 	// are reported separately, never as positively checked for revocation.
+	// A certificate that advertises only OCSP is refused either way, since
+	// OCSP is not consulted (commonX509.SigningChainPolicy).
 	// The default requires positive status for every certificate below the anchor.
 	AllowUnadvertisedRevocation bool
 	// WalletAudience defaults to the static OpenID4VP identifier. Dynamic
