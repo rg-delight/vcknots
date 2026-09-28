@@ -704,6 +704,11 @@ func TestDraft13PreAuthorizedIssuanceRefusesBeforeTheTokenRequest(t *testing.T) 
 		change    func(*PreAuthorizedIssuanceRequest)
 		want      error
 	}{
+		"no acceptance policy": {
+			configure: func(c *Config) { c.CredentialAcceptance = nil },
+			change:    func(*PreAuthorizedIssuanceRequest) {},
+			want:      ErrCredentialAcceptancePolicyRequired,
+		},
 		"a configuration the offer does not list": {
 			change: func(r *PreAuthorizedIssuanceRequest) { r.CredentialConfigurationID = "other" },
 			want:   ErrDraft13CredentialConfigurationUnknown,
@@ -1173,24 +1178,83 @@ func TestDraft13AuthorizeIssuanceRequiresAuthorizationDetailsItAskedFor(t *testi
 	require.Empty(t, fixture.credentials())
 }
 
-// A Draft 13 Credential Request needs an acceptance policy, the request's
-// own or Config.CredentialAcceptance, before it sends anything.
-func TestDraft13RequiresAnAcceptancePolicy(t *testing.T) {
-	fixture := newDraft13Fixture(t, draft13RegisteredClient)
+// A Draft 13 issuance obtains no authorization for a credential the wallet
+// could not accept: without the request's own policy or
+// Config.CredentialAcceptance, AuthorizePreAuthorizedIssuance sends no Token
+// Request, so the pre-authorized code stays unredeemed (Section 4.1.1), and
+// BeginIssuance sends no Pushed Authorization Request and returns no
+// authorization URL to open.
+func TestDraft13RequiresAnAcceptancePolicyBeforeTheAuthorization(t *testing.T) {
+	var parCalls atomic.Int32
+	par := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		parCalls.Add(1)
+		draft13WriteJSON(w, http.StatusCreated, map[string]any{"request_uri": "urn:ietf:params:oauth:request_uri:1", "expires_in": 60})
+	}))
+	t.Cleanup(par.Close)
+	fixture := newDraft13Fixture(t, draft13RegisteredClient, func(c *Config) { c.CredentialAcceptance = nil })
+	fixture.set(func(f *draft13Fixture) {
+		f.asMetadataExtra = map[string]any{"pushed_authorization_request_endpoint": par.URL + "/par"}
+	})
 	ctx := context.Background()
-	unverified := fixture.newWallet(t, func(c *Config) { c.CredentialAcceptance = nil })
-	grant := fixture.preAuthorize(t, unverified)
+	draft13 := fixture.wallet.Draft13()
 
-	_, err := unverified.Draft13().RequestCredential(ctx, grant, fixture.holder())
+	grant, err := draft13.AuthorizePreAuthorizedIssuance(ctx, fixture.preAuthorizedRequest())
+	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Nil(t, grant)
+	authorization, err := draft13.BeginIssuance(ctx, IssuanceRequest{CredentialOffer: fixture.authorizationCodeOffer()})
+	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Nil(t, authorization)
+	require.Empty(t, fixture.tokens())
+	require.Zero(t, parCalls.Load())
+
+	// The same requests with their own policy reach both endpoints.
+	policy := acceptIssuerKeyPolicy(fixture.issuerKey)
+	request := fixture.preAuthorizedRequest()
+	request.Acceptance = policy
+	_, err = draft13.AuthorizePreAuthorizedIssuance(ctx, request)
+	require.NoError(t, err)
+	authorization, err = draft13.BeginIssuance(ctx, IssuanceRequest{CredentialOffer: fixture.authorizationCodeOffer(), Acceptance: policy})
+	require.NoError(t, err)
+	require.True(t, authorization.AcceptanceOverridden)
+	require.Same(t, policy, authorization.Acceptance)
+	require.Len(t, fixture.tokens(), 1)
+	require.Equal(t, int32(1), parCalls.Load())
+}
+
+// The grant carries the policy the Draft 13 flow began with to
+// RequestCredential, where a CredentialRequest.Acceptance overrides it. A
+// grant read back without it records that it had one and is refused before
+// the Credential Request instead of accepting under Config.CredentialAcceptance.
+func TestDraft13GrantCarriesThePerRequestPolicy(t *testing.T) {
+	fixture := newDraft13Fixture(t, func(c *Config) { c.CredentialAcceptance = nil })
+	ctx := context.Background()
+	policy := acceptIssuerKeyPolicy(fixture.issuerKey)
+	request := fixture.preAuthorizedRequest()
+	request.Acceptance = policy
+	grant, err := fixture.wallet.Draft13().AuthorizePreAuthorizedIssuance(ctx, request)
+	require.NoError(t, err)
+	require.True(t, grant.AcceptanceOverridden)
+	require.Same(t, policy, grant.Acceptance)
+
+	var stored IssuanceGrant
+	requireJSONRoundTrip(t, grant, &stored)
+	require.True(t, stored.AcceptanceOverridden)
+	require.Nil(t, stored.Acceptance)
+	configured := fixture.newWallet(t, func(c *Config) { c.CredentialAcceptance = policy })
+	_, err = configured.Draft13().RequestCredential(ctx, &stored, fixture.holder())
 	draft13RequireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
 	require.Empty(t, fixture.credentials())
-	require.Zero(t, draft13StoredCount(t, unverified))
 
-	request := fixture.holder()
-	request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
-	result, err := unverified.Draft13().RequestCredential(ctx, grant, request)
+	overridden := fixture.holder()
+	overridden.Acceptance = acceptIssuerKeyPolicy(mustP256Key())
+	_, err = fixture.wallet.Draft13().RequestCredential(ctx, grant, overridden)
+	require.ErrorIs(t, err, acceptance.ErrIssuerSignatureInvalid)
+	require.Zero(t, draft13StoredCount(t, fixture.wallet))
+
+	result, err := fixture.wallet.Draft13().RequestCredential(ctx, grant, fixture.holder())
 	require.NoError(t, err)
 	require.Len(t, result.Credentials, 1)
+	require.Equal(t, 1, draft13StoredCount(t, fixture.wallet))
 }
 
 // draft13States returns a complete state of each stage for issuer, stamped

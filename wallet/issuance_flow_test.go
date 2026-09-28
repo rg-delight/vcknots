@@ -178,46 +178,166 @@ func TestIssuanceOfferRestrictsRequestFields(t *testing.T) {
 // ---------------------------------------------------------------------------
 // The acceptance policy is required before anything is sent or stored.
 // ---------------------------------------------------------------------------
-// RequestCredential needs an acceptance policy, the request's own or
-// Config.CredentialAcceptance, and sends nothing without one: an issuer the
-// wallet cannot authenticate is not asked for a credential. The stages before
-// it do not require one, since each request may bring its own.
+// No stage obtains an authorization for a credential the wallet could not
+// accept: without IssuanceRequest.Acceptance,
+// PreAuthorizedIssuanceRequest.Acceptance or Config.CredentialAcceptance,
+// BeginIssuance and AuthorizePreAuthorizedIssuance send no Pushed
+// Authorization Request and no Token Request, and return no authorization URL
+// to open; the pre-authorized code stays unredeemed.
 func TestIssuanceFailsWithoutAcceptancePolicy(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.noAcceptancePolicy = true
 	})
+	ctx := context.Background()
 
-	result, err := fixture.receive(fixture.issuanceRequest())
-	require.ErrorIs(t, err, ErrCredentialAcceptancePolicyRequired)
-	require.Nil(t, result)
+	authorization, err := fixture.wallet.BeginIssuance(ctx, fixture.issuanceRequest())
+	requireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Nil(t, authorization)
+	grant, err := fixture.wallet.AuthorizePreAuthorizedIssuance(ctx, fixture.tokenTestPreAuthorizedRequest(nil))
+	requireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+	require.Nil(t, grant)
+
+	require.Zero(t, fixture.parCalls)
+	require.Zero(t, fixture.authorizeCalls)
+	require.Zero(t, fixture.tokenCalls)
 	require.Zero(t, fixture.credentialCalls)
 	entries, _, listErr := fixture.wallet.GetCredentialEntries(GetCredentialEntriesRequest{})
 	require.NoError(t, listErr)
 	require.Empty(t, entries)
+
+	// The same requests with their own policy reach the PAR and token
+	// endpoints of the same server.
+	policy := acceptIssuerKeyPolicy(fixture.issuerKey)
+	request := fixture.issuanceRequest()
+	request.Acceptance = policy
+	_, err = fixture.wallet.BeginIssuance(ctx, request)
+	require.NoError(t, err)
+	preAuthorized := fixture.tokenTestPreAuthorizedRequest(nil)
+	preAuthorized.Acceptance = policy
+	_, err = fixture.wallet.AuthorizePreAuthorizedIssuance(ctx, preAuthorized)
+	require.NoError(t, err)
+	require.Equal(t, 1, fixture.parCalls)
+	require.Equal(t, 1, fixture.tokenCalls)
 }
 
-// CredentialRequest.Acceptance configures the acceptance of one issuance, so a
-// wallet without Config.CredentialAcceptance issues under it, and the
-// Deferred state it returns carries it.
+// The policy a flow begins with is the policy of its credentials: the
+// IssuanceAuthorization and the IssuanceGrant carry it to RequestCredential,
+// a CredentialRequest.Acceptance overrides it, and the Deferred state carries
+// it on.
 func TestIssuanceAcceptsUnderTheRequestPolicy(t *testing.T) {
-	t.Run("an immediate issuance", func(t *testing.T) {
+	t.Run("the policy the flow began with", func(t *testing.T) {
 		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 			f.noAcceptancePolicy = true
 		})
-		request := fixture.credentialRequest()
+		request := fixture.issuanceRequest()
 		request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
-		result, err := fixture.receiveWith(fixture.issuanceRequest(), request)
+		grant, err := fixture.authorize(request)
+		require.NoError(t, err)
+		require.True(t, grant.AcceptanceOverridden)
+		require.Same(t, request.Acceptance, grant.Acceptance)
+		result, err := fixture.wallet.RequestCredential(context.Background(), grant, fixture.credentialRequest())
 		require.NoError(t, err)
 		require.Len(t, result.Credentials, 1)
 		require.NotEmpty(t, result.Credentials[0].Verification.Mechanism)
 	})
 
-	t.Run("a policy for another issuer key refuses the credential", func(t *testing.T) {
+	t.Run("the pre-authorized grant carries its policy", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+			f.noAcceptancePolicy = true
+		})
+		request := fixture.tokenTestPreAuthorizedRequest(nil)
+		request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+		grant, err := fixture.wallet.AuthorizePreAuthorizedIssuance(context.Background(), request)
+		require.NoError(t, err)
+		result, err := fixture.wallet.RequestCredential(context.Background(), grant, fixture.credentialRequest())
+		require.NoError(t, err)
+		require.Len(t, result.Credentials, 1)
+	})
+
+	t.Run("a credential request policy overrides the grant's", func(t *testing.T) {
 		fixture := newFinalIssuanceFixture(t)
-		request := fixture.credentialRequest()
-		request.Acceptance = acceptIssuerKeyPolicy(mustP256Key())
-		_, err := fixture.receiveWith(fixture.issuanceRequest(), request)
+		request := fixture.issuanceRequest()
+		request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+		credentialRequest := fixture.credentialRequest()
+		credentialRequest.Acceptance = acceptIssuerKeyPolicy(mustP256Key())
+		_, err := fixture.receiveWith(request, credentialRequest)
 		require.ErrorIs(t, err, acceptance.ErrIssuerSignatureInvalid)
+	})
+
+	t.Run("the deferred state carries the grant's policy", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
+			f.noAcceptancePolicy = true
+			f.includeDeferredEndpoint = true
+			f.credentialHandler = func(w http.ResponseWriter, _ *http.Request) {
+				mockserver.JSONResponse(w, http.StatusAccepted, map[string]any{"transaction_id": "tx-1"})
+			}
+		})
+		request := fixture.issuanceRequest()
+		request.Acceptance = acceptIssuerKeyPolicy(fixture.issuerKey)
+		result, err := fixture.receive(request)
+		require.NoError(t, err)
+		require.NotNil(t, result.Deferred)
+		require.True(t, result.Deferred.AcceptanceOverridden)
+		require.Same(t, request.Acceptance, result.Deferred.Acceptance)
+		issued, err := fixture.wallet.RequestDeferredCredential(context.Background(), result.Deferred)
+		require.NoError(t, err)
+		require.Len(t, issued.Credentials, 1)
+	})
+}
+
+// A per-request policy is not serialized with the state that carries it. A
+// state read back without it records that it had one (AcceptanceOverridden),
+// and the next stage refuses it before anything is sent rather than
+// continuing under Config.CredentialAcceptance, which a wallet that runs the
+// stage may configure for other issuances.
+func TestIssuanceStatesKeepTheFactOfAPerRequestPolicy(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an authorization state", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t)
+		policy := acceptIssuerKeyPolicy(fixture.issuerKey)
+		request := fixture.issuanceRequest()
+		request.Acceptance = policy
+		authorization, err := fixture.wallet.BeginIssuance(ctx, request)
+		require.NoError(t, err)
+		location, err := fixture.followAuthorization(authorization)
+		require.NoError(t, err)
+
+		var stored IssuanceAuthorization
+		requireJSONRoundTrip(t, authorization, &stored)
+		require.True(t, stored.AcceptanceOverridden)
+		require.Nil(t, stored.Acceptance)
+		_, err = fixture.newWallet(t).AuthorizeIssuance(ctx, &stored, location)
+		requireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+		require.Zero(t, fixture.tokenCalls, "the code is not exchanged")
+
+		stored.Acceptance = policy
+		grant, err := fixture.newWallet(t).AuthorizeIssuance(ctx, &stored, location)
+		require.NoError(t, err)
+		require.Same(t, policy, grant.Acceptance)
+	})
+
+	t.Run("a grant", func(t *testing.T) {
+		fixture := newFinalIssuanceFixture(t)
+		policy := acceptIssuerKeyPolicy(fixture.issuerKey)
+		request := fixture.tokenTestPreAuthorizedRequest(nil)
+		request.Acceptance = policy
+		grant, err := fixture.wallet.AuthorizePreAuthorizedIssuance(ctx, request)
+		require.NoError(t, err)
+
+		var stored IssuanceGrant
+		requireJSONRoundTrip(t, grant, &stored)
+		require.True(t, stored.AcceptanceOverridden)
+		require.Nil(t, stored.Acceptance)
+		_, err = fixture.newWallet(t).RequestCredential(ctx, &stored, fixture.credentialRequest())
+		requireCoded(t, err, ErrCredentialAcceptancePolicyRequired)
+		require.Zero(t, fixture.credentialCalls, "nothing is requested")
+
+		credentialRequest := fixture.credentialRequest()
+		credentialRequest.Acceptance = policy
+		result, err := fixture.newWallet(t).RequestCredential(ctx, &stored, credentialRequest)
+		require.NoError(t, err)
+		require.Len(t, result.Credentials, 1)
 	})
 }
 

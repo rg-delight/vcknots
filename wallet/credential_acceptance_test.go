@@ -136,15 +136,15 @@ func (f *acceptanceFixture) receive(t *testing.T) (*SavedCredential, error) {
 	return f.receiveUnder(t, nil)
 }
 
-// receiveUnder runs the Draft 13 Pre-Authorized Code Flow with a
+// receiveUnder runs the Draft 13 Pre-Authorized Code Flow begun with a
 // per-request acceptance policy; nil applies Config.CredentialAcceptance.
 func (f *acceptanceFixture) receiveUnder(t *testing.T, policy *acceptance.Policy) (*SavedCredential, error) {
 	t.Helper()
 	issuer, err := url.Parse(f.server.URL)
 	require.NoError(t, err)
 	return receiveDraft13(t.Context(), f.wallet,
-		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "acceptance-config", "code")},
-		CredentialRequest{HolderKeys: []IKeyEntry{f.holder}, Acceptance: policy})
+		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "acceptance-config", "code"), Acceptance: policy},
+		CredentialRequest{HolderKeys: []IKeyEntry{f.holder}})
 }
 
 // storeCredential runs the Draft 13 store path over wire under the wallet's

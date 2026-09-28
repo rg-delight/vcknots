@@ -29,9 +29,12 @@ import (
 // for grant with one key proof per holder key, a key attestation when the
 // issuer requires one or the request includes one (Appendix D), and response
 // encryption per Config.Issuance.CredentialEncryption with an ephemeral key.
-// The credentials are verified under req.Acceptance, or else
-// Config.CredentialAcceptance, and saved unless the wallet is storeless. With
-// neither policy nothing is sent (ErrCredentialAcceptancePolicyRequired).
+// The credentials are verified under req.Acceptance, or else the policy the
+// grant carries from the start of the flow, or else
+// Config.CredentialAcceptance, and saved unless the wallet is storeless.
+// Without a policy nothing is sent (ErrCredentialAcceptancePolicyRequired),
+// and a grant that records its own policy (AcceptanceOverridden) but lost it
+// in serialization does not fall back to Config.CredentialAcceptance.
 //
 // A key attestation that neither the request nor Config.Attestation.Key
 // supplies stops the call before anything is sent, with
@@ -50,7 +53,7 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 	if err := w.requireFinalIssuance(ctx); err != nil {
 		return nil, err
 	}
-	policy, err := w.acceptancePolicy(req.Acceptance)
+	policy, perRequest, err := w.grantAcceptancePolicy(grant, req.Acceptance)
 	if err != nil {
 		return nil, err
 	}
@@ -215,8 +218,8 @@ func (w *Wallet) requestFinalCredential(ctx context.Context, grant *IssuanceGran
 				HolderKeys:                holderKeys,
 				ResponseDecryptionKey:     decryptionKey,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
-				Acceptance:                req.Acceptance,
-				AcceptanceOverridden:      req.Acceptance != nil,
+				Acceptance:                perRequest,
+				AcceptanceOverridden:      perRequest != nil,
 				cache:                     w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil

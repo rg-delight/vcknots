@@ -25,7 +25,9 @@ import (
 // the authorization request when the server supports RFC 9126 PAR (HAIP
 // requires it), and returns the state holding the URL to open in the holder's
 // browser. The library does not open it. Config.ClientAuth.ClientID and
-// Config.Issuance.RedirectURI identify the wallet.
+// Config.Issuance.RedirectURI identify the wallet. Without req.Acceptance or
+// Config.CredentialAcceptance nothing is sent
+// (ErrCredentialAcceptancePolicyRequired); the state carries req.Acceptance.
 func (w *Wallet) BeginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
 	authorization, err := w.beginIssuance(ctx, req)
 	return authorization, classify(err)
@@ -33,6 +35,9 @@ func (w *Wallet) BeginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 
 func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
 	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := w.acceptancePolicy(req.Acceptance); err != nil {
 		return nil, err
 	}
 	clientID, redirectURI, err := w.authorizationCodeClient()
@@ -130,6 +135,8 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 		ClientID:                      clientID,
 		RedirectURI:                   redirectURI,
 		AuthorizationDetailsRequested: len(details) > 0,
+		Acceptance:                    req.Acceptance,
+		AcceptanceOverridden:          req.Acceptance != nil,
 	}
 	requestURI := ""
 	if usePAR {
@@ -161,7 +168,10 @@ func (w *Wallet) beginIssuance(ctx context.Context, req IssuanceRequest) (*Issua
 // metadata, checks the redirect (RFC 6749 Section 4.1.2, RFC 9207), exchanges
 // the code at the token endpoint and fetches the c_nonce. redirectURL is the
 // whole callback URL. An error redirect is returned as
-// *AuthorizationResponseError.
+// *AuthorizationResponseError. The code is not exchanged when no acceptance
+// policy applies: the state's Acceptance, which a state that records one
+// (AcceptanceOverridden) needs set again after serialization, or else
+// Config.CredentialAcceptance (ErrCredentialAcceptancePolicyRequired).
 func (w *Wallet) AuthorizeIssuance(ctx context.Context, authorization *IssuanceAuthorization, redirectURL string) (*IssuanceGrant, error) {
 	grant, err := w.authorizeIssuance(ctx, authorization, redirectURL)
 	return grant, classify(err)
@@ -172,6 +182,9 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 		return nil, err
 	}
 	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
+		return nil, err
+	}
+	if _, err := w.authorizationAcceptancePolicy(a); err != nil {
 		return nil, err
 	}
 	transport, err := w.oid4vciTransport()
@@ -233,7 +246,11 @@ func (w *Wallet) authorizeIssuance(ctx context.Context, a *IssuanceAuthorization
 	if a.AuthorizationDetailsRequested {
 		mode = authorizationDetailsRequired
 	}
-	return w.newFinalGrant(ctx, transport, discovery, a.CredentialConfigurationID, config, token, mode)
+	grant, err := w.newFinalGrant(ctx, transport, discovery, a.CredentialConfigurationID, config, token, mode)
+	if err != nil {
+		return nil, err
+	}
+	return grant.carryAcceptance(a.Acceptance), nil
 }
 
 // checkAuthorizationState checks that a is a complete state recorded under
@@ -265,9 +282,9 @@ func (w *Wallet) checkAuthorizationState(a *IssuanceAuthorization, current profi
 }
 
 // requireFinalIssuance applies the preconditions of every OpenID4VCI 1.0
-// stage: a live context and under HAIP a DPoP key (HAIP Section 4). The
-// acceptance policy is required where credentials are requested, since each
-// request may bring its own (CredentialRequest.Acceptance).
+// stage: a live context and under HAIP a DPoP key (HAIP Section 4). Each
+// stage resolves the acceptance policy itself, since the request or the state
+// it takes may bring its own.
 func (w *Wallet) requireFinalIssuance(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

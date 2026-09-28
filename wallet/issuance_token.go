@@ -14,7 +14,9 @@ import (
 // Flow token request (Sections 4.1.1 and 6.1) and fetches the c_nonce. The
 // client is anonymous unless Config.Attestation.Client or private_key_jwt
 // authenticates it; HAIP requires one of them. A DPoP proof is sent whenever
-// Config.DPoP.Key is set.
+// Config.DPoP.Key is set. Without req.Acceptance or Config.CredentialAcceptance
+// the code is not redeemed (ErrCredentialAcceptancePolicyRequired); the grant
+// carries req.Acceptance to RequestCredential.
 func (w *Wallet) AuthorizePreAuthorizedIssuance(ctx context.Context, req PreAuthorizedIssuanceRequest) (*IssuanceGrant, error) {
 	grant, err := w.authorizePreAuthorizedIssuance(ctx, req)
 	return grant, classify(err)
@@ -22,6 +24,11 @@ func (w *Wallet) AuthorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 
 func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuthorizedIssuanceRequest) (*IssuanceGrant, error) {
 	if err := w.requireFinalAuthorizationStage(ctx); err != nil {
+		return nil, err
+	}
+	// The pre-authorized code is used once, so it is not redeemed for a
+	// credential the wallet could not accept.
+	if _, err := w.acceptancePolicy(req.Acceptance); err != nil {
 		return nil, err
 	}
 	if req.CredentialOffer == nil {
@@ -93,7 +100,11 @@ func (w *Wallet) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuth
 	}
 	// The request sent neither scope nor authorization_details, so the Token
 	// Response's authorization_details are optional (Section 6.2).
-	return w.newFinalGrant(ctx, transport, discovery, offered.configurationID, config, token, authorizationDetailsOptional)
+	grant, err := w.newFinalGrant(ctx, transport, discovery, offered.configurationID, config, token, authorizationDetailsOptional)
+	if err != nil {
+		return nil, err
+	}
+	return grant.carryAcceptance(req.Acceptance), nil
 }
 
 // checkTxCode applies Section 6.1: tx_code "MUST be present if a tx_code

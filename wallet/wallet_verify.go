@@ -93,17 +93,44 @@ func (w *Wallet) acceptancePolicy(override *acceptance.Policy) (*acceptance.Poli
 	return nil, fmt.Errorf("issuer verification is not configured: %w", ErrCredentialAcceptancePolicyRequired)
 }
 
-// deferredAcceptancePolicy is acceptancePolicy for a deferred issuance. An
-// issuance requested with its own policy records that in
+// stateAcceptancePolicy is acceptancePolicy for an issuance state. An
+// issuance begun or requested with its own policy records that in the state's
 // AcceptanceOverridden, which survives serialization while the policy does
-// not; such a DeferredIssuance without its policy fails with
+// not; such a state without its policy fails with
 // ErrCredentialAcceptancePolicyRequired rather than silently falling back to
-// Config.CredentialAcceptance.
-func (w *Wallet) deferredAcceptancePolicy(d *DeferredIssuance) (*acceptance.Policy, error) {
-	if d.AcceptanceOverridden && d.Acceptance == nil {
-		return nil, fmt.Errorf("the issuance was requested with its own acceptance policy; set DeferredIssuance.Acceptance again: %w", ErrCredentialAcceptancePolicyRequired)
+// Config.CredentialAcceptance. field names what the caller sets again.
+func (w *Wallet) stateAcceptancePolicy(overridden bool, policy *acceptance.Policy, field string) (*acceptance.Policy, error) {
+	if overridden && policy == nil {
+		return nil, fmt.Errorf("the issuance state records its own acceptance policy, which is not serialized; set %s again: %w", field, ErrCredentialAcceptancePolicyRequired)
 	}
-	return w.acceptancePolicy(d.Acceptance)
+	return w.acceptancePolicy(policy)
+}
+
+// authorizationAcceptancePolicy is stateAcceptancePolicy for
+// AuthorizeIssuance.
+func (w *Wallet) authorizationAcceptancePolicy(a *IssuanceAuthorization) (*acceptance.Policy, error) {
+	return w.stateAcceptancePolicy(a.AcceptanceOverridden, a.Acceptance, "IssuanceAuthorization.Acceptance")
+}
+
+// grantAcceptancePolicy is the policy a Credential Request accepts its
+// credentials under: override (CredentialRequest.Acceptance), else the
+// policy the grant carries from the start of the flow, else
+// Config.CredentialAcceptance. perRequest is the policy a Deferred issuance
+// carries on, nil when Config.CredentialAcceptance applies.
+func (w *Wallet) grantAcceptancePolicy(grant *IssuanceGrant, override *acceptance.Policy) (policy, perRequest *acceptance.Policy, err error) {
+	if override != nil {
+		return override, override, nil
+	}
+	policy, err = w.stateAcceptancePolicy(grant.AcceptanceOverridden, grant.Acceptance, "IssuanceGrant.Acceptance or CredentialRequest.Acceptance")
+	if err != nil {
+		return nil, nil, err
+	}
+	return policy, grant.Acceptance, nil
+}
+
+// deferredAcceptancePolicy is stateAcceptancePolicy for a deferred issuance.
+func (w *Wallet) deferredAcceptancePolicy(d *DeferredIssuance) (*acceptance.Policy, error) {
+	return w.stateAcceptancePolicy(d.AcceptanceOverridden, d.Acceptance, "DeferredIssuance.Acceptance")
 }
 
 // verifyCredentialUnder applies policy to raw under issuance profile p: the

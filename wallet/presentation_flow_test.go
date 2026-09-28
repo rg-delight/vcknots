@@ -353,8 +353,8 @@ func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry)
 	key := newMockKeyEntry()
 	issuer := newReceiveCredentialTestServer(t, key)
 	saved, err := receiveDraft13(t.Context(), controller,
-		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "test-config", "test-code")},
-		CredentialRequest{HolderKeys: []IKeyEntry{key}, Acceptance: mockIssuerAcceptance()})
+		PreAuthorizedIssuanceRequest{CredentialOffer: preAuthorizedCodeOffer(issuer, "test-config", "test-code"), Acceptance: mockIssuerAcceptance()},
+		CredentialRequest{HolderKeys: []IKeyEntry{key}})
 	require.NoError(t, err, "presentation test must receive and store a real signed credential")
 	require.NotNil(t, saved)
 	require.NotEmpty(t, saved.Entry.Raw)

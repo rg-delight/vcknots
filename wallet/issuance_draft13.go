@@ -40,7 +40,8 @@ func (w *Wallet) Draft13() *Draft13Issuance {
 // requires an offer with an authorization_code grant, or without grants when
 // the authorization server supports that grant (Section 4.1.1), pushes the
 // authorization request when the server supports PAR, and returns the state
-// holding the URL to open in the holder's browser.
+// holding the URL to open in the holder's browser. Like the 1.0 BeginIssuance
+// it sends nothing without req.Acceptance or Config.CredentialAcceptance.
 func (d *Draft13Issuance) BeginIssuance(ctx context.Context, req IssuanceRequest) (*IssuanceAuthorization, error) {
 	authorization, err := d.beginIssuance(ctx, req)
 	return authorization, classify(err)
@@ -54,7 +55,9 @@ func (d *Draft13Issuance) AuthorizeIssuance(ctx context.Context, authorization *
 }
 
 // AuthorizePreAuthorizedIssuance runs the Draft 13 Pre-Authorized Code Flow
-// token request (Section 6.1).
+// token request (Section 6.1). Like the 1.0 method it does not redeem the
+// code without req.Acceptance or Config.CredentialAcceptance, and the grant
+// carries req.Acceptance to RequestCredential.
 func (d *Draft13Issuance) AuthorizePreAuthorizedIssuance(ctx context.Context, req PreAuthorizedIssuanceRequest) (*IssuanceGrant, error) {
 	grant, err := d.authorizePreAuthorizedIssuance(ctx, req)
 	return grant, classify(err)
@@ -63,9 +66,10 @@ func (d *Draft13Issuance) AuthorizePreAuthorizedIssuance(ctx context.Context, re
 // RequestCredential sends the Draft 13 Credential Request (Section 7.2) with
 // one key proof, retrying once with the fresh c_nonce of an invalid_proof
 // error (Section 7.3.2). Config.Experimental.Hooks.KeyProof rewrites the
-// proof. The credential is verified under req.Acceptance, or else
-// Config.CredentialAcceptance, and saved unless the wallet is storeless. With
-// neither policy nothing is sent (ErrCredentialAcceptancePolicyRequired).
+// proof. The credential is verified under the policy the 1.0
+// RequestCredential resolves (req.Acceptance, the grant's, or
+// Config.CredentialAcceptance), and saved unless the wallet is storeless.
+// Without one nothing is sent (ErrCredentialAcceptancePolicyRequired).
 func (d *Draft13Issuance) RequestCredential(ctx context.Context, grant *IssuanceGrant, req CredentialRequest) (*IssuanceResult, error) {
 	result, err := d.requestCredential(ctx, grant, req)
 	return result, classify(err)
@@ -231,6 +235,9 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 	if err != nil {
 		return nil, err
 	}
+	if _, err := d.w.acceptancePolicy(req.Acceptance); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(req.CredentialIssuer) != "" {
 		return nil, invalidArgument("Draft 13 starts from a credential offer; CredentialIssuer must be empty")
 	}
@@ -293,6 +300,8 @@ func (d *Draft13Issuance) beginIssuance(ctx context.Context, req IssuanceRequest
 		ClientID:                      clientID,
 		RedirectURI:                   redirectURI,
 		AuthorizationDetailsRequested: len(details) > 0,
+		Acceptance:                    req.Acceptance,
+		AcceptanceOverridden:          req.Acceptance != nil,
 	}
 	usePAR, err := pushedAuthorizationRequired(as, false)
 	if err != nil {
@@ -337,6 +346,9 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if err := d.w.checkAuthorizationState(a, profile.Draft13()); err != nil {
 		return nil, err
 	}
+	if _, err := d.w.authorizationAcceptancePolicy(a); err != nil {
+		return nil, err
+	}
 	discovery, err := d.w.discoverIssuance(ctx, draft13Discovery{transport}, a.cache, a.CredentialIssuer, pinnedAuthorizationServer(a.AuthorizationServer), true)
 	if err != nil {
 		return nil, err
@@ -377,12 +389,21 @@ func (d *Draft13Issuance) authorizeIssuance(ctx context.Context, a *IssuanceAuth
 	if a.AuthorizationDetailsRequested {
 		mode = authorizationDetailsEntryRequired
 	}
-	return d.newGrant(discovery, a.CredentialConfigurationID, token, mode)
+	grant, err := d.newGrant(discovery, a.CredentialConfigurationID, token, mode)
+	if err != nil {
+		return nil, err
+	}
+	return grant.carryAcceptance(a.Acceptance), nil
 }
 
 func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, req PreAuthorizedIssuanceRequest) (*IssuanceGrant, error) {
 	transport, err := d.require(ctx)
 	if err != nil {
+		return nil, err
+	}
+	// The pre-authorized code is used once (Section 4.1.1), so it is not
+	// redeemed for a credential the wallet could not accept.
+	if _, err := d.w.acceptancePolicy(req.Acceptance); err != nil {
 		return nil, err
 	}
 	if err := d.checkOfferIssuer(transport, req.CredentialOffer); err != nil {
@@ -434,7 +455,11 @@ func (d *Draft13Issuance) authorizePreAuthorizedIssuance(ctx context.Context, re
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch access token: %w", err)
 	}
-	return d.newGrant(discovery, configurationID, token, authorizationDetailsOptional)
+	issuanceGrant, err := d.newGrant(discovery, configurationID, token, authorizationDetailsOptional)
+	if err != nil {
+		return nil, err
+	}
+	return issuanceGrant.carryAcceptance(req.Acceptance), nil
 }
 
 // newGrant collects the Token Response into a Draft 13 grant; its c_nonce is
@@ -510,7 +535,7 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 	if req.KeyAttestation != nil || req.IncludeKeyAttestation {
 		return nil, invalidArgument("Draft 13 has no key attestation")
 	}
-	policy, err := d.w.acceptancePolicy(req.Acceptance)
+	policy, perRequest, err := d.w.grantAcceptancePolicy(grant, req.Acceptance)
 	if err != nil {
 		return nil, err
 	}
@@ -579,8 +604,8 @@ func (d *Draft13Issuance) requestCredential(ctx context.Context, grant *Issuance
 				Interval:                  intervalDuration(response.Interval),
 				HolderKeys:                holderKeys,
 				DPoPKeyThumbprint:         grant.DPoPKeyThumbprint,
-				Acceptance:                req.Acceptance,
-				AcceptanceOverridden:      req.Acceptance != nil,
+				Acceptance:                perRequest,
+				AcceptanceOverridden:      perRequest != nil,
 				cache:                     d.w.newIssuanceMetadataCache(discovery),
 			},
 		}, nil

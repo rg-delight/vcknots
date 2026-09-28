@@ -69,6 +69,12 @@ type IssuanceRequest struct {
 	// without one it is required.
 	CredentialConfigurationID string
 	AuthorizationRequestType  AuthorizationRequestType
+	// Acceptance is the acceptance policy of this issuance: it overrides
+	// Config.CredentialAcceptance, and the IssuanceAuthorization and the
+	// IssuanceGrant carry it to RequestCredential. One of the two is required,
+	// and without either nothing is sent (ErrCredentialAcceptancePolicyRequired),
+	// so no authorization is obtained for a credential the wallet would refuse.
+	Acceptance *acceptance.Policy
 }
 
 // PreAuthorizedIssuanceRequest starts a Pre-Authorized Code Flow issuance
@@ -85,6 +91,11 @@ type PreAuthorizedIssuanceRequest struct {
 	// AuthorizationServer overrides the grant's authorization_server hint; it
 	// must be one of the issuer metadata's authorization_servers.
 	AuthorizationServer string
+	// Acceptance is the acceptance policy of this issuance: it overrides
+	// Config.CredentialAcceptance, and the IssuanceGrant carries it to
+	// RequestCredential. One of the two is required, and without either the
+	// pre-authorized code is not redeemed (ErrCredentialAcceptancePolicyRequired).
+	Acceptance *acceptance.Policy
 }
 
 // CredentialRequest holds the per-request inputs of RequestCredential.
@@ -104,12 +115,13 @@ type CredentialRequest struct {
 	// IncludeKeyAttestation sends a key attestation although the issuer does
 	// not require one.
 	IncludeKeyAttestation bool
-	// Acceptance is the acceptance policy of this issuance: it overrides
+	// Acceptance is the acceptance policy of this request: it overrides the
+	// policy the grant carries (IssuanceGrant.Acceptance) and
 	// Config.CredentialAcceptance for the credentials of this request, and of
 	// the Deferred issuance it may return. The library fills the issuance
 	// context the policy needs (the Credential Issuer Identifier and the
-	// Credential Format). One of the two is required, and the request is not
-	// sent without it (ErrCredentialAcceptancePolicyRequired).
+	// Credential Format). One of them is required, and the request is not sent
+	// without it (ErrCredentialAcceptancePolicyRequired).
 	Acceptance *acceptance.Policy
 }
 
@@ -153,6 +165,16 @@ type IssuanceAuthorization struct {
 	// the code to it (draft-ietf-oauth-attestation-based-client-auth
 	// Section 10.4). Secret.
 	ClientInstanceKey *jose.JSONWebKey `json:"client_instance_key,omitempty"`
+	// Acceptance is the IssuanceRequest.Acceptance the flow began with. A
+	// policy holds functions and trust material, so it is not serialized: a
+	// caller that stores the state sets it again before AuthorizeIssuance.
+	Acceptance *acceptance.Policy `json:"-"`
+	// AcceptanceOverridden records that the flow began with an
+	// IssuanceRequest.Acceptance, and is serialized. While it is set,
+	// AuthorizeIssuance refuses a state whose Acceptance is nil with
+	// ErrCredentialAcceptancePolicyRequired, before the code is exchanged,
+	// instead of continuing under Config.CredentialAcceptance.
+	AcceptanceOverridden bool `json:"acceptance_overridden,omitempty"`
 
 	cache *issuanceMetadataCache
 }
@@ -201,8 +223,27 @@ type IssuanceGrant struct {
 	// KeyAttestationRequired records that the configuration lists
 	// key_attestations_required (OpenID4VCI 1.0 Appendix D).
 	KeyAttestationRequired bool `json:"key_attestation_required,omitempty"`
+	// Acceptance is the IssuanceRequest.Acceptance or
+	// PreAuthorizedIssuanceRequest.Acceptance the flow began with; a
+	// CredentialRequest.Acceptance overrides it. It is not serialized: a
+	// caller that stores the state sets it again, or passes
+	// CredentialRequest.Acceptance, before RequestCredential.
+	Acceptance *acceptance.Policy `json:"-"`
+	// AcceptanceOverridden records that the flow began with its own policy,
+	// and is serialized. While it is set, RequestCredential without a
+	// CredentialRequest.Acceptance refuses a grant whose Acceptance is nil with
+	// ErrCredentialAcceptancePolicyRequired, before anything is sent, instead
+	// of accepting the credentials under Config.CredentialAcceptance.
+	AcceptanceOverridden bool `json:"acceptance_overridden,omitempty"`
 
 	cache *issuanceMetadataCache
+}
+
+// carryAcceptance records on g the per-request policy its flow began with;
+// nil records none, and Config.CredentialAcceptance applies.
+func (g *IssuanceGrant) carryAcceptance(policy *acceptance.Policy) *IssuanceGrant {
+	g.Acceptance, g.AcceptanceOverridden = policy, policy != nil
+	return g
 }
 
 // DeferredIssuance is a pending deferred transaction (OpenID4VCI 1.0 Section
@@ -225,13 +266,14 @@ type DeferredIssuance struct {
 	// Credential Response. Secret.
 	ResponseDecryptionKey *jose.JSONWebKey `json:"response_decryption_key,omitempty"`
 	DPoPKeyThumbprint     string           `json:"dpop_key_thumbprint,omitempty"`
-	// Acceptance is the CredentialRequest.Acceptance this issuance was
-	// requested with. A policy holds functions and trust material, so it is
-	// not serialized: a caller that stores the state sets it again before
-	// RequestDeferredCredential.
+	// Acceptance is the per-request policy this issuance was requested
+	// under: the CredentialRequest.Acceptance, or else the policy the
+	// IssuanceGrant carried. A policy holds functions and trust material, so
+	// it is not serialized: a caller that stores the state sets it again
+	// before RequestDeferredCredential.
 	Acceptance *acceptance.Policy `json:"-"`
-	// AcceptanceOverridden records that the issuance was requested with a
-	// CredentialRequest.Acceptance, and is serialized. While it is set,
+	// AcceptanceOverridden records that the issuance was requested under a
+	// per-request policy, and is serialized. While it is set,
 	// RequestDeferredCredential refuses a DeferredIssuance whose Acceptance is
 	// nil with ErrCredentialAcceptancePolicyRequired, before anything is sent,
 	// instead of accepting the credentials under Config.CredentialAcceptance.
