@@ -13,12 +13,17 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/trustknots/vcknots/wallet"
+	"github.com/trustknots/vcknots/wallet/acceptance"
 	"github.com/trustknots/vcknots/wallet/clientconfig"
 	"github.com/trustknots/vcknots/wallet/credstore"
+	"github.com/trustknots/vcknots/wallet/experimental"
 	"github.com/trustknots/vcknots/wallet/idprof"
+	"github.com/trustknots/vcknots/wallet/idprof/issuerkeys"
 	"github.com/trustknots/vcknots/wallet/presenter"
 	"github.com/trustknots/vcknots/wallet/presenter/plugins/oid4vp"
 	"github.com/trustknots/vcknots/wallet/receiver"
+	"github.com/trustknots/vcknots/wallet/receiver/plugins/oid4vci"
+	receiverTypes "github.com/trustknots/vcknots/wallet/receiver/types"
 	"github.com/trustknots/vcknots/wallet/serializer"
 	"github.com/trustknots/vcknots/wallet/verifier"
 )
@@ -48,6 +53,43 @@ func LoadClientAuth() (wallet.ClientAuthConfig, error) {
 		clientconfig.WithPrivateJWKFile(DefaultClientPrivateJWKPath),
 		clientconfig.AllowInsecureFilePermissions(),
 	)
+}
+
+// SampleIssuerAcceptance is the credential acceptance policy of the
+// examples. The local sample server publishes JWT VC Issuer Metadata at
+// /.well-known/jwt-vc-issuer (SD-JWT VC -19 §4), which authenticates its
+// SD-JWT VCs; a DID issuer is accepted once the Credential Issuer's origin
+// links it with a DID Configuration. The local sample server runs on plain
+// http, so allowHTTP lets the key resolution reach it through the
+// experimental setting; it is not for production use. When issuerCAPath names
+// a PEM file, a credential carrying x5c is authenticated against the
+// certificates in it; its iss must be a host the leaf certificate names
+// (allowHTTP binds an http iss the same way).
+func SampleIssuerAcceptance(issuerCAPath string, allowHTTP bool) (*acceptance.Policy, error) {
+	policy := &acceptance.Policy{IssuerKeys: &issuerkeys.Resolver{
+		Mechanisms: issuerkeys.Mechanisms{
+			JWTVCIssuerMetadata: true, RemoteJWKS: true,
+			DIDKey: true, DIDJWK: true, DIDWeb: true, DIDConfiguration: true,
+		},
+		Experimental: experimental.Transport{AllowHTTP: allowHTTP},
+	}}
+	if issuerCAPath == "" {
+		return policy, nil
+	}
+	pem, err := os.ReadFile(issuerCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read issuer CA certificates: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("failed to parse issuer CA certificates")
+	}
+	policy.IssuerX509 = &acceptance.IssuerX509TrustOptions{
+		RootCAs:                     roots,
+		AllowUnadvertisedRevocation: true,
+		Experimental:                experimental.Transport{AllowHTTP: allowHTTP},
+	}
+	return policy, nil
 }
 
 type MockKeyEntry struct {
@@ -115,13 +157,18 @@ type Runtime struct {
 	Wallet     *wallet.Wallet
 }
 
-func NewOID4VPRuntime(certPath string) (*Runtime, error) {
+// NewOID4VPRuntime builds a wallet for the sample flows. allowHTTP accepts the
+// plain http endpoints of a local sample server through the experimental
+// transport settings; it is not for production use.
+func NewOID4VPRuntime(certPath string, allowHTTP bool) (*Runtime, error) {
 	credStore, err := credstore.NewCredStoreDispatcher(credstore.WithDefaultConfig())
 	if err != nil {
 		return nil, err
 	}
 
-	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithDefaultConfig())
+	receiverDispatcher, err := receiver.NewReceivingDispatcher(receiver.WithPlugin(receiverTypes.Oid4vci, &oid4vci.Oid4vciReceiver{
+		Experimental: experimental.Transport{AllowHTTP: allowHTTP},
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +199,9 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 
 	oid4vpPresenter := &oid4vp.Oid4vpPresenter{
 		X509TrustChainRoots: certPool,
+		// The sample verifier listens on plain http; that is outside
+		// OpenID4VP and is opted into explicitly.
+		Experimental: experimental.Presenter{Transport: experimental.Transport{AllowHTTP: allowHTTP}},
 	}
 	presenterDispatcher, err := presenter.NewPresentationDispatcher(
 		presenter.WithPlugin(presenter.Oid4vp, oid4vpPresenter),
@@ -170,14 +220,20 @@ func NewOID4VPRuntime(certPath string) (*Runtime, error) {
 		return nil, err
 	}
 
+	issuerAcceptance, err := SampleIssuerAcceptance(os.Getenv("VCKNOTS_ISSUER_CA_PATH"), allowHTTP)
+	if err != nil {
+		return nil, err
+	}
+
 	w, err := wallet.NewWalletWithConfig(wallet.Config{
-		CredStore:  credStore,
-		IDProfiler: idProf,
-		Receiver:   receiverDispatcher,
-		Serializer: serializerDispatcher,
-		Verifier:   verifierDispatcher,
-		Presenter:  presenterDispatcher,
-		ClientAuth: clientAuth,
+		CredentialAcceptance: issuerAcceptance,
+		CredStore:            credStore,
+		IDProfiler:           idProf,
+		Receiver:             receiverDispatcher,
+		Serializer:           serializerDispatcher,
+		Verifier:             verifierDispatcher,
+		Presenter:            presenterDispatcher,
+		ClientAuth:           clientAuth,
 		// Key is left unset so that NewWalletWithConfig generates a DPoP key
 		// of its own. Reusing the registered client authentication key would
 		// tie DPoP key rotation to the client assertion key.
