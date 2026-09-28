@@ -97,6 +97,6 @@ func TestWallet_Draft24TransactionDataOwnedByANonSDJWTCredentialFails(t *testing
 	selections := []CredentialSelection{{CredentialID: entries[0].Entry.Id, QueryIDs: []string{"d1"}}}
 	credentials, err := controller.resolveSelections(selections, key)
 	require.NoError(t, err)
-	_, err = controller.serializeDraft24Presentation(req, Presentation{Key: key, Credentials: selections}, credentials, flavor)
+	_, err = controller.serializeDraft24Presentation(req, Presentation{Key: key, Credentials: selections}, credentials, nil, flavor)
 	require.ErrorContains(t, err, "invalid_transaction_data")
 }

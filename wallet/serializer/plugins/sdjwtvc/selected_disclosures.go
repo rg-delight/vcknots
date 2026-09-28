@@ -1,9 +1,8 @@
 package sdjwtvc
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -31,6 +30,10 @@ func selectDisclosuresByName(disclosures []string, algorithm string, claims []st
 	}
 	return selected, nil
 }
+
+// errSelectedClaimNotFound reports a claims path pointer that selects nothing
+// in the credential.
+var errSelectedClaimNotFound = errors.New("selected claim does not exist at the credential")
 
 // sdjwtDisclosureResolver resolves disclosure digests back to their parsed
 // form and applies a claims path pointer to that view without materializing
@@ -165,7 +168,7 @@ func (r *sdjwtDisclosureResolver) selectPath(payload map[string]any, path []any,
 			}
 		}
 		if len(next) == 0 {
-			return fmt.Errorf("selected claim does not exist at the credential")
+			return errSelectedClaimNotFound
 		}
 		current = next
 	}
@@ -380,29 +383,7 @@ func selectedPathIndex(value any) (int64, bool) {
 // It lets the DCQL layer evaluate OID4VP 1.0 Section 7 claims path pointers
 // over the decoded credential.
 func ReconstructClaimsObject(rawCredential string) (map[string]any, error) {
-	combined := ParseCombinedFormatForPresentation(rawCredential)
-	if combined.SDJWT == "" {
-		return nil, fmt.Errorf("SD-JWT is empty")
-	}
-	parts := strings.Split(combined.SDJWT, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("SD-JWT must have 3 parts")
-	}
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid SD-JWT payload encoding: %w", err)
-	}
-	var payload map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
-	decoder.UseNumber()
-	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("invalid SD-JWT payload: %w", err)
-	}
-	algorithm, err := sdHashAlgorithm(payload)
-	if err != nil {
-		return nil, err
-	}
-	resolver, err := newSDJWTDisclosureResolver(combined.Disclosures, algorithm)
+	payload, resolver, err := parseForSelection(rawCredential)
 	if err != nil {
 		return nil, err
 	}

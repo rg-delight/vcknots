@@ -166,17 +166,11 @@ func (w *Wallet) submitPresentationExchange(ctx context.Context, h *oid4vp.Admit
 	if err != nil {
 		return nil, err
 	}
-	p.Credentials = slices.Clone(p.Credentials)
-	for index, limit := range limits {
-		if limit != nil {
-			p.Credentials[index].DisclosedClaims = limit
-		}
-	}
 	descriptorMap, err := buildDraft24DescriptorMap(len(saved), *flavor, descriptorIDs)
 	if err != nil {
 		return nil, err
 	}
-	vpToken, err := w.serializeDraft24Presentation(&req, p, credentials, *flavor)
+	vpToken, err := w.serializeDraft24Presentation(&req, p, credentials, limits, *flavor)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +236,10 @@ func buildDraft24DescriptorMap(count int, flavor credential.SupportedSerializati
 //
 // Each transaction_data entry is carried by the credential it is assigned to
 // (Draft 24 Section 5.1, assignTransactionData), and only an SD-JWT VC Key
-// Binding JWT can carry it (Appendix A.4.5).
-func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentationRequest, p Presentation, credentials []resolvedCredential, flavor credential.SupportedSerializationFlavor) ([]byte, error) {
+// Binding JWT can carry it (Appendix A.4.5). limits[i], when not nil, holds
+// the claims path pointers credential i discloses under limit_disclosure
+// (draft24DisclosureLimits) and replaces its DisclosedClaims.
+func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentationRequest, p Presentation, credentials []resolvedCredential, limits [][]string, flavor credential.SupportedSerializationFlavor) ([]byte, error) {
 	transactionData, err := assignTransactionData(req.TransactionData, p.Credentials)
 	if err != nil {
 		return nil, err
@@ -285,7 +281,11 @@ func (w *Wallet) serializeDraft24Presentation(req *oid4vp.CredentialPresentation
 			// Draft 24 has no require_cryptographic_holder_binding, so the
 			// Verifier cannot waive the Key Binding JWT.
 			sdOpts.RequireKeyBinding = true
-			if disclosed := p.Credentials[index].DisclosedClaims; disclosed != nil {
+			if index < len(limits) && limits[index] != nil {
+				sdOpts.SelectedClaims = slices.Clone(limits[index])
+				sdOpts.LimitDisclosureToSelectedClaims = true
+				sdOpts.RequireRootClaimMatch = true
+			} else if disclosed := p.Credentials[index].DisclosedClaims; disclosed != nil {
 				sdOpts.SelectedClaims = append([]string(nil), disclosed...)
 				sdOpts.LimitDisclosureToSelectedClaims = true
 			}
