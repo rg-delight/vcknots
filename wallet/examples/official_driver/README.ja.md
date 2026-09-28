@@ -155,8 +155,9 @@ Credential を保存したら `credential_accepted`、拒否したら `credentia
 保存後の通知の失敗はエラーとして報告します。
 出力は `credentialIds`、Credential 順の `verification` 配列（`acceptance.Verification`）、Issuer が通知を求めた場合の `notificationId`、最後のポーリングの後も保留中の場合の `transactionId` と `pending: true` です。
 
-`present` は holder 鍵で `PresentCredential` を呼びます。
+`present` は holder 鍵で `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を呼びます。
 要求を解析して受け付け、DCQL クエリを満たす保存済み Credential を選び、応答を送ります。
+driver は同意の段階を置かずに応答します。
 `redirectUri`、`redirectFollowed`、`redirectStatus`（リダイレクトを開かなかった場合は `0`）を返します。
 `followRedirect` が有効な場合、driver は返された `redirect_uri` を同一端末のブラウザと同じように開きます。
 TLS を構成したクライアントで GET を送り、`Accept: text/html,*/*`、`User-Agent: official_driver`、15 秒のタイムアウト、最大 5 回のリダイレクトを使います。

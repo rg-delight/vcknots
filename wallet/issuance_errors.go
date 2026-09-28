@@ -16,8 +16,11 @@ import (
 // Aliases of sentinels declared by sub-packages, so errors.Is holds at either
 // import path.
 var (
-	// ErrCredentialAcceptancePolicyRequired reports that Config.CredentialAcceptance
-	// is nil on a path that must authenticate the issuer before storing.
+	// ErrCredentialAcceptancePolicyRequired reports an issuance, or a
+	// credential check, with neither a per-request acceptance policy nor
+	// Config.CredentialAcceptance, or an issuance state that recorded its own
+	// policy (AcceptanceOverridden) and was read back without it. It is
+	// reported before anything is sent.
 	ErrCredentialAcceptancePolicyRequired = acceptance.ErrPolicyRequired
 	ErrHTTPRedirectNotAllowed             = receiverOid4vci.ErrHTTPRedirectNotAllowed
 	// ErrProofAlgorithmNotSupported reports that the holder key's algorithm is

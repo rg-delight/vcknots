@@ -23,8 +23,10 @@
 
 ## サンプルが使う Wallet API
 
-サンプルは、OpenID4VCI 1.0 の段階的 API（`ParseCredentialOfferURL` または `ResolveCredentialOffer`、`AuthorizePreAuthorizedIssuance`、`RequestCredential` による Pre-Authorized Code Flow）で Credential を受領し、1 回の呼出しでフローを実行する `PresentCredential`（OpenID4VP 1.0）で提示します。
-ユーザーのいる wallet は、Authorization Code Flow に `BeginIssuance` と `AuthorizeIssuance` を、提示に `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` も使います。
+サンプルは、OpenID4VCI 1.0 の段階的 API（`ParseCredentialOfferURL` または `ResolveCredentialOffer`、`AuthorizePreAuthorizedIssuance`、`RequestCredential` による Pre-Authorized Code Flow）で Credential を受領し、OpenID4VP 1.0 の段階的 API（`ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation`）で提示します。
+提示の 3 段階は `common.PresentAll` が続けて実行します。
+ユーザーのいる wallet は `SelectCredentials` と `SubmitPresentation` の間で holder の同意を得ます（サンプルは省略しています）。
+Authorization Code Flow には `BeginIssuance` と `AuthorizeIssuance` も使います。
 [wallet ガイド](../../docs/i18n/ja/docusaurus-plugin-content-docs/current/wallet.md) がその API、対応プロトコル、HAIP プロファイル、セキュリティ上の既定値を説明し、[公開 Wallet API driver](official_driver/README.ja.md) が完全な構成を示します。
 
 サンプルは `common.SampleIssuerAcceptance` で `Config.CredentialAcceptance` を設定し、`RequestCredential` はそのポリシーが Issuer を認証した Credential だけを保存します。
@@ -267,7 +269,7 @@ time=2025-11-27T14:03:25.174+09:00 level=INFO msg="Credential presented successf
 
 ---
 
-SD-JWT VC では、答える DCQL query が cryptographic holder binding を要求するとき（`require_cryptographic_holder_binding`、省略時は `true`）、または `SdJwtVcPresentationOptions.RequireKeyBinding` を設定したときに、`PresentCredential` が Key Binding JWT を付けます。
+SD-JWT VC では、答える DCQL query が cryptographic holder binding を要求するとき（`require_cryptographic_holder_binding`、省略時は `true`）、または `SdJwtVcPresentationOptions.RequireKeyBinding` を設定したときに、`SubmitPresentation` が Key Binding JWT を付けます。
 オプションで必須の Key Binding JWT を外すことはできません。
 holder binding を要求する query には、`cnf` のない Credential で答えません。
 

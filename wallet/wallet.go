@@ -5,9 +5,11 @@
 // them to verifiers (OID4VP). It supports multiple credential formats including
 // JWT-VC and SD-JWT-VC.
 //
-// Basic usage:
+// The methods of Wallet run OpenID4VCI 1.0 and OpenID4VP 1.0 in stages, and
+// the draft versions are reached through Wallet.Draft13 and Wallet.Draft24.
+// Receiving a credential under a Pre-Authorized Code offer:
 //
-//	w, err := wallet.NewWallet()
+//	w, err := wallet.NewWalletWithConfig(wallet.Config{CredentialAcceptance: policy})
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -20,7 +22,23 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holderKey}, Acceptance: policy})
+//	result, err := w.RequestCredential(ctx, grant, wallet.CredentialRequest{HolderKeys: []wallet.IKeyEntry{holderKey}})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+// Presenting credentials, with the holder's consent between the selection and
+// the submission:
+//
+//	request, err := w.ParsePresentationRequest(ctx, requestURI)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	selections, err := w.SelectCredentials(ctx, request)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	submitted, err := w.SubmitPresentation(ctx, request, wallet.Presentation{Key: holderKey, Credentials: selections})
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -56,16 +74,24 @@ import (
 
 // Wallet implements high-level wallet operations for verifiable credentials.
 //
-// It coordinates multiple dispatcher components to execute complete workflows:
-//   - ReceivingDispatcher: handles credential issuance protocols (e.g., OID4VCI)
-//   - PresentationDispatcher: handles credential presentation protocols (e.g., OID4VP)
-//   - SerializationDispatcher: handles credential serialization (JWT, SD-JWT)
-//   - CredStoreDispatcher: manages credential storage
-//   - IdentityProfileDispatcher: manages DIDs and identity profiles
-//   - VerificationDispatcher: handles cryptographic signature verification
+// Its methods are the stages of the protocols, and a caller runs them in
+// order, keeping the state each returns (see IssuanceGrant and
+// oid4vp.AdmittedRequest):
+//   - OpenID4VCI 1.0: ResolveCredentialOffer, then BeginIssuance and
+//     AuthorizeIssuance, or AuthorizePreAuthorizedIssuance, then
+//     RequestCredential, RequestDeferredCredential and NotifyIssuer.
+//   - OpenID4VP 1.0: ParsePresentationRequest (or ParseDCAPIRequest), then
+//     SelectCredentials, and SubmitPresentation or DeclinePresentation after
+//     the holder's consent.
+//   - OpenID4VCI Draft 13: the issuance stages under Draft13. OpenID4VP
+//     Draft 24: a request parsed under Draft24, then selected and submitted
+//     as above. Config.Profiles enables each draft.
 //
-// Each workflow method (ReceiveCredential, PresentCredential) orchestrates
-// multiple dispatchers to implement the complete protocol flow.
+// The stages delegate to the dispatchers of Config: the ReceivingDispatcher
+// and the PresentationDispatcher run the protocols, the
+// SerializationDispatcher and the VerificationDispatcher parse and verify
+// credentials, the CredStoreDispatcher stores them and the
+// IdentityProfileDispatcher manages DIDs.
 type Wallet struct {
 	credStore  *credstore.CredStoreDispatcher
 	idProf     *idprof.IdentityProfileDispatcher
@@ -175,7 +201,8 @@ type Config struct {
 // DPoPConfig holds configuration for DPoP proof generation. Key is the
 // wallet's DPoP key; OpenID4VCI 1.0 issuances send a DPoP proof whenever it is
 // set, and HAIP requires it. Enabled generates a key when Key is nil and
-// forces DPoP on the Draft 13 and ReceiveCredential paths.
+// forces DPoP on the Draft 13 token requests, which otherwise send it only to
+// an authorization server that advertises dpop_signing_alg_values_supported.
 type DPoPConfig struct {
 	Enabled bool
 	Key     IKeyEntry
@@ -302,33 +329,39 @@ func curveForSignatureAlgorithm(alg jose.SignatureAlgorithm) (elliptic.Curve, er
 	}
 }
 
-// NewWallet creates a Wallet with default dispatcher configurations.
+// NewWallet creates a Wallet with the default dispatchers, as
+// NewWalletWithConfig does for a zero Config:
+//   - Credential storage using the local file system
+//   - OpenID4VCI for credential receiving
+//   - OpenID4VP for credential presentation
+//   - JWT VC, SD-JWT VC and Data Integrity credential serialization
+//   - Signature verification for every algorithm the verifier package
+//     registers by default
+//   - did:key and did:jwk identity profiles
 //
-// This initializes all dispatcher components with their built-in plugin implementations:
-//   - Credential storage using local file system
-//   - OID4VCI for credential receiving
-//   - OID4VP for credential presentation
-//   - JWT and SD-JWT serialization support
-//   - ES256 signature verification
-//   - DID:key and DID:jwk identity profiles
+// The Config.Profiles of a zero Config apply: OpenID4VCI 1.0 and OpenID4VP
+// 1.0 under profile.Final, with both draft profiles. The wallet has no
+// Config.CredentialAcceptance, so receiving a credential needs an acceptance
+// policy on the request that starts each issuance (IssuanceRequest.Acceptance
+// or PreAuthorizedIssuanceRequest.Acceptance); without one no issuance starts
+// (ErrCredentialAcceptancePolicyRequired). A wallet that receives credentials
+// usually sets Config.CredentialAcceptance through NewWalletWithConfig
+// instead.
 //
 // Returns an error if any dispatcher initialization fails.
 func NewWallet() (*Wallet, error) {
 	return NewWalletWithConfig(Config{})
 }
 
-// NewWalletWithConfig creates a Wallet with custom dispatcher configurations.
+// NewWalletWithConfig creates a Wallet from config: its protocol profiles, its
+// credential acceptance policy, its OpenID4VCI client settings and any
+// dispatcher it injects. A dispatcher field left nil is initialized with the
+// default implementation; the default receiver and presenter are built for
+// the OpenID4VCI 1.0 / OpenID4VP 1.0 profile of config.Profiles.
 //
-// This allows injection of custom dispatcher implementations or configurations.
-// Any dispatcher field left nil in the config will be initialized with a default
-// implementation automatically.
-//
-// This constructor is primarily used when:
-//   - Testing with mock dispatchers
-//   - Registering custom protocol plugins
-//   - Using non-default storage backends
-//
-// For typical usage, prefer NewWallet instead.
+// An injected Receiver or Presenter is checked here, once: its plugins must
+// report the wallet's profile (see Config.Profiles), and a refused dispatcher
+// fails the constructor rather than a later method.
 func NewWalletWithConfig(config Config) (*Wallet, error) {
 	w, err := newWallet(config)
 	return w, classify(err)

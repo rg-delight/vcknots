@@ -25,8 +25,8 @@ Regardless of the credential format shown above, every local server integration 
 
 ## Wallet API used by the samples
 
-The samples receive credentials with the OpenID4VCI 1.0 staged API (`ParseCredentialOfferURL` or `ResolveCredentialOffer`, `AuthorizePreAuthorizedIssuance` and `RequestCredential`, Pre-Authorized Code Flow) and present them with the one-call method `PresentCredential` (OpenID4VP 1.0).
-A wallet with a user also uses `BeginIssuance` and `AuthorizeIssuance` for the Authorization Code Flow, and `ParsePresentationRequest`, `SelectCredentials` and `SubmitPresentation` for presentation.
+The samples receive credentials with the OpenID4VCI 1.0 staged API (`ParseCredentialOfferURL` or `ResolveCredentialOffer`, `AuthorizePreAuthorizedIssuance` and `RequestCredential`, Pre-Authorized Code Flow) and present them with the OpenID4VP 1.0 staged API (`ParsePresentationRequest`, `SelectCredentials` and `SubmitPresentation`), which `common.PresentAll` runs in a row.
+A wallet with a user asks for the holder's consent between `SelectCredentials` and `SubmitPresentation`, which the samples skip, and also uses `BeginIssuance` and `AuthorizeIssuance` for the Authorization Code Flow.
 The [wallet guide](../../docs/en/wallet.md) describes that API, the supported protocols, the HAIP profile and the security defaults, and the [public Wallet API driver](official_driver/README.md) shows a complete configuration.
 
 The samples set `Config.CredentialAcceptance` from `common.SampleIssuerAcceptance`, and `RequestCredential` stores a credential only after that policy authenticated its issuer.
@@ -269,7 +269,7 @@ Reaching this point also means that the authorization server accepted the client
 
 ---
 
-For SD-JWT VC, `PresentCredential` attaches a Key Binding JWT when the answered DCQL query requires cryptographic holder binding (`require_cryptographic_holder_binding`, default `true`) or when `SdJwtVcPresentationOptions.RequireKeyBinding` is set; the options cannot remove a required one. A query that requires holder binding is not answered with a credential that has no `cnf`.
+For SD-JWT VC, `SubmitPresentation` attaches a Key Binding JWT when the answered DCQL query requires cryptographic holder binding (`require_cryptographic_holder_binding`, default `true`) or when `SdJwtVcPresentationOptions.RequireKeyBinding` is set; the options cannot remove a required one. A query that requires holder binding is not answered with a credential that has no `cnf`.
 
 ### Mode 2: Conformance Test Mode (External URL)
 

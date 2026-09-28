@@ -361,7 +361,7 @@ func receiveCredentialForPresentationTest(t *testing.T) (*Wallet, *mockKeyEntry)
 	return controller, key
 }
 
-func TestController_ReceiveAndPresentCredential_ProfileWire(t *testing.T) {
+func TestController_ReceiveThenPresent_ProfileWire(t *testing.T) {
 	for _, draft := range []bool{false, true} {
 		name := "final"
 		if draft {

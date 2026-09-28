@@ -179,9 +179,10 @@ error. The output is `credentialIds`, a `verification` array in credential order
 notifications, and `transactionId` with `pending: true` when the issuance was
 still pending after the last poll.
 
-`present` calls `PresentCredential` with the holder key: the request is parsed
-and admitted, the stored credentials that satisfy the DCQL query are chosen, and
-the response is sent. It returns `redirectUri`, `redirectFollowed` and
+`present` calls `ParsePresentationRequest`, `SelectCredentials` and
+`SubmitPresentation` with the holder key: the request is parsed and admitted,
+the stored credentials that satisfy the DCQL query are chosen, and the response
+is sent. The driver answers without a consent step. It returns `redirectUri`, `redirectFollowed` and
 `redirectStatus` (`0` when the redirect was not opened). With `followRedirect`
 enabled, the driver opens a returned `redirect_uri` as a same-device browser
 would: a GET with the TLS-configured client, `Accept: text/html,*/*`,
