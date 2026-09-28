@@ -335,7 +335,7 @@ func sameHolderKey(a, b IKeyEntry) bool {
 // the definition, for a descriptor without one) to it, the way the Verifier's
 // vp_formats applies. Draft 24 §5.4: "The Wallet MUST ignore any format
 // property inside a presentation_definition object if that format was not
-// included in the vp_formats property of the metadata" (CX-VP A08).
+// included in the vp_formats property of the metadata".
 func checkDraft24DescriptorAlgorithms(req *oid4vp.CredentialPresentationRequest, descriptorIDs []string, presentation string) error {
 	if len(req.RawPresentationDefinition) == 0 {
 		return nil

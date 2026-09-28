@@ -39,7 +39,7 @@ func signRS256(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string 
 // TestCheckReferenceRefusesAnRSAKeyBelow2048Bits covers RFC 7518 Section 3.3:
 // "A key of size 2048 bits or larger MUST be used with these algorithms". A
 // Status List Token signed under a shorter RSA key is not read, even when the
-// key resolution hook returns that key. (Regression of audit probe PROBE-7.)
+// key resolution hook returns that key.
 func TestCheckReferenceRefusesAnRSAKeyBelow2048Bits(t *testing.T) {
 	for _, test := range []struct {
 		bits    int

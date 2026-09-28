@@ -9,8 +9,8 @@ import (
 )
 
 // OpenID4VP 1.0 §5.1: "Other metadata parameters MUST be ignored". A member
-// the Wallet does not act on can no longer refuse the request by its type
-// (CX-VP A14); a member it acts on still must be well formed.
+// the Wallet does not act on cannot refuse the request by its type; a member
+// it acts on still must be well formed.
 func TestFinalClientMetadataIgnoresUnusedMembersOfAnyType(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	claims := f.claims()
@@ -41,7 +41,7 @@ func TestFederationIgnoresTheRequestClientMetadata(t *testing.T) {
 	require.Equal(t, "Federated verifier", request.ClientMetadata.ClientName)
 }
 
-// CX-VP A13: a 1.0 request is judged by vp_formats_supported; the Draft 24
+// A 1.0 request is judged by vp_formats_supported; the Draft 24
 // vp_formats member is never read there, and the other way round.
 func TestEachVersionReadsItsOwnFormatsMember(t *testing.T) {
 	raw := []byte(`{"vp_formats":{"dc+sd-jwt":{"sd-jwt_alg_values":["ES256"]}},"vp_formats_supported":{"dc+sd-jwt":{"sd-jwt_alg_values":["ES384"]}}}`)
@@ -61,8 +61,8 @@ func TestEachVersionReadsItsOwnFormatsMember(t *testing.T) {
 }
 
 // OpenID4VP 1.0 Appendix B.3.4 and Draft 24 Appendix B.4.2: the alg of the
-// Issuer-signed JWT and of the KB-JWT must be one the Verifier lists (CX-VP
-// A12). Absent lists accept every algorithm.
+// Issuer-signed JWT and of the KB-JWT must be one the Verifier lists. Absent
+// lists accept every algorithm.
 func TestCheckSDJWTPresentationAlgorithms(t *testing.T) {
 	jws := func(alg string) string {
 		header, _ := json.Marshal(map[string]string{"alg": alg})

@@ -171,8 +171,8 @@ func TestDraft24PostsOnlyUnderDirectPostModes(t *testing.T) {
 // Draft 24 §8.1: vp_token is "a JSON String or JSON object that MUST contain a
 // single Verifiable Presentation or an array of JSON Strings and JSON objects".
 // Encrypted under JARM (§8.3), the array of several SD-JWT presentations and
-// an ldp_vp object stay JSON inside the JWE; they were embedded as the string
-// of their encoding (R4 MEDIUM-3, CX-VP A09).
+// an ldp_vp object stay JSON inside the JWE rather than the string of their
+// encoding.
 func TestDraft24JARMEmbedsStructuredVPTokenAsJSON(t *testing.T) {
 	recipient := newEncryptionKey(t)
 	metadata := &VerifierMetadata{

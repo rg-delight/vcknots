@@ -639,9 +639,9 @@ func TestParseDCAPIRequestExpectedOriginsMatchExactly(t *testing.T) {
 	}
 }
 
-// SB16: a validly signed DC API request whose payload is the JSON literal
-// null decoded to a nil claims map, and the completion wrote client_id into it
-// (a panic). RFC 9101 §4 makes the Request Object a JSON object; a payload
+// A validly signed DC API request whose payload is the JSON literal null
+// decodes to a nil claims map, which the completion must not write client_id
+// into (a panic). RFC 9101 §4 makes the Request Object a JSON object; a payload
 // that is not one is invalid_request, for the single- and multi-signed forms
 // alike, and so is unsigned request data that is null.
 func TestParseDCAPIRequestRefusesNullClaims(t *testing.T) {

@@ -42,13 +42,13 @@ func TestConfigProfilesRefusesInvalidSets(t *testing.T) {
 	}
 }
 
-// Review of 2026-09-25 (finding 8): the draft refusal read the profile's name,
-// so profile.Final().With(profile.HAIPOptions()) ran beside Draft 13, Draft 24
-// and Experimental.Hooks. Review of 2026-09-26 (report 7, L-2): the fix
-// inferred the refusal from "covers all of HAIPOptions", so dropping any one
-// HAIP option re-enabled the drafts. The refusal is now the explicit option
-// ForbidDraftProfiles (HAIP 1.0 §1: the base protocols are OpenID4VCI 1.0 and
-// OpenID4VP 1.0), and Experimental.Hooks falls under ForbidExperimental.
+// The draft refusal must not depend on the profile's name, or
+// profile.Final().With(profile.HAIPOptions()) would run beside Draft 13, Draft
+// 24 and Experimental.Hooks, nor be inferred from "covers all of HAIPOptions",
+// or dropping any one HAIP option would re-enable the drafts. The refusal is
+// the explicit option ForbidDraftProfiles (HAIP 1.0 §1: the base protocols are
+// OpenID4VCI 1.0 and OpenID4VP 1.0), and Experimental.Hooks falls under
+// ForbidExperimental.
 func TestConfigProfilesRefuseDraftsUnderForbidDraftProfiles(t *testing.T) {
 	strict, err := profile.Final().With(profile.HAIPOptions())
 	require.NoError(t, err)
@@ -106,9 +106,9 @@ func requireRefusedBy(t *testing.T, err error, option string) {
 	require.Equal(t, option, refused.Option)
 }
 
-// Review of 2026-09-26 (report 7, section 1.2): a HAIP() plugin was refused
-// in a wallet built with Final().With(HAIPOptions()) (ErrProfileMismatch),
-// since the kind label took part in the comparison.
+// A HAIP() plugin is accepted in a wallet built with
+// Final().With(HAIPOptions()) rather than refused with ErrProfileMismatch:
+// plugin profiles compare by version and options.
 func TestPluginProfilesCompareVersionAndOptions(t *testing.T) {
 	strict, err := profile.Final().With(profile.HAIPOptions())
 	require.NoError(t, err)

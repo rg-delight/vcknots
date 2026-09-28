@@ -358,8 +358,8 @@ func newTestIssuerChain(t *testing.T, dnsNames []string) testIssuerChain {
 	return testIssuerChain{caCert: caCert, caKey: caKey, leafCert: leafCert, leafKey: leafKey}
 }
 
-// TestReceiveCredentialRequiresAPolicy pins CR-10: ReceiveCredential used to
-// store a credential whose issuer it had not authenticated when no policy was
+// TestReceiveCredentialRequiresAPolicy: ReceiveCredential used to store a
+// credential whose issuer it had not authenticated when no policy was
 // configured. SD-JWT VC -19 §2.4 requires the issuer-signed JWT's key to be
 // validated, so without a policy nothing is requested or stored.
 func TestReceiveCredentialRequiresAPolicy(t *testing.T) {
@@ -522,7 +522,7 @@ func TestVerifyCredentialForAcceptanceRequiresPolicy(t *testing.T) {
 	})
 }
 
-// Review of 2026-09-25 (HAIP 1.0 §6.1): a credential verified apart from the
+// HAIP 1.0 §6.1: a credential verified apart from the
 // issuance is held to the holder binding its Credential Configuration asks
 // for, as RequestCredential holds it.
 func TestVerifyCredentialForAcceptanceAppliesTheConfigurationsHolderBinding(t *testing.T) {

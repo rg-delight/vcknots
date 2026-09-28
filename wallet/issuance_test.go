@@ -91,11 +91,10 @@ func TestIssuanceStatesSurviveJSONInAnotherWallet(t *testing.T) {
 	require.Equal(t, "tx-1", fixture.lastDeferredBody["transaction_id"])
 }
 
-// Review of 2026-09-25 (finding 5): a per-request acceptance policy does not
-// survive serialization, and a deferred issuance read back without it was
-// accepted under Config.CredentialAcceptance instead. The override is now
-// recorded, and its absence refuses the Deferred Credential Request before
-// anything is sent.
+// A per-request acceptance policy does not survive serialization, and a
+// deferred issuance read back without it must not be accepted under
+// Config.CredentialAcceptance instead. The override is recorded, and its
+// absence refuses the Deferred Credential Request before anything is sent.
 func TestDeferredIssuanceKeepsTheFactOfAPerRequestPolicy(t *testing.T) {
 	fixture := newFinalIssuanceFixture(t, func(f *finalIssuanceFixture) {
 		f.includeDeferredEndpoint = true

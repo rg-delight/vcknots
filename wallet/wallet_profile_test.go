@@ -370,8 +370,7 @@ func draftReceiveRequest(t *testing.T, server *httptest.Server, holder IKeyEntry
 // ReceiveCredential is upstream's Draft 13 entry point. It used to store a
 // credential whose issuer it had not authenticated when no policy was
 // configured; SD-JWT VC -19 §2.4 and §2.5 require the issuer key to be
-// validated, so it now needs a policy and requests nothing without one (CR-10,
-// upstream-origin behaviour change).
+// validated, so it now needs a policy and requests nothing without one.
 func TestReceiveCredentialDraftRequiresAPolicy(t *testing.T) {
 	holder := newMockKeyEntry()
 	holderKey := holder.PublicKey()

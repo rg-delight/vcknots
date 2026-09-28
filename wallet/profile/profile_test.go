@@ -150,9 +150,9 @@ func TestVersions(t *testing.T) {
 	}
 }
 
-// Review of 2026-09-26 (report 7, section 1.2): HAIP carried a kind label of
-// its own, so a plugin built with HAIP() did not match a wallet built with
-// Final().With(HAIPOptions()) although both applied the same rules.
+// HAIP() is Final().With(HAIPOptions()): no kind label of its own separates
+// a plugin built with one from a wallet built with the other, as both apply
+// the same rules.
 func TestHAIPIsFinalWithHAIPOptions(t *testing.T) {
 	built, err := Final().With(HAIPOptions())
 	if err != nil {
@@ -166,8 +166,8 @@ func TestHAIPIsFinalWithHAIPOptions(t *testing.T) {
 	}
 }
 
-// Review of 2026-09-26 (report 7, section 4 item 1): With replaced the
-// options, so Final().With(a).With(b) failed unless b repeated a.
+// With strengthens the options it is given, so Final().With(a).With(b)
+// succeeds without b repeating a.
 func TestWithComposesByStrengthening(t *testing.T) {
 	chained, err := Final().With(Options{RequireDPoP: true})
 	if err != nil {
@@ -229,8 +229,8 @@ func TestWithRefusesSetsWithNoCommonMember(t *testing.T) {
 
 // OpenID4VP 1.0 §5.9.3: "Requests using the redirect_uri Client Identifier
 // Prefix cannot be signed", and "The Wallet MUST NOT accept" the origin
-// prefix in requests. Review of 2026-09-26 (report 7, section 1.3): these
-// combinations passed With and refused every request at run time.
+// prefix in requests. With refuses these combinations up front rather than
+// letting them refuse every request at run time.
 func TestWithRefusesOptionsThatRefuseEveryRedirectRequest(t *testing.T) {
 	tests := map[string]struct {
 		options Options

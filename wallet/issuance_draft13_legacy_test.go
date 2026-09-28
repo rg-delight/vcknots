@@ -141,7 +141,7 @@ func TestReceiveCredentialRefusesBeforeRedeemingTheCode(t *testing.T) {
 	}
 }
 
-// Review of 2026-09-25 (finding 8): the Draft 13 one-call flow reads the
+// The Draft 13 one-call flow reads the
 // Credential Issuer Metadata from the Draft 13 Section 11.2.2 location only;
 // for an identifier with a path it differs from the 1.0 Section 12.2.2 one.
 func TestReceiveCredentialReadsTheDraft13MetadataLocation(t *testing.T) {

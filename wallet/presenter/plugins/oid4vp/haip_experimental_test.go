@@ -23,12 +23,11 @@ func (r *refusingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, http.ErrUseLastResponse
 }
 
-// Promoted from the 2026-09-25 final review probes D and E: a HAIP presenter
-// applied Experimental.Transport on the Draft 24 entry point and
-// Experimental.AcceptClientMetadataJWKsWithoutKeyID on the Digital Credentials
-// API entry point, because only the OpenID4VP 1.0 URI parse looked at
-// Experimental, and only at two of its fields. Under ForbidExperimental
-// every entry point refuses any non-zero Experimental before the network.
+// Under ForbidExperimental every entry point refuses any non-zero
+// Experimental before the network: Experimental.Transport on the Draft 24
+// entry point and Experimental.AcceptClientMetadataJWKsWithoutKeyID on the
+// Digital Credentials API entry point included, not only the OpenID4VP 1.0
+// URI parse.
 func TestHAIPPresenterRefusesExperimentalOnEveryEntryPoint(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	_, sealed := f.admitSealed(t, f.sealedPresenter(profile.Final(), f.now), f.claims())

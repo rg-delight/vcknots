@@ -335,12 +335,13 @@ func TestAssignTransactionData(t *testing.T) {
 	require.ErrorContains(t, err, "transaction_data entry 0")
 }
 
-// CX-VP A02: with credential_ids ["pid"] and pid answered by two credentials
-// (multiple: true), the same transaction was bound into both Key Binding JWTs.
-// OpenID4VP 1.0 Section 5.1 lets one referenced Credential authorize it, so
-// the library asks the Holder which (ErrTransactionDataAssignmentRequired) and
-// then binds it into that credential's presentation alone - or into several,
-// only when the Holder's assignment names each.
+// With credential_ids ["pid"] and pid answered by two credentials (multiple:
+// true), the same transaction must not be bound into both Key Binding JWTs by
+// default. OpenID4VP 1.0 Section 5.1 lets one referenced Credential authorize
+// it, so the library asks the Holder which
+// (ErrTransactionDataAssignmentRequired) and then binds it into that
+// credential's presentation alone - or into several, only when the Holder's
+// assignment names each.
 func TestWallet_TransactionDataFollowsTheHoldersAssignment(t *testing.T) {
 	fixture := transactionDataFixture(t)
 	holder := fixture.key.PublicKey()

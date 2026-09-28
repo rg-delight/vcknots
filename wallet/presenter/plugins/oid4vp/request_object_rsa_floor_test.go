@@ -45,7 +45,7 @@ func rsaSignedRequestObject(t *testing.T, f *requestObjectFixture, bits int) (cl
 	return clientID, requestObject
 }
 
-// SB14 / RFC 7518 Section 3.3: "A key of size 2048 bits or larger MUST be used
+// RFC 7518 Section 3.3: "A key of size 2048 bits or larger MUST be used
 // with these algorithms". A Request Object signed under a 1024-bit RSA
 // certificate is refused before its signature is checked; a 2048-bit one is
 // admitted.

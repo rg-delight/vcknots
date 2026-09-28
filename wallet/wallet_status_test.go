@@ -10,11 +10,10 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// Review of 2026-09-25 (HAIP 1.0 §6.1): a Status List checker built for a
-// HAIP wallet ran under Final unless the caller repeated the profile, so its
-// token x5c rules did not apply. Review of 2026-09-26 (report 7, L-4): the fix
-// read a zero Profile as "the wallet's" here and as Final everywhere else.
-// The zero Profile is Final everywhere now, so a checker that does not name
+// HAIP 1.0 §6.1: a Status List checker built for a HAIP wallet must not run
+// under Final because the caller did not repeat the profile, or its token
+// x5c rules would not apply. The zero Profile is Final everywhere, including
+// here, so a checker that does not name
 // the wallet's profile is refused rather than run under weaker rules.
 func TestStatusListCheckerRequiresTheWalletProfile(t *testing.T) {
 	strict, err := profile.Final().With(profile.HAIPOptions())

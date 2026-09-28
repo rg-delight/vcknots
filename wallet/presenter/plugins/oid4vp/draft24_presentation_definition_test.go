@@ -124,10 +124,9 @@ func TestDraft24TransactionDataIsCheckedAgainstTheResolvedDefinition(t *testing.
 	assertAuthzErrorCode(t, parse("unknown"), InvalidTransactionDataError)
 }
 
-// CX-VP A04 / R4 HIGH-4: a signed Request Object carrying
-// presentation_definition_uri was answerable at consent but not after it,
-// because the re-admission from the seal saw only the URI. The seal now
-// records the definition fetched for the authenticated URI, and the
+// A signed Request Object carrying presentation_definition_uri stays answerable
+// after consent, although the re-admission from the seal sees only the URI. The
+// seal records the definition fetched for the authenticated URI, and the
 // re-admission reads it without fetching again, even when the Verifier now
 // serves another definition.
 func TestSealedDraft24AdmissionCarriesTheResolvedDefinition(t *testing.T) {

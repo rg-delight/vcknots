@@ -19,19 +19,16 @@ import (
 	"github.com/trustknots/vcknots/wallet/profile"
 )
 
-// The tests in this file are promoted from the probes of the 2026-09-25
-// final review (findings 2 and 7).
-
 // withMaxReadmitAge is p with MaxReadmitAge set.
 func withMaxReadmitAge(p *Oid4vpPresenter, age time.Duration) *Oid4vpPresenter {
 	p.MaxReadmitAge = age
 	return p
 }
 
-// Probe A: the CRL is reissued after the first admission, so its thisUpdate
-// is after the sealed instant. Revocation is judged on the current clock,
-// which such a CRL is valid on; before the fix the re-admission judged it on
-// the clock of the first admission and refused it as not yet valid.
+// The CRL is reissued after the first admission, so its thisUpdate is after
+// the sealed instant. Revocation is judged on the current clock, which such a
+// CRL is valid on, not on the clock of the first admission, which would
+// refuse it as not yet valid.
 func TestSealedAdmissionChecksRevocationOnTheCurrentClock(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	_, sealed := f.admitSealed(t, f.sealedPresenter(profile.HAIP(), f.now), f.claims())
@@ -49,7 +46,7 @@ func TestSealedAdmissionChecksRevocationOnTheCurrentClock(t *testing.T) {
 	require.Equal(t, f.now.Add(5*time.Minute), readmitted.(*AdmittedRequest).Request().RequestObjectVerification.ExpiresAt)
 }
 
-// Probe C: the leaf certificate expired between the admission and the
+// The leaf certificate expired between the admission and the
 // re-admission. The chain is validated on the current clock and refuses it;
 // the default MaxReadmitAge refuses the seal before that.
 func TestSealedAdmissionChecksTheChainOnTheCurrentClock(t *testing.T) {
@@ -102,10 +99,10 @@ func resealRecord(t *testing.T, record sealedAdmissionRecord) types.SealedAdmiss
 	return types.SealedAdmission(sealedAdmissionVersion + "." + body + "." + base64.RawURLEncoding.EncodeToString(sealedAdmissionTag(sealKey, body)))
 }
 
-// Probe B: a seal made under profile.Final().With(profile.HAIPOptions()) was
-// re-admitted under plain profile.Final(), whose version it shares, dropping
-// every HAIP option. The record carries the profile's text form, which names
-// every option (LIB-PROFILE L-6).
+// A seal made under profile.Final().With(profile.HAIPOptions()) must not be
+// re-admitted under plain profile.Final(), whose version it shares, which
+// would drop every HAIP option. The record carries the profile's text form,
+// which names every option.
 func TestSealedAdmissionBindsTheProfileOptions(t *testing.T) {
 	f := newRequestObjectFixture(t)
 	strict, err := profile.Final().With(profile.HAIPOptions())
