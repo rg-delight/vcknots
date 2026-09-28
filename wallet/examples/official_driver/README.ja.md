@@ -47,6 +47,8 @@ holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイル
 | `attesterIssuer` | string | `""` | 静的 client attester の `iss` です。 |
 | `keyAttesterKeyFile` | string | `""` | テスト専用の `attestation.StaticKeyAttester`（`Config.Attestation.Key`）の秘密 JWK です。`keyAttesterIssuer` と一緒に設定します。 |
 | `keyAttesterIssuer` | string | `""` | 静的 key attester の `iss` です。 |
+| `attesterCAFiles` | []string | `[]` | wallet が自身の client attestation と key attestation の `x5c` チェーンを検証する、Wallet Provider の PEM トラストアンカーです（`Config.Attestation.Trust.TrustAnchors`）。HAIP では、これがないと attestation の `x5c` チェーンを拒否します。 |
+| `attesterAllowUnadvertisedRevocation` | bool | `false` | `Config.Attestation.Trust.AllowUnadvertisedRevocation` です。`attesterCAFiles` が必要です。 |
 | `includeKeyAttestation` | bool | `false` | `CredentialRequest.IncludeKeyAttestation` で、Issuer が要求しなくても key attestation を送ります。 |
 | `deferredPollAttempts` | int | `10` | 発行が保留中の間に driver が送る Deferred Credential Request の回数です。ゼロ以下なら 10 です。 |
 | `credentialResponseEncryption` | bool | `false` | `Config.Issuance.CredentialEncryption.Response` を `CredentialEncryptionRequired` にし、応答の暗号化を提供しない Issuer を拒否します。応答用の鍵は一時鍵です。 |
@@ -63,7 +65,7 @@ holder、DPoP、client の鍵として、別々の EC 署名用 JWK ファイル
 HAIP では、SD-JWT VC に `issuerCAFiles` が必要です。
 `requireHolderBinding` はすべての場合に適用されます。
 
-TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であり、`IssuerX509TrustOptions` と `RequestObjectValidationOptions` の CRL 用クライアントでもあるので、CRL の取得も `tlsCAFiles` に従います。
+TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であり、`IssuerX509TrustOptions`、`RequestObjectValidationOptions`、`Config.Attestation.Trust` の CRL 用クライアントでもあるので、CRL の取得も `tlsCAFiles` に従います。
 矛盾するオプション（CA ファイルのない `*AllowUnadvertisedRevocation`、`verifierCAFiles` のない `walletAudience`、issuer のない attester 鍵）と、`redirectUri` のない Authorization Code の操作は、どの操作を実行するよりも前に拒否します。
 
 `StaticClientAttester` と `StaticKeyAttester` は、ローカルに保持した attester 鍵で attestation を自己発行します。
@@ -94,6 +96,8 @@ TLS を構成した HTTP クライアントは、plugin の `HTTPClient` であ�
   "attesterIssuer": "https://attester.example",
   "keyAttesterKeyFile": "/path/to/key-attester.jwk",
   "keyAttesterIssuer": "https://attester.example",
+  "attesterCAFiles": ["/path/to/wallet-provider-trust-anchor.pem"],
+  "attesterAllowUnadvertisedRevocation": false,
   "includeKeyAttestation": false,
   "deferredPollAttempts": 10,
   "credentialResponseEncryption": false

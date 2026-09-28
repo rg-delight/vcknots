@@ -53,6 +53,8 @@ paths in the configuration.
 | `attesterIssuer` | string | `""` | `iss` of the static client attester. |
 | `keyAttesterKeyFile` | string | `""` | Private JWK of a test-only `attestation.StaticKeyAttester` (`Config.Attestation.Key`). Set together with `keyAttesterIssuer`. |
 | `keyAttesterIssuer` | string | `""` | `iss` of the static key attester. |
+| `attesterCAFiles` | []string | `[]` | PEM Wallet Provider trust anchors the wallet validates the `x5c` chains of its own client and key attestations against (`Config.Attestation.Trust.TrustAnchors`). HAIP refuses an attestation `x5c` chain when none is configured. |
+| `attesterAllowUnadvertisedRevocation` | bool | `false` | `Config.Attestation.Trust.AllowUnadvertisedRevocation`. Requires `attesterCAFiles`. |
 | `includeKeyAttestation` | bool | `false` | `CredentialRequest.IncludeKeyAttestation`: send a key attestation although the issuer does not require one. |
 | `deferredPollAttempts` | int | `10` | How many Deferred Credential Requests the driver sends while the issuance is pending. Zero or negative selects 10. |
 | `credentialResponseEncryption` | bool | `false` | Sets `Config.Issuance.CredentialEncryption.Response` to `CredentialEncryptionRequired`; an issuer that offers no response encryption is refused. The response key is ephemeral. |
@@ -70,8 +72,8 @@ is refused. Under HAIP an SD-JWT VC requires `issuerCAFiles`.
 `requireHolderBinding` applies in every case.
 
 The TLS-configured HTTP client is the plugins' `HTTPClient` and the CRL client
-of `IssuerX509TrustOptions` and `RequestObjectValidationOptions`, so CRL
-fetches honour `tlsCAFiles`. Inconsistent options (an
+of `IssuerX509TrustOptions`, `RequestObjectValidationOptions` and
+`Config.Attestation.Trust`, so CRL fetches honour `tlsCAFiles`. Inconsistent options (an
 `*AllowUnadvertisedRevocation` flag without its CA files, `walletAudience`
 without `verifierCAFiles`, an attester key without its issuer) and an
 authorization code operation without `redirectUri` are rejected before any
@@ -106,6 +108,8 @@ Example configuration:
   "attesterIssuer": "https://attester.example",
   "keyAttesterKeyFile": "/path/to/key-attester.jwk",
   "keyAttesterIssuer": "https://attester.example",
+  "attesterCAFiles": ["/path/to/wallet-provider-trust-anchor.pem"],
+  "attesterAllowUnadvertisedRevocation": false,
   "includeKeyAttestation": false,
   "deferredPollAttempts": 10,
   "credentialResponseEncryption": false
