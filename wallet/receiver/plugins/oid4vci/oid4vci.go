@@ -107,9 +107,12 @@ func (o *Oid4vciReceiver) ValidateProfile() error {
 // headers to an origin the response chose.
 var ErrHTTPRedirectNotAllowed = common.NewCodedError("http_redirect_not_allowed", "OID4VCI endpoint redirected; redirects are not followed")
 
-// ReceiveCredential performs a Draft 13 credential request. It is a
-// types.Receiver method and carries no context; it binds its request to
-// context.Background().
+// ReceiveCredential sends one OpenID4VCI 1.0 Credential Request (Section
+// 8.2): credential_identifier when one is given, credential_configuration_id
+// otherwise, and jwtProof as the only entry of proofs.jwt. credentialDefinition
+// is not sent. It is the types.Receiver method; the wallet's issuance flows
+// use OID4VCITransport and Draft13Transport instead. It carries no context and
+// binds its request to context.Background().
 func (o *Oid4vciReceiver) ReceiveCredential(
 	receivingTypes types.SupportedReceivingTypes,
 	endpoint common.URIField,

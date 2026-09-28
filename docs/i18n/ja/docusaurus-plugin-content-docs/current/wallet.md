@@ -1587,9 +1587,9 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 
 ## 以前の wallet API からの変更点
 
-このセクションは、upstream のコミット `f0c7c53` 以降に、そこに存在した識別子に加えられた変更と、そのメソッドの挙動の変更を挙げます。
-それ以降に追加された識別子は、ここまでのセクションで説明しています。
-`f0c7c53` のエクスポートされたシグネチャは、`ReceiveCredential`、`ReceiveCredentialRequest`、下に挙げる削除した `env` の識別子を除いて変わっていません。
+このセクションは、upstream の `main`（`51149d9`）の wallet API に存在する識別子に加えた変更と、そのメソッドの挙動の変更を挙げます。
+この版で追加した識別子は、ここまでのセクションで説明しています。
+upstream の `main` のエクスポートされたシグネチャは、`ReceiveCredential`、`ReceiveCredentialRequest`、下に挙げる削除した `env` の識別子を除いて変わっていません。
 
 **パッケージ `wallet`**
 
@@ -1598,7 +1598,7 @@ observer に渡すリクエストでは、秘密を `observe.Redacted` に置き
 * `NewWalletWithConfig` は、不正な `Profiles`、wallet と異なる profile の plugin、プロファイルが option を持つときの `profile.Carrier` を実装しない plugin、Draft のプロファイルがないときの `Experimental.Hooks` を拒否します。`CredStore` を伴う `Storeless`、注入した `Presenter` を伴う `SupportedTransactionDataTypes`、`*oid4vp.Oid4vpPresenter` 以外の presenter plugin も拒否します。エラーにはコードがあります。
 * `SetReceiver` は非推奨です。ディスパッチャの plugin を `NewWalletWithConfig` と同じく確認し、拒否したディスパッチャは設定せず、receiver を必要とするメソッドはすべてその拒否を返します。
 * `VerifyCredential` は、proof が検証できたときだけ、かつ `acceptance.DefaultSigningAlgorithms()`（ES256）に限り true を返します。nil の Credential には false を返します。
-* `ReceiveCredential` は `context.Context` を受け取り、`Draft13()` の Draft 13 Pre-Authorized Code Flow を 1 回の呼出しで実行します。`credential_configuration_id` と `proofs` の代わりに Draft 13 の Credential Request（`format` と 1 つの `proof`）を送り、key proof の `c_nonce` は Token Response からだけ得ます。`nonce_endpoint` は呼ばず、そこから Token Response の `c_nonce` に切り替えることもありません。`Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。受理ポリシー（`ReceiveCredentialRequest.Acceptance` または `Config.CredentialAcceptance`）と `Key` が必要で、なければ何も要求せずに `ErrCredentialAcceptancePolicyRequired` か `ErrDraft13HolderKeyMissing` を返します。以前は解析しただけの Credential を保存していました。ポリシーを満たさない Credential と、`cnf` が `Key` 以外の鍵を指す Credential は保存しません。storeless の wallet は Credential を保存せずに返します。Deferred の応答は `ErrDraft13CredentialDeferred` を返します。匿名の token request（`client_id` なし）には、認可サーバーのメタデータの `pre-authorized_grant_anonymous_access_supported: true` が必要です。値がないときは以前 `true` として扱っていましたが、今は拒否します。Offer の Issuer は、receiver plugin が許す場合（`HTTPSchemePolicy`）に限り平文 HTTP を使えます。
+* `ReceiveCredential` は `context.Context` を受け取り、`Draft13()` の Draft 13 Pre-Authorized Code Flow を 1 回の呼出しで実行します。`credential_configuration_id` と `proofs` の代わりに Draft 13 の Credential Request（`format` と 1 つの `proof`）を送り、key proof の `c_nonce` は Token Response からだけ得ます。`nonce_endpoint` は呼ばず、そこから Token Response の `c_nonce` に切り替えることもありません。`Config.Profiles` で `profile.Draft13()` が有効でなければ `ErrProfileForbidsDraft` を返します（既定値では有効です）。受理ポリシー（`ReceiveCredentialRequest.Acceptance` または `Config.CredentialAcceptance`）と `Key` が必要で、なければ何も要求せずに `ErrCredentialAcceptancePolicyRequired` か `ErrDraft13HolderKeyMissing` を返します。以前は解析しただけの Credential を保存していました。ポリシーを満たさない Credential と、`cnf` が `Key` 以外の鍵を指す Credential は保存しません。storeless の wallet は Credential を保存せずに返します。Deferred の応答は `ErrDraft13CredentialDeferred` を返します。token request は、OpenID4VCI 1.0 の `token_endpoint_auth_methods_supported` による交渉ではなく、Draft 13 §6.1 に従います。`Config.ClientAuth.ClientID` があれば常に送り、匿名の token request（`client_id` なし）には `pre-authorized_grant_anonymous_access_supported: true` が必要です（値がなければ `false` です）。メタデータの `token_endpoint_auth_methods_supported` は、設定した `private_key_jwt` の assertion を付けるかどうかだけを決めます。Offer の Issuer は、receiver plugin が許す場合（`HTTPSchemePolicy`）に限り平文 HTTP を使えます。
 * `ReceiveCredentialRequest` に `Acceptance` と `CredentialConfigurationID` があります。`Type`（OpenID4VCI しかありません）、`RequestedFormat`（configuration は `CredentialConfigurationID` で選びます）、`CachedIssuerMetadata`（メタデータは常に再取得します）を削除しました。
 * `PresentCredential` と `PresentCredentialWithOptions` は `ParsePresentationRequest`、`SelectCredentials`、`SubmitPresentation` を実行します。保存済み Credential は最新のものではなく DCQL クエリで選び、答える query ごとに提示を作り、query の要求どおりに Key Binding JWT を付けます。要求は [Verifier の認証](#verifier-authentication)の規則で受け付けます。
 * `GetCredentialEntries` と `GetCredentialEntry` は、storeless の wallet で `ErrNoCredentialStore` を返します。

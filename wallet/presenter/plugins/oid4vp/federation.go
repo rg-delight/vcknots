@@ -164,8 +164,8 @@ func (b *requestCore) authenticateFederationRequestObject(
 }
 
 // newFederationEvidence records what a Trust Chain resolution established
-// about a Verifier, for both the signed and the unsigned openid_federation
-// request.
+// about a Verifier. An openid_federation request is always a signed Request
+// Object (RequiresRequestObjectSignature).
 func newFederationEvidence(trust *federation.VerifierTrust) *FederationEvidence {
 	return &FederationEvidence{
 		SubjectEntityID:     trust.TrustChain.SubjectEntityID,

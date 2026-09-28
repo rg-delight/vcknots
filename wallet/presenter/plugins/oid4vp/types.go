@@ -118,9 +118,9 @@ type CredentialPresentationRequest struct {
 	// in PresentationDefinition and RawPresentationDefinition; a sealed
 	// admission carries that definition to the re-admission.
 	PresentationDefinitionURI string `json:"presentation_definition_uri,omitempty"`
-	// VerifierFederation is the Trust Chain that authenticated an
-	// openid_federation Verifier, signed or (when allowed) unsigned. It is
-	// produced by this library, never read from request data.
+	// VerifierFederation is the Trust Chain that authenticated the signed
+	// Request Object of an openid_federation Verifier. It is produced by this
+	// library, never read from request data.
 	VerifierFederation     *FederationEvidence     `json:"-"`
 	PresentationDefinition *PresentationDefinition `json:"presentation_definition,omitempty"`
 	// RawPresentationDefinition is the Draft24 presentation_definition

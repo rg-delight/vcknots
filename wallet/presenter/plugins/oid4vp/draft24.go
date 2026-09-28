@@ -17,8 +17,10 @@ var (
 )
 
 // ParseDraft24Request parses and admits an OpenID4VP Draft 24 Authorization
-// Request URI carrying a Presentation Exchange presentation_definition or a
-// Draft 24 dcql_query. The presenter's profile does not apply. The result is
+// Request URI carrying a Presentation Exchange presentation_definition, by
+// value or by reference. A request carrying dcql_query is refused with a
+// *VersionMismatchError naming OpenID4VP 1.0, as the Draft 24 DCQL response
+// is not implemented. The presenter's profile does not apply. The result is
 // an *AdmittedRequest.
 func (p *Oid4vpPresenter) ParseDraft24Request(ctx context.Context, uri string) (types.AdmittedRequest, error) {
 	return asAdmitted(p.parseDraft24RequestURI(ctx, uri))

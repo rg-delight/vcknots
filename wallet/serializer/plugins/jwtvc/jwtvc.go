@@ -67,9 +67,9 @@ func (s *JwtVcSerializer) DeserializeCredential(flavor credential.SupportedSeria
 		return nil, types.NewFormatError(flavor, types.ErrUnsupportedFormat, "expected JWT VC format")
 	}
 
-	// Parse JWT using go-jose (automatic structure validation).
-	// The accepted set is shared with the SD-JWT VC serializer through
-	// joseutil.ParseAlgorithm; it excludes "none" and the HS* MAC algorithms.
+	// Parse JWT using go-jose (automatic structure validation) under
+	// joseutil.AcceptedSignatureAlgorithms, the set every signature check of
+	// the library derives from; it excludes "none" and the HS* MAC algorithms.
 	jws, err := jose.ParseSigned(string(data), joseutil.AcceptedSignatureAlgorithms())
 	if err != nil {
 		return nil, types.NewInvalidJWTError("failed to parse JWT", err)

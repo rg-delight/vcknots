@@ -2,7 +2,9 @@
 
 この独立した Go モジュールは、公開 Wallet API を実行します。
 stdin から JSON の操作を 1 つ読み、stdout に JSON の結果を 1 つ書きます。
-プロトコルのエラーでは終了コード 1 で `{"operation": ..., "error": ...}` を書き、コマンドや構成の入力が不正な場合は終了コード 2 で終了します。
+成功すると終了コード 0 で終了します。
+コマンドラインが不正な場合、または構成ファイルや操作を、既知のメンバーだけから成る 1 つの JSON 文書として読めない場合は、理由を stderr に書き、終了コード 2 で終了します。
+それ以外の失敗（未対応の操作、読めない鍵ファイル、wallet が拒否する構成、プロトコルのエラー）では、stdout に `{"operation": ..., "error": ...}` を書き、終了コード 1 で終了します。
 
 driver は、OpenID4VCI 1.0 の Pre-Authorized Code Flow と Authorization Code Flow で Credential を受領し、保存済み Credential を列挙し、起動 URI または W3C Digital Credentials API を通じて OpenID4VP 1.0 で提示し、指定があれば HAIP 1.0 プロファイルを適用します。
 ソフトウェアの JWK を使うため、ハードウェアによる保護はありません。
