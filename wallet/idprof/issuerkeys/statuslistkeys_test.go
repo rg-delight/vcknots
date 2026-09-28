@@ -242,12 +242,12 @@ func TestStatusListKeysBindsTheTokenToTheCredentialLeaf(t *testing.T) {
 		}
 	})
 
-	t.Run("a leaf naming the host with another subject is refused", func(t *testing.T) {
+	t.Run("a leaf naming the host with another subject and another CA is refused", func(t *testing.T) {
 		t.Parallel()
 		f := newStatusListFixture(t)
 		trust := f.trust(f.ca.certificate)
-		trust.IssuerCertificate = newTestLeafWithSubject(t, f.ca, "another issuer", nil, "issuer.example.test").certificate
-		if got := failureOf(t, resolve(t, f, trust, f.leaf)); got != "certificate subject is not the credential issuer" {
+		trust.IssuerCertificate = newTestLeafWithSubject(t, newTestCA(t, "credential root"), "another issuer", nil, "issuer.example.test").certificate
+		if got := failureOf(t, resolve(t, f, trust, f.leaf)); got != statusListUnlinkedFailure {
 			t.Errorf("x5c failure = %q", got)
 		}
 	})
@@ -282,9 +282,9 @@ func TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost(t *testing.T) {
 		}
 		return key
 	}
-	// leafFor issues a leaf for key under the fixture CA with the subject
-	// common name commonName (none when empty) and the dNSName dnsName.
-	leafFor := func(t *testing.T, f *statusListFixture, key crypto.Signer, commonName, dnsName string) testCertificate {
+	// leafFor issues a leaf for key under parent with the subject common name
+	// commonName (none when empty) and the dNSName dnsName.
+	leafFor := func(t *testing.T, parent testCertificate, key crypto.Signer, commonName, dnsName string) testCertificate {
 		t.Helper()
 		template := &x509.Certificate{
 			SerialNumber:          randomSerial(t),
@@ -297,7 +297,7 @@ func TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost(t *testing.T) {
 		if commonName != "" {
 			template.Subject = pkix.Name{CommonName: commonName}
 		}
-		return createCertificate(t, template, &f.ca, key)
+		return createCertificate(t, template, &parent, key)
 	}
 	resolve := func(t *testing.T, f *statusListFixture, issuer string, issuerCertificate, leaf testCertificate) error {
 		t.Helper()
@@ -312,26 +312,28 @@ func TestStatusListKeysBindsAnEmptySubjectOnlyByKeyOrHost(t *testing.T) {
 		name string
 		// issuer is the credential's iss; empty for a credential without one.
 		issuer string
-		// build returns the credential's issuer certificate and the token leaf.
+		// build returns the credential's issuer certificate, which another CA
+		// than the token leaf's issued unless the case says otherwise, and the
+		// token leaf, which the trusted fixture CA issued.
 		build   func(t *testing.T, f *statusListFixture) (issuerCertificate, leaf testCertificate)
 		failure string // "" when the token leaf is accepted
 	}{
 		{name: "empty subjects without iss are refused", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
-			return leafFor(t, f, newKey(t), "", "credential.example.test"), leafFor(t, f, newKey(t), "", "attacker.example.test")
+			return leafFor(t, newTestCA(t, "credential root"), newKey(t), "", "credential.example.test"), leafFor(t, f.ca, newKey(t), "", "attacker.example.test")
 		}, failure: emptyFailure},
 		{name: "an empty issuer subject without iss is refused", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
-			return leafFor(t, f, newKey(t), "", "credential.example.test"), leafFor(t, f, newKey(t), "status signer", "credential.example.test")
+			return leafFor(t, newTestCA(t, "credential root"), newKey(t), "", "credential.example.test"), leafFor(t, f.ca, newKey(t), "status signer", "credential.example.test")
 		}, failure: emptyFailure},
 		{name: "the same key with empty subjects is accepted", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
 			key := newKey(t)
-			return leafFor(t, f, key, "", "credential.example.test"), leafFor(t, f, key, "", "status.example.test")
+			return leafFor(t, newTestCA(t, "credential root"), key, "", "credential.example.test"), leafFor(t, f.ca, key, "", "status.example.test")
 		}},
 		{name: "the same key with another subject is accepted", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
 			key := newKey(t)
-			return leafFor(t, f, key, "credential issuer", "credential.example.test"), leafFor(t, f, key, "status signer", "credential.example.test")
+			return leafFor(t, newTestCA(t, "credential root"), key, "credential issuer", "credential.example.test"), leafFor(t, f.ca, key, "status signer", "credential.example.test")
 		}},
 		{name: "empty subjects with iss rest on the host binding", issuer: "https://issuer.example.test", build: func(t *testing.T, f *statusListFixture) (testCertificate, testCertificate) {
-			return leafFor(t, f, newKey(t), "", "issuer.example.test"), leafFor(t, f, newKey(t), "", "issuer.example.test")
+			return leafFor(t, newTestCA(t, "credential root"), newKey(t), "", "issuer.example.test"), leafFor(t, f.ca, newKey(t), "", "issuer.example.test")
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -575,6 +577,66 @@ func TestStatusListKeysDID(t *testing.T) {
 	})
 }
 
+// statusListUnlinkedFailure is the x5c diagnostic of a Status List Token leaf
+// that no draft-ietf-oauth-status-list-21 Section 11.3 link binds to the
+// credential's issuer certificate.
+const statusListUnlinkedFailure = "certificate is neither the credential issuer's nor issued by the credential issuer's certificate authority"
+
+// TestStatusListKeysAcceptsAStatusIssuerOfTheSameCA covers
+// draft-ietf-oauth-status-list-21 Section 11.3: when the Status Issuer is
+// another entity than the credential's issuer, "the keys used for the Status
+// List Token may be cryptographically linked, e.g. by a Certificate Authority
+// through an x.509 PKI", and the two certificates "should be issued by the
+// same Certificate Authority". A leaf with another key and another subject is
+// the Status Issuer's when the credential issuer's CA issued it, for a
+// credential without iss too, and its chain must still reach an anchor.
+func TestStatusListKeysAcceptsAStatusIssuerOfTheSameCA(t *testing.T) {
+	t.Parallel()
+	resolve := func(f *statusListFixture, trust *X5CTrust) error {
+		_, _, err := f.resolver.StatusListKeys(context.Background(), f.template(FormatSDJWTVC), trust, keyRequest("", statusListHeader(f.leaf)))
+		return err
+	}
+	failureOf := func(t *testing.T, err error) string {
+		t.Helper()
+		var unresolved *UnresolvedError
+		if !errors.As(err, &unresolved) {
+			t.Fatalf("err = %v, want *UnresolvedError", err)
+		}
+		return diagnosticFor(t, unresolved.Diagnostics, RungX5C).Failure
+	}
+
+	t.Run("a Status Issuer certificate of the same CA is accepted", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = newTestLeafWithSubject(t, f.ca, "credential issuer", nil, "credential.example.test").certificate
+		if err := resolve(f, trust); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a CA with the same name and another key is another CA", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		sameName := newTestCA(t, f.ca.certificate.Subject.CommonName)
+		trust := f.trust(f.ca.certificate)
+		trust.IssuerCertificate = newTestLeafWithSubject(t, sameName, "credential issuer", nil, "credential.example.test").certificate
+		if got := failureOf(t, resolve(f, trust)); got != statusListUnlinkedFailure {
+			t.Errorf("x5c failure = %q", got)
+		}
+	})
+
+	t.Run("the shared CA still has to be a configured anchor", func(t *testing.T) {
+		t.Parallel()
+		f := newStatusListFixture(t)
+		trust := f.trust(newTestCA(t, "another root").certificate)
+		trust.IssuerCertificate = newTestLeafWithSubject(t, f.ca, "credential issuer", nil, "credential.example.test").certificate
+		if got := failureOf(t, resolve(f, trust)); got != failureChainUntrusted {
+			t.Errorf("x5c failure = %q", got)
+		}
+	})
+}
+
 // TestStatusListKeysWithoutIssuer covers a credential without `iss`, whose
 // Issuer is the subject of its x5c leaf (SD-JWT VC -19 Section 2.5): the
 // Status List Token must carry a trusted chain whose leaf has that subject.
@@ -603,7 +665,7 @@ func TestStatusListKeysWithoutIssuer(t *testing.T) {
 		{name: "another subject", issuer: func(t *testing.T, f *statusListFixture) *x509.Certificate {
 			other := newTestCA(t, "another issuer")
 			return other.certificate
-		}, failure: "certificate subject is not the credential issuer"},
+		}, failure: statusListUnlinkedFailure},
 		{name: "no issuer certificate", issuer: func(*testing.T, *statusListFixture) *x509.Certificate { return nil }, failure: "credential issuer certificate is not configured"},
 	} {
 		t.Run(test.name+" is not resolved", func(t *testing.T) {

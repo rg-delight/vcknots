@@ -58,15 +58,17 @@ type X5CTrust struct {
 	// IssuerCertificate is the validated x5c leaf certificate of the
 	// credential whose status is checked (the credential acceptor's leaf).
 	// When it is set, a Status List Token with x5c must carry a leaf with the
-	// same public key or the same non-empty subject, whether or not the
-	// credential carries `iss`: the token is bound to the Referenced Token by
-	// its signer (draft-ietf-oauth-status-list-21 Section 11.3), and the
-	// Issuer of an x5c credential is the subject of that certificate (SD-JWT
-	// VC -19 Section 2.5). An empty subject identifies nobody, so when either
-	// subject is empty only the issuer host binding can speak for the leaf,
-	// and a credential without `iss` has none. It is required for a
-	// credential without `iss`, which names no other identity to bind the
-	// token to; set it for every credential that was accepted through its
+	// same public key, the same non-empty subject, or the same issuing
+	// certificate authority (the same issuer name and authority key
+	// identifier), whether or not the credential carries `iss`: the token is
+	// bound to the Referenced Token by its signer or by the PKI that links the
+	// two (draft-ietf-oauth-status-list-21 Section 11.3), and the Issuer of an
+	// x5c credential is the subject of that certificate (SD-JWT VC -19
+	// Section 2.5). An empty subject identifies nobody, so when no other link
+	// holds and either subject is empty only the issuer host binding can speak
+	// for the leaf, and a credential without `iss` has none. It is required
+	// for a credential without `iss`, which names no other identity to bind
+	// the token to; set it for every credential that was accepted through its
 	// x5c.
 	IssuerCertificate *x509.Certificate
 }
@@ -196,21 +198,41 @@ type x5cBinding struct {
 
 // issuerCertificateFailure says why leaf, the Status List Token's x5c leaf,
 // does not speak for the issuer of the credential whose certificate is
-// binding.issuerCertificate, or returns "" when it does.
+// binding.issuerCertificate, or returns "" when it does. The chain is
+// validated to a configured anchor afterwards either way.
 //
-// draft-ietf-oauth-status-list-21 Section 11.3 binds the token to the
-// Referenced Token's issuer: the same key, or the same resolution path. A leaf
-// with the issuer certificate's public key is that signer. Otherwise the leaf
-// speaks for the issuer when it has the same subject, because the Issuer of an
-// x5c credential is its leaf subject (SD-JWT VC -19 Section 2.5) - but an
-// empty subject (no RDNs, as a certificate that names its holder only in a
-// subject alternative name has) identifies nobody, and two such certificates
-// would match each other. When either subject is empty, the leaf is accepted
-// only when it names the issuer URL's host (binding.issuerURL is set and
+// draft-ietf-oauth-status-list-21 Section 11.3 "does not mandate specific
+// methods for key resolution and trust management" and recommends three
+// links, each of which binds the token here:
+//
+//   - The Status Issuer is the credential's issuer and signs with "the same
+//     key that is embedded into the Referenced Token": the leaf has the issuer
+//     certificate's public key.
+//   - The leaf names the same issuer: it has the issuer certificate's subject,
+//     because the Issuer of an x5c credential is its leaf subject (SD-JWT VC
+//     -19 Section 2.5). An empty subject (no RDNs, as a certificate that names
+//     its holder only in a subject alternative name has) identifies nobody,
+//     and two such certificates would match each other.
+//   - The Status Issuer is another entity whose key is "cryptographically
+//     linked ... by a Certificate Authority through an x.509 PKI": the two
+//     certificates "should be issued by the same Certificate Authority". The
+//     leaf and the issuer certificate name the same issuer and the same
+//     non-empty authority key identifier (RFC 5280 Section 4.2.1.1), which
+//     their issuing CA signed into each.
+//
+// When no link holds and either subject is empty, the leaf is accepted only
+// when it names the issuer URL's host (binding.issuerURL is set and
 // RequireLeafNamesIssuer has already held); a credential without iss has no
-// such name, and its token is refused.
+// such name, and its token is refused. Section 11.3 also says the Status
+// Issuer's certificate "should utilize extended key usage (Section 10)", but
+// draft -21 leaves that key purpose's OID unassigned (id-kp TBD), so no
+// extended key usage is required here; X5CTrust.KeyUsages lets an ecosystem
+// that assigns one require it.
 func (b x5cBinding) issuerCertificateFailure(leaf *x509.Certificate) string {
 	if samePublicKey(leaf.PublicKey, b.issuerCertificate.PublicKey) {
+		return ""
+	}
+	if sameIssuingAuthority(leaf, b.issuerCertificate) {
 		return ""
 	}
 	if emptySubject(leaf) || emptySubject(b.issuerCertificate) {
@@ -220,9 +242,18 @@ func (b x5cBinding) issuerCertificateFailure(leaf *x509.Certificate) string {
 		return "certificate subject is empty and does not identify the credential issuer"
 	}
 	if !bytes.Equal(leaf.RawSubject, b.issuerCertificate.RawSubject) {
-		return "certificate subject is not the credential issuer"
+		return "certificate is neither the credential issuer's nor issued by the credential issuer's certificate authority"
 	}
 	return ""
+}
+
+// sameIssuingAuthority reports whether a and b were issued by the same
+// certificate authority: the same issuer name and the same authority key
+// identifier, which must be present.
+func sameIssuingAuthority(a, b *x509.Certificate) bool {
+	return len(a.AuthorityKeyId) > 0 &&
+		bytes.Equal(a.AuthorityKeyId, b.AuthorityKeyId) &&
+		bytes.Equal(a.RawIssuer, b.RawIssuer)
 }
 
 // samePublicKey reports whether a and b are the same public key.
